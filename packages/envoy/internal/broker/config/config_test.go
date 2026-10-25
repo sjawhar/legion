@@ -111,9 +111,36 @@ func TestLoadDefaultsTheIntegerSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 || cfg.AccessTokenSeconds != 900 ||
-		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 {
-		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d AccessTokenSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
-			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.AccessTokenSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
+		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 || cfg.DrainSeconds != 5 {
+		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d AccessTokenSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d DrainSeconds=%d",
+			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.AccessTokenSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds, cfg.DrainSeconds)
+	}
+}
+
+// TestLoadReadsTheDrainSeconds pins BROKER_DRAIN_SECONDS, the wait the broker serves out after
+// SIGTERM while answering /healthz with 503: 0 is allowed, since a local run has no EndpointSlice
+// to propagate and the wait would be pure delay, and a value past two minutes, a negative one or
+// one that is not a whole number refuses to start naming the variable, rather than leaving the
+// drain at a length nobody chose.
+func TestLoadReadsTheDrainSeconds(t *testing.T) {
+	for _, good := range []struct {
+		value string
+		want  int
+	}{{"0", 0}, {"30", 30}, {"120", 120}} {
+		e := validEnv()
+		e["BROKER_DRAIN_SECONDS"] = good.value
+		cfg, err := Load(env(e))
+		if err != nil || cfg.DrainSeconds != good.want {
+			t.Fatalf("Load(BROKER_DRAIN_SECONDS=%s) = %d, %v; want %d", good.value, cfg.DrainSeconds, err, good.want)
+		}
+	}
+	for _, bad := range []string{"121", "-1", "five", "5s", "5.0", " "} {
+		e := validEnv()
+		e["BROKER_DRAIN_SECONDS"] = bad
+		_, err := Load(env(e))
+		if err == nil || !strings.HasPrefix(err.Error(), "BROKER_DRAIN_SECONDS must be a whole number between 0 and 120") {
+			t.Fatalf("Load(BROKER_DRAIN_SECONDS=%q) = %v, want a refusal naming BROKER_DRAIN_SECONDS and its range", bad, err)
+		}
 	}
 }
 
@@ -142,19 +169,20 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 }
 
 // TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated
-// name=<service-account subject> entries, none when unset. A name is one a machine login's service
-// can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a subject is a Kubernetes
-// service account's (system:serviceaccount:<namespace>:<name>), the only subject a pod's projected
-// token can carry. An entry with no "=", an empty side, an invalid name or subject, or a name given
-// twice refuses to start naming the entry, since the broker could never serve that service a secret
-// or would have to pick one of two subjects.
+// name=<service-account subject> entries keyed by subject, none when unset. A name is one a
+// machine login's service can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a
+// subject is a Kubernetes service account's (system:serviceaccount:<namespace>:<name>), the only
+// subject a pod's projected token can carry. One service may be named for several accounts. An
+// entry with no "=", an empty side, an invalid name or subject, or an account given twice refuses
+// to start naming the entry or the account, since the broker could never serve that service a
+// secret or the account would prove more than one entry.
 func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ServiceAccounts != nil {
-		t.Fatalf("ServiceAccounts = %v, want nil when BROKER_SERVICES is unset", cfg.ServiceAccounts)
+	if cfg.ServicesByAccount != nil {
+		t.Fatalf("ServicesByAccount = %v, want nil when BROKER_SERVICES is unset", cfg.ServicesByAccount)
 	}
 
 	e := validEnv()
@@ -164,11 +192,26 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"example-service": "system:serviceaccount:example:example-sa",
-		"other-service":   "system:serviceaccount:other:other-sa",
+		"system:serviceaccount:example:example-sa": "example-service",
+		"system:serviceaccount:other:other-sa":     "other-service",
 	}
-	if !maps.Equal(cfg.ServiceAccounts, want) {
-		t.Fatalf("ServiceAccounts = %v, want %v", cfg.ServiceAccounts, want)
+	if !maps.Equal(cfg.ServicesByAccount, want) {
+		t.Fatalf("ServicesByAccount = %v, want %v", cfg.ServicesByAccount, want)
+	}
+
+	// One service may run its pods as several accounts, each of which proves it.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = map[string]string{
+		"system:serviceaccount:example:example-sa": "example-service",
+		"system:serviceaccount:example:another-sa": "example-service",
+	}
+	if !maps.Equal(cfg.ServicesByAccount, want) {
+		t.Fatalf("ServicesByAccount with two accounts for one service = %v, want %v", cfg.ServicesByAccount, want)
 	}
 
 	for _, bad := range []string{
@@ -183,7 +226,6 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 		"other-service=other-sa",
 		"other-service=system:serviceaccount:other",
 		"other-service=system:serviceaccount:Other:other-sa",
-		"example-service=system:serviceaccount:example:another-sa",
 	} {
 		e := validEnv()
 		e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa " + bad
@@ -200,6 +242,14 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") ||
 		!strings.Contains(err.Error(), "system:serviceaccount:x:y") || !strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
 		t.Errorf("BROKER_SERVICES binding one account to two names: err = %v, want a refusal naming the account and both names", err)
+	}
+
+	// The same account named twice for one service is a mistake in the setting, refused naming the
+	// account and the service.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "a=system:serviceaccount:x:y a=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES names the service account system:serviceaccount:x:y twice for \"a\"; each account proves one service, so name it once") {
+		t.Errorf("BROKER_SERVICES naming one account twice for one service: err = %v, want a refusal naming the account twice for the service", err)
 	}
 
 	// A namespace's default service account proves nothing: every pod in that namespace whose spec

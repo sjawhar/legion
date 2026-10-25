@@ -7,6 +7,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
+  `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
+  is refused while an issue beneath it is still in the workflow and a merged root's close waits
+  for the rest of its tree, so a root stands in `awaiting_merge` for days and an operator reads
+  the merge here rather than guessing at it. Always emitted, so a plugin built before it refuses
+  the state. Install this release with a `legion` built from the same commit.
 - The `legion-controller` skill this plugin ships reorders a project's board with
   `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
   stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by
@@ -544,6 +550,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `legion.daemonApiVersion` is unchanged.
 
 ### Fixed
+
+- The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
+  reached an architect with its middle cut out; its Wake routing table moves unchanged to
+  `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and

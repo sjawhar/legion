@@ -87,13 +87,14 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 	apiToken := accountToken(t, cluster, clusterKey, apiAccount)
 	strangerToken := accountToken(t, cluster, clusterKey, otherAccount)
 
-	addr, _, await := startBroker(t, exchangeEnv(t, databaseURL, cluster, github, longAccessSeconds)...)
+	broker := startBroker(t, brokerOptions{Env: exchangeEnv(t, databaseURL, cluster, github, longAccessSeconds)})
+	addr := broker.Addr
 	live := newLiveBroker(addr, key)
 
 	t.Run("the real binary boots on a fresh schema with its token exchange on", func(t *testing.T) {
 		// The binary logs the state of its exchange after the bind line startBroker synchronises
 		// on, so the boot is read once that line has arrived.
-		boot := await("token exchange")
+		boot := broker.Await(t, "token exchange")
 		t.Logf("the broker's own boot lines:\n%s", boot)
 		requireHealthy(t, addr)
 		for _, want := range []string{
@@ -154,8 +155,9 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 	t.Run("a lapsed token is renewed by the same standing pod token", func(t *testing.T) {
 		// Its own broker run, on a schema of its own, started with an access-token lifetime of a
 		// few seconds: the proof is that the first token lapses, not that the test waits.
-		renewalAddr, _, renewalAwait := startBroker(t, exchangeEnv(t, storetest.URL(t), cluster, github, shortAccessSeconds)...)
-		renewalAwait("token exchange")
+		renewalBroker := startBroker(t, brokerOptions{Env: exchangeEnv(t, storetest.URL(t), cluster, github, shortAccessSeconds)})
+		renewalBroker.Await(t, "token exchange")
+		renewalAddr := renewalBroker.Addr
 		renewal := newLiveBroker(renewalAddr, key)
 		podToken := mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, "pod-uid-renewal")
 

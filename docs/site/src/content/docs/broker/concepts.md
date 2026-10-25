@@ -199,12 +199,12 @@ it enrolled under. A pod has no operator, so a pod asking for a person's agent-t
 to that person for approval.
 
 An owner may also be a service the broker is configured with. `BROKER_SERVICES` binds each
-service's name to the Kubernetes service account its pods run as, for example
-`legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the pods
-that a launcher logged in as that service enrolled, and whose projected token proved that service
-account: the Legion daemon's worker pods, for `legion-daemon`. A launcher logs in as a service with
-its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token proving the pods'
-account is what makes a pod the service's.
+service's name to the Kubernetes service accounts its pods run as, one entry per account, for
+example `legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the
+pods that a launcher logged in as that service enrolled, and whose projected token proved one of
+that service's accounts: the Legion daemon's worker pods, for `legion-daemon`. A launcher logs in
+as a service with its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token
+proving the pods' account is what makes a pod the service's.
 
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service
@@ -228,9 +228,22 @@ five minutes, a fixed time rather than a setting (`policyRefresh` in
 reread it: `POST /v1/secrets/{name}/reread`, which `agent-secrets secret` sends after each write it
 makes and any caller may send right after writing a secret, and a request naming a secret the
 broker does not serve yet, which makes it reread that one name before refusing it (up to ten such
-rereads at once per session, refilled one every ten seconds: `DefaultMissRereads` in
-`packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
-served on its first request. A reread reads the one secret from
+rereads at once per session in each broker process, refilled one every ten seconds:
+`DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a secret
+created a moment ago is served on its first request.
+
+A reread asked for over `POST /v1/secrets/{name}/reread` is the whole broker's, not one process's.
+A deployment may run several broker processes against one database, and the one such a reread
+reaches tells the others to read that same name again,
+so a retag that narrows who may have a secret is in force everywhere within seconds rather than at
+each process's own next five-minute read. The miss-path reread above is the other way round: it
+stays in the process that served the request, deliberately, since fanning it out would spend every
+peer a store read for a name that peer may never be asked for. One exception is worth stating: a process whose
+connection to the database has dropped hears nothing while it is reconnecting, and nothing is
+replayed to it when it reconnects, so until its own five-minute read it goes on serving what it
+last read. That read is the backstop for everything the telling can miss.
+
+A reread reads the one secret from
 the store (on AWS, `DescribeSecret`, which shows a write at once; on Google Secret Manager,
 `GetSecret`, which Google documents as eventually consistent, so a reread made right after a write
 can still find the old state, usually for seconds) and serves it, or stops serving it,

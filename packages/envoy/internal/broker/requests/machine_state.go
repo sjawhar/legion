@@ -92,6 +92,10 @@ const jtiRetentionMargin = time.Minute
 
 // DefaultMissRereads bounds the policy rereads one enrollment's unknown-name requests trigger:
 // a session inventing names costs at most Burst DescribeSecret calls, refilled one per Every.
+// The budget is per process, so two broker pods make two of it for the same enrollment. That is
+// left as it is because this bounds load rather than authority - a reread only moves a pod
+// toward the secret store's own truth, and grants nothing - so the cost of sharing it across
+// pods, a store read's worth of state in Postgres on every miss, buys nothing an operator needs.
 var DefaultMissRereads = ratelimit.Limit{Every: 10 * time.Second, Burst: 10}
 
 // SecretDecision is how the policy decided one name of a request.
@@ -154,10 +158,10 @@ type Machine struct {
 	// MissRereads bounds, per enrollment, the single-name policy rereads Create makes for names the
 	// live policy does not serve (rereadMissing); nil means DefaultMissRereads.
 	MissRereads *ratelimit.Limit
-	// ServiceAccounts are the registered services' accounts (BROKER_SERVICES): for each service
-	// name, the subject a pod's projected token must have proved for its launcher's service to be
-	// its own (requester).
-	ServiceAccounts map[string]string
+	// ServicesByAccount are the registered services' accounts (BROKER_SERVICES): for each account,
+	// the service a pod whose projected token proved it runs as that account proves, when its
+	// launcher's service is that one (requester).
+	ServicesByAccount map[string]string
 	// Minters maps each policy kind (policy.Kinds) to its Minter. A release never returns the
 	// stored value of a kind secret.
 	Minters map[string]Minter
@@ -195,10 +199,10 @@ type enrollmentRow struct {
 
 // requester is the enrollment as the policy sees it, read through q: the person it acts for (none
 // for a pod), its service, and the names that person withheld from it (RevokeByApprover's
-// withhold). Its service is its launcher credential's only when it is a pod, that service is one
-// of services, and the pod's verified service account is the one services binds it to: a machine
-// login's service name is the machine's own claim, which anyone signed in to Dispatch may approve, so the
-// account is what proves the service. Any other session has none. A caller that decides for the
+// withhold). Its service is its launcher credential's only when it is a pod and services maps the
+// pod's verified service account to that same service: a machine login's service name is the
+// machine's own claim, which anyone signed in to Dispatch may approve, so the account is what
+// proves the service. Any other session has none. A caller that decides for the
 // session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
 func (e enrollmentRow) requester(ctx context.Context, q querier, services map[string]string) (policy.Requester, error) {
@@ -211,7 +215,7 @@ func (e enrollmentRow) requester(ctx context.Context, q querier, services map[st
 		return policy.Requester{}, err
 	}
 	var service string
-	if subject, ok := services[deref(e.Service)]; ok && e.Kind == "pod" && e.Subject != nil && *e.Subject == subject {
+	if e.Kind == "pod" && e.Subject != nil && e.Service != nil && services[*e.Subject] == *e.Service {
 		service = *e.Service
 	}
 	return policy.Requester{Operator: deref(e.Operator), Service: service, Withheld: withheld}, nil
@@ -292,7 +296,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
 		return Request{}, err
 	}
-	requester, err := enr.requester(ctx, tx, m.ServiceAccounts)
+	requester, err := enr.requester(ctx, tx, m.ServicesByAccount)
 	if err != nil {
 		return Request{}, err
 	}
@@ -627,7 +631,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	if approve {
-		requester, err := enr.requester(ctx, tx, m.ServiceAccounts)
+		requester, err := enr.requester(ctx, tx, m.ServicesByAccount)
 		if err != nil {
 			return Decision{}, err
 		}

@@ -100,18 +100,20 @@ type Config struct {
 	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
-	// service account (system:serviceaccount:<namespace>:<name>) is the one the service's pods run
-	// as, and each account is bound to one service only. A session is the service's when a launcher
-	// logged in as the service enrolled it and it is a pod whose projected token proved it runs as
-	// that account. A machine login's service name is the machine's own claim, approved by whoever
-	// its login names, so the pod's verified service account is what proves the service, and an
-	// account bound to two names would prove neither. A namespace's default account
+	// service account (system:serviceaccount:<namespace>:<name>) is one the service's pods run as. A
+	// service may be named for several accounts, one entry each, but each account is given once and
+	// proves exactly one service. A session is the service's when a launcher logged in as the
+	// service enrolled it and it is a pod whose projected token proved it runs as one of that
+	// service's accounts. A machine login's service name is the machine's own claim, approved by
+	// whoever its login names, so the pod's verified service account is what proves the service,
+	// and an account bound to two names would prove neither. A namespace's default account
 	// (system:serviceaccount:<namespace>:default) is refused: every pod in the namespace whose spec
 	// names no account runs as it and can mount a token for the broker's audience, so it proves
-	// nothing about which pods are the service's. A secret owned by a listed service goes at once
-	// to those pods and is refused to every other session. Unset, no service is registered, and a
-	// secret whose owner tag names one is refused as owner-tag-malformed.
-	ServiceAccounts map[string]string
+	// nothing about which pods are the service's. Keyed by account, each answering its service. A
+	// secret owned by a listed service goes at once to those pods and is refused to every other
+	// session. Unset, no service is registered, and a secret whose owner tag names one is refused
+	// as owner-tag-malformed.
+	ServicesByAccount map[string]string
 	// BROKER_SERVICE_LOGINS: the ServiceAccounts that log in as a service with their own projected
 	// token (POST /v1/launcher-credentials/token), whitespace-separated <service>=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion. Each
@@ -190,6 +192,19 @@ type Config struct {
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
 	SweepSeconds int
+	// BROKER_DRAIN_SECONDS: how long the broker goes on serving after SIGTERM while answering
+	// GET /healthz with 503, so Kubernetes has stopped sending it new requests before it stops
+	// accepting them. It is configuration rather than a compiled constant because the right value
+	// is the cluster's EndpointSlice propagation time — how long a pod the control plane has
+	// marked for deletion keeps receiving traffic — which lives in the deployment's own
+	// repository, not this one, and must be tunable there without a new image. Removal from a
+	// Service's EndpointSlice starts when the pod's deletion timestamp appears, concurrently with
+	// the kubelet beginning termination, so what the drain must outlast is that propagation and
+	// not a readiness probe's periodSeconds × failureThreshold, which no longer stands between
+	// the pod and the endpoint controller by then; 5 seconds is what this repository's own
+	// Dispatch deployment sizes its preStop wait at, for the same reason. 0 is for a local run or
+	// a dev stack, where nothing propagates and the wait is pure delay.
+	DrainSeconds int
 	// BROKER_TRUSTED_PROXY_HEADER: the request header (e.g. X-Forwarded-For) whose last entry the
 	// machine-login and secret-reread rate limiters take as the caller's address. Unset, they use
 	// the connection's own address, which is right only when nothing proxies the broker. Set it
@@ -259,7 +274,9 @@ type serviceAccountEntry struct{ service, subject, text string }
 // the entry: one not of that form or naming the service policy.OwnerShared; a namespace's default
 // account, which every pod in that namespace whose spec names no account runs as and can get a
 // token for the broker's audience with, so it proves nothing; and an account given twice, since
-// each account proves one service.
+// each account proves one service: named for two services, the refusal names both; named twice
+// for the same service, it names the account and that service. A service named for several
+// accounts is allowed.
 func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) {
 	var entries []serviceAccountEntry
 	seen := map[string]string{}
@@ -272,6 +289,9 @@ func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) 
 			return nil, fmt.Errorf("%s names a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; name a dedicated account", setting, text)
 		}
 		if other, twice := seen[subject]; twice {
+			if other == service {
+				return nil, fmt.Errorf("%s names the service account %s twice for %q; each account proves one service, so name it once", setting, subject, service)
+			}
 			return nil, fmt.Errorf("%s names the service account %s for both %q and %q; each account proves one service, so name it once", setting, subject, other, service)
 		}
 		seen[subject] = service
@@ -525,23 +545,18 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	for _, entry := range services {
-		if _, duplicate := cfg.ServiceAccounts[entry.service]; duplicate {
-			return Config{}, fmt.Errorf("BROKER_SERVICES must give each service once, got %q", entry.text)
+		if cfg.ServicesByAccount == nil {
+			cfg.ServicesByAccount = map[string]string{}
 		}
-		if cfg.ServiceAccounts == nil {
-			cfg.ServiceAccounts = map[string]string{}
-		}
-		cfg.ServiceAccounts[entry.service] = entry.subject
+		cfg.ServicesByAccount[entry.subject] = entry.service
 	}
 	logins, err := parseServiceAccounts("BROKER_SERVICE_LOGINS", getenv("BROKER_SERVICE_LOGINS"))
 	if err != nil {
 		return Config{}, err
 	}
 	for _, entry := range logins {
-		for name, subject := range cfg.ServiceAccounts {
-			if subject == entry.subject {
-				return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS names %s, the account BROKER_SERVICES binds for %q's pods, got %q: every such pod holds a token for it and would log in as %s; log the service in with an account of its own that no pod it enrolls runs as", entry.subject, name, entry.text, entry.service)
-			}
+		if name, bound := cfg.ServicesByAccount[entry.subject]; bound {
+			return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS names %s, the account BROKER_SERVICES binds for %q's pods, got %q: every such pod holds a token for it and would log in as %s; log the service in with an account of its own that no pod it enrolls runs as", entry.subject, name, entry.text, entry.service)
 		}
 		if cfg.ServiceLogins == nil {
 			cfg.ServiceLogins = map[string]string{}
@@ -606,6 +621,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"BROKER_ACCESS_TOKEN_SECONDS", &cfg.AccessTokenSeconds, 900, 1, 3600},
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
+		{"BROKER_DRAIN_SECONDS", &cfg.DrainSeconds, 5, 0, 120},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)

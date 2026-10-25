@@ -41,63 +41,108 @@ const (
 // (planning through reviewing, or held from one) to Legion as a root of its own: one Dispatch write
 // sets the child todo with the legion label, and that write's event admits the child as an orphan
 // with its own architect, as the label and the todo do when a person sets them. Before, the child
-// stayed suspended, unlabelled and with no architect, and nothing ran it again (LEGION-624). A child
-// stays done through its linger hands every child it left mid-run to Legion as a root of its own:
-// one Dispatch write sets the child todo with the legion label, and that write's daemon event
-// admits the child as an orphan with its own architect and the role of its carried phase started
-// (LEGION-624). Every phase carries into the new generation: re-planning a merged child or
-// withdrawing a READY would lose completed work. A child that is still admitted, finished or
-// parked stays with the tree. The hand-over remains pending during the linger, so a root that comes
-// back in it resumes its children where they stood and hands none over. A root a person parked and
-// then closed settles the same way. A merged root's close opens its production check, whose first
-// look its implementer reports here, since the tree's close waits for an open check (the workflow's
-// check tests).
+// stayed suspended, unlabelled and with no architect, and nothing ran it again (LEGION-624). Every
+// phase carries into the new generation: re-planning a merged child or withdrawing a READY would
+// lose completed work. A child that is still admitted, finished or parked stays with the tree. The
+// hand-over remains pending during the linger, so a root that comes back in it resumes its children
+// where they stood and hands none over. The close here is a person's — parked, then closed — which
+// is the path that still reaches the hand-over: a merged root's close waits for the rest of its
+// tree instead (the workflow's closeMerged), so it leaves no child mid-run to hand over.
 func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		close func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler)
-	}{
-		{name: "merged", close: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
-			if result, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 1, MergeSHA: "merge-1"}, engine, admission); err != nil || result.Refusal != nil {
-				t.Fatalf("merge %s = %+v, %v", finishedRoot, result.Refusal, err)
-			}
-			if result, err := intake.ApplyFact(context.Background(), pool, "api", "check-pass", intake.CheckReport{Issue: finishedRoot, Look: 1, Verdict: "pass", Summary: "driven"}, engine, admission); err != nil || result.Refusal != nil {
-				t.Fatalf("report %s's production check = %+v, %v", finishedRoot, result.Refusal, err)
-			}
-		}},
-		{name: "parked, then closed by a person", close: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
-			apply(t, pool, admission, "root-parked", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
-			apply(t, pool, admission, "root-closed", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.closed", Status: "done", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool, admission, engine := seedFinishingTree(t)
-			tc.close(t, pool, admission, engine)
-			if got := handOvers(t, pool); len(got) != 0 {
-				t.Fatalf("hand-overs while the tree lingers = %v, want none: the root can still come back", got)
-			}
+	pool, admission, engine := seedFinishingTree(t)
+	apply(t, pool, admission, "root-parked", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+	apply(t, pool, admission, "root-closed", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.closed", Status: "done", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+	if got := handOvers(t, pool); len(got) != 0 {
+		t.Fatalf("hand-overs while the tree lingers = %v, want none: the root can still come back", got)
+	}
 
-			expireLinger(t, pool, admission, engine)
-			if got, want := handOvers(t, pool), []string{planning, heldTesting, inRetro, awaiting, inAccepting}; !slices.Equal(got, want) {
-				t.Fatalf("hand-overs once the linger ended = %v, want %v", got, want)
-			}
-			if got := messagedChildren(t, pool); len(got) != 0 {
-				t.Fatalf("children told a person finishes them = %v, want none: every phase carries over", got)
-			}
+	expireLinger(t, pool, admission, engine)
+	if got, want := handOvers(t, pool), []string{planning, heldTesting, inRetro, awaiting, inAccepting}; !slices.Equal(got, want) {
+		t.Fatalf("hand-overs once the linger ended = %v, want %v", got, want)
+	}
+	if got := messagedChildren(t, pool); len(got) != 0 {
+		t.Fatalf("children told a person finishes them = %v, want none: every phase carries over", got)
+	}
 
-			// The write's event carries the todo and label. The hand-over fence identifies it as a
-			// state-carrying root promotion, rather than the ordinary child re-entry path.
-			apply(t, pool, admission, "planning-handed-over", intake.DispatchIssue{Key: planning, ResolvedRepo: "acme/widgets", Seq: 4, Type: "issue.updated", Status: "todo", Title: planning, Parent: finishedRoot, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
-			got := issue(t, pool, planning)
-			if got.Tree != planning || got.Phase != phase.Planning || got.Generation != 2 || got.Status != "in_progress" || architectStarts(t, pool, planning) != 1 {
-				t.Fatalf("the handed-over child = %#v with %d architect starts, want its own planning root, generation 2, with its architect started once", got, architectStarts(t, pool, planning))
-			}
-			for _, key := range []string{heldTesting, inRetro, awaiting, inAccepting, finished, parked, unstarted} {
-				if got := issue(t, pool, key); got.Tree != finishedRoot || got.Generation != 1 {
-					t.Fatalf("%s = %#v, want it left in %s's tree until its own hand-over event", key, got, finishedRoot)
-				}
-			}
-		})
+	// The write's event carries the todo and label. The hand-over fence identifies it as a
+	// state-carrying root promotion, rather than the ordinary child re-entry path.
+	apply(t, pool, admission, "planning-handed-over", intake.DispatchIssue{Key: planning, ResolvedRepo: "acme/widgets", Seq: 4, Type: "issue.updated", Status: "todo", Title: planning, Parent: finishedRoot, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	got := issue(t, pool, planning)
+	if got.Tree != planning || got.Phase != phase.Planning || got.Generation != 2 || got.Status != "in_progress" || architectStarts(t, pool, planning) != 1 {
+		t.Fatalf("the handed-over child = %#v with %d architect starts, want its own planning root, generation 2, with its architect started once", got, architectStarts(t, pool, planning))
+	}
+	for _, key := range []string{heldTesting, inRetro, awaiting, inAccepting, finished, parked, unstarted} {
+		if got := issue(t, pool, key); got.Tree != finishedRoot || got.Generation != 1 {
+			t.Fatalf("%s = %#v, want it left in %s's tree until its own hand-over event", key, got, finishedRoot)
+		}
+	}
+}
+
+// A merged root's close waits for the rest of its tree: the merge leaves the root awaiting it, with
+// its slot still taken and no child disturbed, and the close comes once the last of them leaves —
+// here the architect parking each. That close lingers the tree and opens the root's production
+// check, whose first look its implementer reports, since the tree's close waits for an open check
+// (the workflow's check tests). Nothing is left mid-run by then, so the linger's end hands no child
+// over, and the slot the tree held is released. A pull request opened from the root's branch while
+// it waits is new work and leaves the merge it waits on standing.
+func TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves(t *testing.T) {
+	pool, admission, engine := seedFinishingTree(t)
+	if result, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 1, MergeSHA: "merge-1"}, engine, admission); err != nil || result.Refusal != nil {
+		t.Fatalf("merge %s = %+v, %v", finishedRoot, result.Refusal, err)
+	}
+	if got := issue(t, pool, finishedRoot); got.Phase != phase.AwaitingMerge || got.Lingers() {
+		t.Fatalf("the merged root = %#v, want it still awaiting its merge, not lingering", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: finishedRoot, Index: 0, AdmittedAt: fixedNow}})
+	for _, key := range []string{planning, heldTesting, inRetro, awaiting, inAccepting} {
+		if got := issue(t, pool, key); got.Generation != 1 || got.Tree != finishedRoot {
+			t.Fatalf("%s after its root's merge = %#v, want it untouched in %s's tree", key, got, finishedRoot)
+		}
+	}
+	if result, err := intake.ApplyFact(context.Background(), pool, "github", "follow-up-opened", intake.PullRequestOpened{Repo: "acme/widgets", Number: 2, Branch: "legion/LEGION-1", HeadSHA: "follow-up", UpdatedAt: fixedNow.Add(time.Hour)}, engine, admission); err != nil || result.Refusal != nil {
+		t.Fatalf("open a follow-up pull request from %s's branch = %+v, %v", finishedRoot, result.Refusal, err)
+	}
+	if got := issue(t, pool, finishedRoot); got.Phase != phase.AwaitingMerge {
+		t.Fatalf("the merged root once a follow-up pull request opened = %#v, want it still awaiting its merge", got)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		pr, err := record.NewStore().PullRequest(context.Background(), tx, finishedRoot)
+		if err != nil || pr == nil || pr.Number != 1 || pr.State != record.PullRequestMerged {
+			t.Fatalf("the root's pull request once a follow-up opened = %+v, %v, want #1 merged", pr, err)
+		}
+	})
+
+	// Every member but the last leaves the root waiting. The released child that has not started a
+	// phase holds the close up as much as a working one: it is in the workflow, and it will run, so
+	// it is the one parked last.
+	park := func(seq int, key string) {
+		t.Helper()
+		apply(t, pool, admission, "park-"+key, intake.DispatchIssue{Key: key, ResolvedRepo: "acme/widgets", Seq: int64(seq) + 4, Type: "issue.updated", Status: "backlog", Title: key, Parent: finishedRoot, Rank: "B"}, engine)
+	}
+	for seq, key := range []string{planning, heldTesting, inRetro, awaiting, inAccepting} {
+		park(seq, key)
+		if got := issue(t, pool, finishedRoot); got.Phase != phase.AwaitingMerge {
+			t.Fatalf("the root once %s was parked = %#v, want it still waiting for the rest of its tree", key, got)
+		}
+	}
+	park(5, unstarted)
+	if got := issue(t, pool, finishedRoot); got.Phase != phase.Done || !got.Lingers() {
+		t.Fatalf("the root once its last open child left = %#v, want it done and lingering", got)
+	}
+	assertSlots(t, pool, nil)
+	inTx(t, pool, func(tx pgx.Tx) {
+		check, err := record.NewStore().ProductionCheck(context.Background(), tx, finishedRoot)
+		if err != nil || check == nil || !check.Open() || check.Number != 1 || check.MergeSHA != "merge-1" {
+			t.Fatalf("the root's production check = %+v, %v, want it open on pull request #1 at merge-1", check, err)
+		}
+	})
+	if result, err := intake.ApplyFact(context.Background(), pool, "api", "check-pass", intake.CheckReport{Issue: finishedRoot, Look: 1, Verdict: "pass", Summary: "driven"}, engine, admission); err != nil || result.Refusal != nil {
+		t.Fatalf("report %s's production check = %+v, %v", finishedRoot, result.Refusal, err)
+	}
+
+	expireLinger(t, pool, admission, engine)
+	if got := handOvers(t, pool); len(got) != 0 {
+		t.Fatalf("hand-overs once the linger ended = %v, want none: no child was left mid-run", got)
 	}
 }
 
@@ -610,13 +655,14 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 
 // A root a person sets todo again while its tree lingers is re-admitted, and its mid-run children
 // resume in its new run where they stood (startMidPhaseChildren). The end of the closed generation's
-// linger hands none of them over: the reopen wins, and the two never both act on one child.
+// linger hands none of them over: the reopen wins, and the two never both act on one child. The
+// close that lingers the tree over running children is a person's — a merged root's waits for the
+// rest of its tree (the workflow's closeMerged).
 func TestARootReopenedInItsLingerKeepsItsChildren(t *testing.T) {
 	pool, admission, engine := seedFinishingTree(t)
-	if result, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 1, MergeSHA: "merge-1"}, engine, admission); err != nil || result.Refusal != nil {
-		t.Fatalf("merge %s = %+v, %v", finishedRoot, result.Refusal, err)
-	}
-	apply(t, pool, admission, "root-reopened", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+	apply(t, pool, admission, "root-parked", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+	apply(t, pool, admission, "root-closed", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.closed", Status: "done", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+	apply(t, pool, admission, "root-reopened", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 4, Type: "issue.updated", Status: "todo", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
 	if root := issue(t, pool, finishedRoot); root.Generation != 2 || root.Lingers() {
 		t.Fatalf("the reopened root = %#v, want generation 2, no longer lingering", root)
 	}

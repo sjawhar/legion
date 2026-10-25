@@ -596,6 +596,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "project creation", event: model.Event{Type: "project.created", Actor: user}, want: false},
 		{name: "repository project mapping", event: model.Event{Type: "settings.repo_project.updated", Actor: user}, want: false},
 		{name: "architecture source", event: model.Event{Type: "settings.architecture_source.updated", Actor: user}, want: false},
+		{name: "project default assignee", event: model.Event{Type: "settings.project_default_assignee.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
 		{name: "user thread state", event: model.Event{Type: "user_thread_state.updated", Actor: user}, want: false},
 	} {
