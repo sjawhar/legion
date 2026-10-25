@@ -577,17 +577,22 @@ func TestDeliver_NilSessionsReturnsError(t *testing.T) {
 	}
 }
 
-// TestDeliver_SessionAddress pins the address rule: the URL a delivery requests for a session
-// registered with each combination of owning listener, recorded host and host bridge.
+// TestDeliver_SessionAddress pins the owner rule: the URL a delivery requests for a session
+// registered with each combination of owning listener, recorded host and host bridge. A listener
+// delivers only to a session it owns (MachineID empty or its own): through the bridge, else at the
+// recorded host, else at host.docker.internal. Another listener's session is that listener's to
+// deliver, so this one refuses it with ErrWrongMachine and requests nothing: every listener on the
+// bus reads each inbox message, and a second one that delivered would deliver it twice.
 func TestDeliver_SessionAddress(t *testing.T) {
 	sessions, deliverer := newKVDeliverer(t)
 	deliverer.MachineID = "local-machine"
 
 	tests := []struct {
-		name   string
-		bridge string
-		entry  session.SessionEntry
-		want   string
+		name    string
+		bridge  string
+		entry   session.SessionEntry
+		want    string
+		wantErr error
 	}{
 		{
 			name:   "own machine with a bridge goes through the bridge, not the recorded host",
@@ -612,21 +617,22 @@ func TestDeliver_SessionAddress(t *testing.T) {
 			want:  "http://host.docker.internal:4096/session/ses_target/prompt_async",
 		},
 		{
-			name:   "another machine's session goes to its recorded host",
-			bridge: "127.0.0.1",
-			entry:  session.SessionEntry{MachineID: "remote-machine", Host: "example-host-b"},
-			want:   "http://example-host-b:4096/session/ses_target/prompt_async",
-		},
-		{
-			name:   "another machine's session without a recorded host goes to its machine id",
-			bridge: "127.0.0.1",
-			entry:  session.SessionEntry{MachineID: "remote-machine"},
-			want:   "http://remote-machine:4096/session/ses_target/prompt_async",
-		},
-		{
 			name:  "an IPv6 recorded host is bracketed",
-			entry: session.SessionEntry{MachineID: "remote-machine", Host: "fd00::1"},
+			entry: session.SessionEntry{MachineID: "local-machine", Host: "fd00::1"},
 			want:  "http://[fd00::1]:4096/session/ses_target/prompt_async",
+		},
+		{
+			// Replaces the contract TestDeliver_CrossMachineUsesRemoteHost and TestTsnetAwareDelivery
+			// pinned, that another machine's session was dialled at its machine id.
+			name:    "another machine's session with a recorded host is its owner's to deliver, not dialled at its host or machine id",
+			bridge:  "127.0.0.1",
+			entry:   session.SessionEntry{MachineID: "remote-machine", Host: "example-host-b"},
+			wantErr: session.ErrWrongMachine,
+		},
+		{
+			name:    "another machine's session without a recorded host is its owner's to deliver, not dialled at its machine id",
+			entry:   session.SessionEntry{MachineID: "remote-machine"},
+			wantErr: session.ErrWrongMachine,
 		},
 	}
 	for _, tt := range tests {
@@ -652,6 +658,15 @@ func TestDeliver_SessionAddress(t *testing.T) {
 				newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
 				store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"},
 			)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Deliver() = %v, want %v", err, tt.wantErr)
+				}
+				if len(requests) != 0 {
+					t.Fatalf("requested %q, want no request", requests)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Deliver() = %v, want nil", err)
 			}

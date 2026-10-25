@@ -656,9 +656,9 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 
 // sessionInfo is the joined view of an Interest (topics, dir, machine) and a
 // SessionEntry (port). Returned by GET /v1/sessions. Its host is where the session runs, its
-// recorded host or else MachineID (HostOrMachine). A listener reaches a session on its own machine
-// at the host bridge when one is set, else at the recorded host, else at its fallback:
-// host.docker.internal on its own machine, the machine id on another (session.Deliverer).
+// recorded host or else MachineID (HostOrMachine). Only the listener MachineID names delivers to
+// the session (session.Deliverer): at its host bridge when one is set, else at the recorded host,
+// else at host.docker.internal; another listener's session is that listener's to deliver.
 type sessionInfo struct {
 	SessionID      string   `json:"session_id"`
 	MachineID      string   `json:"machine_id"`

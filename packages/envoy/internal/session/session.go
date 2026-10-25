@@ -17,8 +17,9 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// ErrWrongMachine is returned when a session belongs to a different machine.
-// Callers should ACK the message (another listener owns this session).
+// ErrWrongMachine is returned for a session with a serve port that another listener owns: its
+// entry carries a MachineID that is neither empty nor this listener's. HandleAgentMessage answers
+// it Delivered:false without a NAK, since the owning listener delivers the message.
 var ErrWrongMachine = errors.New("session belongs to a different machine")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
@@ -66,6 +67,13 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.Port > 0 {
+		// Only the owning listener delivers to a session: every listener on the bus reads each
+		// inbox message from its own durable, so a second listener that could reach the session
+		// would deliver the same message again. The owner always has the message and reaches its
+		// sessions by hostFor's rule.
+		if entry.MachineID != "" && entry.MachineID != d.MachineID {
+			return DeliveryResult{}, ErrWrongMachine
+		}
 		return DeliveryResult{}, d.prompt(*entry, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
@@ -184,25 +192,22 @@ func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) err
 // resume was removed — cold-starting host processes from inside a container
 // runs as root and is a security risk. Messages stay in JetStream for retry.
 
-// hostFor is the address rule every delivery follows. A session this listener owns goes
-// through HostBridge when one is configured: the listener may run in a container that reaches
-// its own machine's sessions only through that bridge, whatever host name the session reported.
-// Otherwise the session's recorded Host is where its process runs, which MachineID is not when
-// sessions register through a listener on another machine. A session with no recorded Host (its
-// plugin predates the field) falls back to host.docker.internal on this machine and to the
-// owning listener's MachineID, resolved as a host name, on another.
+// hostFor is the address rule every delivery follows, for a session this listener owns (its
+// MachineID empty or this listener's; DeliverWithResultForEntry refuses another listener's
+// session with ErrWrongMachine, since that session is its owner's to deliver). The session goes
+// through HostBridge when one is configured: the listener may run in a container that reaches its
+// own machine's sessions only through that bridge, whatever host name the session reported.
+// Otherwise it is reached at its recorded Host, where its process runs, and at
+// host.docker.internal when it recorded none (its plugin predates the field). A session
+// registered through a listener that cannot reach its port is reached by nobody.
 func (d Deliverer) hostFor(entry SessionEntry) string {
-	own := entry.MachineID == "" || entry.MachineID == d.MachineID
-	if own && d.HostBridge != "" {
+	if d.HostBridge != "" {
 		return d.HostBridge
 	}
 	if entry.Host != "" {
 		return entry.Host
 	}
-	if own {
-		return "host.docker.internal"
-	}
-	return entry.MachineID
+	return "host.docker.internal"
 }
 
 var hostName = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_.-]{0,251}[A-Za-z0-9_])?$`)

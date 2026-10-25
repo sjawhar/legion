@@ -1,7 +1,6 @@
 package session_test
 
 import (
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -144,24 +143,24 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	}
 }
 
-// unreachableClient fails every request, as a session machine the listener cannot reach does,
-// and records each URL it was asked for in attempts.
-func unreachableClient(attempts *[]string) *http.Client {
+// reachableClient answers every request as a serving port would (204), as a session the listener
+// could reach does, and records each URL it was asked for in requests.
+func reachableClient(requests *[]string) *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		*attempts = append(*attempts, req.URL.String())
-		return nil, errors.New("connection refused")
+		*requests = append(*requests, req.URL.String())
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
 	})}
 }
 
-// TestHandleAgentMessage_WrongMachineKVAcks tests that when the KV session
-// registry says a session is on another machine, the handler attempts delivery
-// at the session's recorded host. Since that host is unreachable, delivery fails
-// and the handler ACKs (doesn't NAK) because another listener may own this session.
+// TestHandleAgentMessage_WrongMachineKVAcks tests that when the KV session registry says a session
+// is another listener's (machine-B), the registry path neither delivers nor NAKs, and requests
+// nothing even though the session's port answers: the session is its owner's to deliver, and every
+// listener on the bus reads each inbox message, so a second delivery would arrive twice.
 func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
-	var attempts []string
+	var requests []string
 	sessions, deliverer := newKVDeliverer(t)
 	deliverer.MachineID = "machine-A"
-	deliverer.HTTPClient = unreachableClient(&attempts)
+	deliverer.HTTPClient = reachableClient(&requests)
 	if err := sessions.Put("ses_target", session.SessionEntry{Port: 4096, MachineID: "machine-B", Host: "example-host-b", Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
@@ -172,29 +171,26 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 		"ses_target", "machine-A", nil, &deliverer,
 	)
 
-	// Remote delivery fails (example-host-b unreachable), but handler ACKs
-	// because another listener may own this session.
 	if result.ShouldNAK {
-		t.Fatal("expected ACK (not NAK) when remote delivery fails")
+		t.Fatal("expected ACK (not NAK) for another listener's session")
 	}
 	if result.Delivered {
-		t.Fatal("expected no delivery (session on different machine)")
+		t.Fatal("expected no delivery (session is machine-B's)")
 	}
-	want := "http://example-host-b:4096/session/ses_target/prompt_async"
-	if len(attempts) != 1 || attempts[0] != want {
-		t.Fatalf("attempted %q, want exactly [%q]", attempts, want)
+	if len(requests) != 0 {
+		t.Fatalf("requested %q, want no request", requests)
 	}
 }
 
-// TestHandleAgentMessage_InterestPathWrongMachineKVAcks tests that when
-// the interest path matches this machine, but the KV session registry says the
-// session moved to another machine, the handler attempts delivery at the
-// session's recorded host. Since that host is unreachable, delivery fails and NAKs for retry.
+// TestHandleAgentMessage_InterestPathWrongMachineKVAcks tests that when the interest path matches
+// this machine but the KV session registry says the session moved to another listener
+// (machine-B), the handler neither delivers nor NAKs and requests nothing: the session entry names
+// its owner, which delivers the message from its own durable.
 func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
-	var attempts []string
+	var requests []string
 	sessions, deliverer := newKVDeliverer(t)
 	deliverer.MachineID = "machine-A"
-	deliverer.HTTPClient = unreachableClient(&attempts)
+	deliverer.HTTPClient = reachableClient(&requests)
 	if err := sessions.Put("ses_target", session.SessionEntry{Port: 4096, MachineID: "machine-B", Host: "example-host-b", Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
@@ -211,16 +207,13 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 		"ses_target", "machine-A", interest, &deliverer,
 	)
 
-	// Interest path matches, but KV says session moved to machine-B.
-	// Handler attempts delivery at its recorded host, which fails, so NAK for retry.
-	if !result.ShouldNAK {
-		t.Fatalf("expected NAK when remote delivery fails, got NAK=%v, Delivered=%v", result.ShouldNAK, result.Delivered)
+	if result.ShouldNAK {
+		t.Fatalf("expected ACK (not NAK) for a session KV says moved to machine-B, got NAK=%v, Delivered=%v", result.ShouldNAK, result.Delivered)
 	}
 	if result.Delivered {
 		t.Fatal("expected no delivery (KV says session moved to machine-B)")
 	}
-	want := "http://example-host-b:4096/session/ses_target/prompt_async"
-	if len(attempts) != 1 || attempts[0] != want {
-		t.Fatalf("attempted %q, want exactly [%q]", attempts, want)
+	if len(requests) != 0 {
+		t.Fatalf("requested %q, want no request", requests)
 	}
 }

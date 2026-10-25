@@ -48,8 +48,9 @@ func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 
 func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 	// An older plugin's subscribeBody has no "host" key; sessionEntryFromSubscribe must not
-	// invent one: an empty Host is what sends delivery to its fallback (host.docker.internal on the
-	// listener's own machine, the machine id on another) and display to MachineID (HostOrMachine).
+	// invent one: an empty Host is what sends the owning listener's delivery (the only one; no
+	// other listener delivers to the session) to its fallback, host.docker.internal, and display
+	// to MachineID (HostOrMachine).
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old", Port: 1}, "example-listener")
 
 	if got.Host != "" {

@@ -20,10 +20,11 @@ type subscribeBody struct {
 	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel
 	// hostname): where the session process actually runs, as opposed to machineID below,
 	// which is always the registering listener's own machine (unrelated to the caller). It is the
-	// address a listener reaches the session's serving port at, unless the session is on the
-	// listener's own machine and the listener has a host bridge (ENVOY_HOST_BRIDGE), which wins.
-	// Empty for a session whose plugin predates this field; delivery then falls back to
-	// host.docker.internal on the listener's own machine and to its machine id on another.
+	// address the registering listener reaches the session's serving port at, unless that
+	// listener has a host bridge (ENVOY_HOST_BRIDGE), which wins. Only that listener delivers to
+	// the session; any other listener leaves it to its owner (session.ErrWrongMachine). Empty for
+	// a session whose plugin predates this field; its own listener then falls back to
+	// host.docker.internal.
 	Host string `json:"host"`
 }
 
