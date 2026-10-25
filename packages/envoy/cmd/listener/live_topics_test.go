@@ -587,6 +587,59 @@ func TestARehomedSessionStillReceivesItsStoredTopicOnce(t *testing.T) {
 	}
 }
 
+// The same re-homed session, with the first listener holding a host bridge, as every compose
+// listener does (ENVOY_HOST_BRIDGE=127.0.0.1 there). The bridge is the first listener's way to its
+// own machine's sessions; the re-registered session runs on the second listener's machine, so its
+// owner reaches it at the host it recorded. 127.0.0.2 stands for that bridge: a loopback address
+// the serving port, bound on 127.0.0.1, does not listen on. Before the bridge was limited to
+// sessions registered through the listener, the owner dialled it, was refused, logged a failed
+// delivery and retried, and the session was never prompted.
+func TestARehomedSessionStillReceivesItsStoredTopicOnceFromAnOwnerWithABridge(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	first := startListenerProcess(t, binary, uri, "rehome-bridged-first", "ENVOY_HOST_BRIDGE=127.0.0.2")
+	first.waitHealthy(t)
+	second := startListenerProcess(t, binary, uri, "rehome-bridged-second")
+	second.waitHealthy(t)
+
+	topic := "notifications.github.acme.repo" + id.New() + ".pr.1"
+	serving := startServingPort(t, "ses_rehome_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, first, serving, "127.0.0.1", topic)
+	registerServingSession(t, second, serving, "127.0.0.1", topic)
+	first.awaitSessionMachine(t, serving.sessionID, "rehome-bridged-second")
+
+	item := newEnvelope("github", topic, "pull request 1 was opened")
+	publish(t, connectPublisher(t, uri), item)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
+	serving.noPrompt(t, 3*time.Second)
+	for _, listener := range []*listenerProcess{first, second} {
+		if output := listener.Output.String(); strings.Contains(output, "listener delivery failed") {
+			t.Fatalf("the listener on port %d logged a failed delivery:\n%s", listener.port, output)
+		}
+	}
+}
+
+// A listener with a host bridge reaches a session that registered through it at the bridge, even
+// when the session recorded a host of its own: the bridge is how a listener in a container reaches
+// its own machine's sessions, whatever name they reported. The recorded host here resolves nowhere,
+// so a prompt arriving proves the bridge was used.
+func TestAListenerReachesItsOwnSessionThroughItsBridge(t *testing.T) {
+	uri := testnats.URL(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "bridge-own", "ENVOY_HOST_BRIDGE=127.0.0.1")
+	listener.waitHealthy(t)
+
+	topic := "notifications.github.acme.repo" + id.New() + ".pr.1"
+	serving := startServingPort(t, "ses_bridge_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, listener, serving, "session-host.invalid", topic)
+
+	item := newEnvelope("github", topic, "pull request 1 was opened")
+	publish(t, connectPublisher(t, uri), item)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
+	serving.noPrompt(t, 3*time.Second)
+}
+
 // subscribeExceptions subscribes a connection of the test's own to every exceptions lane, core
 // NATS and stored alike, and flushes so the server holds the subscription when it returns.
 func subscribeExceptions(t *testing.T, uri string) *natsgo.Subscription {

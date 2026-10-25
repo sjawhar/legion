@@ -30,17 +30,19 @@ type SessionEntry struct {
 	SelfSubscribed bool `json:"self_subscribed,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
 	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, and the
-	// address its owning listener reaches it at (Deliverer.hostFor), unless that listener's
-	// configured HostBridge wins. Only the owning listener delivers to the session; another
-	// leaves it to the owner (ErrWrongMachine), whatever Host says. The owner is the listener the
-	// session's stored subscription names, the one store.Registry.Match fans its topics out on,
-	// else, with no subscription stored, the one MachineID names (any listener when that is empty
+	// address its owning listener reaches it at (Deliverer.hostFor), unless the session registered
+	// through that listener and its configured HostBridge wins. Only the owning listener delivers
+	// to the session; another leaves it to the owner (ErrWrongMachine), whatever Host says. The
+	// owner is the listener the session's stored subscription names, the one store.Registry.Match
+	// fans its topics out on, else, with no subscription stored, the one MachineID names (any
+	// listener when that is empty
 	// too). MachineID is the registering listener's own ENVOY_MACHINE_ID, whether every session
 	// registers through one shared listener or each machine runs its own; a re-registration
 	// through another listener moves it, while the stored subscription keeps its first listener's.
 	// Host is empty for a session whose plugin predates this field (subscribeBody had no "host");
-	// its owning listener then falls back to host.docker.internal, and HostOrMachine falls back to
-	// MachineID so every display caller sees a populated value.
+	// its owning listener then falls back to host.docker.internal when the session registered
+	// through it, else to MachineID, and HostOrMachine falls back to MachineID so every display
+	// caller sees a populated value.
 	Host string `json:"host,omitempty"`
 }
 

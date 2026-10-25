@@ -658,9 +658,10 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 // SessionEntry (port). Returned by GET /v1/sessions. Its host is where the session runs, its
 // recorded host or else MachineID (HostOrMachine). Only the session's owner delivers to it
 // (session.Deliverer): the listener its stored subscription names, the one store.Registry.Match
-// delivers on, else the one MachineID names. The owner reaches it at its host bridge when one is
-// set, else at the recorded host, else at host.docker.internal; any other listener leaves inbox
-// messages to the owner silently.
+// delivers on, else the one MachineID names. The owner reaches a session registered through it at
+// its host bridge when one is set, else at the recorded host, else at host.docker.internal; a
+// session that re-registered through another listener is reached at its recorded host, else at
+// MachineID. Any other listener leaves inbox messages to the owner silently.
 type sessionInfo struct {
 	SessionID      string   `json:"session_id"`
 	MachineID      string   `json:"machine_id"`
