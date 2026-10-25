@@ -2,40 +2,49 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-229",
-  "completed": "2026-10-25T07:12:00Z",
-  "headTested": "914ce1e77c593174e9bbfe82fd09c656a2c85e24",
+  "completed": "2026-10-25T09:40:00Z",
+  "round": 2,
+  "headTested": "a828af781acc30f5918116fc06381300208579e1",
+  "codeHead": "2e7fc8d85bc79e6414a6b08ded391d2869a75f95",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command on this pod's own zonky PostgreSQL 16.4 (port 54331, fresh initdb) and a nats-server v2.10.22 installed with go install: `LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54331/postgres?sslmode=disable' LEGION_E2E_NATS_BIN=/legion/scratch/bin/nats-server bash scripts/e2e/merged-root-waits.sh` at the workspace head 2cd3f00 (code head 914ce1e) gave `merged root waits e2e: PASS in 238s`, all six steps with the same readbacks the PR quotes: step1 409 SIGNOFF_CHILD_IN_WORKFLOW naming the child, step2 root in awaiting_merge / pullRequest.state merged / slot kept / no Dispatch write / one pr-merged notice, step5 restart leaves the wait with notices still 1, step3 child implementer completion 200 -> testing, step4 child merge -> root done, slot freed, production check open at merge-parent, architect suspended."
+    "how": "Re-ran the implementer's command at a828af7 on this pod's zonky PostgreSQL 16.4 (127.0.0.1:54331) and nats-server v2.10.22: `LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54331/postgres?sslmode=disable' LEGION_E2E_NATS_BIN=/legion/scratch/bin/nats-server bash scripts/e2e/merged-root-waits.sh` -> `merged root waits e2e: PASS in 17s`, seven steps, including step7: `read back over 3s: TEST1CED568AF303-1 is in awaiting_merge on pull request #10843772, pullRequest.state merged — not #10843774` and step4: root done, no slot, production check open on #10843772 at merge-parent, one pr-merged notice over the run, the Dispatch done write taken."
   },
-  "failures": [
-    {
-      "criterion": "The root closes only after its last open child is done or parked — and closes the moment that child leaves (spec: 'The root closes the moment its last open child leaves the workflow'). The spec's hazard section claims a push is 'the one door' that still moves a merged root waiting in awaiting_merge; a pull request opened from the root's branch during the wait is a second one.",
-      "evidence": "A merged root waiting for its child, then a GitHub `opened` event for a new pull request (another number) from the same branch legion/<root>: pullRequestOpened (packages/daemon/internal/workflow/pullrequest.go:30-69) replaces the recorded merged pull request with the new open one, so the merge the root waits on is erased. When the last child is then parked, closeAwaitingRoot (linger.go:185) reads pr.State != merged and returns: the root stays in awaiting_merge forever, holding its admission slot and its six workers, and the boot sweep (resume.go sweepMerged) skips it for the same reason; if the new pull request later merges, the root closes with its production check on the wrong pull request. Before this change the root closed at its merge, so the window did not exist; the wait makes it days long. Live: the booted daemon (run, through the implementer's own harness, -tags e2e, same PostgreSQL and nats-server) showed `D2: drove GitHub pr opened #14988314 on legion/TEST065B65D5DAE6-1 ... read back: root phase awaiting_merge pullRequest #14988314 state open` then `D3: drove Dispatch issue.updated TEST065B65D5DAE6-2 -> backlog ... read back after 10s: root phase awaiting_merge status retro slot true pullRequest #14988314 open` — FAIL: the merged root never closed after its last child left. Red test, commit 944300fecd31 on legion/INFRA-229: TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding in packages/daemon/internal/workflow/merge_close_test.go; `cd packages/daemon && LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54331/postgres?sslmode=disable' go test ./internal/workflow/ -count=1 -run TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding` fails with `merge_close_test.go:485: phase = \"awaiting_merge\", want \"done\"`. The test pins the outcome only (the root closes on #42 at merge, its slot freed), not a fix shape."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
+  "round1Failure": {
+    "criterion": "A pull request opened from a waiting merged root's branch erased the merge it waits on, so the root never closed when its last child left.",
+    "resolution": "Fixed in cdbe0414b1e5: pullRequestOpened does not record another pull request from the branch of an issue that awaits its merge while its recorded one is merged. The red test TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding was edited by the implementer: its slots-empty assertion cannot hold inside package workflow, whose rig runs a no-op admission (slots are freed only by admit.releaseDoneSlots, admit.go:695 — I confirmed no slot release exists under internal/workflow). It became the close's own linger_close row, and the slot assertion moved to admit's TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves, which runs the real admission. That was a defect in my assertion, not a weakening; accepted. My live run below checks the slot directly."
+  },
   "proof": [
     {
-      "criterion": "An issue at the acceptance step is not accepted while an issue beneath it is in the workflow, however deep; the refusal names each; a child with nothing beneath it is accepted; out-of-workflow children hold nothing.",
-      "surface": "The booted daemon (run, the function legion start calls) through the implementer's whole-daemon harness with -tags e2e, on a real PostgreSQL 16.4 and nats-server 2.10.22, driven over POST /legion/v1/signoff with the architect's real grant and Dispatch issue.updated envelopes on ENVOY_NOTIFICATIONS, read back from GET /legion/v1/state. A throwaway driver file, not committed.",
-      "command": "go test -c -tags e2e ./internal/daemon, then LEGION_TEST_PG_DSN=... LEGION_E2E_NATS_URL=nats://127.0.0.1:42222 ./tester-driver.test -test.run '^TestTesterDeepTreeAcceptanceLive$' -test.v",
-      "observed": "Tree R > C (accepting) > G (implementing) > H (admitted, todo), plus D (backlog) and E (done) under R. sign_off R -> 409 'R still has C, G, H beneath it' (D and E not named); sign_off C -> 409 naming G, H only; G parked to backlog -> 409 naming H only; H to icebox -> sign_off C 200, C in retro; sign_off R -> 409 naming C (in retro). With R's parent set to H (a parent cycle R->C->G->H->R) the sign-off still answered in 15ms naming C.",
-      "headSha": "914ce1e77c593174e9bbfe82fd09c656a2c85e24",
-      "negativeControl": "The same call with the grandchild H in icebox and G in backlog (nothing beneath C in the workflow) is accepted 200, so the 409s are the rule's and not a refusal of the call."
+      "criterion": "The root closes only after its last open child is done or parked, and on its own merge: pull requests opened, pushed, closed, reopened or merged from the waiting root's branch do not replace the merge it waits on (round-1 failure).",
+      "surface": "The booted daemon (run, the function legion start calls) through the branch's -tags e2e whole-daemon harness on PostgreSQL 16.4 and nats-server 2.10.22, GitHub pull-request envelopes and Dispatch issue.updated envelopes on ENVOY_NOTIFICATIONS, read back from GET /legion/v1/state and from the shipped legion binary built at this head (`legion state --port <p> --json`). Throwaway driver file, not committed.",
+      "command": "go test -c -tags e2e ./internal/daemon, then LEGION_TEST_PG_DSN=... LEGION_E2E_NATS_URL=nats://127.0.0.1:42222 TESTER_LEGION_BIN=/legion/scratch/bin/legion ./tester-driver.test -test.run '^TestTesterFollowUpPROnMergedRootBranchLive$' -test.v",
+      "observed": "Root merged #3410906 and waits for its child. Follow-up #3410956 opened, then synchronized to a new head, then closed unmerged, then reopened: after each, held over 3s, the root stayed in awaiting_merge on #3410906 state merged. A second follow-up #3410957 opened and merged at merge-second while the child ran: the root kept waiting, pr-merged notices still 1, and `legion state --port 19360 --json` read the root on #3410906 'merged'. Child parked to backlog: root done, status done, slot freed, production check on #3410906 at merge-parent.",
+      "headSha": "a828af781acc30f5918116fc06381300208579e1",
+      "negativeControl": "The same opened-then-park sequence at round 1's head 914ce1e (no guard): `read back after 10s: root phase awaiting_merge status retro slot true pullRequest #14988314 open`, the root never closed."
     },
     {
-      "criterion": "A merged root waits while any member of its tree runs, one notice per merge, a push withdraws nothing, and the root closes the moment its last member leaves; legion state reports open/merged/closed.",
-      "surface": "The same booted daemon, GitHub pull-request envelopes and Dispatch issue.updated envelopes on ENVOY_NOTIFICATIONS, GET /legion/v1/state, the Dispatch and Envoy stand-ins, and the shipped legion binary built from this head running `legion state --port <daemon port> --json` against that live daemon.",
-      "command": "./tester-driver.test -test.run '^TestTesterWaitingRootBreaksLive$' -test.v with TESTER_LEGION_BIN=/legion/scratch/bin/legion (go build ./cmd/legion at this head)",
-      "observed": "Root R awaiting_merge with READY row, children C (implementing), C2 (implementing), grandchild G (admitted, todo). R's merge: R awaiting_merge, slot kept, no check, one pr-merged notice naming C, C2, G. Merge redelivered under a new event id: notices still 1 over 3s. synchronize to head-after-merge: R stays awaiting_merge, no Dispatch write (no READY withdrawal, no in_progress) over 3s, head recorded, state merged. C parked: R still waits, notices 1. C2 merged (done); C's PR closed unmerged. `legion state --port 43147 --json`: R 'merged', C 'closed', C2 'merged', G no pull request. G to icebox: R done, status done, slot freed, production check open on R's PR at merge-parent, Dispatch done write taken, 1 pr-merged notice over the run; `legion state` R 'merged'. Separately, a person's Dispatch done on a waiting root lingered the tree at once: root done, check opened, architect suspended.",
-      "headSha": "914ce1e77c593174e9bbfe82fd09c656a2c85e24",
-      "negativeControl": "While G was still admitted the root stayed in awaiting_merge over each 3s window; only its departure closed it."
+      "criterion": "Acceptance is refused while any issue beneath is in the workflow, however deep, naming each; out-of-workflow children hold nothing; a child with nothing beneath is accepted.",
+      "surface": "The same booted daemon, POST /legion/v1/signoff with the architect's real grant, Dispatch issue.updated envelopes, GET /legion/v1/state.",
+      "command": "./tester-driver.test -test.run '^TestTesterDeepTreeAcceptanceLive$' -test.v",
+      "observed": "R > C (accepting) > G (implementing) > H (admitted, todo), plus D (backlog) and E (done) under R: sign_off R 409 naming C, G, H only; sign_off C 409 naming G, H; G parked -> C 409 naming H; H iced -> C 200, in retro; R's parent set to H (a loop R->C->G->H->R) -> sign_off R 409 naming C, answered in 16ms.",
+      "headSha": "a828af781acc30f5918116fc06381300208579e1",
+      "negativeControl": "The same sign-off of C with nothing beneath it in the workflow answered 200, so the 409s are the rule's."
+    },
+    {
+      "criterion": "A merged root with running members stays in awaiting_merge with one notice, a push and a redelivered merge move nothing, it closes the moment the last member leaves, legion state reports open/merged/closed, and a person's Dispatch done still lingers the tree.",
+      "surface": "The same booted daemon and the shipped legion binary against it.",
+      "command": "./tester-driver.test -test.run '^TestTester(WaitingRootBreaks|PersonClosesWaitingRoot)Live$' -test.v",
+      "observed": "Children C, C2 and grandchild G running: root's merge -> awaiting_merge, slot kept, no check, one pr-merged notice naming C, C2, G. Merge redelivered under a new event id and a synchronize past READY's head: root stays, notices 1, no Dispatch write. C parked: waits. C2 merged, C's PR closed unmerged: waits; `legion state --port 35127 --json` read root 'merged', C 'closed', C2 'merged'. G iced: root done, status done, slot freed, check on its own PR at merge-parent, Dispatch done write taken, 1 notice over the run. Person's Dispatch done on a waiting root: root done, check opened, architect suspended.",
+      "headSha": "a828af781acc30f5918116fc06381300208579e1",
+      "negativeControl": "While the grandchild was still admitted, every 3s window held the root in awaiting_merge; only its departure closed it."
     }
   ],
-  "ciRead": "Code head 914ce1e: Tests run 40169318647 success (lint, typecheck, test), Worker Image 40169318604 success, Docs 40169318600 success, PR Title 40169357860 success, Legion Envoy and Contracts 40169318581 queued. Not rerun.",
+  "ciRead": "Code head 2e7fc8d has no runs of its own; head a828af7: Tests 40176403700 queued, Legion Envoy and Contracts 40176403711 queued, Docs 40176403691 in progress, Worker Image 40176403704 pending, PR Title 40176433746 queued (40176403709 cancelled). Not waited for, not rerun.",
   "notes": [
-    "Spec departure already recorded by the implementer and accepted by the architect: an issue reaching awaiting_merge on an already-merged pull request gets a pr-merged notice naming what the close waits for, where the approved spec v15 says it 'is told no second time'. Not a test failure; for the reviewer.",
-    "The live proof's step2 and step4 seed the root's and child's phase advances through the store rather than driving retro/merger/READY; the facts under test (merge, park, completion, restart) are driven. The implementer's README says so."
+    "Round-2 diff read: cdbe0414 (the guard and tests), 33a030d4 (live proof step 7), e4013a2d (forward merge of main, CHANGELOGs only), 2e7fc8d8 (script temp dirs under TMPDIR). A full round was run, not a fingerprint re-check.",
+    "Carried for the reviewer from round 1: the notice an issue gets on reaching awaiting_merge on an already-merged pull request departs from spec v15 ('told no second time'), accepted by the architect in plan.md v2."
   ]
 }
