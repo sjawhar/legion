@@ -2,52 +2,67 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T15:15:00Z",
-  "round": "the fourth implementing round, answering the tester's two failures at 962f924510f4",
+  "completed": "2026-10-25T16:05:00Z",
+  "round": "the fifth implementing round, answering the tester's single failure at f4f64586fbab: the third way a fixed session name moves",
   "proof": [
     {
-      "criterion": "An introspection the broker cannot stand behind says what failed, in the error it returns and in the one line the route logs (the tester's failure 1, and the architect's 'carry the cause into the error text and the log line').",
-      "surface": "The introspection route itself, with its store closed under it, as the api package drives it.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestIntrospectionAnswersAStorageOutage503 ./internal/broker/api/",
-      "observed": "PASS, and the line the broker logged while it ran is now `ERROR broker: introspect token failed error=\"read token session: closed pool\"`. Before this change the same run logged `error=\"request_unauthorized\"`, the library's own code and nothing else, which told the operator an authorization failure when the store was down. The 503 and its DATABASE_UNAVAILABLE code are unchanged; only what the error says changed.",
-      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
-      "negativeControl": "TestIntrospectionAnswersARevokedTokenAsNotLive in the same package: a genuine negative still answers 200 {\"active\":false} and logs nothing, so naming the cause did not turn a refusal into an error."
+      "criterion": "A rollout that re-points a fixed session name cannot leave the entry the configuration fixes it for locked out of its own name (the tester's failure, found on two broker processes against one database).",
+      "surface": "Real compiled broker processes against one Postgres, driven through the rollout sequence, as the tester found the defect.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -tags multiprocess -count=1 -run TestAFixedSessionNameAcrossARollout -v ./cmd/broker",
+      "observed": "--- PASS, all three subtests, ok github.com/sjawhar/envoy/cmd/broker 6.772s. The third drives the defect: a process started with the OLD configuration mid-rollout serves an exchange of its own, and afterwards the name is still the new entry's -- the new entry answers 200 and the old entry 400 invalid_grant -- where before the fix the old process took the name back and the new entry was refused until a replica restarted. The restarted process logs no takeover and one 'left with its holder' line naming both principals.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The same test run against the two changed functions in their pre-fix form fails, and only in that third subtest. A single-process test cannot see this at all, which is why the proof is two processes."
     },
     {
-      "criterion": "The tester's red test passes unmodified.",
-      "surface": "The tester's own test, run by name, with its file untouched.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestAnIntrospectionFailureNamesItsCause ./internal/broker/oauth/",
-      "observed": "--- PASS, both subtests: 'a stored row naming a client the provider does not register' and 'a store that has gone away'. The whole working copy for this round is one file, packages/envoy/internal/broker/oauth/introspect.go, so the tester's test file is not in the diff at all.",
-      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
-      "negativeControl": "Both of its subtests failed at the previous head with 'Introspect's error reads \"request_unauthorized\"', which is why the tester wrote it."
+      "criterion": "A stranger is still refused a fixed name its entry has never claimed -- the property that could have been lost when reserving stopped taking (the architect's second condition).",
+      "surface": "The same two-process test, as its first subtest, and the first exchange the database ever sees.",
+      "command": "the same command, subtest 1_AStrangerIsRefusedAFixedNameItsEntryHasNeverClaimed",
+      "observed": "PASS: with a process up whose configuration fixes the name for an entry that has never exchanged, a pod of another account asking for that name is refused 400 invalid_grant, 'The session name … belongs to another identity', and the binding row is the fixed entry's permanent hold.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The same row then shows the name moving to the entry the configuration fixes it for, at that entry's own claim, so the refusal is a reservation rather than a name nobody can use."
     },
     {
-      "criterion": "Every sentence of the pull request body is true of the code (the tester's failure 2, and the architect's standard: no sentence claiming more than the code).",
-      "surface": "The two sentences the tester caught, against the code they describe.",
-      "command": "the body's Change bullet 3 and its Look-at-first line, read against oauthstore/exchange.go's BindSession and ReserveSessions",
-      "observed": "Both now say what the code does. The bullet said 'no lapse hands it across principals'; a lapse does, once the holder's last token is ninety days past expiry, which is BindSession's own `or oauth_session_bindings.expires_at <= now()`. The Look-at-first line called that retention 'the only way one ever moves'; a configuration change moves a name too, which is ReserveSessions taking a fixed name from its holder, and the tester watched the real binary do it and log both principals. The body now names exactly those two ways, says both are deliberate, and quotes the WARN the second one writes.",
-      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
-      "negativeControl": "The migration's own comment already carried the qualifier the bullet dropped ('while its holder has used it within the retention'), so the code and its schema agreed with each other and only the body did not; that is the disagreement the correction removes."
+      "criterion": "Two replicas of one generation never take the name from each other (the architect's third condition: shown, not argued).",
+      "surface": "The same two-process test, as its second subtest, asserting on the processes' own logs as well as their answers.",
+      "command": "the same command, subtest 2_TwoProcessesOfOneGenerationNeverTakeTheNameFromEachOther",
+      "observed": "PASS: two processes of the same generation serve the fixed entry's exchanges in turn, including the second process's first exchange; every answer is 200, the binding row stays that entry's permanent hold after every turn, and neither process's log carries the takeover line.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The third subtest shows the same log line being written when a take really happens, so its absence here is the property and not a line that never appears."
+    },
+    {
+      "criterion": "Every sentence of the pull request body is true of the code, including what the fix leaves (the architect: 'a third correction of the same kind is not acceptable on this slice').",
+      "surface": "The body's Change bullet and its Look-at-first line, read against the two statements they describe.",
+      "command": "the body, read against oauthstore/exchange.go's BindSession and ReserveSessions",
+      "observed": "The bullet now says a name leaves its holder in exactly two ways and that nothing else in the code moves one: the retention running out, and the caller the configuration fixes the name for taking it when it exchanges, which is how an operator re-points an entry. It then states the two consequences rather than leaving them to be found: a re-point takes effect at the new entry's first exchange, so an entry that never exchanges leaves the name with its previous holder; and while that is true the name follows the ordinary rule, so if the previous holder's claim then runs out a third principal could claim it, with the fixed entry taking it back at its next exchange. It also states that reserving takes nothing, what that buys mid-rollout, and that the test above proves all three.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The architect's question, answered in the body and checkable there: after this fix there is no other path by which a name is held by a principal the current configuration does not fix it for. The two named are the whole of it, and both end at that entry's next exchange."
     },
     {
       "criterion": "The change the earlier rounds proved still holds at this head.",
-      "surface": "The real compiled cmd/broker binary on a real Postgres, as the package's own live-binary test, and the broker suites.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/... ./cmd/broker/...",
-      "observed": "Every package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors; cmd/broker, which carries the live-binary test, ok 107.786s.",
-      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
-      "negativeControl": "gofmt -l prints nothing and go vet ./... is clean at the same head."
+      "surface": "The broker suites and the live-binary test, on a real Postgres.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/... ./cmd/broker/",
+      "observed": "Every package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors. cmd/broker, which carries the live-binary exchange test, ok 101.423s.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "gofmt -l prints nothing; go vet ./... and go vet -tags multiprocess ./cmd/broker are clean; check-private-names passes over 4985 files."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/broker/oauth/introspect.go: brokerFailure returns the store's own error from beneath the library's wrapper, whose text is only its error code, so the route's 503 is logged with the cause rather than with 'request_unauthorized'. Nothing else in the tree changed this round."
+    "packages/envoy/internal/broker/oauthstore/exchange.go: ReserveSessions holds a fixed name only where no other principal holds it, takes nothing, and answers the names it left with their holders; BindSession takes a `fixed` argument -- this process's configuration fixes this name for this caller -- holds the name with no expiry when it is set, and answers the principal it took the name from.",
+    "packages/envoy/internal/broker/oauth/exchange.go: reserveSessions logs each name it left with its holder and goes on serving; claimSession passes `fixed` and the takeover is logged after the commit.",
+    "packages/envoy/cmd/broker/multiprocess_test.go: TestAFixedSessionNameAcrossARollout, the rollout proof on real processes.",
+    "packages/envoy/internal/broker/oauth/{exchange_test.go,provider_test.go} and oauthstore/exchange_test.go: the in-process cases for the same rules, and a second provider on one database."
   ],
   "trickyParts": [
-    "The cause was never lost: the store's error is kept beneath the library's wrapper the whole way. What hid it is that the wrapper's Error() prints its code alone, so returning the wrapper returned a sentence that was true of nothing. Unwrapping it at the one place the broker owns was the whole fix; no store or route change was needed, and the path was checked for a second place a cause is dropped rather than only the last one."
+    "The defect was invisible to every single-process test, because it needs two processes with configurations that disagree and an order between their first exchanges. That is why the proof is in cmd/broker under the multiprocess tag, beside TestTwoBrokers, rather than in the provider's own package.",
+    "Moving the take from seeding to the claim is what removes the race rather than narrowing it: two configurations can no longer take a name from each other at all, because only the caller a configuration fixes the name for ever takes it, and that is also the moment that carries the operator's intent."
   ],
-  "deviations": [],
+  "deviations": [
+    "The architect's round cap said a new finding after round 3 goes to a child issue. This one is fixed here instead, which the architect and I reached independently and the architect confirmed: it is the feature built in this slice failing on the deployment's own two replicas at its first rollout, locking out the entry the configuration fixes, and the alternative was a body sentence describing a lockout that lasts until an unrelated restart."
+  ],
   "openQuestions": [
-    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal.",
-    "The architect has said that a genuinely new finding after this round goes to a child issue of this tree with its acceptance written, rather than to another round here."
+    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal."
   ],
-  "discoveredComplexity": []
+  "discoveredComplexity": [
+    "The schema did not move: migration 0018 is unchanged, and the fix is two statements and the argument that tells them apart."
+  ]
 }
