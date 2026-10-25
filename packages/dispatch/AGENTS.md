@@ -156,13 +156,19 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   own (`min-w-0`, never a `max-w-*` cap) and its text wraps, mid-word where a name has nothing
   else to break on, so a session a person named at length reads whole at every screen width, as a
   taller row rather than a shortened name or a page wider than the screen, which matters because
-  a person finds a session by the name they gave it. The directory is what gives that width up.
+  a person finds a session by the name they gave it. The directory is what gives that width up,
+  down to a floor and no further: from `md` it keeps `md:min-w-48`, enough for its host and last
+  segment to be read and hovered, so a 64-character name costs the row a further line rather than
+  squeezing the directory to no width at all, where nothing is painted and no hover can reach it.
   From `md` (768 px) it shows `<machine> · <last path segment>`
   (`lastPathSegment`, which keeps the path itself when it holds no segment at all, as `/` does)
   and keeps the whole `<machine> · <full path>` as its `title`, since a reader at that width has
   a hover to ask with; below `md`, where a phone has no hover and the directory already sits on a
-  line of its own under the name (`order-last basis-full`), it shows the whole path and wraps it
-  instead of truncating. Which side of that line the page is on is answered once for the list
+  line of its own under the name (`order-last basis-full`), it shows the whole path. Neither
+  width ellipsises it: the shortened text exists to be read, so a host or last segment wider than
+  the floor wraps inside it rather than being cut, and `e2e/agents.e2e.ts`'s laptop row holds it
+  to `assertWhole` as well as to a painted box.
+  Which side of that line the page is on is answered once for the list
   (`MD_VIEWPORT_QUERY`, Tailwind's `md` itself so it answers exactly when the row's own `md:`
   classes apply, through `useMediaQuery` in `AgentsPage`, handed to each row as `mdViewport`), so
   a list of two hundred rows holds one media-query listener rather than two hundred.

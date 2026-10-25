@@ -1792,6 +1792,11 @@ test("an agent row shows the whole session name at every width, and shortens its
       // with the whole path a hover away.
       await expect(directory).toHaveText("build-host · features");
       await expect(directory).toHaveAttribute("title", `build-host · ${dir70}`);
+      // Text and `title` are both there on an element squeezed to no width, where nothing is
+      // painted and no hover can reach it, so the box itself is asserted too — and the
+      // shortened text is meant to be read, so nothing above it may cut it either.
+      await expect(directory).toBeVisible();
+      await assertWhole(directory);
     }
   } finally {
     await context.close();

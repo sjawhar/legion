@@ -803,7 +803,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   await options.connection.flush()
   await serialized(async () => {
     await register()
-    await restoreRole()
+    // Best-effort, as the interests read above is, and for a sharper reason: registration has
+    // already happened, so a throw here takes down a channel the registry is advertising and
+    // leaves the Agents page a row that never beats again. A role file that cannot be read -
+    // unreadable, truncated, hand-edited, written by a later format - costs this session its
+    // role, which its next soft `setRole` off the heartbeat re-claims, and nothing more.
+    await restoreRole().catch((error: unknown) => {
+      process.stderr.write(
+        `envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error)}); the session starts without one\n`,
+      )
+    })
   })
   // Housekeeping of the plugin's own state directories, each best-effort for the reason the
   // interests read above is: the heartbeat timer below is not armed yet, so a sweep that threw

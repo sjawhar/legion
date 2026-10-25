@@ -726,9 +726,16 @@ function AgentRow({
           {/* The directory is what gives the row's width to the name: above a phone it keeps its
               last segment and the whole path is one hover away, while a phone, which has no
               hover and already puts the directory on a line of its own under the name, shows the
-              path whole and wraps it rather than cutting it. */}
+              path whole and wraps it rather than cutting it. The floor at `md` is there because
+              the name is allowed to take everything else: without it a long name squeezes this
+              span to nothing, and a directory with no box is painted nowhere and hovered
+              nowhere. It is sized for a host and a last segment at this text size - roughly
+              thirty characters - so the shortened directory stays readable, and the name takes
+              a third line instead. Nothing here ellipsises: the shortened text is meant to be
+              read whole, so a host or segment longer than the floor wraps inside it rather than
+              being cut, and the whole path is still the `title`. */}
           <span
-            className={`order-last min-w-0 basis-full text-xs break-words md:order-none md:flex-1 md:basis-0 md:truncate ${textMutedOnCanvas}`}
+            className={`order-last min-w-0 basis-full text-xs break-words md:order-none md:min-w-48 md:flex-1 md:basis-0 ${textMutedOnCanvas}`}
             data-agent-dir=""
             title={machineAndDir}
           >

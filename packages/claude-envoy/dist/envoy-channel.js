@@ -48708,7 +48708,10 @@ async function startChannelSession(options) {
   await options.connection.flush();
   await serialized(async () => {
     await register();
-    await restoreRole();
+    await restoreRole().catch((error48) => {
+      process.stderr.write(`envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error48)}); the session starts without one
+`);
+    });
   });
   for (const prune of [
     pruneStaleSessionHandoffs,
