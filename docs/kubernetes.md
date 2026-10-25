@@ -3014,31 +3014,34 @@ password=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
 cleanup() {
   status=$?
   trap - EXIT INT TERM HUP
-  trap '' INT TERM HUP; set -m                 # further stops reach neither it nor its steps
+  trap '' INT TERM HUP                         # this shell ignores any further stop
+  # Each kubectl below runs under setsid -w, in a session of its own, so a stop sent to the
+  # sequence's group never reaches it: kubectl, a Go program, keeps an inherited ignore of
+  # SIGINT and SIGHUP but not of SIGTERM.
   set +e
   if [ -z "$workload" ]; then                  # no name read: find this run's Job by its label
     echo "cleanup: no Job name was read; deleting by label sequence-run=$run"
-    kubectl delete job -l sequence-run="$run" --cascade=foreground --ignore-not-found \
+    setsid -w kubectl delete job -l sequence-run="$run" --cascade=foreground --ignore-not-found \
       || { echo "cleanup: the Job's delete failed"; [ "$status" -ne 0 ] || status=1; }
-    kubectl get jobs -l sequence-run="$run"    # "No resources found" does not prove none is left: see below
+    setsid -w kubectl get jobs -l sequence-run="$run"   # an empty listing proves nothing: see below
     rm -rf "$dir"
     echo "sequence: exit $status"
     exit "$status"
   fi
   if [ "$status" -ne 0 ]; then                 # what the readings below send a role to look at
-    kubectl get pods -l job-name="$workload" --show-labels
-    kubectl logs -l job-name="$workload" --tail=20
-    kubectl get pods -l job-name="$workload" \
+    setsid -w kubectl get pods -l job-name="$workload" --show-labels
+    setsid -w kubectl logs -l job-name="$workload" --tail=20
+    setsid -w kubectl get pods -l job-name="$workload" \
       -o jsonpath='{range .items[*].status.containerStatuses[*]}{.name}: {.state}{"\n"}{end}'
-    kubectl get service "$workload" --ignore-not-found \
+    setsid -w kubectl get service "$workload" --ignore-not-found \
       -o jsonpath='{range .spec.ports[*]}port {.port} -> targetPort {.targetPort}{"\n"}{end}'
   fi
-  kubectl delete job "$workload" --cascade=foreground --ignore-not-found \
+  setsid -w kubectl delete job "$workload" --cascade=foreground --ignore-not-found \
     || { echo "cleanup: the Job's delete failed"; [ "$status" -ne 0 ] || status=1; }
-  kubectl wait --for=delete service/"$workload" --timeout=60s \
+  setsid -w kubectl wait --for=delete service/"$workload" --timeout=60s \
     || { echo "cleanup: the Service is still there"; [ "$status" -ne 0 ] || status=1; }
-  kubectl get job,service "$workload" --ignore-not-found   # prints nothing once both are gone
-  kubectl get pods -l job-name="$workload"                 # "No resources found"
+  setsid -w kubectl get job,service "$workload" --ignore-not-found   # nothing once both are gone
+  setsid -w kubectl get pods -l job-name="$workload"                 # "No resources found"
   rm -rf "$dir"
   echo "sequence: exit $status"
   exit "$status"
@@ -3209,23 +3212,25 @@ left; `SIGHUP` and `SIGINT` sent to the group during the Ready wait, and `SIGINT
 sent to it during the check, each ran the trap within a second; `SIGTERM` sent to the `bash` alone
 during the Ready wait ran it 76 s later, when the wait returned, and `SIGINT` sent to it alone
 during a check that was being refused ran it 58 s later, when the check gave up. Once the trap
-runs, it ignores further `SIGINT`, `SIGTERM` and `SIGHUP`, and `set -m` starts each of its commands
-in a process group of its own, so a stop sent to the sequence's group while the trap runs — a
-second stop, or one sent after a failed step or the work's end started the trap — reaches neither
-the trap nor its commands, and the clean-up runs to its end. The process groups are needed because
-`kubectl`, a Go program, does not keep an ignored `SIGTERM`. The cost is that nothing but a
-`SIGKILL` ends a clean-up in progress. Measured on 2026-10-25 on this block, filled in, with one
-fixture line for the work: two `kill -TERM -- -<process>` 0.5 s apart once it had answered printed
-`sequence: exit 143` and left nothing; one sent as a trap started by failing work began its
-readings printed `sequence: exit 1` and left nothing. The block before that line left the Job, its
-Service and its pod running in both cases, with no `sequence: exit` line, and with the signals
-ignored but no `set -m` the second stop killed the trap's delete: it printed `cleanup: the Job's
-delete failed`, its Service wait timed out, and the Job, Service and pod stayed. A `SIGKILL`, or
-the role's pod going away, ends the sequence, its trap included, with no `sequence: exit` line: a
-`kill -KILL -- -<process>` once it had answered left the Job, its Service and its pod, and the two
-lines below removed them in 2 s. The Job's two deadlines bound what such a run leaves, and a role
-that stopped that way — or that ran the sequence in its tool's foreground and saw the call time
-out — removes it with the name the sequence printed once its Job was created:
+runs, its shell ignores further `SIGINT`, `SIGTERM` and `SIGHUP`, and it runs each of its `kubectl`
+commands under `setsid -w`, in a session of its own, so a stop sent to the sequence's group while
+the trap runs — a second stop, or one sent after a failed step or the work's end started the trap —
+reaches neither the shell nor its `kubectl`, and the clean-up runs to its end. The sessions are
+needed because `kubectl`, a Go program, keeps an inherited ignore of `SIGINT` and `SIGHUP` but not
+of `SIGTERM`. The cost is that nothing but a `SIGKILL` ends a clean-up in progress. Measured on
+2026-10-25 on this block, filled in, with one fixture line for the work, each stop sent to the
+group: `SIGTERM` once it had answered and then a second `SIGTERM` 0.5 s later, a `SIGINT` 0.3 s
+later or a `SIGHUP` 0.3 s later, each printed `sequence: exit 143` and left nothing; with failing
+work, one `SIGINT` or one `SIGTERM` sent as the trap began its readings printed `sequence: exit 1`
+and left nothing. Two earlier forms of the trap failed those runs: with no ignore, a `SIGTERM`
+during the readings ended the trap there, and with the ignore alone a second `SIGTERM` killed the
+trap's `kubectl delete` (it printed `cleanup: the Job's delete failed`); a form that put the trap
+in job control (`set -m`) let a `SIGINT` end it. Each left the Job, its Service and its pod. A
+`SIGKILL`, or the role's pod going away, ends the sequence, its trap included, with no
+`sequence: exit` line: a `kill -KILL -- -<process>` once it had answered left the Job, its Service
+and its pod, and the two lines below removed them in 1 s. The Job's two deadlines bound what such
+a run leaves, and a role that stopped that way — or that ran the sequence in its tool's foreground
+and saw the call time out — removes it with the name the sequence printed once its Job was created:
 
 ```sh
 kubectl delete job <the printed workload name> --cascade=foreground
@@ -3299,8 +3304,8 @@ to `yes`. So each bullet below carries the date of the run behind it, and a read
 gate commands itself rather than trusting the answers recorded here:
 
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-232, with every command of
-  the sequence as published above (dispatch://INFRA-386 has since changed two of its comments and
-  added one command, the trap's line that keeps further stops from reaching the clean-up), through
+  the sequence as published above (dispatch://INFRA-386 has since changed two of its comments, made
+  its trap ignore further stops and run each of its `kubectl` commands under `setsid -w`), through
   the role's own bash tool*: the block taken from this page with only its three bracketed lines
   filled in, each run under the name the API server gave it
   and a run label of its own, and a fixture changing one line of it where named. As published,
