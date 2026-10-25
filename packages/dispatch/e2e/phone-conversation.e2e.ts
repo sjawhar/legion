@@ -663,7 +663,7 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
 // sits and grows upward with a refusal's row. While the page is offline the live socket is let go
 // and the pill reads `Reconnecting…`; it sits above the composer, on the narrowest phone and a
 // common one, so it covers neither Retry, nor Send, nor the line under Send, and it leaves once
-// the socket reopens. (The two-minute stuck state is `live-socket.test.ts`'s, under fake timers.)
+// the socket reopens. (The two-minute stuck state is the next row's.)
 test("on a phone, the connection pill covers none of the docked composer", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Connection pill over a refusal" });
@@ -692,6 +692,53 @@ test("on a phone, the connection pill covers none of the docked composer", async
 
     await alice.setOffline(false);
     await expect(pill).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A live socket refused for two minutes is stuck: the pill says live updates are not reaching the
+// page and offers Reload, while the page keeps trying underneath. It floats where `Reconnecting…`
+// does, so it too sits above the docked composer, grown by a refusal's row, and neither it nor its
+// Reload covers any of it, on the narrowest phone and a common one.
+test("on a phone, the stuck live-updates pill covers none of the docked composer", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Stuck pill over a refusal" });
+  const alice = await asUser(browser, "alice");
+  const narrow = { height: 568, width: 320 };
+
+  try {
+    const page = await alice.newPage();
+    await page.clock.install();
+    await page.setViewportSize(narrow);
+    // Every opening of the live socket fails, as behind a proxy that drops the upgrade.
+    let opens = 0;
+    await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
+      opens += 1;
+      await route.close({ code: 1006, reason: "the opening handshake failed" });
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const pill = page.getByTestId("connection-pill");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await form.getByLabel("Comment").fill("A draft\nover\nfour lines\nof text");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(pill).toHaveText("Reconnecting…");
+
+    await page.clock.fastForward(120_000);
+    await expect(pill).toContainText("Live updates are not reaching this page");
+    const reload = pill.getByRole("button", { name: "Reload" });
+    await expect(reload).toBeVisible();
+    await expect.poll(() => opens).toBeGreaterThan(1);
+    await expectUncovered(pill, form);
+    await expectUncovered(reload, form);
+    await page.setViewportSize(phone);
+    await expectUncovered(pill, form);
+    await expectUncovered(reload, form);
   } finally {
     await alice.close();
   }
