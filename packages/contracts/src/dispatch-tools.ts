@@ -92,9 +92,10 @@ function documentOwnerValidation(
   };
 }
 
+const documentEditOwner = documentOwnerValidation(true);
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
-    if (!documentOwnerValidation(true, true).check(value)) return false;
+    if (!documentEditOwner.check(value)) return false;
     const input = value as { readonly precondition?: unknown };
     if (input.precondition === undefined) return true;
     if (typeof input.precondition !== "object" || input.precondition === null) return false;
@@ -104,8 +105,7 @@ const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
     };
     return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
   },
-  message:
-    "Exactly one of issue and project is required; artifact or ref must name the document. A precondition selects exactly one of document or blocks.",
+  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
@@ -514,8 +514,9 @@ export const dispatchToolSpecs = [
       "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " +
       "the issue and decide again. A claim whose session is no longer running may be " +
       "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
-      "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
-      "dispatch issue-update when you start. A claim is released by its holder or any human, and by " +
+      "issue's status — claiming moves nothing, and the result names who moves the status: you, with " +
+      "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " +
+      "else is undone. A claim is released by its holder or any human, and by " +
       "any agent once the holder's session is no longer running. " +
       ISSUE_REFERENCE,
     arguments: (z) => ({
@@ -902,7 +903,9 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Project document artifact id, slug, or filename; optional when ref names it.")
+        .describe(
+          "Optional project document artifact id, slug, or filename; primary document by default for an issue."
+        )
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z

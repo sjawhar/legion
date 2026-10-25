@@ -1,10 +1,12 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -31,11 +33,13 @@ type checkClock struct{ now time.Time }
 func (c *checkClock) Now() time.Time { return c.now }
 
 // checkRig is a tree whose issue's production check the test drives: the pool, the engine on a
-// clock the test moves, and apply, which applies a fact and fails the test on an error.
+// clock the test moves, the journal it writes, and apply, which applies a fact and fails the test
+// on an error.
 type checkRig struct {
 	pool   *pgxpool.Pool
 	engine *Engine
 	clock  *checkClock
+	logged *bytes.Buffer
 	apply  func(id string, fact intake.Fact) intake.Result
 }
 
@@ -43,8 +47,10 @@ func newCheckRig(t *testing.T, builtFrom string) checkRig {
 	t.Helper()
 	pool := migratedPool(t)
 	clock := &checkClock{now: checkOpened}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, Clock: clock.Now}, nil)
-	return checkRig{pool: pool, engine: engine, clock: clock, apply: applyFacts(t, pool, engine)}
+	logged := &bytes.Buffer{}
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, Clock: clock.Now},
+		slog.New(slog.NewTextHandler(logged, nil)))
+	return checkRig{pool: pool, engine: engine, clock: clock, logged: logged, apply: applyFacts(t, pool, engine)}
 }
 
 // childCheckRig is a running root (LEGION-208, implementing) whose child LEGION-209 merged
@@ -58,9 +64,12 @@ func childCheckRig(t *testing.T, builtFrom string) checkRig {
 	return rig
 }
 
-// rootCheckRig is a root LEGION-208 that merged sjawhar/legion#42 at merge while awaiting it, with
-// a child LEGION-209 left implementing: the tree lingers an hour and the root's check is open at
-// look 1.
+// rootCheckRig is a root LEGION-208 whose sjawhar/legion#42 merged at merge while it awaited it,
+// and which a person then closed on Dispatch, with a child LEGION-209 left implementing: the tree
+// lingers an hour and the root's check is open at look 1. The merge alone no longer produces that
+// state — a merged root's close waits for the rest of its tree (closeMerged) — and a person's
+// close of a root still lingers the tree whatever its children are doing, which is the path these
+// tests are about.
 func rootCheckRig(t *testing.T) checkRig {
 	t.Helper()
 	rig := newCheckRig(t, "")
@@ -69,6 +78,7 @@ func rootCheckRig(t *testing.T) checkRig {
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	rig.apply("merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"})
+	rig.apply("root-closed", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.closed", Status: "done", Title: "root", Rank: "U"})
 	return rig
 }
 
@@ -672,7 +682,8 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 // merge would have: a root with no running child, and an issue held from awaiting_merge, whose
 // hold the close clears, each with a check opened on no merge commit yet. A root with a child still
 // in the workflow stays, and closes when that child leaves; an issue whose pull request is open,
-// and another project's, stay as they are.
+// and another project's, stay as they are. The boot writes its "closes" line only where it closed,
+// and no notice at all: the architect was told of the wait when the close entered it.
 func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t *testing.T) {
 	rig := newCheckRig(t, "")
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-301", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-301", Project: "LEGION", Title: "alone", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "A"})
@@ -726,6 +737,20 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 		if check := productionCheck(t, rig.pool, key); check != nil {
 			t.Fatalf("%s's check after the boot = %+v, want none", key, check)
 		}
+	}
+	// The boot writes its "closes" line only where it closed, and tells no architect anything: a
+	// restart must not repeat the notice the entry into the wait wrote, and a root can now wait for
+	// days across many boots.
+	for _, key := range []string{"LEGION-301", "LEGION-304"} {
+		if !strings.Contains(rig.logged.String(), `upgrade" issue=`+key) {
+			t.Fatalf("the boot's journal holds no close of %s:\n%s", key, rig.logged.String())
+		}
+	}
+	if strings.Contains(rig.logged.String(), `upgrade" issue=LEGION-302`) {
+		t.Fatalf("the boot logged a close of the root it left waiting:\n%s", rig.logged.String())
+	}
+	if got := noticeKinds(t, rig.pool, "LEGION-302"); len(got) != 0 {
+		t.Fatalf("the waiting root's notices after the boot = %v, want none", got)
 	}
 
 	rig.apply("child-done", intake.DispatchIssue{Key: "LEGION-303", Seq: 2, Type: "issue.closed", Status: "done", Title: "running child", Parent: "LEGION-302", Rank: "C"})

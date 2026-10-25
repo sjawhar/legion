@@ -28,6 +28,7 @@ with the `read` tool: a read by filesystem path stops at 300 lines.
 | You review or approve, build the READY packet, or check the merge in production | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
+| Your phase needs a tool — a client, a linter, a CLI — that the image may not carry | `skill://legion-worker/references/tools.md` |
 | You find a problem outside your issue, or the production check fails | `skill://legion-worker/references/findings.md` |
 
 ## Identity, scope, and role
@@ -136,12 +137,11 @@ committed predecessor handoffs in lifecycle order, with the `read` tool from
 4. `review.json`
 
 Read only files that precede the assigned phase. Each was checked against its phase's rules when
-its phase completed (the completion gate below): fields the phase does not declare passed
-untouched and reach the next worker.
-Write the phase-specific fields the next phase and the architect need, consistent with what
-predecessor phases already wrote. The durable copy lives in
-`$LEGION_WORKSPACE/.legion/<issue>/<phase>.json`. If a committed handoff conflicts with memory or a prior
-transcript, the committed file wins: it is the copy that survived.
+its phase completed (the completion gate below): fields the phase does not declare passed untouched
+and reach the next worker. Write the phase-specific fields the next phase and the architect need,
+consistent with what predecessor phases already wrote. The durable copy lives in
+`$LEGION_WORKSPACE/.legion/<issue>/<phase>.json`. If a committed handoff conflicts with memory or a
+prior transcript, the committed file wins: it is the copy that survived.
 
 If your task, prompt, or a message since your last turn begins `Your workspace was recreated…`, read
 your phase's committed handoff and reconcile before new work: anything unpushed is gone, and the

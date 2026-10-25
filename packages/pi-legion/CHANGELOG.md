@@ -7,7 +7,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
-- Daemon API contract 36 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
+- Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
   ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
   `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
   lost-disk machinery that variable drove is gone with it: `workspace-init`'s exit code 3 for a
@@ -15,6 +15,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   that loss wrote, the probe for an issue's retained sessions, and `legion sessions mark-lost`.
   `runtime.kubernetes.session_store` must be `postgres`, since a session kept as a file on that
   disk would die with the pod. Install this release with a `legion` built from the same commit.
+- Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
+  `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
+  is refused while an issue beneath it is still in the workflow and a merged root's close waits
+  for the rest of its tree, so a root stands in `awaiting_merge` for days and an operator reads
+  the merge here rather than guessing at it. Always emitted, so a plugin built before it refuses
+  the state. Install this release with a `legion` built from the same commit.
 - The `legion-controller` skill this plugin ships reorders a project's board with
   `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
   stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by

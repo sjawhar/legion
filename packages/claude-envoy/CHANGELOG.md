@@ -11,6 +11,21 @@
   own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
   `legion/` were regenerated (INFRA-188).
 
+### Changed
+
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
+  owns, created with the pod and deleted with it, so the `workspace-init provision` container is
+  no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the lost-disk machinery it drove — the
+  provisioning exit code 3, the recovery marker and the probe for an issue's retained sessions,
+  with the `legion sessions mark-lost` command — is gone, and `runtime.kubernetes.session_store`
+  must be `postgres`. Nothing this plugin reads or writes moved; a session of it registers with a
+  daemon at 37.
+- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
+  `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
+  and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+
 ### Fixed
 
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
@@ -116,7 +131,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 36, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 37, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -136,14 +151,6 @@
 
 ### Changed
 
-- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
-  (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
-  owns, created with the pod and deleted with it, so the `workspace-init provision` container is
-  no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the lost-disk machinery it drove — the
-  provisioning exit code 3, the recovery marker and the probe for an issue's retained sessions,
-  with the `legion sessions mark-lost` command — is gone, and `runtime.kubernetes.session_store`
-  must be `postgres`. Nothing this plugin reads or writes moved; a session of it registers with a
-  daemon at 36.
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
   every credential, credential source and credential file path left out and a URL's userinfo masked
