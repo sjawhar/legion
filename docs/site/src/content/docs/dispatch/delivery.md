@@ -41,7 +41,10 @@ Each page's freshness row says **Live** while the connection is open, with how l
 change arrived. A source Dispatch reports as stale, or a failed reconcile, still shows
 in red with its age and error. While the connection is lost the row reads **Reconnecting** in red,
 with how long it has been lost; the page reconnects by itself and is sent only what changed while
-it was away. A page away for more than a day reads its window once, whole.
+it was away. A page away for more than a day reads its window once, whole. The whole verdict
+follows a reconnect — which sources are stale, the last reconcile and its error, and how many pull
+requests Dispatch can no longer fetch — so a failure that cleared or appeared while the page was
+away shows at once rather than at its next full read.
 
 ## Grouping sessions
 
@@ -151,7 +154,9 @@ Dispatch answers a delivery view with:
   each list's `upsert` and the ids it `remove`s), the map entries and counts that changed (`maps`
   and `counts`, null for a key that left), and the fields replaced whole (`set`, which carries
   `window` whenever it moved, never alone);
-- `freshness`, the freshness verdict: sent right after a subscription's first answer when Dispatch
+- `freshness`, the whole freshness verdict - the `freshness` object the snapshot carries (the last
+  event, the last reconcile, its error and how many pull requests cannot be fetched) and the
+  `stale` source list - sent right after a subscription's first answer when Dispatch
   holds one, so a socket opened or resumed after the verdict changed still gets it, and to every
   subscriber whenever it changes;
 - `error`, with the code the matching GET route would answer (`INVALID_QUERY`,

@@ -76,13 +76,19 @@ Specs: dispatch://INFRA-258 and dispatch://INFRA-292.
 - **Deadlines on ordinary requests.** A GET the page makes whose response headers have not arrived
   after `REQUEST_DEADLINE_MS` (30 s, `packages/dispatch/web/src/api/client.ts`) is aborted and
   fails with `RequestTimeoutError`, so a request stalled inside the browser fails and is retried
-  instead of hanging the page. Once the headers arrive, the body reads without that deadline.
+  instead of hanging the page. The body it then downloads has an idle deadline of its own:
+  `REQUEST_IDLE_DEADLINE_MS` (30 s), restarted by every chunk, so a slow body that keeps arriving
+  succeeds and one that stops mid-download fails rather than waiting for ever.
 - **An idempotency key on every send** (`idempotency_key`, with `409 MESSAGE_KEY_REUSED`, or
   `409 BROADCAST_KEY_REUSED` for a broadcast, for a key reused on a different request). The page
   retries a send to one session, and a broadcast, under its key until Dispatch confirms it
   (`sendUnderKey`, `packages/dispatch/web/src/features/conversation/send-request.ts`), and keeps
   the send in `sessionStorage` (`keyed-send-storage.ts`) so a reload resumes it, so a send that
-  timed out is delivered once, never twice.
+  timed out is delivered once, never twice. A repeat under a held key also resumes what the server
+  still owes: the message a crash left with no attempt, and each recipient of a broadcast in the
+  same state. A kept send belongs to the login that pressed it and resumes on its own only within
+  five minutes; older, it comes back as a refusal the reader retries or discards, so a tab
+  reopened the next morning never sends yesterday's message by itself.
 
 ## The rule
 

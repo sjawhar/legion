@@ -14,6 +14,10 @@
   page checks before it renders it. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a
   random age in [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and
   `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64.
+- `AuthenticatedUser.event_head`, the decimal id of the newest event when `GET /auth/whoami`
+  answered (INFRA-292). It is required: a page of this release subscribes the event feed on
+  `GET /ws/live`, which only a server that answers the head serves, and the feed starts its first
+  subscription there, so every read the page makes after the sign-in check is covered by a resume.
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`
