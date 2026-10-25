@@ -4045,6 +4045,46 @@ console.log(JSON.stringify(args));
         delete process.env.OMP_ASKGATE_TIMEOUT_MS;
       }
     });
+
+    test("a session whose envoy.json location cannot be worked out refuses each write the gate would review", async () => {
+      // With no file, the switch cannot be read either way, and only `askgate.enabled: false`
+      // turns AskGate off (outside review, finding 4: the gate bound nothing and the write sent).
+      delete process.env.ENVOY_CONFIG_FILE;
+      process.env.XDG_CONFIG_HOME = "relative/config";
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-no-config-path");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      expect(notifications).toEqual([
+        "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
+        "envoy: AskGate refuses each Dispatch write it would review: this session's envoy.json location could not be worked out, so its switch cannot be read.",
+      ]);
+      const refused = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      )) as { block?: boolean; reason?: string } | undefined;
+      expect(refused?.block).toBe(true);
+      expect(refused?.reason).toContain("envoy.json location could not be worked out");
+      const other = await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ls", input: { command: "ls -la" } },
+        context
+      );
+      expect(other).toBeUndefined();
+      expect(completions).toEqual([]);
+      expect(fixture.entries).toMatchObject([
+        {
+          customType: "advisor-gate",
+          data: { tool: "dispatch_ask", outcome: "load-failed", decision: "revise" },
+        },
+      ]);
+    });
   });
 
   test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {

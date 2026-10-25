@@ -122,7 +122,7 @@ import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
-import { registerAskGate } from "./askgate/askgate";
+import { registerAskGate, registerAskGateRefusal } from "./askgate/askgate";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -556,7 +556,10 @@ export default function envoyExtension(pi: PiApi): void {
     const setting = askgateSetting(CONFIG_FILE.path);
     if (setting.error !== null) askgateNotices.push(setting.error);
     askgateOn = setting.enabled;
-  }
+  } else
+    askgateNotices.push(
+      "AskGate refuses each Dispatch write it would review: this session's envoy.json location could not be worked out, so its switch cannot be read."
+    );
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
@@ -3049,8 +3052,11 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // AskGate's `tool_call` handler, registered now, in the factory, so it is there for the first
-  // call; it waits for the modules the gate loads (`registerAskGate`).
-  if (askgateOn && CONFIG_FILE.path !== null) {
+  // call; it waits for the modules the gate loads (`registerAskGate`). With no envoy.json location
+  // the switch cannot be read, so the gate's refusal binds in its place: a session AskGate cannot
+  // be turned off in is never a session it lets writes through unreviewed.
+  if (CONFIG_FILE.path === null) registerAskGateRefusal(pi, new Error(CONFIG_FILE.error));
+  else if (askgateOn) {
     const configFile = CONFIG_FILE.path;
     askgateLoad = registerAskGate(pi, { configFile, logger }).catch((error: unknown) => {
       const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;

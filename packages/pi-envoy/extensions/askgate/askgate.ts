@@ -100,6 +100,17 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
 }
 
 /**
+ * Binds the gate's refusal alone, with no Oh My Pi module loaded, for a session whose envoy.json
+ * location could not be worked out. The switch lives in that file, so AskGate can neither read it
+ * nor be turned off, and a gate that cannot review is no off switch: each write it would review is
+ * refused and recorded as `load-failed` (`loadFailureGate`).
+ */
+export function registerAskGateRefusal(pi: PiApi, error: unknown): void {
+  const refuse = loadFailureGate(error, { env: process.env, configFile: null }, pi);
+  pi.on("tool_call", async (event, ctx) => refuse(event, ctx as unknown as GateCtx));
+}
+
+/**
  * Loads the Oh My Pi modules the gate needs, then binds the core to `pi` with its `tool_call`
  * handler kept back, which it returns: every other event, and `appendEntry`, reach the real `pi`.
  * Rejects when a module does not load or the core refuses to bind.
