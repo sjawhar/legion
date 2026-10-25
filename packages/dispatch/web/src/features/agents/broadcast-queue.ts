@@ -233,8 +233,18 @@ export class BroadcastQueue {
       }
     }, SEND_DEADLINE_MS);
     try {
-      const created = await sendUnderKey(
-        (bounds) => api.createBroadcast(send.input, bounds),
+      // The exclusions are a fact about the send that Dispatch states once, in the answer that
+      // made the broadcast: it stores none, so a repeat under the key names every excluded
+      // session only as "excluded by the original send". The row keeps the first answer's,
+      // where Dispatch said why, and the latest answer's recipients, which carry their delivery
+      // as it stands.
+      let excluded: BroadcastCreated["excluded"] | undefined;
+      const answer = await sendUnderKey(
+        async (bounds) => {
+          const made = await api.createBroadcast(send.input, bounds);
+          excluded ??= made.excluded;
+          return made;
+        },
         signal,
         // Dispatch answers before it delivers, so a recipient whose one attempt is pending is not
         // yet the outcome: a repeat under the key resumes it if its sender died, and leaves it to
@@ -249,6 +259,7 @@ export class BroadcastQueue {
             }) => only?.state !== "pending" || more.length > 0
           )
       );
+      const created = { ...answer, excluded: excluded ?? answer.excluded };
       this.#replace(id, { created, id, send, status: "sent", submittedAt });
       for (const recipient of created.recipients) {
         void this.#client.invalidateQueries({

@@ -368,6 +368,44 @@ test("a broadcast with a pending recipient is asked again under its key until it
   }
 });
 
+// W12. The repeat a pending recipient asks for is answered with the broadcast as it stands, but
+// Dispatch stores no exclusions, so the repeat names every excluded session only as "excluded by
+// the original send". The row keeps what the answer that made the broadcast said - the reason
+// the sender needs - and the recipients of the latest answer.
+test("a repeat under the key keeps the first answer's reasons for an excluded session", async () => {
+  const tab = keptTab();
+  const excludedAs = (reason: string) => [{ reason, session_id: "observer", title: "Observer" }];
+  const createBroadcast = spyOn(api, "createBroadcast")
+    .mockImplementationOnce(async (input) => ({
+      ...created(input, "pending"),
+      excluded: excludedAs("no live session"),
+    }))
+    .mockImplementationOnce(async (input) => ({
+      ...created(input, "sent"),
+      excluded: excludedAs("excluded by the original send"),
+    }));
+  const queue = queueOf(tab);
+  jest.useFakeTimers();
+
+  try {
+    queue.enqueue(press("First.", "key-1"));
+    await settle();
+    jest.advanceTimersByTime(1_000);
+    await settle();
+    expect(createBroadcast).toHaveBeenCalledTimes(2);
+    const [row] = queue.rows();
+    expect(row?.status).toBe("sent");
+    const made = row?.status === "sent" ? row.created : undefined;
+    expect(made?.excluded).toEqual(excludedAs("no live session"));
+    expect(made?.recipients.map(({ message }) => message.deliveries[0]?.state)).toEqual(["sent"]);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    createBroadcast.mockRestore();
+    tab.close();
+  }
+});
+
 // A closed tab loses what sessionStorage keeps, so while a broadcast is queued or out the page asks
 // to confirm leaving, and once every one has its answer it stops asking.
 test("leaving asks for confirmation only while a broadcast is unconfirmed", async () => {
