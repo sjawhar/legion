@@ -2,93 +2,79 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T09:05:00Z",
+  "completed": "2026-10-25T11:25:00Z",
   "decision": "changes_requested",
-  "round": 2,
+  "round": 3,
   "critical": 1,
-  "important": 5,
-  "minor": 2,
+  "important": 4,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "critical",
-      "file": "scripts/e2e/lib/stage4b-pods.test.ts:903",
-      "description": "`lint`, a check the base branch requires, is red at the code head e4f7f42e55a4 (Tests run 40176152122, job 121117155580). The one error is a Biome formatter error on this file: removing the `lost_detail` parameter shortened the template literal, and the `const out =` assignment must now be joined onto one line. Reproduced in the workspace: `bunx biome check scripts/e2e/lib/stage4b-pods.test.ts` → `Formatter would have printed the following content … Found 1 error`. The other two Biome diagnostics in that job (`useLiteralKeys` in packages/pi-shared/src/handoff-commit.ts, `noTemplateCurlyInString` in packages/claude-envoy/tests/dist-fresh.test.ts) are the warning and info the run also reports and are not what fails it. `bunx biome check --write` on the one file closes it."
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:1203",
+      "description": "This change switches every pod of Stage 4b to the SQL session store (`+    session_store: postgres` is an addition of this branch; main's rig named no store) and leaves every transcript reader in the harness reading a file inside the pod. `claim_session_text` (:1034-1038) takes the claim's recorded `sessionFile` and runs `pod_exec … cat --` on it; under `session_store: postgres` that path is the key of a row in `omp_session_files`, not a file on the pod (`internal/ompsessions/ompsessions.go:1-8`: the table \"keys a session by the path its file would have had (the session file a claim records)\"). The `cat` fails, `claim_session_text` returns non-zero, and every checkpoint built on it reads nothing: `planning_tasks` (:1043-1045), on which `child-reentered` waits (:3599-3600), plus `assistant_said` (:927), `session_contains` (:2146), the tree-2 planner session copy (:3745), the implementer's task read (:4193), the review-pair and transcript collection (:4415, :4491, :4525, :4585) and the subagent read (:4514), which cats a path derived from the same key. `pair_text`'s own read (:975) is the same shape. Stage 4b has run at no head, so nothing has met this. Every pod-session consumer needs one SQL-backed reader; the operator-launched controller's sessions are genuinely files and stay as they are."
     },
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:1156-1177",
-      "description": "The cutover's ordering does not hold against the daemon's own boot. This change raises DaemonAPIVersion to 36 (internal/api/version.go:320), and boot posts StalePlugin to every restored live claim whose recorded contract is not the daemon's (internal/daemon/daemon.go:1083 `refreshStalePlugins(s.claims, \"boot\")`, :1090-1116); refreshPlugin then calls replaceProcess \"the process on another plugin contract is replaced mid-turn\" (internal/supervise/plugin.go:41-54, internal/supervise/repoint.go:51). That relaunch meets supersededDisk for every issue Sandbox of the previous release (relaunch.go:526-537) and runs replaceSupersededSandbox, which deletes the Sandbox and, with it, the volume holding the issue's whole workspace. So the first boot of this release deletes every running issue's disk by itself, mid-turn, before the operator can reach step 2's \"Let a role mid-turn finish, or ask it through Dispatch to push\". Step 3 discloses the loss as happening \"whenever that launch comes\"; for a live claim that launch is the boot. The push and stop of every running issue must be placed before the earlier daemon is scaled to 0, which is the last moment an agent can be asked to push, or the migrating relaunch must be held. This is read from the code, not reproduced on a cluster."
+      "file": "packages/daemon/internal/runtime/sandbox/observe.go:99-115",
+      "description": "The gap record narrows the round-2 window and does not close it. `held := r.strandedPod(name)` is taken before the confirming `readSandbox`, and the comment at :86-91 states the trade deliberately: taken first it misses the gap only if a whole foreground delete ran between the two, where taken after it would miss a Create landing between them. The first is the narrower window and the choice is right, but it is still reachable — the observer's GET can be delayed by seconds under API-server load or a throttle, which is the condition `evaluate` already answers with `Uncertain` elsewhere, and in that window the launch records the uid and completes the delete after the empty snapshot was taken. The verdict is then final and the incarnation is forgotten (`watch.go:130-131`), so nothing can repair it. Remedy in the function's own idiom: take a generation counter under `r.mu` beside `strandedPod`, read it again after `readSandbox`, and return `Uncertain` when it moved — the claim stays watched and is evaluated again. A race read from the code; not reproduced."
     },
     {
       "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/relaunch.go:561-579",
-      "description": "The round-1 fix is right on the path it covers and leaves a window it does not. replaceSupersededSandbox deletes the old Sandbox, waits for the API to lose it, then creates the annotated replacement; between those two the Sandbox does not exist. The observer runs on its own ticker and takes no launch turn (watch.go:112-132), so a sibling role evaluated in that window reads `v.sandbox == nil` → Gone (observe.go:183-187), `names(nil, loc)` false, and the confirming readSandbox also returns nil (observe.go:91-107), so displaced() cannot fire and the supervisor charges a death and interrupts the turn (supervise/machine.go:1111-1115). The verdict is final and the claim is then forgotten (watch.go:129-131), so the replacement's annotation cannot repair it. A failed Create or a daemon restart in that window makes the loss permanent. The delete is foreground-propagated and waits out the claim and six Secrets, so the window is seconds rather than instants. The new regression test probes only after the replacement exists (relaunch_test.go:333-375). Remedy: have the runtime remember the displaced pod uid for the claim across the Sandbox's absence and let displaced() consult it when the Sandbox is gone. A race read from the code; not reproduced."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:3652",
-      "description": "The corrected parked checkpoints wait for the Sandbox and pod to be gone and then assert the disk's absence once (`assert_no_pod_disk` at :3652, :3697, :3736). An issue's disk is the pod's own generic ephemeral claim, so Kubernetes reaps it after the pod object goes, not with it — the round-1 tester measured about a second on a real cluster. child1_released one block above (:3618-3623) already has the right shape: the disk is inside the bounded wait. The parked predicates should read the disk the same way, or the live proof fails on a correct stop whose claim is still being collected."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/e2e/README.md:1451",
-      "description": "The proof's own contract now contradicts the script this round corrected. `child-release` still says of the parked child \"its Sandbox is Suspended, its pod gone, and its disk gone with that pod — the Sandbox alone stays until the tree closes\"; `idle-resident` says \"child 2, parked in backlog, has its one Sandbox Suspended with no pod and so no disk\"; `node-release` says \"the root's, child 2's and child 3's Sandboxes are Suspended\". The script now requires no Sandbox at all for a parked issue (child2_parked at :3647-3651, tree1_parked at :6184-6192). A maintainer reading the README to learn what the proof asserts is given the behaviour this change abolished."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/podkind.go:330-345",
-      "description": "Deleting the file-session mode emptied the controller's init container, and the container stayed. `workspaceController` (cmd/legion/workspace_init.go:95-108) now only checks that --root is absolute — it is the compiled-in constant TreeRoot, passed by this very manifest — and refuses a provisioning-token variable the controller's pod never sets. Every controller pod still runs a whole init container with an image, resources, a volume mount and a CLI subcommand to do that. Return no init containers for controllerPod and delete the subcommand, its tests and the golden entries; a construction invariant worth keeping belongs at the manifest boundary."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/manifest_test.go:1780",
-      "description": "Two comments this round wrote still attribute the controller's volume to its session: manifest_test.go:1780-1781 (\"a relaunch finds the session its last pod left on it\") and layout_test.go:119-120 (\"the controller's owns the one `issue` template its session is resumed from\"). Under this change every session is a row in the session database; the controller's volume survives because its working root does, which is what those comments should say."
-    },
-    {
-      "severity": "minor",
       "file": "pull request #2173 body",
-      "description": "Census accuracy, not a gap. I re-ran all nine of the census's search commands at the code head. Eight match exactly (session_store 104, SessionDSN* 93, IssueSuspend{ 9, WorkspaceLost|InitFailed 1, WorkspaceRecoveredFrom 0, LEGION_EXPECT_ISSUE_VOLUME 9, mark-lost 5, mountsProviders 0). `SuspendIssue` reads 24 at the head against the body's 25 — the census was run at 55624814a287 and the forward merge moved the tree since. Every one of the 24 falls in a class the body lists: the interface, its one implementation, its one caller, tests, comments and e2e prose, and the one deliberate docs/solutions hit. No hit is unlisted and none lacks a disposition."
+      "description": "The contract census is stale at the head in the one number it exists to carry. `internal/api/version.go:330` is `const DaemonAPIVersion = 37`, with the collision note explaining that this branch took 36, main then landed INFRA-229 at 36, and the branch moved above it; both plugin manifests declare 37. The body still says `The daemon/plugin contract rises to 36` in the Change bullets, `Raised: the daemon/plugin contract, 35 → 36` in the census, and argues the rollout in terms of `a daemon before 36` and `an image built before 36`. The census is what tells an operator which image the release must carry, and the number is the whole of it. The version.go entry itself is correct and consistent."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:1316",
+      "description": "Step 9 of the cutover this change writes is wrong twice in one sentence; found by the tester, routed to me by the architect. `kubectl -n legion get pvc -l legion.dev/project=<PROJECT>` with the upper-case placeholder selects nothing: the label's value is `claim.ProjectToken(cfg.Project)` (`internal/daemon/bootreads.go:41`), which `internal/claim/token.go:26` lower-cases and strips, while `legion.dev/issue` and `legion.dev/tree` carry the key unchanged (`names.go:271-277`), so the two label families genuinely differ and a blanket sweep would break the working commands. Second, the sentence that the command \"answers this question with silence whether the cutover worked or not\" is wrong with the correct value too: the controller's claim template carries `r.labels(l)` (`podkind.go:312-317`) and a repository cache's objects carry `labelProject` (`repocache.go:96`), so the selector returns those. The step's real instrument is the `jq` over every claim by owner that follows, which carries no selector and is unaffected — the fix is one placeholder and one clause."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/e2e/README.md:965",
+      "description": "The proof's contract disagrees with the proof again, in the same way round 2's three lifecycle rows did. The `pod-baseline` row still promises the stub agent's environment carries `OMP_SESSION_STORAGE=file`; this change makes the store mandatory SQL and `live_operator_test.go:180-183` now asserts `ompsessions.StorageVariable: ompsessions.SQLStorage` with the DSN pointer beside it. This table is where a maintainer looks a checkpoint up, so a wrong expected result here outlives the script."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/podkind.go:285-286",
+      "description": "`controllerPod`'s type comment still describes the init container this round deleted: \"its one init container creates nothing on that volume, and refuses only a pod handed the provisioning token\". `initContainers` returns nil at :335. The comment is the one place a reader learns what the controller's pod is made of."
     }
   ],
-  "roundOneVerification": {
-    "note": "All twelve round-1 threads were answered and resolved by the implementer. I verified each fix at the code head rather than from the replies.",
+  "roundTwoVerification": {
+    "note": "All five round-2 threads were answered and resolved by the implementer. I verified each at the head rather than from its reply, and replied on each.",
     "verified": [
-      "skills/legion-worker/SKILL.md is 498 lines; bun test packages/pi-legion/src/skills-guard.test.ts is 10 pass, 0 fail.",
-      "The Stage 4a marker is TreeRoot + \"/\" + SandboxName(token) + \".marker\" (live_test.go:939), which every role container mounts.",
-      "stage4b's deleted_msg (:259) is the text issue_suspend.go:63 logs; deleted_lines/deleted follow.",
-      "Five parked-issue sites now require absence, one more than my finding named: child2_parked (:3647) and tree1_parked (:6184) assert no Sandbox and no pod.",
-      "suspendDisplacing returns its patched Sandbox and replaceSupersededSandbox copies legion.dev/displaced-pod onto the replacement (relaunch.go:568-569).",
-      "The failed-init classification is initExit != nil && pod.DeletionTimestamp == nil (observe.go:200), and the field is off runtime.Observation (0 hits for InitFailed in runtime/runtime.go).",
-      "sandbox.configure refuses an empty SessionDSNKey (sandbox.go:239); mountsProviders has 0 hits anywhere in packages.",
-      "workspace_init.go creates no sessions directory (0 hits for the literal).",
-      "docs/kubernetes.md's cutover quotes the line install.go:145-147 writes and names the sandbox attribute.",
-      "treeVolumeLayout's doc records the narrowed fence.",
-      "docs/kubernetes.md's cutover stops the earlier daemon before the image is applied, with migration 0051's reason.",
-      "The stale prose I named in names.go, manifest.go, sandbox.go, operatorpod.go and podsafety.go is gone, as is lost_detail (0 hits in scripts).",
-      "The pull request carries a ## Contract change census; re-run results are the minor finding above."
+      "lint is green at the code head; the formatter fix is at scripts/e2e/lib/stage4b-pods.test.ts:903.",
+      "The displacement gap record exists, is keyed by Sandbox name under r.mu, compares the pod uid, is written before the delete and dropped by createSandbox; three tests cover the gap, the failed Create and the over-reach direction, and the tester added a fourth for the uid comparison (eb61c1a2d8b1). The residual snapshot ordering is the finding above.",
+      "controllerPod.initContainers returns nil and `grep -rn 'workspace-init controller'` over packages, docs, scripts, AGENTS.md and deploy returns nothing.",
+      "child2_parked reads the disk inside its own predicate (stage4b-sandbox-tree.sh:3556-3561), and the three one-shot assert_no_pod_disk lines after the parked waits are gone.",
+      "scripts/e2e/README.md's child-release, idle-resident and node-release rows describe deletion, matching the predicates.",
+      "docs/kubernetes.md's cutover pushes and stops every running issue before the earlier daemon is stopped, which is the architect's ruling."
     ]
   },
   "ciAtCodeHead": {
-    "head": "e4f7f42e55a4",
+    "head": "7ed99186e939b8c6d64e58f7612db936af5b8465",
+    "note": "The head is its own code head: the tester's test commit eb61c1a2d8b1 went up with the handoff, so that push carried code and started workflows at the branch head.",
     "requiredByBase": ["lint", "typecheck", "test", "pr-title"],
-    "read": "2026-10-25T08:55:00Z",
-    "verdict": "lint is completed/failure; test, typecheck and pr-title are completed/success. A required check red at the code head is a request for changes, never an approval.",
+    "read": "2026-10-25T11:20:00Z",
+    "verdict": "lint, typecheck and pr-title are completed/success; test was still in_progress at the read. A request for changes does not wait on CI, and the round leaves reviewing with it.",
     "notes": [
-      "The compare e4f7f42e55a4...f1c847373f8e lists only .legion/INFRA-80/implement.json and .legion/INFRA-80/test.json, so these checks stand for this code.",
-      "Legion Envoy and Contracts run 40176152234 was still queued at the read; pi-legion and envoy-infra-go, both red at the previous code head, have no verdict yet here."
+      "At the previous code head c99701afc1e7 the Tests, Docs and Worker Image runs were success and Legion Envoy and Contracts was cancelled."
     ]
   },
   "thermonuclear": {
-    "head": "f1c847373f8ed0e44c85919a6122e9d38a649566",
-    "deepReview": "CHANGES — the displaced-pod record lost while the replacement Sandbox does not exist, and the cutover's ordering against boot's own stale-plugin relaunch. It judged the other ten round-1 fixes complete.",
-    "codeQuality": "CHANGES — the emptied controller init container, the parked predicate's unbounded disk assertion, and documentation left contradicting the corrected script."
+    "head": "7ed99186e939b8c6d64e58f7612db936af5b8465",
+    "deepReview": "CHANGES — the snapshot-before-strand ordering in evaluate. It judged the over-reach direction, the controller init removal, migration 0051 and the forward merge clean, and read the contract as 37 throughout the code.",
+    "codeQuality": "CHANGES — the Stage 4b transcript readers still reading a file under the SQL store, the stale controllerPod type comment and the README's OMP_SESSION_STORAGE=file row."
   },
   "threads": {
-    "openedRoundOne": 12,
-    "answeredByImplementer": 12,
-    "resolved": 12,
+    "openedRoundTwo": 5,
+    "answeredByImplementer": 5,
+    "resolved": 5,
     "botThreads": 0,
-    "note": "I replied on each of the twelve in my own words at this round, saying what I verified. No bot opened a thread on this pull request, so none was accepted for the implementer to resolve."
+    "note": "I replied on each of the five at this head. No bot opened a thread on this pull request, so none was accepted for the implementer to resolve. The round-3 findings are new threads."
+  },
+  "testerCorrection": {
+    "note": "The tester corrected its own committed handoff over Envoy: `coverageInventory.provenWithoutACluster`'s second bullet said the round-1 claim was measured on the same storage class as an issue's disk, and it was not — the build namespace's own scratch class, at 20Gi, with volumeMode set explicitly where the daemon lets the API server default it, and 'about a second' is an upper bound from two polls rather than a timing. The pull request body carries the correction at the inventory bullet, which I read at this head; I take the body and that message over the committed sentence, and the conclusion is unchanged."
   },
   "e2eLines": {
     "implementer": "present",
