@@ -129,16 +129,28 @@ printf 'starting NATS: 127.0.0.1:%s\n' "$nats_port"
 "$nats_binary" -p "$nats_port" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
 nats_pid=$!
 
+# wait_for_nats returns once the server this script started is answering, and fails otherwise. It
+# must never pass on another server: something already holding the port — a run left behind, or a
+# second run of this script — greets a connection exactly as ours would, while ours exits with
+# "address already in use". So the greeting is read only after our own server's log says it is
+# ready, and the wait ends the moment our own process is gone.
 wait_for_nats() {
   local deadline=$((SECONDS + 30))
   local banner
   while ((SECONDS < deadline)); do
-    # A NATS server greets every connection it accepts with its INFO line; curl's telnet
-    # scheme reads that greeting, then waits out its own --max-time, so only the text proves
-    # the server is up.
-    banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${nats_port}" </dev/null 2>/dev/null || true)"
-    if [[ "$banner" == 'INFO '* ]]; then
-      return 0
+    if ! kill -0 "$nats_pid" 2>/dev/null; then
+      printf 'ERR: the NATS server this script started ended before it was ready.\n' >&2
+      cat "$nats_log_file" >&2
+      return 1
+    fi
+    if grep -q 'Server is ready' "$nats_log_file"; then
+      # A NATS server greets every connection it accepts with its INFO line; curl's telnet
+      # scheme reads that greeting, then waits out its own --max-time, so only the text proves
+      # the port answers.
+      banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${nats_port}" </dev/null 2>/dev/null || true)"
+      if [[ "$banner" == 'INFO '* ]]; then
+        return 0
+      fi
     fi
     sleep 0.25
   done

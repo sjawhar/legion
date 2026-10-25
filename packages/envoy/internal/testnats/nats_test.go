@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -508,29 +509,38 @@ func TestTheAnonymousWaitRefusesAServerThatRefusesAnyone(t *testing.T) {
 // envoyRoot is the module's directory, packages/envoy, from this package's own.
 const envoyRoot = "../.."
 
-// thisPackage is the one package that may reach a container runtime: the natslive half of this
-// rig, in image.go and image_test.go, which an untagged build does not see at all.
+// thisPackage is the natslive half of this rig, in image.go and image_test.go, which an untagged
+// build does not see at all.
 const thisPackage = "github.com/sjawhar/envoy/internal/testnats"
 
-// containerModule is the import that needs a container runtime wherever a package reaches it.
-const containerModule = "github.com/testcontainers/testcontainers-go/modules/nats"
+// containerRigs are the packages of this module that may reach testcontainers: this rig, and the
+// two whose containers are not NATS and are not this issue's (internal/testpg runs pgvector,
+// internal/tests3 SeaweedFS). Every other package is a finding, whichever testcontainers package
+// it imports: modules/nats is the obvious way to start a NATS container, and
+// testcontainers.Run(ctx, testnats.Image) is the one that needs no such import.
+var containerRigs = []string{
+	thisPackage,
+	"github.com/sjawhar/envoy/internal/testpg",
+	"github.com/sjawhar/envoy/internal/tests3",
+}
 
-// dockerDrivers are the two ways a file of this module drives a container runtime by hand. Each is
-// spelled in two pieces so that this file, which has to name them, is not itself a finding.
-var dockerDrivers = []string{"exec.Command(" + `"docker"`, "NewDockerClient" + "WithOpts"}
+// containerModule is the import prefix every testcontainers package shares.
+const containerModule = "github.com/testcontainers/testcontainers-go"
 
-// No package of this module outside internal/testnats may start a NATS container or drive a
-// container runtime by hand: Envoy's agents have none, and a test that needs one cannot run where
-// they do. Other packages of this module do start containers on purpose (internal/tests3 runs
-// SeaweedFS, internal/testpg pgvector); what this guard pins is the NATS container module and the
-// two hand-written ways to drive Docker. The rig's own container-backed half is behind the
-// natslive tag, which an untagged go list does not see, so the one package allowed here is this
-// one.
+// dockerDriver matches a file of this module driving a container runtime by hand: the two spellings
+// of exec's run with docker as the command, and testcontainers' own Docker client. It is written
+// from pieces so that this file, which has to name them, is not itself a finding.
+var dockerDriver = regexp.MustCompile(
+	`exec\.Command(Context)?\([^)]*` + `"docker"` + `|NewDockerClient` + `WithOpts`)
+
+// No package of this module outside the rigs above may start a container: Envoy's agents have no
+// container runtime, and a test that needs one cannot run where they do. This pins the two ways
+// to get one — an import of testcontainers, and a hand-driven docker — against the packages
+// allowed to have it. internal/smoke's containers are behind the smoke build tag and the rig's
+// own behind natslive, neither of which an untagged go list or this walk sees.
 func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
 	t.Run("imports", func(t *testing.T) {
-		// internal/smoke is never a finding here: its container-backed tests are behind the smoke
-		// build tag, which this walk does not see, as it does not see image.go either.
-		for _, pkg := range natsContainerImporters(t) {
+		for _, pkg := range containerImporters(t) {
 			t.Errorf("package %s imports %s, which needs a container runtime; start the server with testnats.Start, StartConfig or URL instead", pkg, containerModule)
 		}
 	})
@@ -541,9 +551,9 @@ func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
 	})
 }
 
-// natsContainerImporters lists every package of this module, outside this one, that imports the
-// container module, from its own sources or its tests'.
-func natsContainerImporters(t *testing.T) []string {
+// containerImporters lists every package of this module, outside the rigs allowed one, that
+// imports a testcontainers package, from its own sources or its tests'.
+func containerImporters(t *testing.T) []string {
 	t.Helper()
 	const format = `{{.ImportPath}} {{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}`
 	list := exec.Command("go", "list", "-f", format, "./...")
@@ -559,11 +569,14 @@ func natsContainerImporters(t *testing.T) []string {
 	var importers []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] == thisPackage {
+		if len(fields) == 0 || slices.Contains(containerRigs, fields[0]) {
 			continue
 		}
-		if slices.Contains(fields[1:], containerModule) {
-			importers = append(importers, fields[0])
+		for _, imported := range fields[1:] {
+			if imported == containerModule || strings.HasPrefix(imported, containerModule+"/") {
+				importers = append(importers, fields[0])
+				break
+			}
 		}
 	}
 	return importers
@@ -593,15 +606,12 @@ func dockerDriverFiles(t *testing.T) []string {
 		if err != nil {
 			return err
 		}
-		for _, driver := range dockerDrivers {
-			if strings.Contains(string(text), driver) {
-				relative, err := filepath.Rel(envoyRoot, path)
-				if err != nil {
-					return err
-				}
-				drivers = append(drivers, filepath.ToSlash(relative))
-				return nil
+		if dockerDriver.Match(text) {
+			relative, err := filepath.Rel(envoyRoot, path)
+			if err != nil {
+				return err
 			}
+			drivers = append(drivers, filepath.ToSlash(relative))
 		}
 		return nil
 	})
