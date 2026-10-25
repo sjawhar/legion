@@ -2843,11 +2843,16 @@ kubectl delete job "$workload"                                     # takes its p
 kubectl get jobs,pods                                              # nothing of it is left
 ```
 
-That check is `python3`, which the image carries, because **the role container has no client for
-any of these servers**: `psql`, `redis-cli` and their kind are not in the image
-([Worker image](#worker-image)), a role may not `exec` into the workload's pod, and installing
-one in its own pod is the withheld `operator-setup` capability. What it proves is what a role
-needs first: that the address resolves and the port answers.
+That check is `python3`, which the image carries, because **the role container had no client for
+any of these servers** when it was written ([Worker image](#worker-image)), a role may not `exec`
+into the workload's pod, and installing one in its own pod is the withheld `operator-setup`
+capability. The first of those three reasons has since changed, and only the first: the image
+this repository builds carries `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` from
+dispatch://INFRA-221's merge on 2026-10-25 onward, and a role has them once its deployment pins a
+digest built from that merge or a later commit of `main` ([Pin by digest, never by
+tag](#pin-by-digest-never-by-tag)) — a role on an older digest still has none of them, and
+`python3` runs on both. What it proves is what a role needs first: that the address resolves and
+the port answers.
 
 It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
 readiness probe, so `condition=Ready` means the container started, and a database spends its
