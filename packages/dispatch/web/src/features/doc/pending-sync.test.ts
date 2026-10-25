@@ -1,5 +1,12 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { createHeadlessProof } from "@legion/proof-editor/headless";
 import { waitFor } from "@testing-library/react";
+import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
+import {
+  prosemirrorToYXmlFragment,
+  updateYFragment,
+  yXmlFragmentToProseMirrorRootNode,
+} from "y-prosemirror";
 import * as Y from "yjs";
 
 import { type DocumentConnection, loadDocumentTransport } from "./connection";
@@ -332,6 +339,103 @@ test("a stale row does not let a later row from the same lost history through", 
   expect(doc.store.pendingStructs).toBeNull();
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
   expect(states.at(-1)?.rebuiltAt).toBeDefined();
+});
+
+// The editor's schema, whose image keeps a link as its `link` and `linkTitle` attributes, and the
+// schema an editor built before them has: the same nodes, with Milkdown's commonmark image (`src`,
+// `alt`, `title`) in place of the linked one.
+const editor = await createHeadlessProof();
+const imageSpec = editor.schema.spec.nodes.get("image");
+if (imageSpec?.attrs === undefined) {
+  throw new Error("the editor's schema has no image attributes");
+}
+const { link: _link, linkTitle: _linkTitle, ...stockImageAttrs } = imageSpec.attrs;
+const stockSchema = new Schema({
+  marks: editor.schema.spec.marks,
+  nodes: editor.schema.spec.nodes.update("image", { ...imageSpec, attrs: stockImageAttrs }),
+});
+
+/** A document holding one paragraph: a linked image, then text. */
+function serverWithLinkedImage(clientId: number): Y.Doc {
+  const server = new Y.Doc();
+  server.clientID = clientId;
+  prosemirrorToYXmlFragment(
+    editor.parseMarkdown('[![x](i.png)](https://u.com "t") after'),
+    server.getXmlFragment("prosemirror")
+  );
+  return server;
+}
+
+/** The live document's image element. */
+function imageOf(doc: Y.Doc): Y.XmlElement {
+  const paragraph = doc.getXmlFragment("prosemirror").get(0);
+  const image = paragraph instanceof Y.XmlElement ? paragraph.get(0) : undefined;
+  if (!(image instanceof Y.XmlElement) || image.nodeName !== "image") {
+    throw new Error("the document's first paragraph does not start with an image");
+  }
+  return image;
+}
+
+/**
+ * A browser of an earlier page load whose editor reads the document through `schema` and types
+ * " more" at the end of the image's paragraph, as y-prosemirror writes an editor's change back:
+ * `updateYFragment` rewrites the paragraph and every element in it. The edit is kept as a saved row.
+ */
+async function savedParagraphEdit(artifact: string, server: Y.Doc, schema: Schema): Promise<void> {
+  const browser = new Y.Doc();
+  Y.applyUpdate(browser, Y.encodeStateAsUpdate(server));
+  const fragment = browser.getXmlFragment("prosemirror");
+  const read: ProseMirrorNode = yXmlFragmentToProseMirrorRootNode(fragment, schema);
+  const paragraph = read.child(0);
+  const edited = read.copy(
+    read.content.replaceChild(0, paragraph.copy(paragraph.content.addToEnd(schema.text(" more"))))
+  );
+  let update: Uint8Array | undefined;
+  browser.on("update", (emitted: Uint8Array) => {
+    update = emitted;
+  });
+  updateYFragment(browser, fragment, edited, { isOMark: new Map(), mapping: new Map() });
+  if (update === undefined) {
+    throw new Error("the editor's change emits an update");
+  }
+  await (await storeFor(artifact, browser.clientID)).record(update).written;
+}
+
+test("a saved row an editor without the image's link made is dropped, reported, and the link stays", async () => {
+  const artifact = artifactId();
+  const server = serverWithLinkedImage(100);
+  const before = Date.now();
+  await savedParagraphEdit(artifact, server, stockSchema);
+  const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+  const stateVector = Y.encodeStateVector(doc);
+
+  await sync.firstSync(false);
+
+  expect(Y.encodeStateVector(doc)).toEqual(stateVector);
+  expect(imageOf(doc).getAttribute("link")).toBe("https://u.com");
+  expect(imageOf(doc).getAttribute("linkTitle")).toBe("t");
+  expect(doc.getXmlFragment("prosemirror").toString()).not.toContain("more");
+  expect(await rowsOf(artifact)).toEqual([]);
+  const reported = states.at(-1);
+  expect(reported?.count).toBe(0);
+  expect(reported?.rebuiltAt).toBeUndefined();
+  expect(reported?.strippedAt).toBeGreaterThanOrEqual(before);
+  expect(reported?.strippedAt).toBeLessThanOrEqual(Date.now());
+});
+
+test("a saved row the editor with the image's link made applies and keeps the link", async () => {
+  const artifact = artifactId();
+  const server = serverWithLinkedImage(100);
+  await savedParagraphEdit(artifact, server, editor.schema);
+  const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(false);
+
+  expect(doc.getXmlFragment("prosemirror").toString()).toContain("after more");
+  expect(imageOf(doc).getAttribute("link")).toBe("https://u.com");
+  expect(imageOf(doc).getAttribute("linkTitle")).toBe("t");
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+  expect(states.at(-1)).toEqual({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true });
 });
 
 test("a first sync deletes every row it handled in one IndexedDB write", async () => {

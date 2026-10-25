@@ -592,11 +592,15 @@ rather than a provider counter, so reconnect queues cannot clear an earlier unco
 reads every frame field through `sync-frame.ts`'s bounds-checked `readField`. The first synced
 admission judges each saved row on a scratch copy of the live document before applying it: the
 copy takes every row the live document takes and is copied afresh after a row it refuses, so a
-row a rebuild leaves parked is dropped and reported alone while the others apply, and the rows it
-handled are deleted in one IndexedDB write once their re-recorded rows are stored. A read-only
-admission keeps them all, and an `ARTIFACT_NOT_FOUND` admission removes rows for the document that
-is gone. The connection indicator names saved edits while disconnected and warns when IndexedDB
-cannot retain them across a reload.
+row a rebuild leaves parked, or a row that deletes an image's `link` or `linkTitle` key, is dropped
+and reported alone while the others apply, and the rows it handled are deleted in one IndexedDB
+write once their re-recorded rows are stored. The second refusal holds back an editor built before
+the image kept its link: y-prosemirror's `updateYFragment` removes from an element it rewrites
+every attribute its schema lacks, which is the only way an editor deletes either key, and a row
+that editor saved would otherwise reach the server through the next writable admission. A
+read-only admission keeps them all, and an `ARTIFACT_NOT_FOUND` admission removes rows for the
+document that is gone. The connection indicator names saved edits while disconnected, says when a
+row was dropped and why, and warns when IndexedDB cannot retain them across a reload.
 
 The one exception is a page being left: from `beforeunload` no failure reloads it, because WebKit
 and Firefox cancel the chunk downloads in flight when a navigation starts (WebKit also refuses new
@@ -655,10 +659,15 @@ leave a connected editor alone whether they succeed or fail, so an outage that a
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
 version for the session. It passes that schema to the live editor, historical-version editor, and
 the one headless Markdown engine cached per schema version; the connection carries it as
-`schema_version`. A server version mismatch admits the tab read-only and the surface shows
-`Reload to edit`. Typed blocks use `:::name{#block-id key="value"}` container directives. The server
-owns their schema and version, while Dispatch owns host rendering for `render: "host"` types; the
-SPA must not invent node schemas or parse a second directive grammar.
+`schema_version`, beside `editor_schema`, the `DOCUMENT_EDITOR_SCHEMA_VERSION` of
+`packages/contracts` compiled into the bundle, in the query and as the Hocuspocus token
+`<schema_version>:<editor_schema>`. The server admits the tab read-write only when both are its
+own, so a bundle whose editor predates a node attribute stays read-only whatever schema version it
+fetched; any mismatch admits the tab read-only and the surface shows `Reload to edit`. Raise
+`DOCUMENT_EDITOR_SCHEMA_VERSION` whenever the editor's built-in node schema gains an attribute an
+editor without it would strip. Typed blocks use `:::name{#block-id key="value"}` container
+directives. The server owns their schema and version, while Dispatch owns host rendering for
+`render: "host"` types; the SPA must not invent node schemas or parse a second directive grammar.
 After the first paint, Dispatch warms that schema and headless Markdown engine so a long-lived tab
 holds the lazy chunk through an SPA replacement. A stale Vite chunk reloads the page once per
 session (never while the browser is offline — that is an outage, not a deployment); if rendering

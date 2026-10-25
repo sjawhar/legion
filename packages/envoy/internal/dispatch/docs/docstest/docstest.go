@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +18,24 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
+
+// AdmissionQuery is the query a current dashboard's provider sends on the document websocket,
+// which the server admits read-write on an open issue: schema_version and editor_schema. A test
+// dialer that expects to write appends it to the room's address after "?". schemaVersion is the
+// server's pmdoc.SchemaVersion(), passed in because pmdoc's own tests import this package.
+func AdmissionQuery(schemaVersion int) string {
+	return "schema_version=" + strconv.Itoa(schemaVersion) +
+		"&editor_schema=" + strconv.Itoa(contracts.DocumentEditorSchemaVersion)
+}
+
+// AdmissionToken is the Hocuspocus token a current dashboard's provider sends, `<schema>:<editor>`,
+// the same two versions as AdmissionQuery's; schemaVersion is the server's pmdoc.SchemaVersion().
+func AdmissionToken(schemaVersion int) string {
+	return strconv.Itoa(schemaVersion) + ":" + strconv.Itoa(contracts.DocumentEditorSchemaVersion)
+}
 
 // Peer is a writable connection to a document's room that behaves as a browser's provider does: it
 // applies every sync message the room sends to Doc, answers the room's sync step 1, and sends the
@@ -40,9 +58,9 @@ type Peer struct {
 }
 
 // Dial connects a peer to artifactID's room at url, the document websocket's full address with its
-// schema_version, with header naming the caller, and starts its reader. doc is the peer's copy of
-// the document: a new one, or the copy a reconnecting browser kept. The connection closes when t
-// ends.
+// admission query (AdmissionQuery), with header naming the caller, and starts its reader. doc is
+// the peer's copy of the document: a new one, or the copy a reconnecting browser kept. The
+// connection closes when t ends.
 func Dial(t testing.TB, url string, header http.Header, artifactID string, doc *crdt.Doc) *Peer {
 	t.Helper()
 	connection, response, err := gws.DefaultDialer.Dial(url, header)
@@ -70,6 +88,26 @@ func (p *Peer) Write(syncMessage []byte) error {
 	p.writes.Lock()
 	defer p.writes.Unlock()
 	return p.connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
+}
+
+// AuthenticationMessage is the Hocuspocus token message a browser's provider sends for room: the
+// document's name, the authentication kind, the token subtype, then token.
+func AuthenticationMessage(room, token string) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarString(room)
+		encoder.WriteVarUint(2) // Hocuspocus authentication message.
+		encoder.WriteVarUint(0) // Token authentication payload.
+		encoder.WriteVarString(token)
+	})
+}
+
+// Authenticate sends the room token as a browser's provider does once connected (an
+// AuthenticationMessage). The room's answer to it overrides the upgrade's admission for every frame
+// the peer sends after it; the reader does not wait for that answer.
+func (p *Peer) Authenticate(token string) error {
+	p.writes.Lock()
+	defer p.writes.Unlock()
+	return p.connection.WriteMessage(gws.BinaryMessage, AuthenticationMessage(p.artifactID, token))
 }
 
 // Send runs change in one transaction on Doc and sends the room the update it made, as a keystroke

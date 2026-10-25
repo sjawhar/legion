@@ -548,6 +548,14 @@
 
 ### Changed
 
+- Dispatch admits a document websocket read-write only when it presents both the document schema
+  version (`schema_version`) and the editor schema the dashboard bundle was built with
+  (`editor_schema`, `contracts.DocumentEditorSchemaVersion`), in the query and as the Hocuspocus
+  token `<schema_version>:<editor_schema>`, which still overrides the query's answer. A bundle
+  built before the image's `link` and `linkTitle` attributes sends neither the editor schema nor a
+  token of that shape, so it is read-only even after it fetches the current schema version, and an
+  edit it sends cannot strip a linked image's link. Any other token, the bare `<schema_version>`
+  included, is read-only, as is a closed issue's document to every bundle (INFRA-190).
 - **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
   never back past this release. A broker before kinds reads no `kind` tag and would serve the
   secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes

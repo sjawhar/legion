@@ -4,6 +4,13 @@
 
 ### Added
 
+- `DOCUMENT_EDITOR_SCHEMA_VERSION` (1), the version of the node schema the document editor's own
+  code builds, generated into Go as `contracts.DocumentEditorSchemaVersion`. The dashboard sends it
+  on the document websocket as `editor_schema` and in its Hocuspocus token,
+  `<schema_version>:<editor_schema>`, and Dispatch admits an editor read-write only when it matches,
+  so an editor built before the image's `link` and `linkTitle` attributes cannot strip them. Raise
+  it whenever the editor's built-in node schema gains an attribute an editor without it would strip
+  on edit (INFRA-190).
 - Two optional arguments on `dispatch_issue_update`, `before` and `after`, which move an issue on
   its project's board: `before` puts it above that issue, `after` below, and both together land it
   between them. Either one is a field, so the rule that requires at least one field besides `issue`

@@ -2366,6 +2366,19 @@ export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
  *  `contracts.DocumentSchemaCloseReason`. */
 export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
 
+/**
+ * The version of the node schema the document editor's own code builds, which the dashboard sends
+ * on the document websocket beside the `blocks.json` version it fetched: as `editor_schema` in the
+ * query and after `:` in the Hocuspocus token (`<schema>:<editor>`). The server admits an editor
+ * read-write only when both equal its own, so an editor built before a node attribute existed is
+ * admitted read-only, even after it fetches the current `blocks.json` version, and cannot strip
+ * that attribute from the shared document. Raise it whenever the editor's built-in node schema (its
+ * code, not `blocks.json`) gains an attribute an editor without it would strip on edit: y-prosemirror
+ * removes from an element it rewrites every attribute its schema lacks. Version 1 is the image's
+ * `link` and `linkTitle`. Generated into Go as `contracts.DocumentEditorSchemaVersion`.
+ */
+export const DOCUMENT_EDITOR_SCHEMA_VERSION = 1;
+
 export interface ArtifactRebuildReport {
   readonly head: number;
   readonly removed_checkpoints: number;

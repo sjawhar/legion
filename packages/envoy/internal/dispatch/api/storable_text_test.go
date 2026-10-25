@@ -16,8 +16,11 @@ import (
 
 	"github.com/google/uuid"
 	gws "github.com/gorilla/websocket"
+	"github.com/reearth/ygo/crdt"
+	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -703,7 +706,7 @@ func TestTheDocumentWebsocketRefusesANulInItsBearersActor(t *testing.T) {
 	issue := createInteractionIssue(t, handler, "TEST", "Websocket actor", "before\n")
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	room := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	room := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID + "?" + docstest.AdmissionQuery(pmdoc.SchemaVersion())
 	dial := func(actor string) (*gws.Conn, *http.Response, error) {
 		return gws.DefaultDialer.Dial(room, http.Header{"Authorization": {"Bearer agent-token"}, "X-Dispatch-Actor": {actor}})
 	}
@@ -727,4 +730,106 @@ func TestTheDocumentWebsocketRefusesANulInItsBearersActor(t *testing.T) {
 		t.Fatalf("dial with a clean actor: response=%v err=%v", response, err)
 	}
 	_ = connection.Close()
+}
+
+// An editor built before the image's link and linkTitle attributes removes both from every image
+// it rewrites, since y-prosemirror drops an attribute its schema lacks. So its bundle is admitted
+// read-only, both when it presents the document schema version it cached before they existed and
+// the current one it fetched since: an update removing them, sent over its connection, leaves the
+// document's text as it was. The same update over a current bundle's connection is applied, so the
+// room refused the stale editor, not the update.
+func TestAStaleEditorsUpdateLeavesALinkedImageAlone(t *testing.T) {
+	const linked = `[![x](i.png)](https://u.com "t")`
+	documentService, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Linked image", linked+"\n")
+	text := func() string {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET /text: status=%d body=%s", response.Code, response.Body.String())
+		}
+		return strings.TrimSpace(decodeBody[struct {
+			Markdown string `json:"markdown"`
+		}](t, response).Markdown)
+	}
+	if got := text(); got != linked {
+		t.Fatalf("seeded document = %q, want %q", got, linked)
+	}
+
+	// update removes the image's link and linkTitle, as a stale editor's rewrite of it does. It is
+	// made once, on the first peer's copy of the document, and every peer sends those bytes.
+	var update []byte
+	send := func(peer *syncedPeer) {
+		t.Helper()
+		if update == nil {
+			image := firstElementNamed(peer.doc.GetXmlFragment("prosemirror"), "image")
+			if image == nil {
+				t.Fatal("the browser peer's document holds no image")
+			}
+			for _, key := range []string{"link", "linkTitle"} {
+				if _, held := image.GetAttributeValue(key); !held {
+					t.Fatalf("the image holds no %s attribute to remove", key)
+				}
+			}
+			update = docstest.Transact(peer.doc, func(txn *crdt.Transaction) {
+				image.DeleteAttribute(txn, "link")
+				image.DeleteAttribute(txn, "linkTitle")
+			})
+			if update == nil {
+				t.Fatal("removing the image's link attributes made no update")
+			}
+		} else if err := crdt.ApplyUpdateV1(peer.doc, update, nil); err != nil {
+			t.Fatalf("apply the update to the peer's document: %v", err)
+		}
+		if err := peer.connection().Write(ygsync.EncodeUpdate(update)); err != nil {
+			t.Fatalf("send the update: %v", err)
+		}
+	}
+
+	current := strconv.Itoa(pmdoc.SchemaVersion())
+	cached := strconv.Itoa(pmdoc.SchemaVersion() - 1)
+	for _, stale := range []struct{ name, query, token string }{
+		{"the schema version it cached", "schema_version=" + cached, cached},
+		{"the schema version it fetched", "schema_version=" + current, current},
+	} {
+		peer := connectBrowserPeerWith(t, documentService, issue.PrimaryArtifactID, stale.query)
+		if err := peer.connection().Authenticate(stale.token); err != nil {
+			t.Fatalf("%s: send the token: %v", stale.name, err)
+		}
+		send(peer)
+		// The room reads one connection's frames in order and lets it go only after the last, so
+		// once it has let this one go it has handled the update.
+		peer.closeAndWait(t)
+		if got := text(); got != linked {
+			t.Fatalf("%s: after the stale editor's update GET /text = %q, want %q", stale.name, got, linked)
+		}
+	}
+
+	writer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(writer.close)
+	if err := writer.connection().Authenticate(docstest.AdmissionToken(pmdoc.SchemaVersion())); err != nil {
+		t.Fatalf("send the current token: %v", err)
+	}
+	send(writer)
+	writer.barrier(t)
+	if got, want := text(), "![x](i.png)"; got != want {
+		t.Fatalf("after a current editor's update GET /text = %q, want %q", got, want)
+	}
+}
+
+// firstElementNamed is the first element called name under fragment, in document order, or nil.
+func firstElementNamed(fragment *crdt.YXmlFragment, name string) *crdt.YXmlElement {
+	for _, child := range fragment.Children() {
+		element, ok := child.(*crdt.YXmlElement)
+		if !ok {
+			continue
+		}
+		if element.NodeName == name {
+			return element
+		}
+		if found := firstElementNamed(&element.YXmlFragment, name); found != nil {
+			return found
+		}
+	}
+	return nil
 }

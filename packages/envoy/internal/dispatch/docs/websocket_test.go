@@ -14,6 +14,7 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -23,11 +24,11 @@ import (
 )
 
 // connectPeer connects login's browser to artifactID's room through the document server at
-// serverURL, at the schema version the dashboard presents, so the room takes its edits.
+// serverURL, with the admission query a current dashboard presents, so the room takes its edits.
 func connectPeer(t *testing.T, serverURL, artifactID, login string) *docstest.Peer {
 	t.Helper()
 	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
-		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+		"?" + docstest.AdmissionQuery(pmdoc.SchemaVersion())
 	return docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
 }
 
@@ -75,77 +76,97 @@ func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	}
 }
 
-func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t *testing.T) {
-	for _, schemaVersion := range []string{"0", ""} {
-		t.Run(schemaVersion, func(t *testing.T) {
-			service, artifactID := newTestService(t)
-			request := httptest.NewRequest(
-				http.MethodGet,
-				"/ws/doc/"+artifactID+"?schema_version="+schemaVersion,
-				nil,
-			)
-			request.Header.Set("X-Dispatch-User", "alice")
-			request.SetPathValue("room", artifactID)
-			request = request.WithContext(
-				context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}),
-			)
+// admissionRow is one dashboard bundle's admission: the query its provider sends on the upgrade
+// and the Hocuspocus token it sends once connected, with whether each alone is admitted read-write.
+type admissionRow struct {
+	name                         string
+	query, token                 string
+	queryWritable, tokenWritable bool
+}
 
-			config, ok := service.authorize(request)
-			if !ok || !config.ReadOnly {
-				t.Fatalf(
-					"schema version %q authorization = %#v, %t; want read-only acceptance",
-					schemaVersion,
-					config,
-					ok,
-				)
+// admissionRows covers every shape a bundle presents. An editor built before the editor schema
+// existed sends the schema version it cached or fetched and a bare token; one built with it sends
+// both versions, in the query and as `<schema>:<editor>`. Only the current pair is writable, and a
+// token other than exactly that is read-only even beside the current query, since it overrides it.
+func admissionRows() []admissionRow {
+	current := strconv.Itoa(pmdoc.SchemaVersion())
+	previous := strconv.Itoa(pmdoc.SchemaVersion() - 1)
+	editor := strconv.Itoa(contracts.DocumentEditorSchemaVersion)
+	staleEditor := strconv.Itoa(contracts.DocumentEditorSchemaVersion - 1)
+	currentQuery := docstest.AdmissionQuery(pmdoc.SchemaVersion())
+	return []admissionRow{
+		{name: "an old bundle with the schema version it cached", query: "schema_version=" + previous, token: previous},
+		{name: "an old bundle with the schema version it fetched", query: "schema_version=" + current, token: current},
+		{name: "a bundle with another editor schema", query: "schema_version=" + current + "&editor_schema=" + staleEditor, token: current + ":" + staleEditor},
+		{name: "a new bundle with a stale schema version", query: "schema_version=" + previous + "&editor_schema=" + editor, token: previous + ":" + editor},
+		{name: "no versions", query: "", token: ""},
+		{name: "only the editor schema", query: "editor_schema=" + editor, token: ":" + editor},
+		{name: "a token without the editor schema", query: currentQuery, queryWritable: true, token: current + ":"},
+		{name: "a token with a third part", query: currentQuery, queryWritable: true, token: current + ":" + editor + ":" + editor},
+		{name: "a token with a leading space", query: currentQuery, queryWritable: true, token: " " + current + ":" + editor},
+		{name: "a current query and an old token", query: currentQuery, queryWritable: true, token: current},
+		{name: "the current bundle", query: currentQuery, queryWritable: true, token: docstest.AdmissionToken(pmdoc.SchemaVersion()), tokenWritable: true},
+	}
+}
+
+// authorizeUpgrade runs the upgrade's admission for a request to artifactID's room with query.
+func authorizeUpgrade(t *testing.T, service *Service, artifactID, query string) bool {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/ws/doc/"+artifactID+"?"+query, nil)
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.SetPathValue("room", artifactID)
+	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}))
+	config, ok := service.authorize(request)
+	if !ok {
+		t.Fatalf("query %q was refused, want an admission", query)
+	}
+	return config.ReadOnly
+}
+
+func TestSchemaVersionAdmissionAtTheUpgradeReadsBothVersions(t *testing.T) {
+	service, artifactID := newTestService(t)
+	for _, row := range admissionRows() {
+		t.Run(row.name, func(t *testing.T) {
+			if readOnly := authorizeUpgrade(t, service, artifactID, row.query); readOnly == row.queryWritable {
+				t.Fatalf("query %q admitted read-only %t, want %t", row.query, readOnly, !row.queryWritable)
 			}
 		})
 	}
 }
 
-func TestSchemaVersionAdmissionCommunicatesReadOnlyScope(t *testing.T) {
-	service, artifactID := newTestService(t)
-
-	mismatched, err := service.authorizeSchemaVersion(artifactID, "0")
-	if err != nil {
-		t.Fatalf("authorize mismatched schema version: %v", err)
-	}
-	if !mismatched.ReadOnly {
-		t.Fatalf("mismatched schema admission = %#v, want read-only", mismatched)
-	}
-
-	current, err := service.authorizeSchemaVersion(artifactID, fmt.Sprintf("%d", pmdoc.SchemaVersion()))
-	if err != nil {
-		t.Fatalf("authorize current schema version: %v", err)
-	}
-	if current.ReadOnly {
-		t.Fatalf("current schema admission = %#v, want read-write", current)
-	}
-}
-
+// The scope the Hocuspocus authentication reply carries is the provider's signal, and the token's
+// answer overrides the upgrade's, so a token other than the current one is read-only after any query.
 func TestHocuspocusAuthenticationCommunicatesSchemaReadOnly(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
-	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
-	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
-	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("connect live document: response=%#v err=%v", response, err)
+	for _, row := range admissionRows() {
+		t.Run(row.name, func(t *testing.T) {
+			wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID + "?" + row.query
+			connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"X-Dispatch-User": []string{"alice"}})
+			if err != nil {
+				t.Fatalf("connect live document: response=%#v err=%v", response, err)
+			}
+			defer func() { _ = connection.Close() }()
+			want := "readonly"
+			if row.tokenWritable {
+				want = "read-write"
+			}
+			if scope := authenticationScope(t, connection, artifactID, row.token); scope != want {
+				t.Fatalf("token %q after query %q authenticated %q, want %q", row.token, row.query, scope, want)
+			}
+		})
 	}
-	t.Cleanup(func() { _ = connection.Close() })
+}
 
-	auth := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarString(artifactID)
-		encoder.WriteVarUint(2) // Hocuspocus authentication message.
-		encoder.WriteVarUint(0) // Token authentication payload.
-		encoder.WriteVarString("0")
-	})
-	if err := connection.WriteMessage(gws.BinaryMessage, auth); err != nil {
+// authenticationScope sends token as the room's Hocuspocus token over connection and returns the
+// scope of the authenticated reply.
+func authenticationScope(t *testing.T, connection *gws.Conn, artifactID, token string) string {
+	t.Helper()
+	if err := connection.WriteMessage(gws.BinaryMessage, docstest.AuthenticationMessage(artifactID, token)); err != nil {
 		t.Fatalf("send schema authentication: %v", err)
 	}
-
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {
 		_, message, err := connection.ReadMessage()
@@ -171,10 +192,29 @@ func TestHocuspocusAuthenticationCommunicatesSchemaReadOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read Hocuspocus authentication scope: %v", err)
 		}
-		if subtype != 2 || scope != "readonly" {
-			t.Fatalf("schema authentication = subtype %d scope %q, want authenticated readonly", subtype, scope)
+		if subtype != 2 {
+			t.Fatalf("schema authentication = subtype %d scope %q, want authenticated", subtype, scope)
 		}
-		return
+		return scope
+	}
+}
+
+// A closed issue's document is read-only to every bundle, the current one included, at the upgrade
+// and in the token's answer.
+func TestSchemaVersionAdmissionOfAClosedIssueIsReadOnly(t *testing.T) {
+	service, artifactID := newTestService(t)
+	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	if !authorizeUpgrade(t, service, artifactID, docstest.AdmissionQuery(pmdoc.SchemaVersion())) {
+		t.Fatal("the current query on a closed issue was admitted read-write")
+	}
+	config, err := service.authorizeSchemaVersion(artifactID, docstest.AdmissionToken(pmdoc.SchemaVersion()))
+	if err != nil {
+		t.Fatalf("authorize the current token: %v", err)
+	}
+	if !config.ReadOnly {
+		t.Fatalf("the current token on a closed issue = %#v, want read-only", config)
 	}
 }
 

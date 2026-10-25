@@ -687,11 +687,11 @@ func (p *dispatchProcess) openStream(t *testing.T, path string) <-chan streamEnd
 	return ended
 }
 
-// openEditor connects a signed-in spec tab to the document at the schema version the dashboard
+// openEditor connects a signed-in spec tab to the document with the admission query the dashboard
 // presents, so the room takes its edits, and returns once the editor's copy renders want.
 func (p *dispatchProcess) openEditor(t *testing.T, artifactID, want string) *docstest.Peer {
 	t.Helper()
-	url := "ws://127.0.0.1:" + strconv.Itoa(p.port) + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	url := "ws://127.0.0.1:" + strconv.Itoa(p.port) + "/ws/doc/" + artifactID + "?" + docstest.AdmissionQuery(pmdoc.SchemaVersion())
 	editor := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{dispatchTestLogin}}, artifactID, crdt.New())
 	deadline := time.After(10 * time.Second)
 	for markdown(editor) != want {
