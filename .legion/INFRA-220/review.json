@@ -2,41 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T16:26:00Z",
-  "round": 3,
-  "reviewedHead": "0493abd27512fb002875ef24892ea78050c714fa plus this handoff commit (code head 91f50e61b385: 802c9b23, where the image ships Claude Code's pin and a pod fetches the binary, merged forward with main 371d6c87). Compare 91f50e61...0493abd2 shows status ahead and 2 files, both under .legion/.",
-  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title. At CI head 91f50e61 at 16:20Z: typecheck and pr-title success; lint and test in_progress (Tests run 40210101226). A request for changes does not wait on them. Not required: the 'Legion Envoy and Contracts' failure at 2fc4b487 was cmd/broker test files main had broken (this branch touches nothing under packages/envoy); at this head `go vet ./cmd/broker` is clean.",
-  "thermonuclear": {
-    "deepReview": "CHANGES at 0493abd2: one Medium, the cold-cache race in claudeCodeBlock.",
-    "codeQuality": "CHANGES at 0493abd2: the same race, plus splitting plugins_test.go (declined: the repository has no rule on file length, and the suite is cohesive)."
+  "completed": "2026-10-25T17:00:00Z",
+  "round": 4,
+  "reviewedHead": "4105bd1332397d9e0c9e3136f4b88202ea4c1134 plus this handoff commit (code head 801c889482930f3ce5ead51c08eabd30de754642; compare 801c8894...4105bd13 shows status ahead, 2 files, both under .legion/)",
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title. At CI head 801c8894, read 16:59Z: lint, typecheck and test completed success (Tests run 40212834721); pr-title success (one superseded run cancelled).",
+  "roundThreeFindings": {
+    "cacheRace": "Fixed in 801c8894: `mkdir -p -- \"$cache\" 2>/dev/null || { rm -f -- \"$cache\" && mkdir -p -- \"$cache\"; }` (plugins.go:385). Two roles creating a missing cache both succeed, so the old check-then-remove window is gone. Checked in sh with set -eu: a directory already present exits 0, and a regular file is recovered to a directory. TestAClaudeLaunchMakesItsSharedNpmCacheWhateverItFinds passes here.",
+    "staleComments": "Fixed: runtime/backend.go:42 and scripts/e2e/stage1-skeleton.sh:251 now describe the pin and the install at launch.",
+    "prBody": "Fixed: the Change bullet says the image carries the pin and a pod installs the release; the E2E (implementer) line names 801c8894 in all four items, the fourth being the pod's own install."
   },
-  "decision": "changes_requested",
+  "thermonuclear": {
+    "deepReview": "CHANGES at 4105bd13: one Medium, two roles recovering a regular file at the cache path concurrently.",
+    "codeQuality": "CHANGES at 4105bd13: the same interleaving.",
+    "adjudication": "Declined as not a defect. A regular file at $XDG_CACHE_HOME/legion-claude-code is something nothing in Legion creates: this block is the path's only writer (grep: plugins.go:384 alone), and it always runs mkdir -p before flock, so flock never meets a missing path and never creates a file. The pair's trigger needs that unreachable file and two roles racing on it. Even then it fails closed (one launch failure, after which the directory exists and the retry succeeds) and hides no error. The recovery branch is defensive code for a state the code cannot reach."
+  },
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/plugins.go",
-      "description": "claudeCodeBlock :376 `[ -d \"$cache\" ] || rm -f -- \"$cache\"` runs before the flock under the wrapper's set -eu, and every Claude role of the pod shares one cache. On a cold cache (a new or recreated volume, roles relaunched together), two roles can both see no directory; once one has made it, the other's rm -f fails on the directory and its wrapper exits 1 before npm. That is a charged launch failure. Reproduced in sh: rm -f on the directory prints 'Is a directory' and the subshell exits 1; the control, a cold cache with no race, succeeds. installBlock escapes the same line only because it sits inside its retried `legion_install || legion_install`. Make the cache creation race-safe and add a deterministic test."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/backend.go",
-      "description": ":42 still says the worker image carries Claude Code."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/e2e/stage1-skeleton.sh",
-      "description": ":251 still says the worker image carries Claude Code; the claude-code row now checks the pin and the plugin."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body",
-      "description": "The Change bullet still says the worker image carries Claude Code. The E2E (implementer) line names 2fc4b487 and has no item for the pod's install of the pinned release, while implement.json records all four proofs at 91f50e61, the fourth being that install."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "notProven": [
-    "scripts/e2e/claude-backend-sandbox.sh (acceptance bullet 1's cluster run, which now also proves the pod's fetch of the pinned Claude Code) and the tmux step of scripts/e2e/claude-backend-tmux.sh are written but not run; whether to accept without them is with the owner (ask 14f85ee4)."
+    "scripts/e2e/claude-backend-sandbox.sh (acceptance bullet 1's cluster run, including the pod's fetch of the pinned Claude Code) and the tmux step of scripts/e2e/claude-backend-tmux.sh are written but not run; whether to accept without them is with the owner (ask 14f85ee4)."
   ]
 }
