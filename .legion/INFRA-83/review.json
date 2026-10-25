@@ -2,56 +2,49 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-83",
-  "completed": "2026-10-25T02:10:00Z",
+  "completed": "2026-10-25T11:45:00Z",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "round": 14,
-  "kind": "full round: the third forward merge changed the fingerprint, so the head was judged as new work rather than confirmed",
+  "round": 15,
+  "kind": "full round: the fourth forward merge changed the fingerprint, so the head was judged as new work rather than confirmed",
   "keyFindings": [],
   "fingerprint": {
-    "mine": "Computed at both of my own heads with the committed command, after a fetch: adf0b13293993bf8e36c9f7c314f775b8a0a3d890ba79b3081887024342cc2c7 at my last submitted review's commit_id bd45b54a8cc9533c8f97749b40d7e266a46316f3, and 06f9532e23693ae67d1ef03948640233f3612f56c8c8fd8a99a6381c95200b0d at the head. Different, so a full round with the pair again, and my round-thirteen approval does not carry itself forward.",
-    "whyItMoved": "Two entries under the recipe's normalisation and nothing else: the one-line comment the merge itself rewrote in packages/daemon/internal/daemon/required_checks.go, which is this branch's own work, and one blank list separator the conflict resolution dropped from packages/pi-legion/CHANGELOG.md, which is main's text and carries no sentence. AGENTS.md's raw diff shifted too but does not reach the fingerprint, since the recipe strips hunk headers. Nothing neither side intended is in the delta."
+    "mine": "Computed at both of my own heads with the committed command, after a fetch: 06f9532e23693ae67d1ef03948640233f3612f56c8c8fd8a99a6381c95200b0d at my last submitted review's commit_id 96933b6e17620e246d5271cb84c9632074d9c59e, and 61c46e8da4d5807b6ff74b21d4df2c4246cd6a7d3d657cc3f68451a7bc360bec at the head. Different, so a full round with the pair again.",
+    "attribution": "I attributed it per file rather than taking either account. Under the recipe as conflicts-and-rewrites.md writes it, --context 0, exactly two paths move: skills/legion-architect/SKILL.md and its generated bundle copy, where main reworded the acceptance sentence that one of this branch's --paginate edits sits in, so the branch's contribution is the identical flag applied to a reworded line. Under the default three lines of context five paths move, adding docs/site concepts.md, docs/site troubleshooting.md and prompts/go/architect-common.md, which differ only in context main changed around hunks this branch did not touch. Both accounts are complete; they are two normalisations of the same fact, and nothing neither side intended is in either."
   },
   "theMerge": {
-    "commit": "dbd39906ae732b477899ef196bd52e855c029762",
-    "read": "Against both parents, in both directions. One conflicted file, packages/pi-legion/CHANGELOG.md, where this branch's READY and merge-waiting bullet and main's legion-controller bullet both survive whole and neither is reworded; one unconflicted edit, required_checks.go:69. Everything else main landed since 2b4308b0 is on paths this branch never touched, and no added line of main's re-states anything this branch deleted. No conflict marker survives in the tree.",
-    "theEditInsideTheMerge": "required_checks.go:69 now reads 'requiredchecks.Required, which this pass is the only reader of', replacing 'the reader READY uses' - the fast-follow item I named in rounds twelve and thirteen. It is a correct statement of the code at this head: requiredchecks.Required has exactly one non-test call site, at required_checks.go:205 inside watchRequiredChecks, and api/ready.go no longer imports the package. Worth saying plainly that it was made inside a merge commit, whose diff a reader compares parent against parent and would therefore miss; the two forward merges that hurt this branch did the opposite, so this is the safe direction, but the practice is worth naming rather than noticing."
+    "commit": "3c518b2dd970e972683090eb9a1bcba30273fb98",
+    "resolutionsJudged": "Three prose files conflicted and I read each as a judgement rather than a mechanical merge. skills/legion-architect/SKILL.md and its bundle: main reworded the acceptance sentence and dropped 'and, for a parent, that every child is done (section 3)'; the resolution keeps main's wording and carries this branch's --paginate onto it. That drop is main's deliberate change and not a loss - the same main text describes SIGNOFF_CHILD_IN_WORKFLOW and the park_child alternative, and the daemon refuses the acceptance for an open descendant before any move to retro, so the prose duty was replaced by a refusal rather than forgotten, and a reader is nowhere told a parent may be accepted while a child still runs. docs/site concepts.md: both sides survive whole, this branch's merging row saying GitHub completes the merge under the base branch's own rules and main's awaiting_merge row keeping the merged-root exception. Neither merged text tells a reader anything false.",
+    "deletionSurvival": "Main brought 11,632 added lines across 179 files in this merge, which is the largest surface a deleted claim could have returned from. Swept at this head: no instruction anywhere to write, fill, cite or update a pull request body CI line; the retired phrases only inside prompts_test.go's own list; no surviving sentence asserting READY reads a head's checks or required set, the one loose grep hit in architect-common.md being a false positive across two unrelated sentences of one long line, checked and discarded; the absolute no-CI claim absent; no conflict marker in the tree."
   },
   "whatIVerifiedMyself": [
-    "Both fingerprints, at my own two heads, with the committed command rather than from any message.",
-    "The merge read against both parents, and the required_checks.go claim checked against the package's call sites rather than taken from the report.",
-    "Deletion survival after the third merge: no surviving instruction to write, fill, cite or update a pull request body CI line anywhere; the retired phrases only inside prompts_test.go's own list and historical changelog entries; no sentence left asserting READY reads a head's checks; no conflict marker.",
-    "The predicate divergence of the fast-follow below, read in the source: routineWait is Armed or Merging or an Unmergeable whose Routine() is true, which ghautomerge.go:303 defines as BLOCKED or UNKNOWN only, while waitingOnGitHub admits every Unmergeable including BEHIND, DRAFT and DIRTY - the three states ghautomerge's own comment at :299-302 says wait on someone rather than on GitHub.",
+    "Both fingerprints at my own two heads, and then the per-file attribution at both normalisations rather than accepting either count.",
+    "The three resolutions read against both parents, and the dropped parent-children clause checked against the daemon refusal that now carries it rather than assumed deliberate.",
+    "The deletion-survival sweep over the merged tree, including the one false-positive hit resolved rather than left as a maybe.",
     "I read the required checks of the code commit on GitHub myself before approving and carry no verdict or run id forward as what the head holds now: the required set is lint, typecheck, test and pr-title with no branch-protection checks, every required name's newest run at the code commit had completed and succeeded when I read it, nothing there was failed, cancelled or timed out, the only lane still running was the non-required dispatch check, and the compare from that commit to the head I approve returned handoffsOnly true over two files."
   ],
-  "consideredAndNotCarried": [
-    "The code-quality half calls the notice's opening clause false for an Unmergeable, since choose sends no mutation in that state, so 'Legion submitted the merge ... and GitHub has not completed it' asserts an act that did not happen. I read it the other way and say why: the sentence summarises the row, which is a standing submission the daemon keeps making, and its two following clauses - that nothing has been withdrawn and that the daemon goes on submitting it - are exactly true of an Unmergeable. The cause it then quotes, 'the daemon merges it once GitHub reports it mergeable', agrees rather than contradicts, which is what separates this from the Lagging and Disappeared cases I did block on, where the quoted cause said the pull request was closed or the arm was gone. Round thirteen's deep-review half reached the same reading independently and called it within tolerance.",
-    "The same half's reading that waitingOnGitHub should be routineWait, third time this design has been raised. The new fact it brings is the divergence, which I verified and carry to the fast-follow line with the sentence that should be written; the choice between one predicate and two is the architect's and is not a correctness risk. Telling the architect about a BEHIND or a DRAFT is arguably better than routineWait's classification would give, since those are the waits a person must end; what is missing is any sentence saying the two predicates differ and why."
+  "notBlockingButNamed": [
+    "The implementer's evidence and the pull request body give the fingerprint account as --context 0 while reporting the five-path result and the hashes that belong to the default-context run. I measured both: the documented recipe gives two paths, the default context gives five, and every path of both is accounted for, so no conclusion moves and nothing is hidden - but the command named and the numbers reported come from different runs, which is the shape this issue exists to remove and the reason I state both accounts here, so the record carries the right pairing whether or not the body is rewritten. Retro's body pass is where it belongs rather than a round: the canonical values the branch must act on are the tester's and are correct, and a reader who runs the stated command reaches the stated conclusion by a different count.",
+    "Carried from earlier rounds and unchanged by this merge: waitingOnGitHub and routineWait disagreeing by one term with neither doc naming the other; the merge-waiting remedy enumeration omitting the Unmergeable states a person must end; readyMerge's first switch arm duplicating its third; tools.test.ts hardcoding the daemon's note; the Size line's claim; the literal retro-sentence pin's 187-character lines; the CI-line guard's re- lookbehind; neither guard reading docs/solutions; classify.Judge's lost external caller; the readyChecks name; the compare command hand-maintained in two files; and a content edit made inside a forward-merge commit being invisible to a parent-against-parent read."
   ],
   "approval": {
-    "head": "fd8b39d13b2fdadaaa6bcaf0c9710e40f96a56a4",
-    "codeHead": "dbd39906ae732b477899ef196bd52e855c029762",
-    "why": "No finding stands. The deep-review half returned APPROVE with a body on its first invocation; the code-quality half returned CHANGES whose two findings I read against the source and judged a design call and a reading I do not share, both recorded above with the reasoning rather than dismissed. The merge is sound in both directions, the fingerprint's movement is attributed to two entries both accounted for, and every deletion survived a third forward merge."
+    "head": "7e4a6ed5e07e792af4c210e79fa3aae6779c9b72",
+    "codeHead": "3c518b2dd970e972683090eb9a1bcba30273fb98",
+    "why": "No finding stands and both thermonuclear halves returned APPROVE at this head with a body and a verdict line on the first invocation. The fourth forward merge took nothing from either side, the three resolutions are right as judgements and not only as merges, and the largest main surface this branch has absorbed brought back none of what it deletes."
   },
   "thermonuclear": {
-    "head": "fd8b39d13b2fdadaaa6bcaf0c9710e40f96a56a4",
-    "deepReview": "APPROVE at fd8b39d1, body returned in full on the first invocation. It reconstructed the merge against both parents line for line, attributed the fingerprint's movement to exactly two entries, and swept the deletions independently.",
-    "codeQuality": "CHANGES at fd8b39d1, body returned in full on the first invocation. Its High is the waitingOnGitHub and routineWait divergence and its Medium the Unmergeable opening clause; both are answered above, the first carried to the fast-follow line with the fact it added, the second not shared.",
+    "head": "7e4a6ed5e07e792af4c210e79fa3aae6779c9b72",
+    "deepReview": "APPROVE at 7e4a6ed5, body on the first invocation. It reproduced the canonical fingerprints independently, attributed them to two paths under the documented normalisation, swept all 11,632 added lines of main's work for a returning claim and found none, and raised the context-0 labelling as a non-blocking evidence correction, which I measured myself and carry above.",
+    "codeQuality": "APPROVE at 7e4a6ed5, body on the first invocation. No surviving findings; it traced the retained symbols rather than reading a lost caller as dead code, and confirmed main's nearby workflow change neither replaces nor duplicates this branch's queueing or warning.",
     "perHalf": "Both halves returned a body with a verdict line on their first invocation. Neither needed a re-run."
   },
-  "fastFollow": [
-    "waitingOnGitHub and routineWait classify the same ghautomerge types in one package and disagree by one term - every Unmergeable against an Unmergeable whose Routine() is true - with neither doc naming the other. Whichever way it is settled, one sentence on each predicate naming the other and the term of difference is the minimum, and expressing the wider set in ghautomerge where the states live would leave a wait type added later classified once rather than twice.",
-    "The merge-waiting remedy enumeration omits the Unmergeable states a person must end - a branch GitHub requires to be up to date with its base, a draft, a conflict - in the notice's own reason and in five mirrors. This is the second round it has been named and it is now sharper: those are precisely the states waitingOnGitHub admits and routineWait does not.",
-    "A content edit made inside a forward-merge commit is invisible to a parent-against-parent read; this one was right and disclosed, but the practice is worth a line in the conflicts reference.",
-    "From earlier rounds: readyMerge's first switch arm now duplicating its third with a bool literal between them; tools.test.ts hardcoding the daemon's note three times where every sibling suite reads the published fixture; the body's Size line claiming it was re-read at a head it cannot have been; the literal retro-sentence pin forcing a 187-character line in three documents; the CI-line guard's re- lookbehind; neither guard reading docs/solutions; classify.Judge's lost external caller; the readyChecks name; the compare command hand-maintained in two files."
-  ],
   "threads": {
     "onGitHub": 15,
     "resolved": 15,
     "answeredByMe": 15,
     "botThreadsAdjudicated": 0,
-    "note": "Counted at the forge. Rounds twelve and thirteen opened no thread, since their findings named lines that carry no diff row, so the fifteen are rounds one to eleven's, each carrying the implementer's disposition and mine. No bot has opened a thread on #2121."
+    "note": "Counted at the forge, none unresolved and none awaiting my answer. Rounds twelve to fifteen opened no thread, their findings naming lines that carry no diff row. No bot has opened a thread on #2121."
   }
 }
