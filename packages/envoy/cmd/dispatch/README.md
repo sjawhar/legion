@@ -889,8 +889,11 @@ questions, comment bodies, and issue messages are indexed into `refs` on every w
 that introduced it), and creates the `graph_edges` view, which unions those mentions with the
 structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`,
 `owned_by`, `replies_to`, `followed_by`). `GET /api/v1/references?to=<ref>` lists everything that
-points at a node and `?from=<ref>` everything it points to, cross-project. The migration refuses
-to run when an ask or comment anchor carries a non-uuid `artifact_id`.
+points at a node and `?from=<ref>` everything it points to, cross-project. A row whose other end is
+a node kind the running build does not know (a newer build's, read during a rolling deploy) is left
+out of every list and every count that build serves (`nodeLoaders`, `refs/graph.go`, names the
+kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
+`artifact_id`.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs

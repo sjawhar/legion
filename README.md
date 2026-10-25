@@ -148,9 +148,13 @@ go -C packages/envoy test ./...                      # Envoy, Dispatch's server 
 ```
 
 Envoy's Go tests start NATS in Docker, and the tests that need a Postgres read its address from the
-environment. The repository's conventions and each part's commands are in `AGENTS.md` at the root
-and in the `AGENTS.md` beside most packages; `skills/AGENTS.md` covers the skills. The documentation
-site's [contributing page](https://sjawhar.github.io/legion/contributing/) covers writing its pages.
+environment (`LEGION_TEST_PG_DSN` for the daemon's). On a host without Docker, the daemon's NATS
+tests use a running nats-server with JetStream instead when `LEGION_TEST_NATS_URL` (its client URL)
+and `LEGION_TEST_NATS_MONITOR_URL` (its monitoring endpoint) are both set, one package at a time
+(`go test -p 1`). The repository's conventions and each part's commands are in `AGENTS.md` at the
+root and in the `AGENTS.md` beside most packages; `skills/AGENTS.md` covers the skills. The
+documentation site's [contributing page](https://sjawhar.github.io/legion/contributing/) covers
+writing its pages.
 
 ## License
 

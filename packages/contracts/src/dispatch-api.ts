@@ -2384,6 +2384,12 @@ export interface IssueRead {
   readonly events: Event[];
 }
 
+/**
+ * How many of an issue's events `dispatch_read` lists, the newest ones, when it names neither
+ * `events` nor `all_events`: what `DispatchClient.read` returns by default.
+ */
+export const DEFAULT_ISSUE_READ_EVENTS = 10;
+
 export interface ArtifactText {
   readonly markdown: string;
   readonly version: number | null;

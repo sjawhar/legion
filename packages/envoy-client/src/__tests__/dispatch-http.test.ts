@@ -879,6 +879,39 @@ describe("DispatchClient", () => {
     ]);
   });
 
+  // A full page the read goes past must end past its cursor, or the next page would repeat it; a
+  // page that ends the read is taken as served, as the single-page read always took it.
+  test("read refuses a full page that does not move past its cursor only when it must read on", async () => {
+    const page = (from: number, to: number) =>
+      jsonResponse(Array.from({ length: to - from + 1 }, (_, index) => ({ seq: from + index })));
+    const stuck = fakeFetch([
+      jsonResponse({ key: "DSP-1", last_seq: 450 }),
+      page(1, 200),
+      page(1, 200),
+    ]);
+    await expect(
+      new DispatchClient("http://dispatch.test", "secret", stuck.fetchImpl).read("DSP-1", {
+        events: "all",
+      })
+    ).rejects.toThrow("GET /api/v1/issues/DSP-1/events?after=200 answered no event after seq 200");
+    expect(stuck.requests.map((request) => new URL(request.url).search)).toEqual([
+      "",
+      "?after=0&limit=200",
+      "?after=200&limit=200",
+    ]);
+
+    const last = fakeFetch([jsonResponse({ key: "DSP-1", last_seq: 50 }), page(1, 10)]);
+    const read = await new DispatchClient("http://dispatch.test", "secret", last.fetchImpl).read(
+      "DSP-1"
+    );
+    expect(read.events.map((event) => event.seq)).toEqual(
+      Array.from({ length: 10 }, (_, index) => index + 1)
+    );
+    expect(last.requests.map((request) => new URL(request.url).search)).toEqual([
+      "",
+      "?after=40&limit=10",
+    ]);
+  });
   test("maps comment reply-chain reads to the API", async () => {
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse({
