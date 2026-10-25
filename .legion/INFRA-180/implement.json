@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-180",
-  "completed": "2026-10-25T07:58:00Z",
-  "round": 6,
+  "completed": "2026-10-25T08:28:00Z",
+  "round": 7,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
-  "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b",
-  "closedByTheArchitect": "The architect ruled this the last round that changes code in pull request 2166 (Envoy message 44301d00f7aba09a97054c3f1c865887, 2026-10-25T07:46:31Z). Finding A is built; any later finding of any class is recorded here and on the pull request and changes no code, and one severe enough that shipping it would be wrong goes to the architect as a judgement for it to make.",
+  "headSha": "f3c3d411a87c84cd65f127c1ef5958ad68844d1c",
+  "closedByTheArchitect": "The architect ruled round 6 the last round that changes code in pull request 2166 (Envoy message 44301d00f7aba09a97054c3f1c865887, 2026-10-25T07:46:31Z), and then made one named exception for round 7: the single test fixture below, because it is a test rather than behaviour, it is one line, and without it a future refactor reverts the per-object repeat rule with CI green. No production code differs between 77f73e55e29b and this head. Any later finding of any class is recorded here and on the pull request and changes no code, and one severe enough that shipping it would be wrong goes to the architect as a judgement for it to make.",
   "proof": [
     {
       "criterion": "The review's one blocking defect: an attachment's fallback is doubled against blocks nested inside that same attachment, and, with it, a fallback stands ahead of the attachment's own body. The architect's rule: the fallback is read last of that attachment and only when its own subtree did not say it.",
@@ -15,6 +15,14 @@
       "observed": "4 posts, 4 wakes on each listener. A coloured attachment whose fallback copies its own section: 'Deploy failed on web-1\\nDeploy failed on web-1' at 50f2638ba941, 'Deploy failed on web-1' at 77f73e55e29b. An attachment whose fallback says more than its block: 'PLAIN COPY\\nthe real body' with the summary 'PLAIN COPY' before, 'the real body\\nPLAIN COPY' with the summary 'the real body' after — the round 2 note about a fallback leading its own body, retired. Both guards identical on the two listeners: the same-object collapse (title, text, fallback, the fallback equal to the title) delivers '[Triggered] CPU load high\\nhost web-1 is at 97%', and an attachment's fallback against a block elsewhere in the message delivers 'CPU high on host-a\\nCPU high'.",
       "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b",
       "negativeControl": "In each run the same body with the signature v0=deadbeef was refused HTTP 401 and woke nobody, and a correct HMAC over a timestamp 4,000 s old was refused HTTP 401 and woke nobody."
+    },
+    {
+      "criterion": "Approved spec version 11's acceptance names 'the repeated piece' as the case that proves the repeat rule, and at 77f73e55e29b that case did not exercise it: its fixture gave the message the same own text, so ownWords decided it before the per-object tally was reached.",
+      "surface": "The contracts package's own test binary, and a mutation of the production rule in a scratch copy of the module.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/contracts/ -count=1; then, in a /tmp copy with `|| slices.Contains(yielded, text)` deleted from normalize.go, go test ./internal/contracts/ -count=1 -run TestSlackDeliveredText",
+      "observed": "The fixture's own text is now empty, so the attachment's title, text and fallback are decided by the per-object tally and by the fallback's subtree check; its expectations are unchanged ('Build failed', summary 'slack message in C01234567 from U01234567: Build failed'), and the whole table is green at this head.",
+      "headSha": "f3c3d411a87c84cd65f127c1ef5958ad68844d1c",
+      "negativeControl": "With that one condition deleted in a scratch copy, the table stayed wholly green at 77f73e55e29b and fails exactly one case at this head, TestSlackDeliveredText/a_repeated_piece, so the acceptance line's own case now exercises the rule it names."
     },
     {
       "criterion": "The walk's measured cost does not move: only an object carrying a non-blank string fallback pays for the subtree record, so no other object takes a call per piece.",
