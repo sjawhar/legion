@@ -126,18 +126,20 @@ versions. Never add the module to the root `go.work`.
   (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
   string input the component carries (`gcp.dispatchSeededInput`, one row each in
   `TestDispatchRefusesAnNKeySeedInAPlainInput`, `azureFederationAudience` among them);
-  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `agentSecretsTokenSecret`, and the
-  Azure embedder's Pulumi inputs `azureEmbedEndpoint`, `azureEmbedDeployment`,
-  `azureEmbedKeySecret`, `azureTenantId` and `azureClientId` are checked for a seed once they
-  resolve, before any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret` and the Azure embedder's Pulumi
+  inputs `azureEmbedEndpoint`, `azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and
+  `azureClientId` are checked for a seed once they resolve, before any child takes them
+  (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
   `TestConstructRefusesASeedInADispatchInput`, `TestConstructRefusesASeedInAnAzureInput`); the two
   credentials `tailnetAuthKey` and
   `signInClientSecret` are also refused blank or whitespace-only then, through the one rule both
   run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since neither
-  can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker token
-  (`agentSecretsTokenSecret`, a Secret Manager resource path read through a second
-  SecretProviderClass, with its own per-secret accessor member), the Azure embedder's key
-  (`azureEmbedKeySecret`, the same shape under `<hostname>-azure-embed-key`; the keyless form takes
+  can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker relay
+  takes no credential at all, since `envoy-dispatch` presents its own ServiceAccount's projected
+  token, which the kubelet mints for `agentSecretsAudience` and nothing stores
+  (`TestDispatchStoresNoBrokerTokenWhenSet`); the Azure embedder's key (`azureEmbedKeySecret`, a
+  Secret Manager resource path read through a SecretProviderClass of its own,
+  `<hostname>-azure-embed-key`, with its own per-secret accessor member; the keyless form takes
   only a tenant and a client id, and its token is projected into the pod) and the GitHub App key
   (`appPrivateKeySecretName` and `appPrivateKeySecretKey`, a Kubernetes Secret GKE SecretSync
   creates at run time, which the component never parses, creates or waits on) enter by reference,

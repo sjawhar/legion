@@ -26,9 +26,6 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 )
 
-// testUIToken is the UI bearer every broker these tests start is configured with.
-const testUIToken = "test-token-0123456789abcdef0123456789abcdef"
-
 // testSecretsPrefix and testSecretsKMSKeyARN are the name prefix every agent secret sits under
 // and the key every one of them is encrypted with, as productionEnv configures every broker
 // these tests start (BROKER_SECRETS_PREFIX, BROKER_SECRETS_KMS_KEY_ARN). A fake secrets file a
@@ -44,7 +41,6 @@ const (
 // productionEnv is the configuration every broker needs besides its addresses and database: the
 // namespace it serves and the key every secret there is on.
 var productionEnv = []string{
-	"BROKER_UI_TOKEN=" + testUIToken,
 	"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
 	"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
 	"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
@@ -83,10 +79,9 @@ func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 			"BROKER_DATABASE_URL":        "postgres://unused",
 			"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
 			"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.example/credentials/machine",
-			"BROKER_UI_TOKEN":            "ui-token",
+			"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
 			"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
 			"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
-			"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
 		}[name]
 	})
 	if err != nil {
@@ -342,6 +337,25 @@ func startBroker(t *testing.T, options brokerOptions) *brokerProcess {
 // its own write once the pipe's buffer fills.
 func (p *brokerProcess) Log() string {
 	return p.Output.String()
+}
+
+// awaitTimeout bounds how long Await waits for the line it asks for.
+const awaitTimeout = 10 * time.Second
+
+// Await answers everything the broker has logged once a line carrying want has arrived. The
+// binary logs the rest of its boot — the state of its token exchange — after the bind line
+// startBroker synchronises on, so a test that reads one of those later lines asks Await for it
+// rather than reading Boot. It fails t if that line has not come within awaitTimeout.
+func (p *brokerProcess) Await(t *testing.T, want string) string {
+	t.Helper()
+	for deadline := time.Now().Add(awaitTimeout); ; time.Sleep(listeningPoll) {
+		if text := p.Log(); strings.Contains(text, want) {
+			return text
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the broker never logged a line carrying %q:\n%s", want, p.Log())
+		}
+	}
 }
 
 // listeningPoll is how often AwaitListening looks for the broker's listening line. The line is

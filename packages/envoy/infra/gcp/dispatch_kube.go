@@ -28,6 +28,11 @@ type dispatchKubernetes struct {
 // hub through it name.
 const dispatchSOCKS5Port = 1055
 
+// agentSecretsTokenSeconds is the lifetime of the projected ServiceAccount token envoy-dispatch
+// presents to the secrets broker. The broker refuses a token living longer than an hour from its
+// issue, so the kubelet mints it for exactly that and rewrites it before it expires.
+const agentSecretsTokenSeconds = 3600
+
 // clusterLocal is the in-cluster DNS name of Service name in namespace: what one pod calls
 // another workload's Service at.
 func clusterLocal(name, namespace string) string {
@@ -274,19 +279,6 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return nil, err
 	}
 
-	tokenClassName := s.hostname + "-agent-secrets-token"
-	if s.agentSecretsURL != "" {
-		tokenPath := refuseDispatchSeed(args.AgentSecretsTokenSecret, dispatch, "agentSecretsTokenSecret").ApplyT(func(secret string) string {
-			return strings.TrimSuffix(secret, "/") + "/versions/latest"
-		}).(pulumi.StringOutput)
-		if _, err := apiextensions.NewCustomResource(ctx, tokenClassName, &apiextensions.CustomResourceArgs{
-			ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(tokenClassName),
-			OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": tokenPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: agent-secrets-token\n" }).(pulumi.StringOutput)}}},
-		}, child...); err != nil {
-			return nil, err
-		}
-	}
-
 	azureKeyClassName := s.hostname + "-azure-embed-key"
 	if s.azure.key {
 		keyPath := refuseDispatchSeed(args.AzureEmbedKeySecret, dispatch, "azureEmbedKeySecret").ApplyT(func(secret string) string {
@@ -449,14 +441,16 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	appVolumes := append(corev1.VolumeArray{}, seedVolume...)
 	appGrants := []pulumi.Resource{cloud.seedAccessor}
 	if s.agentSecretsURL != "" {
-		// The token is read at run time from Secret Manager through a SecretProviderClass of its
-		// own, mounted as a read-only file of a volume of its own into envoy-dispatch alone;
-		// DISPATCH_AGENT_SECRETS_TOKEN_FILE names that file. The app's pods mount it, so they wait
-		// for the grant that lets them, as they do for the seed's.
-		appEnv = append(appEnv, valueEnv("DISPATCH_AGENT_SECRETS_URL", s.agentSecretsURL), valueEnv("DISPATCH_AGENT_SECRETS_TOKEN_FILE", "/var/run/secrets/dispatch/agent-secrets-token"))
-		appMounts = append(appMounts, corev1.VolumeMountArgs{Name: pulumi.String("agent-secrets-token"), MountPath: pulumi.String("/var/run/secrets/dispatch"), ReadOnly: pulumi.Bool(true)})
-		appVolumes = append(appVolumes, corev1.VolumeArgs{Name: pulumi.String("agent-secrets-token"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(tokenClassName)}}})
-		appGrants = append(appGrants, cloud.tokenAccessor)
+		// Dispatch presents its own ServiceAccount's token to the broker, which reads the caller
+		// from BROKER_API_ACCOUNTS. The kubelet mints it for the broker's audience into a projected
+		// volume of its own, mounted read-only into envoy-dispatch alone, and rewrites it in place
+		// before it expires; DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names that file, which
+		// Dispatch reads at call time. No secret is stored for it, so nothing waits on a grant.
+		appEnv = append(appEnv, valueEnv("DISPATCH_AGENT_SECRETS_URL", s.agentSecretsURL), valueEnv("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE", "/var/run/secrets/dispatch/agent-secrets-account-token"))
+		appMounts = append(appMounts, corev1.VolumeMountArgs{Name: pulumi.String("agent-secrets-account-token"), MountPath: pulumi.String("/var/run/secrets/dispatch"), ReadOnly: pulumi.Bool(true)})
+		appVolumes = append(appVolumes, corev1.VolumeArgs{Name: pulumi.String("agent-secrets-account-token"), Projected: &corev1.ProjectedVolumeSourceArgs{Sources: corev1.VolumeProjectionArray{
+			corev1.VolumeProjectionArgs{ServiceAccountToken: &corev1.ServiceAccountTokenProjectionArgs{Audience: pulumi.String(s.agentSecretsAudience), ExpirationSeconds: pulumi.Int(agentSecretsTokenSeconds), Path: pulumi.String("agent-secrets-account-token")}},
+		}}})
 	}
 	if s.appClientID != "" {
 		// The App key is one key of a Kubernetes Secret this component never creates: it exists at
@@ -475,7 +469,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	if s.azure.key {
 		// The key form: the key is read at run time from Secret Manager through its own
-		// SecretProviderClass and volume, as the broker token is, and the pods wait for its grant.
+		// SecretProviderClass and volume, as the NATS seed is, and the pods wait for its grant.
 		appEnv = append(appEnv, valueEnv("DISPATCH_AZURE_EMBED_KEY_FILE", "/var/run/secrets/azure-embed/key"))
 		appMounts = append(appMounts, corev1.VolumeMountArgs{Name: pulumi.String("azure-embed-key"), MountPath: pulumi.String("/var/run/secrets/azure-embed"), ReadOnly: pulumi.Bool(true)})
 		appVolumes = append(appVolumes, corev1.VolumeArgs{Name: pulumi.String("azure-embed-key"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(azureKeyClassName)}}})

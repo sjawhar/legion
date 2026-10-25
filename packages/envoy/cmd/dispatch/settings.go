@@ -107,8 +107,8 @@ var settings = []setting{
 		Description: "Audience those service-account tokens must carry."},
 	{Name: "DISPATCH_AGENT_SECRETS_URL", Required: "no",
 		Description: "Base URL of the secrets broker's API, an absolute http(s) URL with no path; set, the credential-request pages are on."},
-	{Name: "DISPATCH_AGENT_SECRETS_TOKEN", File: true, Required: "when `DISPATCH_AGENT_SECRETS_URL` is set",
-		Description: "Bearer token Dispatch sends the secrets broker."},
+	{Name: "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE", Required: "when `DISPATCH_AGENT_SECRETS_URL` is set",
+		Description: "File holding Dispatch's own projected Kubernetes service-account token, which every call to the secrets broker presents; the broker verifies it and reads the caller from `BROKER_API_ACCOUNTS`. In the cluster it is the projected-token volume's path (`/var/run/secrets/…/token`), which the kubelet rewrites in place; the file is read at call time, so a rotation needs no restart, and a local run writes a token into a file of its own and names that."},
 	{Name: "DISPATCH_EMBEDDER", Default: "`bedrock`", Required: "no",
 		Description: "Where meaning search reaches Cohere Embed v4: `bedrock` (AWS Bedrock, on the AWS SDK's own region and credentials; with no region, search is keyword-only) or `azure` (Azure AI Foundry, configured by the `DISPATCH_AZURE_*` settings, each of which `bedrock` refuses)."},
 	{Name: "DISPATCH_AZURE_EMBED_ENDPOINT", Required: "when `DISPATCH_EMBEDDER` is `azure`",
@@ -145,7 +145,14 @@ var removedSettings = []struct{ Name, Replacement string }{
 	{"DISPATCH_ALLOWED_LOGINS", "people sign in; DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN names who may"},
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
 	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock (the AWS SDK's default credential chain) or Azure AI Foundry (the DISPATCH_AZURE_* settings), chosen by DISPATCH_EMBEDDER, never with a Cohere API key"},
+	{"DISPATCH_AGENT_SECRETS_TOKEN", noSharedBrokerBearer},
+	{"DISPATCH_AGENT_SECRETS_TOKEN_FILE", noSharedBrokerBearer},
 }
+
+// noSharedBrokerBearer is why the secrets broker's shared bearer and its file are gone: the
+// broker (BROKER_UI_TOKEN removed with it) now identifies Dispatch by Dispatch's own projected
+// Kubernetes ServiceAccount token, which DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names.
+const noSharedBrokerBearer = "the secrets broker takes Dispatch's own projected Kubernetes service-account token, not a shared bearer: name the file holding it in DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE and list that account in the broker's BROKER_API_ACCOUNTS"
 
 // refuseRemovedSettings names the first removed setting env still sets, and what replaced it.
 // resolveBootConfig runs it before it reads anything else.

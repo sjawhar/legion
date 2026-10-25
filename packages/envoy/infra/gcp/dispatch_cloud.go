@@ -26,8 +26,6 @@ type dispatchCloud struct {
 	listenerToken *random.RandomPassword
 	principal     pulumi.StringOutput
 	seedAccessor  *secretmanager.SecretIamMember
-	// tokenAccessor is set only with agentSecretsTokenSecret.
-	tokenAccessor *secretmanager.SecretIamMember
 	// azureKeyAccessor is set only with azureEmbedKeySecret.
 	azureKeyAccessor *secretmanager.SecretIamMember
 	// issuer is the cluster's service-account token issuer.
@@ -179,19 +177,10 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	var tokenAccessor *secretmanager.SecretIamMember
-	if args.AgentSecretsTokenSecret != nil {
-		// The broker token is read by the app at run time through the CSI driver, so the pods'
-		// principal needs the same per-secret accessor grant the NATS seed has.
-		tokenAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-agent-secrets-token-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.AgentSecretsTokenSecret, dispatch, "agentSecretsTokenSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
-		if err != nil {
-			return nil, err
-		}
-	}
 	var azureKeyAccessor *secretmanager.SecretIamMember
 	if s.azure.key {
-		// The Azure key is read by the app at run time through the CSI driver too, under the same
-		// per-secret grant.
+		// The Azure key is read by the app at run time through the CSI driver, so the pods'
+		// principal needs the same per-secret accessor grant the NATS seed has.
 		azureKeyAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-azure-embed-key-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.AzureEmbedKeySecret, dispatch, "azureEmbedKeySecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 		if err != nil {
 			return nil, err
@@ -214,5 +203,5 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 		}
 		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", parts[0], parts[1], parts[2]), nil
 	}).(pulumi.StringOutput)
-	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, tokenAccessor: tokenAccessor, azureKeyAccessor: azureKeyAccessor, issuer: issuer}, nil
+	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, azureKeyAccessor: azureKeyAccessor, issuer: issuer}, nil
 }
