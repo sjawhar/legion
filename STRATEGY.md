@@ -77,7 +77,7 @@ Everything is a node, so verification, handoffs that live in Dispatch, and refer
 - **Merged changes reach production on their own**, without downtime.
 - **In Dispatch, one element behaves the same everywhere and never blocks the person:** one renderer for mentions and markdown, and no input disabled when the action can be queued.
 - **One identity per caller.** Authentication is OAuth or workload identity federation everywhere: a workload exchanges its platform identity for a token, a session acting for a person gets its own token for that person. No shared tokens.
-- **Standard best practice first.** Where a standard solution exists, use it and do not ask. A design that departs sharply from standard practice is a sign to fix the underlying problem, not to keep digging.
+- **Standard best practice first.** Where a standard solution exists, use it and do not ask. Before designing, check how the problem is normally solved and how well-regarded projects doing the same thing solve it. A design that departs sharply from standard practice is a sign to fix the underlying problem, not to keep digging.
 
 ## Boundaries
 
