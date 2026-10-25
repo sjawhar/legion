@@ -559,10 +559,35 @@ with `permission denied for schema public`. Grant `USAGE, CREATE ON SCHEMA publi
 (measured on Postgres 16.15: `CONNECT, CREATE ON DATABASE` alone is refused, the schema grant
 creates the table), or make the login the schema's owner.
 
-Every agent in the deployment can read that URL file, as every pod mounts it, and so can read and
-rewrite every conversation in the table, the controller's included, with the login's rights. That
-is the trade LEGION-654's spec accepts for sessions that outlive their pods: give the login no
-rights beyond the two tables' database, and treat its URL as a credential every agent holds.
+**One login, every conversation: what that costs.** Every role container mounts the providers
+Secret with the session database's URL among its keys, and the agent is told where that file is
+(`OMP_SESSION_SQL_DSN_FILE`, above), so every agent in the deployment holds the login the whole
+table sits behind. Oh My Pi's two tables are keyed by the session's recorded path and carry no
+tenant, project or issue column, so rights over the table are rights over every conversation in
+it: the controller's, and every role's of every issue of every tree. An agent that obeys text it
+was handed can therefore read another issue's transcript and rewrite it — and these agents read
+issue bodies, pull request comments and fetched pages by design, so text written to be obeyed
+reaches them as a matter of course. A rewritten row is not an inert file: it is what that role's
+next resume replays into its own agent, so the write lands in another agent's head. The party
+reachable this way is any other issue, role or tree **of this deployment**, never one outside it:
+the database holds this deployment's sessions, and no pod of it mounts another's.
+
+Under `pvc` a session was a file on a disk only its own issue's pod could mount, so no issue
+could reach another's at all, and this release widens that boundary rather than keeping it. That
+is the trade LEGION-654's spec accepts for sessions that outlive their pods, and it is a trade to
+weigh before the rollout rather than after: a deployment that cannot accept one agent reaching
+another's transcript has no setting in this release that stops it.
+Where it is closed properly is `dispatch://INFRA-228` — a credential per issue, or a row-level
+policy the database itself enforces — and nothing in this release anticipates that work.
+
+The login is not narrowed here, and narrowing it would buy nothing. A login restricted to
+`omp_session_files` and `omp_session_files_parts` still reads and writes every row of both, which
+is the whole of the exposure above; isolation has to be per issue — a credential of its own, or a
+policy the rows are checked against — and no table-level grant is that. The project also declined
+the same narrowing on this same store on `dispatch://INFRA-244`, so deciding the other way here
+would put two contradictory postures on one credential in one deployment. What this release does
+ask of the login is unchanged: give it no rights beyond the database of those two tables, and
+treat its URL as a credential every agent holds.
 
 A resume is held to the table, and to nothing on a disk. A role's launcher looks the recorded
 session up in the table through the same URL file before it starts the child
@@ -768,7 +793,8 @@ two init containers and six role containers — `architect`, `planner`, `impleme
 `reviewer`, `merger` — each of which runs `legion launcher`, a supervisor with no workflow policy
 that authenticates to the daemon's worker stream with its role's own token and starts or stops
 that role's `legion worker-shim` and Oh My Pi when the daemon tells it to. Every role of the issue
-shares the issue's checkout, the issue's own volume, the sessions directory on it and the pod's network;
+shares the issue's checkout, the pod's own disk it sits on and the pod's network, and every one of
+their sessions is a row in the session database rather than a file any of them holds;
 each role keeps its own state directory, agent-secrets key, GitHub App credential and launch credentials. A role's Secret holds
 its launcher token, projected into that role's container alone and bound to the pod's uid, and the
 two gh files its `gh` and `git` read the role's App token from
@@ -1062,7 +1088,8 @@ the root Sandbox's `volumeClaimTemplates` entry, so Agent Sandbox creates the vo
 that Sandbox as its owner, and deleting the root Sandbox deletes the volume (`sandboxManifest` in
 `internal/runtime/sandbox/manifest.go` and `Release` in `sandbox.go`, both at `legion-v10.0.0`).
 That loses every change in its working copies that was not pushed and, where that release kept
-sessions as files on the volume (its own `session_store: pvc`),
+sessions as files on the volume (its own `session_store: pvc`, a value this release's loader
+refuses),
 every session recorded on it. Where it kept them in the table (`postgres`), a session copied there first
 ([Copying file sessions before turning it on](#copying-file-sessions-before-turning-it-on)) is
 kept, and its agent resumes it in a workspace provisioned from its issue's pushed branch. A volume
@@ -1111,12 +1138,26 @@ deployment still on the file store copies its sessions into the table first ([Co
 sessions before turning it on](#copying-file-sessions-before-turning-it-on)); a sessions table
 behind is a deployment every issue's next launch fails on, not something the cutover repairs.
 
-The cutover itself, once the image is applied:
+**The earlier daemon is stopped before the new image boots.** Scale its Deployment to 0 and wait
+for its pod to go, as the session copy does ([Copying file sessions before turning it
+on](#copying-file-sessions-before-turning-it-on), step 2), rather than rolling one image onto the
+other: nothing makes a daemon a singleton, and a daemon that is restarting or refusing its
+configuration leaves the earlier release's issue pods running with nobody supervising them
+([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees)).
+Migration 0051 strips the `release` key from every `issue_suspend` row still queued, because this
+release decodes that payload strictly and no longer has the field; an earlier daemon still
+running after the strip, closing a child as done during the overlap, queues the key again,
+and the new daemon's decode then stalls that issue's lifecycle lane on a row no retry can finish —
+the very failure the migration exists to prevent.
+
+The cutover itself, once that daemon is stopped and the image is applied:
 
 1. **Read the boot log for the issues still to cut over.** The census accepts an issue Sandbox
-   that still owns the `issue` template and logs it by name, `sandbox runtime: issue Sandbox
-   <name> owns an "issue" claim template, the disk shape before the pod-owned disk; its next
-   launch replaces it`, one line per such Sandbox. That list is the work.
+   that still owns the `issue` template and logs one line for each, `sandbox runtime: the issue
+   Sandbox owns a claim template, the disk shape before the pod-owned disk; its next launch
+   replaces it`, which names the Sandbox in the line's `sandbox` attribute, not in its text (the
+   template's name is its `claim_template`), so grep the message and read the names off the
+   attribute. That list is the work.
 2. **Stop each issue running that day with its work pushed, and start it again.** The push is the
    point: the launch that puts the issue on the new shape deletes the Sandbox and the volume it
    owns, so every change not on `legion/<KEY>` is gone. Let a role mid-turn finish, or ask it
@@ -1550,9 +1591,9 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
 - a `setup` that is not a list of non-empty strings (`runtime.kubernetes.setup must be an array
   of non-empty strings`), or an empty list (`runtime.kubernetes.setup must name a command: leave it
   out to run none`);
-- `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
-  one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
-  `pvc` (an inert key is refused, never ignored). At boot the daemon also refuses a
+- a `session_store` that is not `postgres`, and an omitted `session_store`, which is the same
+  refusal rather than a default; and `postgres` without `session_dsn_secret`, or with one that is
+  empty or not a Secret data key (`[-._a-zA-Z0-9]+`). At boot the daemon also refuses a
   `session_dsn_secret` that is the providers Secret's `NATS_NKEY_SEED`, a `provider_keys` entry
   that reads the same key (the shim would export the URL into Oh My Pi's environment), and an
   operator's `pod.env` or `provider_keys` naming `OMP_SESSION_STORAGE` or
@@ -2150,8 +2191,8 @@ each that every role of it is told the same, under the issue's scratch `/legion/
 `XDG_CACHE_HOME=/legion/scratch/cache`, `XDG_DATA_HOME=/legion/scratch/data` and
 `BUN_INSTALL_CACHE_DIR=/legion/scratch/bun/install/cache` (`roleEnvironment`, `manifest.go`). A
 directory per role is what those four replace, by the human's decision of 2026-10-20 (specification
-version 20): the issue's roles already share the pod, the issue's volume whole, the one workspace
-they all work in, the sessions directory, uv's Pythons and cache and the two Go caches, and each
+version 20): the issue's roles already share the pod, the pod's disk whole, the one workspace
+they all work in, uv's Pythons and cache and the two Go caches, and each
 can read and write what the others write, so a cache per role bought an isolation the pod does not
 have and cost a copy of every cache per role. `XDG_STATE_HOME=/legion/scratch/state/<role>` is the
 one directory of the scratch that stays the role's own (the state home above). The two Go caches
@@ -3644,8 +3685,8 @@ runtime:
     tree_volume: 20Gi            # default 20Gi; one volume per issue tree
     kubeconfig: ./kind.kubeconfig  # optional; relative paths resolve against legion.yaml's directory.
                                    # Omitted: the in-cluster service account
-    session_store: pvc           # default; postgres stores each agent's conversation in Postgres (see Session store)
-    session_dsn_secret: SESSION_DSN  # required with postgres: the key of legion-<project>-providers holding one postgres:// URL
+    session_store: pvc           # never read by this daemon, and refused by the Go daemon (see Session store)
+    session_dsn_secret: SESSION_DSN  # likewise: the Go daemon requires this key, beside session_store: postgres
     resources:                   # optional overrides of the profile table below, per quantity
       large:
         limits:
@@ -3660,6 +3701,13 @@ daemon_url: http://<address pods reach the daemon at>:<the daemon's own port>   
 bind: 0.0.0.0
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN       # required under kubernetes
 ```
+
+The block's two `session_*` keys are historical twice over: the TypeScript daemon read neither of
+them, and the Go daemon that does read them takes `postgres` alone, refusing `session_store: pvc`
+and an omitted `session_store` with the same line ([Selecting the store](#selecting-the-store)).
+Copied into a live `legion.yaml`, that `pvc` is a boot refusal rather than a default, and the
+`session_store` clauses of the refusal list below are this section's history, not this release's
+rule.
 
 A user block with `exec:` (the shape `aws eks update-kubeconfig` writes) is honoured: the command
 runs with the daemon's environment plus `exec.env`, its `status.token` is cached until one minute
@@ -4074,23 +4122,21 @@ bind: <devbox VPC IP>
 worker_stream_port: <worker stream port>
 ```
 
-**`--resume` keeps the same-agent invariant through the init container.** The tmux runtime `stat`s the
-recorded session file on the daemon host and refuses to spawn when it is missing (a silent fresh agent
-would lose the session). Under Kubernetes the file lives on the pod's volume (`/legion/sessions/…`, the
-OMP sessions `subPath`), which the daemon cannot see — and OMP itself does not refuse: verified against
-the pinned OMP build (`omp --resume=<missing path> --mode rpc`), it exits 0, answers `ready`, and runs
-as a fresh agent, with no error frame and no mention of the file. So when a spawn resumes a session, the
-runtime hands the init container the file's volume path (`LEGION_RESUME_SESSION_FILE`, the recorded
-`/home/legion/.omp/profiles/legion/agent/sessions/<file>` translated to `/legion/sessions/<file>`; a
-recorded path anywhere else is refused before any API call), and `workspace-init` exits non-zero naming
-the path if it is not there after provisioning — the pod goes `Failed`, the daemon counts a launch
-failure, exactly as tmux does. A volume replaced or a `sessions/` directory removed by hand therefore
-fails the respawn loudly instead of quietly starting a new agent under the old role token. Under
-`session_store: postgres` the transcript is a database row, not a file on the volume, so the init
-container omits that check; `--resume=<row path>` still reaches OMP, which opens the row — and when the
-row is gone, starts a fresh session with a new id that the daemon then refuses to register (`409 Worker
-respawn must resume the same agent session`), so the pod exits and the launch failure is counted (see
-[Selecting the store](#selecting-the-store)).
+**`--resume` keeps the same-agent invariant, and the table is what keeps it.** The tmux runtime
+`stat`s the recorded session file on the daemon host and refuses to spawn when it is missing (a
+silent fresh agent would lose the session), and Oh My Pi itself does not refuse: verified against
+the pinned build (`omp --resume=<missing path> --mode rpc`), it exits 0, answers `ready`, and runs
+as a fresh agent, with no error frame and no mention of the file. Under Kubernetes there is no
+file to `stat` and no init container that looks for one: every session is a row in the session
+database, and the pod's disk, which dies with the pod, never holds a transcript. The role's own
+launcher makes the check instead, inside the pod and before it starts the child: it looks the
+recorded session up in the table through the mounted URL file and refuses the start when the table
+holds none (`resume session <path>: the session table holds no such session`), which the daemon
+counts as a launch failure, three of them retiring the claim. Should a resume reach Oh My Pi with
+its row gone anyway, it starts a fresh session with a new id that the daemon refuses to register
+(`409 Worker respawn must resume the same agent session`), so the pod exits and the launch failure
+is counted there. Either way the respawn fails loudly rather than quietly starting a new agent
+under the old role token (see [Selecting the store](#selecting-the-store)).
 
 **On kind, let the node pull the image from GHCR by digest** (the package is public; a fresh node
 pulled the 377 MB image in about 10 s). Do not `kind load docker-image` a digest-only reference: kind
@@ -4319,10 +4365,11 @@ owner's `github-hosts-<owner>` and `github-config-<owner>`, the review App's rea
 and `config.yml` for every owner of the project, and `github-default`, the first owner), refreshed
 every minute as every role's are, and is the only Secret its launch writes: there is no
 provisioning `-boot` Secret.
-Its Sandbox owns a volume of its own, as an issue's does (`issue-legion-<project>-controller`, from
+Its Sandbox owns a volume of its own, where an issue's owns none (`issue-legion-<project>-controller`, from
 its one `issue` claim template, of `runtime.kubernetes.issue_volume` and `storage_class`), mounted
-at `/legion` with its `sessions` directory at Oh My Pi's sessions directory, so a relaunch resumes
-the session. It provisions no workspace: no `workspace-fetch`, no provisioning token. Its `gh`
+at `/legion`, which is the working root the controller runs in, so what one of its pods leaves
+there the next one finds; its session is a row in the session database like every other, not
+anything on that volume. It provisions no workspace: no `workspace-fetch`, no provisioning token. Its `gh`
 bundle, projected read-only at `/var/run/legion/gh` by a `gh-controller` volume, acts as the review
 App, refreshed every minute as every role's is; a failed review-App mint fails the launch naming
 the role, and the keeper relaunches it. A project with no GitHub owner to mint for (none of its
@@ -4330,8 +4377,9 @@ repositories has an App) starts the controller anyway with `gh` acting as nobody
 controller start` does there: its role Secret records an empty `github-default`, its `gh-controller`
 volume is an empty directory, and it holds owners from its next pod on. Its one init container,
 `legion workspace-init controller --root
-/legion`, makes the sessions directory; in a pod created to resume a session whose file is gone it
-exits 3, which the daemon reads as a lost volume and answers with a fresh controller. The pod
+/legion` (`controllerPod.initContainers`), creates nothing at all: it refuses a `--root` that is
+not absolute and a pod handed the provisioning token, which the controller never holds, and
+otherwise exits 0. The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
 name and to the volume it owns. Under `runtime.kubernetes.agent_secrets` it is enrolled with the
@@ -4414,11 +4462,11 @@ retired, it ends the controller record's registration while the record still nam
 session, minting it a capability nobody holds, logged as `controller: ending the registration of the
 controller an earlier boot under controller: daemon launched; this daemon leaves the controller to
 its operator`; a record naming another session, the operator's controller's once it has
-registered, or none, is left as it is. One known residual: a controller whose session a lost volume
-ended after it registered, switched back before its fresh launch registers, leaves the record naming
-that dead session, which the switch back does not end. Nobody holds its secret, which lived only in
-the dead agent, so it shows as a stale `controllerLocator` with admission wakes queued for nobody
-until the operator's `legion controller start` replaces it. A daemon that cannot stop the claim
+registered, or none, is left as it is. The file store left a residual here — a controller whose
+session died with its volume, switched back before its fresh launch registered, left the record
+naming a dead session the switch back would not end — and the table closes it: a session outlives
+the pod and the volume it ran on, so the claim this daemon stops still records the session the
+record names. A daemon that cannot stop the claim
 refuses to boot, naming
 it (`stop legion-<project>-controller, …`), with the record untouched; one that stopped it but
 cannot end its registration refuses naming it too (`end the registration of
@@ -4428,12 +4476,12 @@ launch of the daemon's own controller, and this daemon leaves the controller to 
 (controller: operator)`), and the token of an earlier launch is an invalid boot token, so no pod of
 the daemon's can replace the operator's registration. Then start the controller with `legion
 controller start` ([Operator-launched controller](#operator-launched-controller)). Releasing the
-Sandbox deletes the controller's volume with it, and the session on it, so switching to
-`controller: daemon` again starts a fresh controller after the keeper's first one-minute wait, on
-fresh budgets: a resume of the recorded session finds it gone (`workspace-init controller` exits 3)
-and the daemon relaunches the claim fresh. A `legion claims stop` of the controller under
-`controller: daemon` releases it the same way, so the keeper's retry after it starts a fresh
-controller too.
+Sandbox deletes the controller's volume with it, and with the volume the working root its pods
+shared, but not its session, which is a row in the session database. So switching to
+`controller: daemon` again relaunches the claim after the keeper's first one-minute wait, on fresh
+budgets, and the controller comes back on the conversation it recorded, in a pod whose `/legion`
+is empty. A `legion claims stop` of the controller under `controller: daemon` releases it the same
+way, so the keeper's retry after it brings the same session back on the same empty root.
 
 **Rolling back the image.** A daemon built before LEGION-592 cannot run against a database a
 `controller: daemon` daemon used: it lists the controller's claim as an issue keyed `""`, which every

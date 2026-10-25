@@ -144,10 +144,8 @@ predecessor phases already wrote. The durable copy lives in
 transcript, the committed file wins: it is the copy that survived.
 
 If your task, prompt, or a message since your last turn begins `Your workspace was recreated…`, read
-your phase's committed handoff and reconcile before new work: anything unpushed is gone. That
-message is the whole record of it, made from the launcher's `LEGION_WORKSPACE_RECREATED`; the
-workspace itself holds no file saying it was recreated. The message stays in history; reconciled,
-it is done.
+your phase's committed handoff and reconcile before new work: anything unpushed is gone, and the
+workspace holds no file saying so. That message stays in history; reconciled, it is done.
 
 ## Phase work
 
