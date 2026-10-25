@@ -3242,6 +3242,30 @@ dispatch://INFRA-206's declarations on 2026-10-25 turned two of the gate's three
 to `yes`. So each bullet below carries the date of the run behind it, and a reader runs the three
 gate commands itself rather than trusting the answers recorded here:
 
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-232, with the sequence
+  exactly as published above, through the role's own bash tool*: the block taken from this page
+  with only its three bracketed lines filled in, each run under the name the API server gave it,
+  and a fixture changing one line of it where named. As published, with one read of the workload
+  pod's labels added: `workload: infra-232-postgres-` and five characters printed after the
+  create, the Service created under that name, the pod's `batch.kubernetes.io/controller-uid` the
+  uid the create returned, `answered`, the trap's listing empty, `sequence: exit 0`, the call
+  returning 92 s after it started, and no Job of that name left in `kubectl get jobs`. With the
+  Job's `cpu` request `"1"`: the create refused by admission naming the four-processor rule, under
+  a name the server had already generated, the trap printing `cleanup: no Job name was read;
+  nothing removed` and `sequence: exit 1`, and no Job left; the same fixture with the trap's
+  no-name branch taken out printed `error: resource name may not be empty` and `cleanup: the Job's
+  delete failed`, then `cleanup: the Service is still there`, for objects that never existed. With
+  the Service selecting by `job-name`: refused by admission at the apply, naming its rule, and the
+  generated Job deleted while its pod was `ContainerCreating`, nothing left. With a 120 s stand-in
+  for the work and a call timeout of 30 s: the call ended at its timeout, the log showed
+  `answered`, and `kill -KILL -- -<process>` then left the Job, its Service and its running pod and
+  printed no `sequence: exit` line; the two recovery lines, given the printed name, removed them in
+  1 s. And the two facts the naming paragraphs rest on: `kubectl apply` of the Job's manifest,
+  run in the block in place of the create, refused it before sending anything, `error: from
+  infra-232-postgres-: cannot use generate name with apply`, and the trap removed nothing; and
+  `kubectl create --dry-run=server` admitted a Job with a generated name, a Job whose name the
+  client chose, and one setting both a name and a one-letter `generateName` under the client's
+  name — on that date the namespace's admission did not require a generated name.
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence as
   published then (before dispatch://INFRA-232 moved the Job to a generated name), through the
   role's own bash tool*: the block taken from this page
