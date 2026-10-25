@@ -302,15 +302,16 @@ test.describe("agents page", () => {
       const page = await context.newPage();
       await openAgents(page);
       let uploads = 0;
-      // The first upload fails, so its Retry is on screen when the message goes.
+      // The first upload is refused, so its Retry is on screen when the message goes. A 5xx would
+      // be tried again under the upload's key rather than refused.
       await page.route("**/api/v1/issues/*/artifacts", (route) => {
         if (route.request().method() !== "POST") return route.fallback();
         uploads += 1;
         if (uploads > 1) return route.fallback();
         return route.fulfill({
-          body: JSON.stringify({ code: "UNAVAILABLE", error: "storage is down" }),
+          body: JSON.stringify({ code: "ARTIFACT_INPUT", error: "Dispatch refused the upload" }),
           contentType: "application/json",
-          status: 503,
+          status: 400,
         });
       });
       const refuse = await refusePosts(page, "**/api/v1/issues/*/comments");
@@ -318,7 +319,7 @@ test.describe("agents page", () => {
       const field = row.getByRole("textbox", { name: "Comment" });
       const uploadRetry = row
         .getByRole("alert")
-        .filter({ hasText: "storage is down" })
+        .filter({ hasText: "Dispatch refused the upload" })
         .getByRole("button", { name: "Retry" });
 
       await page.keyboard.press("j");

@@ -776,7 +776,7 @@ test("a failed queued Conversation comment action keeps its thread and reply, cl
       requests += 1;
       if (requests === 1) {
         await firstResponse;
-        await route.fulfill({ status: 500 });
+        await route.fulfill({ status: 400 });
         return;
       }
       await route.continue();
@@ -789,9 +789,10 @@ test("a failed queued Conversation comment action keeps its thread and reply, cl
     await firstThread.getByRole("button", { name: "Resolve" }).click();
     await secondThread.getByRole("button", { name: "Resolve" }).click();
     resolveFirst?.();
-    // A 500 with no body is still an answer from the API, so the card shows what the client made
-    // of it, as the header, settings and composer do.
-    await expect(firstThread.getByText("Dispatch request failed (500)")).toBeVisible();
+    // A 400 with no body is still a verdict from the API, so the card shows what the client made
+    // of it, as the header, settings and composer do (a 5xx would be tried again under the
+    // write's key instead).
+    await expect(firstThread.getByText("Dispatch request failed (400)")).toBeVisible();
     await expect.poll(() => requests).toBe(1);
     await expect(firstReply).toHaveValue("Half a reply");
     await firstThread.getByRole("button", { name: "Retry" }).click();

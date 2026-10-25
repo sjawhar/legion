@@ -647,10 +647,11 @@ test("a Set priority row the server refuses is reported by the header, in the di
         return;
       }
       patches += 1;
+      // Dispatch's verdict: a 5xx would be tried again under the write's key, not refused.
       await route.fulfill({
-        body: JSON.stringify({ error: { code: "INTERNAL", message: "nope" } }),
+        body: JSON.stringify({ code: "ISSUE_INPUT", error: "Dispatch refused the priority" }),
         contentType: "application/json",
-        status: 500,
+        status: 400,
       });
     });
 
