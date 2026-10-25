@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-168",
+  "completed": "2026-10-25T05:30:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/rules-check.ts:240",
+      "description": "The 32 KiB ask-list bound drops whole asks from the rules request instead of clipping them. Reproduced at this head against the exported describeAsks: three ask blocks of ~9 KB followed by a ~9 KB ask whose recommendation is to change nothing gives `real listed: false`, list 24,732 bytes, asksCut 5 — the target ask never reaches the model, matches stays empty, and askgate-core.ts records ruleOutcome \"none\" for a call no rules check judged. The Dispatch report the A5 reader uses never surfaces ruleAsksCut (DecisionCounts carries calls/refusals/byRule/overrides/errors and no cut), so the loss is invisible to the one reader a standing session has. The PR body's claim that the bound 'clips text, it does not drop the tail ask, so padding does not walk past the check' holds only for a short tail ask; the tester's own live run already dropped one of six."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:2596",
+      "description": "In `warn` mode a charter `revise` refuses nothing — the call is sent with additionalContext at :2610 — yet breaker.revised runs unconditionally at :2596. Breaker keys are coarse (tool plus issue/ask/artifact/project/in_reply_to; the question text is not in the key), so two warned `dispatch ask --issue X` calls trip the breaker, and the third call on that target returns at :2420 before resolveRole and runRulesCheck are reached: a no-change ask posts with no rules check at all, in the mode the change ships as its soft arm. The breaker row also carries ruleOutcome null with no preceding refusal, so askgate-report.ts counts it in neither calls, refusals nor overrides while formatDispatchReport describes every such row as a refused call sent again."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/new-asks.ts:540",
+      "description": "The footnote-definition opener advances past `[^x]:` without consuming the whitespace goldmark's footnote parser consumes, so a footnote whose content starts four or more columns past the marker is read as indented code and its ask block is never seen. Minimal case, confirmed against the real parser: `[^x]:    :::ask{#a}\\n    Which?\\n    :::` gives pmdoc.Parse and pmdoc.ParseFragment one ask block and askBlocks/newAsks none. A differential of 16,905 documents, hand-written plus fuzz, through a harness calling pmdoc directly, keeping only the rows the server accepts (7,219 fragment comparisons and 7,560 whole-document ones) found divergences in exactly this container and nowhere else: 89 documents, every one the scanner missing an ask the server creates and none the reverse. One to three spaces, and a tab, read correctly; four or more do not."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/rules-check.ts:286",
+      "description": "An upload whose de-duplication read fails judges every ask block in the document as new, so re-uploading an unchanged document that already holds a no-change-shaped ask block is refused for an ask it is not opening, and the agent must use --advisor-rebuttal to re-post its own file. This contradicts the module's own contract at :356-359, that the check's own failure never refuses a call. Secondary: for an upload with no retype ops the function returns textMissing true while no ask is marked textMissing, so the entry carries ruleTextMissing true with no ask missing its text and the report's textMissing count conflates two different signals."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/extensions/askgate/rules-check.ts:236",
+      "description": "describeAsks double-counts an ask that is both clipped and dropped: both the textMissing/over-8-KiB branch at :236 and the list-bound branch at :241 feed asksCut at :253, so four asks can report asksCut 5. The `N further new ask(s)…` line at :250 is also appended after the budget check, so the rendered list can exceed ASKS_MAX_BYTES by about 50 bytes."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/scripts/askgate-report.ts:795",
+      "description": "`askgate-report.ts --dispatch-project ''` passes the empty string through parseArgs and dies on Dispatch's 404 for GET /api/v1/projects/artifacts, where scripts/dispatch/ask-census.ts refuses an empty project by name. It fails closed and prints nothing on stdout, so it is a message, not a wrong count."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/extensions/askgate/decision-record.ts:36",
+      "description": "PLUGIN hard-codes the scope name rather than reading pkg.name beside pkg.version, so a rename of the package leaves every record naming the old one."
+    }
+  ],
+  "notes": [
+    "CI read on GitHub, not from a handoff: main's rulesets require lint, typecheck, test and pr-title (branch protection names none); the branch's newest pull_request run is at 61c02aafab8daea79654fd44f0042588765adc8a; all four required checks are completed and success there; compare 61c02aaf...1390a3e6 lists only .legion/ paths, so those runs stand for the code under review. dispatch is still in_progress and is not required.",
+    "Both E2E lines are present in the PR body, the implementer's and the tester's. Threads at the start of the round: none, and no review of any kind on the pull request.",
+    "The thermonuclear pair ran once at the reviewed head 1390a3e637827a12b7fb0f1400088a15ed5dd4e5; both returned CHANGES. Findings 1, 2 and 4 are the pair's, each re-verified here; finding 3 is the reviewer's own, found by re-running the pair's differential harness over every corpus and excluding the rows the server refuses.",
+    "The tester's observation that createDecisionRecorder races two documents for one session does not hold: no await separates documents.get at decision-record.ts:170 from documents.set at :199, and dispatchClient is synchronous, so two gated calls of one session cannot both post the name. No thread was opened for it.",
+    "Checked and clean: the decision record carries no ask text, no quote and no reason (DecisionRecord at decision-record.ts:88-108); a failed or given-up record write produces recordError alone and never changes the decision (askgate-core.ts:2911-2925), proven live by the tester's ZZZNOPE control; CEILING_MARGIN_MS accounts for the record's 5 s stop inside the handler ceiling; escapeXml runs before clipBytes on every ask body, so a clip cannot leave a bare `<`; the three new prompt files are held in the shipped bundle by prepack.test.ts:130-180; the shared fixture packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json binds the Go server test and new-asks.test.ts to the same 13 rows and the same ask ids, and envoy-and-contracts.yaml adds its path to the pi-envoy job's filter."
+  ]
+}
