@@ -1394,3 +1394,44 @@ func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 		}
 	}
 }
+
+// TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker: Dispatch's boot no longer
+// reads the file DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names, so a wrong path or an empty file
+// boots, and only the first credential page finds it out. That call never reaches the broker, so
+// the answer must not be AGENT_SECRETS_UNAVAILABLE, the code that tells an operator the broker is
+// unreachable: what is wrong is Dispatch's own credential, which the operator fixes in Dispatch's
+// deployment, not in the broker's.
+func TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker(t *testing.T) {
+	for name, tokenFile := range map[string]string{
+		"a path that does not exist": filepath.Join(t.TempDir(), "missing"),
+		"an empty file":              writeFile(t, "account-token", "\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				_, _ = w.Write([]byte(`{"requests":[]}`))
+			}))
+			defer broker.Close()
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_AGENT_SECRETS_URL":                broker.URL,
+				"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile,
+			})
+			request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+			response := httptest.NewRecorder()
+			routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
+			if called {
+				t.Fatal("the broker was called with no token Dispatch could read")
+			}
+			var answer struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("GET /api/v1/credential-requests answered %d %s, which is not a JSON error", response.Code, response.Body.String())
+			}
+			if answer.Code == "AGENT_SECRETS_UNAVAILABLE" {
+				t.Fatalf("GET /api/v1/credential-requests = %d %s: the broker was never called, so the answer must name Dispatch's own unreadable ServiceAccount token, not an unreachable broker", response.Code, response.Body.String())
+			}
+		})
+	}
+}
