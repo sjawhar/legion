@@ -94,6 +94,10 @@ func (p *Process) WaitForOutput(t testing.TB, lines ...string) {
 		for !strings.Contains(p.Output.String(), line) {
 			select {
 			case <-p.Exited:
+				// Exited closes only once the output is whole, so this read is final.
+				if strings.Contains(p.Output.String(), line) {
+					continue
+				}
 				t.Fatalf("%s exited before it logged %q:\n%s", p.name, line, p.Output.String())
 			default:
 			}
@@ -105,15 +109,52 @@ func (p *Process) WaitForOutput(t testing.TB, lines ...string) {
 	}
 }
 
-// FreeTCPPort is a loopback port nothing listened on a moment ago, for a process to serve on.
+// handedOut is every port FreeTCPPort has handed to a test that has not ended yet.
+var (
+	handedOutMu sync.Mutex
+	handedOut   = map[int]bool{}
+)
+
+// FreeTCPPort is a loopback port, for a process to serve on, that nothing listened on a moment ago
+// and that FreeTCPPort hands to no other caller of this binary until the test it went to ends.
+//
+// The port is free from the moment this returns until its process binds it, and the kernel hands
+// out any port nothing holds, so a test that draws a second port before the first one's process
+// has bound it can be handed the first again. In CI run 40162140539 one process of a pair exited on
+// "address already in use" for port 35881 while a health check of that port passed, which of the
+// servers that test runs only the pair's other process could have answered. A draw that repeats a
+// held port is kept open until a new port comes, so the kernel cannot hand it back.
+//
+// Only the callers of this function are kept apart: any other socket can still take the port before
+// its process binds it, and that process then exits on the bind.
 func FreeTCPPort(t testing.TB) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick a port: %v", err)
+	handedOutMu.Lock()
+	defer handedOutMu.Unlock()
+	var drawn []net.Listener
+	defer func() {
+		for _, listener := range drawn {
+			_ = listener.Close()
+		}
+	}()
+	for {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("pick a port: %v", err)
+		}
+		drawn = append(drawn, listener)
+		port := listener.Addr().(*net.TCPAddr).Port
+		if handedOut[port] {
+			continue
+		}
+		handedOut[port] = true
+		t.Cleanup(func() {
+			handedOutMu.Lock()
+			defer handedOutMu.Unlock()
+			delete(handedOut, port)
+		})
+		return port
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
 }
 
 // LockedBuffer is a buffer a process's output, or a logger, writes from more than one goroutine
