@@ -99,13 +99,19 @@ func useRoleLayout(t *testing.T, home, homeMounts, fixed string) {
 
 // roleInitHelperLaunch is roleInitLaunch for a test binary: it re-enters self as role-init, with
 // the flags the launcher would pass on the command line carried in roleInitEnv.
+//
+// A binary built with -race sleeps atexit_sleep_ms (1 s by default) before it exits, so a role-init
+// re-entered from a race build would end its namespace a second after its shim, which `legion
+// launcher role-init` never does, and every stop a test times would carry that second. The helper
+// turns the sleep off, keeping whatever else GORACE asks for.
 func roleInitHelperLaunch(self string) func(RoleInitConfig) ([]string, []string, error) {
 	return func(cfg RoleInitConfig) ([]string, []string, error) {
 		body, err := json.Marshal(cfg)
 		if err != nil {
 			return nil, nil, err
 		}
-		return []string{self, "-test.run=^TestRoleInitHelper$"}, []string{roleInitEnv + "=" + string(body)}, nil
+		gorace := strings.TrimSpace(os.Getenv("GORACE") + " atexit_sleep_ms=0")
+		return []string{self, "-test.run=^TestRoleInitHelper$"}, []string{roleInitEnv + "=" + string(body), "GORACE=" + gorace}, nil
 	}
 }
 
