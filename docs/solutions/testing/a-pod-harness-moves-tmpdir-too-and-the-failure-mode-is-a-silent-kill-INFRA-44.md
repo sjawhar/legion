@@ -135,10 +135,10 @@ cluster that admits the configured limit the number differs; the mechanism does 
   writes a gigabyte against the limit unless `TMPDIR` is exported onto the issue volume with
   `GOCACHE`, `GOMODCACHE` and `PLAYWRIGHT_BROWSERS_PATH`. Export it in the same sourced env file as
   the rest.
-  **Note 2026-10-25 (INFRA-221):** that staging is still the step —
-  `skills/legion-worker/references/tools.md` draws the withheld-`operator-setup` line by what a
-  prefix leaves resolving, and a harness root staged through a `TMPDIR` on the issue's volume and
-  reached by the harness's own commands leaves nothing else resolving differently.
+  **Note 2026-10-25 (INFRA-221):** that staging is still the step, judged by both conditions of
+  `skills/legion-worker/references/tools.md`, "The test: where it lands, and what it leaves
+  resolving": the root is staged through a `TMPDIR` on the issue's volume, and only the harness's
+  own commands reach it.
 
 The same applies to any long-lived cache a role sets up for itself, not only this harness: a Go
 build's caches land under `/home/legion` by default, which the limit charges exactly as it charges

@@ -38,10 +38,12 @@ stack up inside one; everything lives outside `$LEGION_WORKSPACE` so no tracked 
    `initdb -D <data> -U postgres --locale=C --encoding=UTF8`, `pg_ctl -D <data> -o '-k <sock> -h
    127.0.0.1 -p 5433' -w start`, create the database and `create extension if not exists vector`
    in it.
-   **Note 2026-10-25 (INFRA-221):** still the step — `skills/legion-worker/references/tools.md`
-   draws the withheld-`operator-setup` line by what a prefix leaves resolving, and this one is
-   reached through the `PATH` and `LD_LIBRARY_PATH` exported around the harness's own commands,
-   not left on the shell a role goes on working in.
+   **Note 2026-10-25 (INFRA-221):** hold this recipe to both conditions of
+   `skills/legion-worker/references/tools.md`, "The test: where it lands, and what it leaves
+   resolving". Here that means `<root>` and `<data>` on the issue's volume, as
+   `docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md`
+   places them, and the `PATH` and `LD_LIBRARY_PATH` above exported around the harness's own
+   commands, not left on the shell a role goes on working in.
 3. **The server:** `DATABASE_URL='postgres://postgres@127.0.0.1:5433/<db>?sslmode=disable'
    DISPATCH_E2E_PORT=8777 bash packages/dispatch/e2e/run-server.sh` from the workspace. That
    script is the whole fixture environment (dev sign-in, insecure cookie, test hooks, agent token,
