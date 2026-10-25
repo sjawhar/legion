@@ -86,6 +86,47 @@ func Open(t testing.TB, params ...string) *store.Store {
 	return st
 }
 
+// DatabaseURL creates a fresh, UNMIGRATED database on the DatabaseURLEnv server, drops it when t
+// ends, and returns its DSN. URL remains the right helper for everything else: a schema is
+// cheaper than a database and isolates rows just as well. A test needs a database of its own
+// only when what it exercises is per-database rather than per-schema, and two things are.
+// LISTEN/NOTIFY is one: a channel name is a database-wide identifier, so every schema on one
+// server hears every other's notifications on the one channel constant a feature listens to, and
+// a test on a schema would hear a sibling test's sends. The migration advisory lock is the
+// other: Migrate takes it database-wide, so two processes migrating their own schemas of one
+// database still serialize on each other.
+//
+// The DSN is unmigrated because that is what both callers need: a LISTEN/NOTIFY test, which
+// reads no table at all, and a test that starts two broker processes against a database neither
+// has migrated yet, which is the race those two processes are there to settle. A caller that
+// wants tables runs store.Migrate on it itself.
+func DatabaseURL(t testing.TB) string {
+	t.Helper()
+	raw := os.Getenv(DatabaseURLEnv)
+	if raw == "" {
+		t.Skip(DatabaseURLEnv + " must be set to run Postgres-backed broker tests")
+	}
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		t.Fatalf("random database name: %v", err)
+	}
+	name := "broker_test_" + hex.EncodeToString(suffix[:])
+	// Both statements go through admin, whose bare Exec runs them outside a transaction: a
+	// create database cannot run inside one. The drop forces the connections a test left behind
+	// (a listener that outlived its own cleanup, a pool closing) off the database, because a
+	// database one connection still holds cannot be dropped, and a leaked one would otherwise
+	// leave a database behind that no later run can clean up either.
+	admin(t, raw, "create database "+name)
+	t.Cleanup(func() { admin(t, raw, "drop database "+name+" with (force)") })
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %s: %v", DatabaseURLEnv, err)
+	}
+	parsed.Path = "/" + name
+	return parsed.String()
+}
+
 func admin(t testing.TB, databaseURL, statement string) {
 	t.Helper()
 	ctx := context.Background()

@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"net"
 	"strconv"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -31,6 +32,11 @@ var migrationFiles embed.FS
 
 type Store struct {
 	Pool *pgxpool.Pool
+
+	// mu guards listen, the one-connection pool Listener opens on first use, so two callers
+	// cannot open two of them.
+	mu     sync.Mutex
+	listen *pgxpool.Pool
 }
 
 // TokenMinter mints the password one new connection signs in with, for the host:port it dials
@@ -82,6 +88,63 @@ func Open(ctx context.Context, databaseURL string, opts ...Option) (*Store, erro
 func IsUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// listenerPoolSize bounds the pool Listener takes its connection from. One listener dials
+// through it - the cross-pod secret-reread fan-out (internal/broker/reread) - and the connection
+// is hijacked as soon as it is opened, so it leaves with its caller and the pool holds none
+// between dials: what this bounds is dials in flight, not connections held.
+const listenerPoolSize = 1
+
+// Listener returns one connection of its own for LISTEN, from a one-connection pool opened from
+// the shared pool's own configuration and hijacked, so it holds no connection of the shared pool
+// and the caller owns, and closes, what it gets. The pool is opened on first use and kept, so
+// every redial of a listener mints its own connection through it.
+//
+// Opening it from s.Pool.Config() rather than from the database URL is what keeps BeforeConnect -
+// the RDS IAM token minter WithTokenMinter installs - minting a fresh token for every redial; a
+// pgxpool.New on the raw URL would carry no minter and sign in with no password at all once the
+// first token lapsed.
+//
+// What it costs: one extra Postgres connection per broker pod, outside the count pool_max_conns
+// sizes, held for the life of the process, since a LISTEN lives on its connection and a pooled
+// one would end the subscription when the pool recycled it. That connection also needs a
+// session-mode path to Postgres: a transaction pooler hands each transaction whichever backend
+// is free, which can carry no LISTEN. The deployment's path is a TLS tunnel that keeps each
+// client connection its own session, not a pooler, so this holds there.
+func (s *Store) Listener(ctx context.Context) (*pgx.Conn, error) {
+	pool, err := s.listenerPool()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return conn.Hijack(), nil
+}
+
+// listenerPool opens the listener pool on first use, under mu for the whole check-and-open.
+func (s *Store) listenerPool() (*pgxpool.Pool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listen != nil {
+		return s.listen, nil
+	}
+	config := s.Pool.Config().Copy()
+	config.MaxConns = listenerPoolSize
+	// Both minimums, not just MinConns: a floor the shared pool's DSN set would be a target one
+	// connection cannot reach, which pgxpool re-attempts every health-check period.
+	config.MinConns = 0
+	config.MinIdleConns = 0
+	// Not the caller's context: this pool outlives the dial that opened it, and pgxpool's own
+	// background work would end with that context.
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		return nil, fmt.Errorf("open the listener connection pool: %w", err)
+	}
+	s.listen = opened
+	return opened, nil
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
