@@ -3259,28 +3259,45 @@ gate commands itself rather than trusting the answers recorded here:
 
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-232, with the sequence
   exactly as published above, through the role's own bash tool*: the block taken from this page
-  with only its three bracketed lines filled in, each run under the name the API server gave it,
-  and a fixture changing one line of it where named. As published, with one read of the workload
-  pod's labels added: `workload: infra-232-postgres-` and five characters printed after the
-  create, the Service created under that name, the pod's `batch.kubernetes.io/controller-uid` the
-  uid the create returned, `answered`, the trap's listing empty, `sequence: exit 0`, the call
-  returning 92 s after it started, and no Job of that name left in `kubectl get jobs`. With the
-  Job's `cpu` request `"1"`: the create refused by admission naming the four-processor rule, under
-  a name the server had already generated, the trap printing `cleanup: no Job name was read;
-  nothing removed` and `sequence: exit 1`, and no Job left; the same fixture with the trap's
-  no-name branch taken out printed `error: resource name may not be empty` and `cleanup: the Job's
-  delete failed`, then `cleanup: the Service is still there`, for objects that never existed. With
-  the Service selecting by `job-name`: refused by admission at the apply, naming its rule, and the
-  generated Job deleted while its pod was `ContainerCreating`, nothing left. With a 120 s stand-in
-  for the work and a call timeout of 30 s: the call ended at its timeout, the log showed
-  `answered`, and `kill -KILL -- -<process>` then left the Job, its Service and its running pod and
-  printed no `sequence: exit` line; the two recovery lines, given the printed name, removed them in
-  1 s. And the two facts the naming paragraphs rest on: `kubectl apply` of the Job's manifest,
-  run in the block in place of the create, refused it before sending anything, `error: from
-  infra-232-postgres-: cannot use generate name with apply`, and the trap removed nothing; and
-  `kubectl create --dry-run=server` admitted a Job with a generated name, a Job whose name the
-  client chose, and one setting both a name and a one-letter `generateName` under the client's
-  name — on that date the namespace's admission did not require a generated name, which
+  with only its three bracketed lines filled in, each run under the name the API server gave it
+  and a run label of its own, and a fixture changing one line of it where named. As published,
+  with reads of the workload pod's labels and of the Jobs carrying the run label added:
+  `run: sequence-run=` and eight characters printed first, `workload: infra-232-postgres-` and five
+  characters printed after the create, the Job admitted with its run label and listed by it, the
+  pod carrying its Job's `batch.kubernetes.io/controller-uid` at the uid the create returned and
+  not the run label, the Service created under the Job's name, `answered`, the trap's listing
+  empty, `sequence: exit 0` about 90 s after the start, and no Job of that name left. While that
+  run was under way, a second run stopped by a `kill -TERM -- -$$` placed right after the create,
+  before the line that reads its answer: the trap printed `cleanup: no Job name was read; deleting
+  by label sequence-run=<value>`, deleted that run's Job, listed none and ended
+  `sequence: exit 143`, while the first run's Job stayed `Running` beside it and went on to
+  `sequence: exit 0`. The same stop on the block as it stood before the label printed
+  `cleanup: no Job name was read; nothing removed` and left its Job running until a delete by name
+  removed it. Twenty-six more runs, each sent `kill -TERM -- -<process>` between 0.10 s and 0.45 s
+  after its first line while the first run was still under way: the earliest, before the trap was
+  installed, printed nothing and made nothing; those that landed before the create's request found
+  nothing by the label; two that landed inside the create deleted the Job it had made by the
+  label; the later ones had read the name and deleted their Job by it. Each of the others ended
+  `sequence: exit 143`, and no Job of theirs was left. A `kill -KILL -- -<process>` that landed
+  inside the create left a Job with no name printed, and
+  `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removed it in
+  31 s, its pod still initialising. With the Job's `cpu` request `"1"`: the create refused by
+  admission naming the four-processor rule, under a name the server had already generated, the
+  trap deleting by the run label and finding nothing, `sequence: exit 1`, and no Job left; that
+  fixture with the trap's no-name branch taken out, run before the label was added, printed
+  `error: resource name may not be empty` and `cleanup: the Job's delete failed`, then
+  `cleanup: the Service is still there`, for objects that never existed. With the Service
+  selecting by `job-name`: refused by admission at the apply, naming its rule, and the generated
+  Job deleted while its pod was `ContainerCreating`, nothing left. With a 120 s stand-in for the
+  work and a call timeout of 30 s: the call ended at its timeout, the log showed `answered`, and
+  `kill -KILL -- -<process>` then left the Job, its Service and its running pod and printed no
+  `sequence: exit` line; the two recovery lines, given the printed name, removed them in 1 s. And
+  the two facts the naming paragraphs rest on, run before the label was added: `kubectl apply` of
+  the Job's manifest, run in the block in place of the create, refused it before sending anything,
+  `error: from infra-232-postgres-: cannot use generate name with apply`, and the trap removed
+  nothing; and `kubectl create --dry-run=server` admitted a Job with a generated name, a Job whose
+  name the client chose, and one setting both a name and a one-letter `generateName` under the
+  client's name — on that date the namespace's admission did not require a generated name, which
   dispatch://INFRA-383 adds.
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence as
   published then (before dispatch://INFRA-232 moved the Job to a generated name), through the
