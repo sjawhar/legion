@@ -98,6 +98,9 @@ cd "$(dirname "$0")/../../envoy"
 # checkout, built under a lock so two harnesses starting at once serialise: Go rewrites it only
 # when the source changed, and a running server keeps the inode it started from.
 flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+# The server runs in UTC, as production does: pgx reads every timestamptz in the process's own
+# zone, so on a host set to another zone every timestamp the server writes would carry that zone's
+# offset (`-07:00`) where production's carry `Z`.
 exec env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
@@ -117,6 +120,7 @@ exec env \
   DISPATCH_WEB_DIST=../dispatch/web/dist \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \
+  TZ=UTC \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \

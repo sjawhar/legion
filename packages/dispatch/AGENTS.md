@@ -877,7 +877,9 @@ project's title `grep`; its fallback is the one-time manual check beside the `we
 
 `run-server.sh` builds the server with the caller's `go`, in the caller's
 environment, and execs the binary with every server
-setting pinned. It execs the binary rather than `go run`: the go command ignores
+setting pinned, its time zone among them: `TZ=UTC`, as production runs, since the server writes
+every timestamp in its process's zone and the specs compare them with `Z`, so a host in another
+zone does not fail them. It execs the binary rather than `go run`: the go command ignores
 only SIGINT and SIGQUIT, so a SIGTERM to `go run` ends the go command and leaves
 its server listening. Playwright kills the whole process group and the
 skill-scenarios rig the whole process tree, so neither noticed, but a caller
