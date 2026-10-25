@@ -133,7 +133,7 @@ func newContractRig(t *testing.T) *contractRig {
 	deps, err := NewDeps(DepsInput{
 		Store: dispatchDB, Identity: headerIdentity(dispatchDB),
 		ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
-		AgentSecretsURL: brokerServer.URL, AgentSecretsToken: dispatchToken,
+		AgentSecretsURL: brokerServer.URL, AgentSecretsTokenFile: accountTokenFile(t, dispatchToken),
 	})
 	if err != nil {
 		t.Fatalf("new dispatch API dependencies: %v", err)

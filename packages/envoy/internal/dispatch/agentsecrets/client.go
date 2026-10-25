@@ -1,10 +1,17 @@
 // Package agentsecrets relays Dispatch's credential-request UI to the secrets broker's
-// UI-bearer API (its UI routes: https://sjawhar.github.io/legion/broker/reference/api/). Reads and the machine-login
-// lookup carry and return
+// named-caller API (its UI routes: https://sjawhar.github.io/legion/broker/reference/api/). Reads
+// and the machine-login lookup carry and return
 // json.RawMessage, so a broker read-shape change never requires a Dispatch code change. Every
 // decision (approve, deny, revoke) instead carries a Decision Dispatch builds itself: its
-// approver is the login Dispatch's own session resolved, which the UI bearer vouches for to the
-// broker, so nothing the browser sends can name who decided.
+// approver is the login Dispatch's own session resolved, so nothing the browser sends can name
+// who decided.
+//
+// Dispatch authenticates to the broker as itself: every call carries Dispatch's own projected
+// Kubernetes ServiceAccount token, which the broker verifies against its cluster issuer and
+// matches against BROKER_API_ACCOUNTS. That names the caller and nothing more — the broker still
+// takes each decision's approver from the body, on the word of that listed caller, and
+// dispatch://INFRA-314 is what replaces that trust with a credential the approver's own session
+// holds.
 package agentsecrets
 
 import (
@@ -15,20 +22,40 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
 // defaultTimeout is the window every broker call gets, matching envoy.Client's default.
 const defaultTimeout = 5 * time.Second
 
-// Client relays Dispatch's UI calls to the broker with the UI bearer. A nil *Client (the
-// broker URL is unconfigured) means the feature is off; the api's pending list answers null then,
-// and every other api handler 404 FEATURE_OFF.
+// tokenCacheTTL is how long a Client reuses the token bytes it last read. Opening the file on
+// every call would cost a read per relayed click for a credential that changes a few times a
+// day: the kubelet rewrites a projected token in place well before it expires, and the broker
+// refuses one that lives longer than an hour from its issue, so bytes this fresh are never near
+// expiry and a rewrite reaches the broker within this window of it.
+const tokenCacheTTL = 30 * time.Second
+
+// Client relays Dispatch's UI calls to the broker, authenticating each one with the projected
+// ServiceAccount token TokenFile holds. A nil *Client (the broker URL is unconfigured) means the
+// feature is off; the api's pending list answers null then, and every other api handler 404
+// FEATURE_OFF.
 type Client struct {
-	URL   string
-	Token string
-	HTTP  *http.Client
+	URL string
+	// TokenFile is the path of Dispatch's own projected Kubernetes ServiceAccount token
+	// (DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE), the credential the broker resolves its caller
+	// from. A projected token rotates, so the path is read at call time, never once at boot.
+	TokenFile string
+	HTTP      *http.Client
+	// tokenTTL is how long token reuses what it read, tokenCacheTTL for every client New builds;
+	// the in-package test that proves a rewritten file is picked up lapses the cache by zeroing
+	// it. tokenMu guards cached and readAt.
+	tokenTTL time.Duration
+	tokenMu  sync.Mutex
+	cached   string
+	readAt   time.Time
 }
 
 // Option configures a Client.
@@ -39,14 +66,17 @@ func WithTimeout(timeout time.Duration) Option {
 	return func(c *Client) { c.HTTP.Timeout = timeout }
 }
 
-// New returns a client for the secrets broker's UI-bearer API. token authenticates Dispatch's
-// server to the broker, which then trusts the approver login Dispatch sends — it is resolved once
-// by Dispatch's boot config, not read from an env var here.
-func New(baseURL, token string, options ...Option) *Client {
+// New returns a client for the secrets broker's named-caller API. tokenFile names the file
+// holding Dispatch's own projected Kubernetes ServiceAccount token, which every call presents:
+// the broker reads the calling service's identity from it (BROKER_API_ACCOUNTS) and then trusts
+// the approver login Dispatch sends — resolved by Dispatch's own session, not read from an env
+// var here.
+func New(baseURL, tokenFile string, options ...Option) *Client {
 	client := &Client{
-		URL:   strings.TrimSuffix(baseURL, "/"),
-		Token: token,
-		HTTP:  &http.Client{Timeout: defaultTimeout},
+		URL:       strings.TrimSuffix(baseURL, "/"),
+		TokenFile: tokenFile,
+		HTTP:      &http.Client{Timeout: defaultTimeout},
+		tokenTTL:  tokenCacheTTL,
 	}
 	for _, option := range options {
 		option(client)
@@ -68,14 +98,36 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("agent-secrets: broker returned %d", e.Status)
 }
 
-func (c *Client) authorize(request *http.Request) {
-	request.Header.Set("Authorization", "Bearer "+c.Token)
+// token is the bearer every call presents: TokenFile's trimmed contents, read again once the
+// copy it cached is older than tokenTTL. A file that cannot be read, or that holds nothing, is an
+// error naming the path and no request at all, never an empty bearer for the broker to refuse:
+// a projected token Dispatch cannot read is Dispatch's own misconfiguration.
+func (c *Client) token() (string, error) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.cached != "" && time.Since(c.readAt) < c.tokenTTL {
+		return c.cached, nil
+	}
+	data, err := os.ReadFile(c.TokenFile)
+	if err != nil {
+		return "", fmt.Errorf("agent-secrets: read the ServiceAccount token %s: %w", c.TokenFile, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("agent-secrets: the ServiceAccount token file %s is empty", c.TokenFile)
+	}
+	c.cached, c.readAt = token, time.Now()
+	return token, nil
 }
 
 // do sends a request relaying body (nil for a bodyless GET) and returns the broker's response
 // body verbatim, or *Error for a non-2xx response, or a plain wrapped error for a transport
-// failure.
+// failure or a token it could not read, which stops the call before it is built.
 func (c *Client) do(ctx context.Context, method, path string, body json.RawMessage) (json.RawMessage, error) {
+	token, err := c.token()
+	if err != nil {
+		return nil, err
+	}
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -87,7 +139,7 @@ func (c *Client) do(ctx context.Context, method, path string, body json.RawMessa
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	c.authorize(request)
+	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := c.HTTP.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("agent-secrets: %s %s: %w", method, path, err)
