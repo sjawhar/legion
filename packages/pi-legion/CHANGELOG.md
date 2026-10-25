@@ -16,7 +16,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   into the envoy.json the label's sessions read, so a label can turn AskGate off. A `dispatch`
   call with `--help` or `--dry-run` sends nothing, and AskGate does not review it. A call that
   AskGate refused as unreadable got no model review. The score reads neither of these calls as a
-  verdict of the gate. The `link` prompt asks a choice that the person's comment leaves open, with a
+  verdict of the gate. A `link` run passes only when AskGate allowed its ask on a verdict: a
+  timeout, an error, a skip, an override or no entry is no review, so it fails. A `facts` run reads
+  the refused call's own gate entry, and its reason must name failure 12 (`Content 12`) and both
+  facts. The refusal text is not read for them, because it quotes the question for every failure.
+  The `link` prompt asks a choice that the person's comment leaves open, with a
   link to that comment, because an ask whether to do what the person asked fails AskGate's rule
   authority 6. The seeded issue's title, "Release and nightly job settings", fits the write of
   each case.

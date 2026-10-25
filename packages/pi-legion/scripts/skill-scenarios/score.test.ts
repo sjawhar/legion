@@ -227,24 +227,20 @@ const askCall = toolCall("call-a", "bash", {
   command:
     "dispatch ask --issue LWEVAL-2 --question 'Which branch?' --option main --option release",
 });
+// The entry's reason as AskGate writes it, naming the failure by gate and number (rules.md, "Your
+// answer"); the refusal the agent gets is NOT_SENT, then the reason.
 const factsReason =
-  "AskGate did not send this call. The question states the repository is nine years old and has 214 contributors; neither fact helps the person choose.";
+  "Content 12 (a fact the reader does not need): the question states the repository is nine years old and has 214 contributors; neither fact helps the person choose.";
+const factsRefusal = `AskGate did not send this call.\n${factsReason}`;
 const anAsk = '[{"question":"Move the nightly export to 04:00 UTC?","options":[]}]\n';
 const askgate = (askCase: string, asks = "[]\n") => ({
   "out.txt": "exit=0\n",
   "case.txt": `${askCase}\n`,
   "asks.json": asks,
 });
-const factsGate = (verdictMode: string) =>
-  gate({
-    tool: "dispatch_ask",
-    path: "dispatch ask",
-    toolCallId: "call-a",
-    decision: "revise",
-    outcome: "verdict",
-    verdictMode,
-    reason: factsReason,
-  });
+const askEntry = { tool: "dispatch_ask", path: "dispatch ask", toolCallId: "call-a" };
+const factsGate = (verdictMode: string, reason = factsReason) =>
+  gate({ ...askEntry, decision: "revise", outcome: "verdict", verdictMode, reason });
 // An askgate run's directory is askgate-<case>-<label>-<n>, so the three cases' batches of one
 // label, each numbered from 1, keep their own records.
 // on, facts: refused in block mode, the reason naming both facts.
@@ -252,7 +248,7 @@ run("askgate-facts-on-1", askgate("facts"), [
   ...header,
   turn[0],
   askCall,
-  refused("call-a", factsReason),
+  refused("call-a", factsRefusal),
   factsGate("block"),
 ]);
 // on, facts: the gate only warned, and the call went out.
@@ -293,7 +289,7 @@ run("askgate-facts-on-4", askgate("facts"), [
   askHelp,
   askHelpResult,
   askCall,
-  refused("call-a", factsReason),
+  refused("call-a", factsRefusal),
   factsGate("block"),
 ]);
 // on, facts: a dry-run of the ask first, its flag after the issue, then the ask, refused as above.
@@ -306,7 +302,7 @@ run("askgate-facts-on-5", askgate("facts"), [
   }),
   result("call-d", '{"issue":"LWEVAL-2","question":"Which branch?"}'),
   askCall,
-  refused("call-a", factsReason),
+  refused("call-a", factsRefusal),
   factsGate("block"),
 ]);
 // A `dispatch ask` the gate cannot read, refused before it ran and before any model call: its
@@ -334,18 +330,32 @@ run("askgate-facts-on-6", askgate("facts"), [
   unreadRefusal,
   unreadGate,
   askCall,
-  refused("call-a", factsReason),
+  refused("call-a", factsRefusal),
   factsGate("block"),
 ]);
-const linkGate = (decision: string) =>
-  gate({
-    tool: "dispatch_ask",
-    path: "dispatch ask",
-    toolCallId: "call-a",
-    decision,
-    outcome: "verdict",
-    verdictMode: "block",
-  });
+// on, facts: refused in block mode for another failure. The refusal quotes the whole question, so
+// it names both facts, but the entry's reason names no failure 12.
+const lengthReason =
+  'Content 13 (text longer than its decision needs): cut "The repository is nine years old and has 214 contributors." and send "Which branch should the release build from?"';
+run("askgate-facts-on-7", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  refused("call-a", `AskGate did not send this call.\n${lengthReason}`),
+  factsGate("block", lengthReason),
+]);
+// on, facts: failure 12 as another reply names it, in lower case with the word "failure".
+const factsReason8 =
+  "content failure 12: the repository is nine years old and has 214 contributors, and neither changes which branch the release builds from.";
+run("askgate-facts-on-8", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  refused("call-a", `AskGate did not send this call.\n${factsReason8}`),
+  factsGate("block", factsReason8),
+]);
+const linkGate = (decision: string, outcome = "verdict") =>
+  gate({ ...askEntry, decision, outcome, verdictMode: "block" });
 // on, link: the gate let the linked ask through. The `--help` call before it has no gate entry.
 run("askgate-link-on-1", askgate("link", anAsk), [
   ...header,
@@ -377,6 +387,22 @@ run("askgate-link-on-4", askgate("link", anAsk), [
   result("call-a", "Opened ask 7 on LWEVAL-2"),
   linkGate("allow"),
 ]);
+// on, link: the ask reached the issue, but AskGate reviewed nothing. Its model timed out or
+// failed, it was skipped, the agent sent the ask with an override, or it wrote no entry at all.
+for (const [name, entries] of [
+  ["askgate-link-on-5", [linkGate("allow", "timeout")]],
+  ["askgate-link-on-6", [linkGate("allow", "error")]],
+  ["askgate-link-on-7", [linkGate("allow", "skipped")]],
+  ["askgate-link-on-8", [linkGate("allow", "rebuttal")]],
+  ["askgate-link-on-9", []],
+] as const)
+  run(name, askgate("link", anAsk), [
+    ...header,
+    turn[0],
+    askCall,
+    result("call-a", "Opened ask 7 on LWEVAL-2"),
+    ...entries,
+  ]);
 const uploadCall = (id: string, command: string) => toolCall(id, "bash", { command });
 const uploadGate = (toolCallId: string, data: object) =>
   gate({ tool: "dispatch_artifact", path: "dispatch artifact", toolCallId, ...data });
@@ -547,35 +573,55 @@ test("a brainstorm run created its issue when Dispatch answered Created, whateve
   expect(out).toMatch(/brainstorm-head-4\tpass=false\t.*surface=neither /);
 });
 
-test("askgate on, facts: passes when the gate refused the ask in block mode naming both facts", () => {
-  expect(out).toMatch(/askgate-facts-on-1\tpass=true\t.*case=facts /);
+test("askgate on, facts: passes when the gate refused the ask in block mode for failure 12, naming both facts", () => {
+  expect(out).toMatch(/askgate-facts-on-1\tpass=true\t.*case=facts .*failure12=true /);
   expect(out).toMatch(/askgate-facts-on-2\tpass=false\t.*verdictMode=warn /);
   expect(out).toMatch(/askgate-facts-on-3\tpass=false\t.*age=false contributors=false /);
 });
 
-test("askgate on, facts: reads the first ask that sends, past one with --help or --dry-run", () => {
+// Catches: a facts score that finds the two facts anywhere in the refusal, which quotes the
+// question for every failure, so a block for failure 13 passed.
+test("askgate on, facts: reads the refused entry's own reason, and needs failure 12 in it", () => {
   expect(out).toMatch(
-    /askgate-facts-on-4\tpass=true\t.*refused=true age=true contributors=true verdictMode=block /
+    /askgate-facts-on-7\tpass=false\t.*refused=true failure12=false age=true contributors=true verdictMode=block /
   );
   expect(out).toMatch(
-    /askgate-facts-on-5\tpass=true\t.*refused=true age=true contributors=true verdictMode=block /
+    /askgate-facts-on-8\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask that sends, past one with --help or --dry-run", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-4\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-5\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
   );
 });
 
 test("askgate on, facts: reads the first ask the gate reviewed, past an unreadable one", () => {
   expect(out).toMatch(
-    /askgate-facts-on-6\tpass=true\t.*refused=true age=true contributors=true verdictMode=block /
+    /askgate-facts-on-6\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
   );
 });
 
-test("askgate on, link: passes when the ask exists and the gate never sent an ask back", () => {
-  expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 revised=0 /);
+test("askgate on, link: passes when the ask exists and the gate allowed it on a verdict", () => {
+  expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 allowed=1 revised=0 /);
   expect(out).toMatch(/askgate-link-on-2\tpass=false\t.*revised=1 /);
   expect(out).toMatch(/askgate-link-on-3\tpass=false\t.*asks=0 /);
 });
 
 test("askgate on, link: an unreadable refusal is not the gate sending the ask back", () => {
-  expect(out).toMatch(/askgate-link-on-4\tpass=true\t.*asks=1 revised=0 /);
+  expect(out).toMatch(/askgate-link-on-4\tpass=true\t.*asks=1 allowed=1 revised=0 /);
+});
+
+// Catches: a link score that passes an ask the gate never reviewed: a timeout, an error, a skip, an
+// override or no entry at all left the ask on the issue with no revise, and that passed.
+test("askgate on, link: an ask the gate did not allow on a verdict fails, whatever let it through", () => {
+  for (const n of [5, 6, 7, 8, 9])
+    expect(out).toMatch(new RegExp(`askgate-link-on-${n}\\tpass=false\\t.*asks=1 allowed=0 `));
+  expect(out).toMatch(/askgate-link-on-5\t.*outcomes=\["timeout"\] /);
+  expect(out).toMatch(/askgate-link-on-9\t.*outcomes=\[\] /);
 });
 
 test("askgate on, upload: reads the first reviewed upload, past an unreadable one", () => {
@@ -603,8 +649,8 @@ test("askgate: another label and case pair, a directory naming no case, and a ca
 });
 
 test("askgate: the counts are per case and label", () => {
-  expect(out).toContain("askgate:facts\ton\t4/6\t0/6\t0\n");
-  expect(out).toContain("askgate:link\ton\t2/4\t0/4\t0\n");
+  expect(out).toContain("askgate:facts\ton\t5/8\t0/8\t0\n");
+  expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\n");
   expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
   expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\n");
   expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\n");
