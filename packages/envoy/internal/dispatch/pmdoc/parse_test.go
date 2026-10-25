@@ -206,6 +206,28 @@ func TestParseStoresAnEncodedJavascriptLinkAsTheAddressItNames(t *testing.T) {
 	}
 }
 
+// An image whose source escapes the `&` of a character reference (`i\&amp;.png`) is a write the
+// server took before INFRA-190, and the change adds no refusal (R2): the source is held as the
+// editor reads it, `i&amp;.png`, so it must be written back so that it reads as that again, with
+// the `&` escaped, for a plain image and for a linked one alike.
+func TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand(t *testing.T) {
+	for _, test := range []struct{ markdown, src string }{
+		{"![x](i\\&amp;.png)\n", "i&amp;.png"},
+		{"[![x](i\\&amp;.png)](https://u.com)\n", "i&amp;.png"},
+		{"![x](i.png?a=1\\&copy;)\n", "i.png?a=1&copy;"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken, as before INFRA-190", test.markdown, err)
+			continue
+		}
+		image := got.Children[0].Children[0]
+		if src, _ := image.Attrs["src"].(string); image.Type != "image" || src != test.src {
+			t.Errorf("ParseForWrite(%q) image src = %q, want %q", test.markdown, src, test.src)
+		}
+	}
+}
+
 // The browser editor's parser matches a reference to its definition by the labels as written,
 // before their character references are decoded, and a label is stored and written decoded, so a
 // reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
