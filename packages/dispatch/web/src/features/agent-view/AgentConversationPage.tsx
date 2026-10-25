@@ -114,6 +114,21 @@ export function AgentConversationPage(): ReactNode {
   // without being taken away from what they were reading.
   const [ownSendCount, setOwnSendCount] = useState(0);
 
+  // Every write this page makes: a refusal renders above the transcript, and an accepted one
+  // counts as the viewer's own send and refreshes the stored thread.
+  const deliver = useCallback(
+    async (post: () => Promise<unknown>) => {
+      setSendError(null);
+      try {
+        await post();
+        setOwnSendCount((previous) => previous + 1);
+        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
+      } catch (error) {
+        setSendError(error instanceof Error ? error.message : "could not reach the session");
+      }
+    },
+    [queryClient, sessionId]
+  );
   // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
   // read-only and this adds no write path of its own. The session confirms a Send or Aside with
   // Dispatch before it takes one as its user's own turn.
@@ -125,16 +140,9 @@ export function AgentConversationPage(): ReactNode {
         .join("\n")
         .trim();
       if (body === "") return;
-      setSendError(null);
-      try {
-        await api.createAgentMessage(sessionId, { body, delivery: mode });
-        setOwnSendCount((previous) => previous + 1);
-        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
-      } catch (error) {
-        setSendError(error instanceof Error ? error.message : "could not reach the session");
-      }
+      await deliver(() => api.createAgentMessage(sessionId, { body, delivery: mode }));
     },
-    [mode, queryClient, sessionId]
+    [deliver, mode, sessionId]
   );
   // A pick is the person's own Send of what they would type at the session's terminal, always as
   // a Send whatever the composer's mode is: a BTW is a side question the session answers, not
@@ -142,19 +150,13 @@ export function AgentConversationPage(): ReactNode {
   // switched the session and to what.
   const { run: runSwitch } = sessionSwitch;
   const onPick = useCallback(
-    async (request: SwitchRequest) => {
-      setSendError(null);
-      try {
-        await runSwitch(request, () =>
+    (request: SwitchRequest) =>
+      deliver(() =>
+        runSwitch(request, () =>
           api.createAgentMessage(sessionId, { body: switchCommand(request), delivery: "steer" })
-        );
-        setOwnSendCount((previous) => previous + 1);
-        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
-      } catch (error) {
-        setSendError(error instanceof Error ? error.message : "could not reach the session");
-      }
-    },
-    [queryClient, runSwitch, sessionId]
+        )
+      ),
+    [deliver, runSwitch, sessionId]
   );
   const presence = STATUS[status];
 
@@ -169,7 +171,7 @@ export function AgentConversationPage(): ReactNode {
         </Link>
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>{label}</h1>
         <SessionSettings
-          onPick={(request) => void onPick(request)}
+          onPick={onPick}
           pending={sessionSwitch.pending}
           status={sessionSwitch.status}
           view={settings}

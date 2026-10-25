@@ -294,6 +294,8 @@ export class AgentStreamPublisher {
   /** The session's model and thinking level, as last published; undefined until first read. */
   #settings: AgentStreamSettingsState | undefined;
   #settingsSeq = 0;
+  /** `#settings` as JSON, which a new state is compared against. */
+  #settingsJson: string | undefined;
 
   constructor(deps: AgentStreamPublisherDeps) {
     this.#deps = deps;
@@ -321,6 +323,7 @@ export class AgentStreamPublisher {
     this.#listedCommands = undefined;
     this.#commands = undefined;
     this.#settings = undefined;
+    this.#settingsJson = undefined;
   }
 
   /**
@@ -374,8 +377,10 @@ export class AgentStreamPublisher {
               : { level: settings.thinking.level, levels: [...settings.thinking.levels] },
         }
       : { reported: false };
-    if (JSON.stringify(kept) === JSON.stringify(this.#settings)) return;
+    const json = JSON.stringify(kept);
+    if (json === this.#settingsJson) return;
     this.#settings = kept;
+    this.#settingsJson = json;
     this.#seq += 1;
     this.#settingsSeq = this.#seq;
     if (this.watched) this.#deps.publish(subject, JSON.stringify(this.#settingsFrame(kept)));

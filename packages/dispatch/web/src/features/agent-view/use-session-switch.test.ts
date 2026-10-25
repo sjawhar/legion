@@ -137,7 +137,7 @@ test("a send Dispatch answers with a failed attempt ends at once, saying no answ
   expect(hook.result.current.status).toBe("No answer came from the session: no live session");
 });
 
-test("a delivery that later fails with an error is the session's answer", async () => {
+test("a delivery the session's own error reply later fails is the session's answer", async () => {
   const hook = renderSwitch();
   const sent = switchMessage("s1", "/model anthropic/model-b");
   await pick(hook, MODEL_B, sent);
@@ -149,11 +149,31 @@ test("a delivery that later fails with an error is the session's answer", async 
   hook.rerender({ thread: [{ message: accepted, replies: [] }] });
   expect(hook.result.current.pending).toBe(true);
 
+  // The envelope id is what marks the failure as the session's own error reply.
   const failed = switchMessage("s1", "/model anthropic/model-b", [
-    attempt({ error: "the session refused the attempt", state: "failed" }),
+    attempt({
+      envelope_id: "envelope-1",
+      error: "the session refused the attempt",
+      state: "failed",
+    }),
   ]);
   hook.rerender({ thread: [{ message: failed, replies: [] }] });
   expect(hook.result.current.status).toBe("The session answered: the session refused the attempt");
+  expect(hook.result.current.pending).toBe(false);
+});
+
+test("a delivery Dispatch later fails itself ends the switch, saying no answer came", async () => {
+  const hook = renderSwitch();
+  const sent = switchMessage("s1", "/model anthropic/model-b");
+  await pick(hook, MODEL_B, sent);
+
+  const failed = switchMessage("s1", "/model anthropic/model-b", [
+    attempt({ envelope_id: null, error: "no receipt from the session", state: "failed" }),
+  ]);
+  hook.rerender({ thread: [{ message: failed, replies: [] }] });
+  expect(hook.result.current.status).toBe(
+    "No answer came from the session: no receipt from the session"
+  );
   expect(hook.result.current.pending).toBe(false);
 });
 

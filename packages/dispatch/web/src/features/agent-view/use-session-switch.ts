@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
+import { rowAnsweredWithError } from "../conversation/delivery";
 
 /** How long the page waits for the session to answer a switch, from the moment Dispatch answered
  *  the switch's send. The session answers a built-in `/model` or `/effort` at once, even mid-turn,
  *  so a switch with no answer by then is one whose session is not running it. */
-export const SWITCH_ANSWER_DEADLINE_MS = 30_000;
+const SWITCH_ANSWER_DEADLINE_MS = 30_000;
 
 /** A switch the header asks for: the model, as `provider/id` exactly as the session listed it, or
  *  the thinking level, as one of the levels its `/effort` offers. */
@@ -49,23 +50,15 @@ export interface SessionSwitch {
   readonly run: (request: SwitchRequest, post: () => Promise<Message>) => Promise<Message>;
 }
 
-const NO_ANSWER =
-  "No answer came from the session within 30 seconds. The header shows the model and thinking level the session last reported.";
-
-/** The attempt the send made, the latest of the message's attempts. */
-function latestAttempt(message: Message): Message["deliveries"][number] | undefined {
-  return message.deliveries.reduce<Message["deliveries"][number] | undefined>(
-    (latest, attempt) =>
-      latest === undefined || attempt.attempt > latest.attempt ? attempt : latest,
-    undefined
-  );
-}
+const NO_ANSWER = `No answer came from the session within ${SWITCH_ANSWER_DEADLINE_MS / 1000} seconds. The header shows the model and thinking level the session last reported.`;
 
 /**
  * The session's answer to the switch `messageId`, as the stored thread holds it: its reply, quoted
- * exactly, or, while the switch still waits, its delivery failing with an error. A delivery the
- * session accepted as its user's turn has not failed, whatever a later send recorded. Undefined
- * while there is neither.
+ * exactly, or, while the switch still waits, its latest attempt failing with an error. A failed
+ * attempt is the session's answer only when the session's own error reply failed it
+ * (`rowAnsweredWithError`); one Dispatch failed itself means no answer came. A delivery the session
+ * accepted as its user's turn has not failed, whatever a later send recorded. Undefined while there
+ * is neither.
  */
 function storedAnswer(
   stored: readonly MessageRead[],
@@ -85,9 +78,11 @@ function storedAnswer(
   const switched = messages.find((message) => message.id === messageId);
   if (switched === undefined) return undefined;
   if (switched.deliveries.some((attempt) => attempt.accepted_as === "user_turn")) return undefined;
-  const attempt = latestAttempt(switched);
+  const attempt = switched.deliveries.at(-1);
   if (attempt?.state !== "failed" || attempt.error === null) return undefined;
-  return `The session answered: ${attempt.error}`;
+  return rowAnsweredWithError(attempt)
+    ? `The session answered: ${attempt.error}`
+    : `No answer came from the session: ${attempt.error}`;
 }
 
 /**
@@ -98,7 +93,8 @@ function storedAnswer(
  * 1. Dispatch's answer to the send already records a failed attempt (no live session took it).
  * 2. The session's reply to the message appears, including one already there when the send
  *    answered.
- * 3. The message's delivery turns failed with an error.
+ * 3. The message's latest attempt turns failed with an error: the session's own error reply, or a
+ *    failure Dispatch recorded itself, which means no answer came.
  * 4. `SWITCH_ANSWER_DEADLINE_MS` passes from the send's answer with none of these.
  *
  * A reply to the latest switch that lands after its deadline replaces the no-answer line. Only the
@@ -155,7 +151,7 @@ export function useSessionSwitch(
         setCurrent((previous) => (previous?.id === id ? null : previous));
         throw error;
       }
-      const attempt = latestAttempt(answer);
+      const attempt = answer.deliveries.at(-1);
       if (attempt?.state === "failed") {
         const reason = attempt.error ?? "the attempt failed";
         setCurrent((previous) =>

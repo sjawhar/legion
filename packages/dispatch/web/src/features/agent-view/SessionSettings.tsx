@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import type { AgentStreamSettingsReported } from "@legion/contracts";
+import { type ReactNode, useMemo } from "react";
 
 import { pillClassName } from "../../components/Pill";
 import { TruncatedText } from "../../components/TruncatedText";
@@ -11,15 +12,21 @@ import type { SwitchRequest } from "./use-session-switch";
  *  header never runs wider than a phone. */
 const selectClasses = `min-h-8 max-w-56 min-w-0 truncate rounded-lg px-2 py-1 text-xs disabled:opacity-50 ${inputClasses(false)}`;
 
-/** The models a picker offers, in the session's order, grouped by provider in the order each
- *  provider first appears. The current model is offered even when the list lacks it (a fallback
- *  model can be one the session does not list), so the picker always shows what the session runs.
- *  An id with no provider before a `/` stands on its own, outside every group. */
+/** The values a picker offers: the session's list, with the current value added when the list
+ *  lacks it (a fallback model can be one the session does not list), so the picker always shows
+ *  what the session runs. */
+function withCurrent(list: readonly string[], current: string | undefined): readonly string[] {
+  return current === undefined || list.includes(current) ? list : [...list, current];
+}
+
+/** The models a picker offers (`withCurrent`), in the session's order, grouped by provider in the
+ *  order each provider first appears. An id with no provider before a `/` stands on its own,
+ *  outside every group. */
 function modelOptions(
   models: readonly string[],
   current: string | undefined
 ): { readonly loose: string[]; readonly groups: Map<string, string[]> } {
-  const offered = current === undefined || models.includes(current) ? models : [...models, current];
+  const offered = withCurrent(models, current);
   const loose: string[] = [];
   const groups = new Map<string, string[]>();
   for (const id of offered) {
@@ -67,7 +74,6 @@ export function SessionSettings({
   view: SessionSettingsView;
 }): ReactNode {
   const model = view.reported ? view.settings.model : view.model;
-  const thinking = view.reported ? view.settings.thinking : undefined;
   return (
     <>
       {view.reported && view.modelPicker ? (
@@ -84,42 +90,14 @@ export function SessionSettings({
           </TruncatedText>
         </span>
       )}
-      {thinking === undefined ? null : thinking === null ? (
-        <span className={`text-xs ${textMutedOnCanvas}`} data-testid="agent-session-thinking">
-          no adjustable thinking
-        </span>
-      ) : view.reported && view.thinkingPicker ? (
-        <select
-          aria-label="Thinking level"
-          className={selectClasses}
-          data-testid="agent-thinking-picker"
-          disabled={pending}
-          onChange={(event) => {
-            if (event.target.value !== thinking.level) {
-              onPick({ kind: "thinking", value: event.target.value });
-            }
-          }}
-          value={thinking.level ?? ""}
-        >
-          {thinking.level === null ? (
-            <option data-testid="agent-session-thinking" disabled value="">
-              model default
-            </option>
-          ) : null}
-          {(thinking.level === null || thinking.levels.includes(thinking.level)
-            ? thinking.levels
-            : [...thinking.levels, thinking.level]
-          ).map((level) => choice(level, thinking.level ?? undefined, "agent-session-thinking"))}
-        </select>
-      ) : (
-        <span
-          className={pillClassName("label")}
-          data-testid="agent-session-thinking"
-          title="Thinking level"
-        >
-          {thinking.level ?? "model default"}
-        </span>
-      )}
+      {view.reported ? (
+        <ThinkingControl
+          offered={view.thinkingPicker}
+          onPick={onPick}
+          pending={pending}
+          thinking={view.settings.thinking}
+        />
+      ) : null}
       {status === undefined ? null : (
         <p
           className={`order-last basis-full text-xs break-words whitespace-pre-wrap ${textMutedOnCanvas}`}
@@ -152,7 +130,7 @@ function ModelPicker({
   onPick: (request: SwitchRequest) => void;
   pending: boolean;
 }): ReactNode {
-  const { groups, loose } = modelOptions(models, current);
+  const { groups, loose } = useMemo(() => modelOptions(models, current), [models, current]);
   return (
     <select
       aria-label="Model"
@@ -176,6 +154,63 @@ function ModelPicker({
           {ids.map((id) => choice(id, current, "agent-session-model"))}
         </optgroup>
       ))}
+    </select>
+  );
+}
+
+/** The session's thinking level: `no adjustable thinking` when the model has none, a pill where
+ *  the session switches it only at its own terminal, and otherwise the picker. */
+function ThinkingControl({
+  offered,
+  onPick,
+  pending,
+  thinking,
+}: {
+  offered: boolean;
+  onPick: (request: SwitchRequest) => void;
+  pending: boolean;
+  thinking: AgentStreamSettingsReported["thinking"];
+}): ReactNode {
+  if (thinking === null) {
+    return (
+      <span className={`text-xs ${textMutedOnCanvas}`} data-testid="agent-session-thinking">
+        no adjustable thinking
+      </span>
+    );
+  }
+  if (!offered) {
+    return (
+      <span
+        className={pillClassName("label")}
+        data-testid="agent-session-thinking"
+        title="Thinking level"
+      >
+        {thinking.level ?? "model default"}
+      </span>
+    );
+  }
+  const current = thinking.level ?? undefined;
+  return (
+    <select
+      aria-label="Thinking level"
+      className={selectClasses}
+      data-testid="agent-thinking-picker"
+      disabled={pending}
+      onChange={(event) => {
+        if (event.target.value !== thinking.level) {
+          onPick({ kind: "thinking", value: event.target.value });
+        }
+      }}
+      value={thinking.level ?? ""}
+    >
+      {thinking.level === null ? (
+        <option data-testid="agent-session-thinking" disabled value="">
+          model default
+        </option>
+      ) : null}
+      {withCurrent(thinking.levels, current).map((level) =>
+        choice(level, current, "agent-session-thinking")
+      )}
     </select>
   );
 }

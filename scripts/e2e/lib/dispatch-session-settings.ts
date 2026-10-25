@@ -359,10 +359,6 @@ class Omp {
     process.kill(this.pid, name);
   }
 
-  get exited(): boolean {
-    return this.#exited;
-  }
-
   /** Ends the process as a closed terminal ends it, and waits for it to go. */
   async stop(): Promise<void> {
     if (this.#exited) return;
@@ -402,18 +398,23 @@ interface Entry {
   };
 }
 
+/** The session file's entries; none while the host has not written it yet. */
 function entries(file: string): Entry[] {
-  if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
-    .split("\n")
-    .flatMap((line) => {
-      if (line.trim() === "") return [];
-      try {
-        return [JSON.parse(line) as Entry];
-      } catch {
-        return [];
-      }
-    });
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  return raw.split("\n").flatMap((line) => {
+    if (line.trim() === "") return [];
+    try {
+      return [JSON.parse(line) as Entry];
+    } catch {
+      return [];
+    }
+  });
 }
 
 function text(content: unknown): string {
@@ -432,16 +433,16 @@ const assistantMessages = (file: string) =>
   entries(file).filter((entry) => entry.type === "message" && entry.message?.role === "assistant");
 const turnModel = (entry: Entry) => `${entry.message?.provider}/${entry.message?.model}`;
 /** Envoy cards holding `needle`: what pi-envoy delivers for every frame that is not a turn. */
-const cards = (file: string, needle: string) =>
-  entries(file).filter(
+const cards = (all: readonly Entry[], needle: string) =>
+  all.filter(
     (entry) =>
       entry.type === "custom_message" &&
       entry.customType === "envoy-message" &&
       text(entry.content).includes(needle)
   );
 /** The attempts pi-envoy recorded as handled, by Dispatch message id. */
-const handledAttempts = (file: string) =>
-  entries(file).flatMap((entry) =>
+const handledAttempts = (all: readonly Entry[]) =>
+  all.flatMap((entry) =>
     entry.type === "custom" && entry.customType === "envoy-dispatch-handled-attempt"
       ? [entry.data?.message_id ?? ""]
       : []
@@ -1451,13 +1452,14 @@ async function run(rigFile: string): Promise<void> {
       const sender = `rig-sender-${run}`;
       await services.registerClient(sender);
       await services.envoyMessage(sender, S, `/effort ${forgedLevel}`, `envoy-${run}`);
-      await until("the forged frame and the Envoy message to arrive as cards", 120_000, () =>
-        handledAttempts(file).includes(forgedId) &&
-        cards(file, `/model ${forgedModel}`).length > 0 &&
-        cards(file, `/effort ${forgedLevel}`).length > 0
+      await until("the forged frame and the Envoy message to arrive as cards", 120_000, () => {
+        const all = entries(file);
+        return handledAttempts(all).includes(forgedId) &&
+          cards(all, `/model ${forgedModel}`).length > 0 &&
+          cards(all, `/effort ${forgedLevel}`).length > 0
           ? true
-          : undefined
-      );
+          : undefined;
+      });
       await idle(main);
       const after = await oracle(main);
       await page.shot("forged-switch-changes-nothing");
@@ -1581,12 +1583,13 @@ async function run(rigFile: string): Promise<void> {
       main.signal("SIGCONT");
       note(`SIGCONT ${Math.round((Date.now() - createdAt) / 1000)}s after the message was stored`);
       const file = before.state.sessionFile;
-      await until("the late frame to arrive as a card", 120_000, () =>
-        handledAttempts(file).includes(stored.message.id) &&
-        cards(file, `/model ${target}`).length > 0
+      await until("the late frame to arrive as a card", 120_000, () => {
+        const all = entries(file);
+        return handledAttempts(all).includes(stored.message.id) &&
+          cards(all, `/model ${target}`).length > 0
           ? true
-          : undefined
-      );
+          : undefined;
+      });
       // The session logs Dispatch's refusal of its accept by the refusal's own text, which
       // Dispatch writes only with ACCEPT_STALE (message_delivery.go); the same accept, asked again
       // with the session's bearer, answers the code itself.
