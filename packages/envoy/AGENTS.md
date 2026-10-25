@@ -1452,10 +1452,14 @@ its parser unquotes back. Marks are read as that parser reads them, as a set, wh
 them: a mark opened where the same mark is already open adds nothing, and its close ends the mark
 for the rest of the text around it, up to the node that opened it (`parseInlineMarks`), so
 `*x *y* z*` is
-`x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
-marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
-mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
-refused. Delimiter runs pair as that parser pairs them: CommonMark's rule of three is judged on the
+`x y` in emphasis and ` z` without, and `****a****` is strong once. A link around one whole image
+and nothing else, with a destination (`[![x](i.png)](https://u.com "t")`, a README badge), is read
+as that image with its `link` and `linkTitle` attributes and written back inside the link's syntax,
+as the browser editor stores it (INFRA-190). Any other image is read without the marks around it,
+a link among them, as that editor's store (y-prosemirror, which keeps a mark on text alone) holds
+it, so an image beside text in a link, or a marked image in one, is stored without the link
+(LEGION-365) rather than refused. Delimiter runs pair as that parser pairs them: CommonMark's rule
+of three is judged on the
 lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
 goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`
 is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one

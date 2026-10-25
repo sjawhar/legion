@@ -548,6 +548,14 @@
 
 ### Changed
 
+- **Breaking:** roll Dispatch forward, never back past this release, once a document holds a
+  linked image. A link around one whole image and nothing else (`[![x](i.png)](https://u.com
+  "t")`, a README badge) is now stored as the image's `link` and `linkTitle` attributes and read
+  back unchanged through the documents API and the editor, where it was stored without its link
+  (LEGION-365); every place Dispatch draws the image opens the link, an unsafe address (such as
+  `javascript:`) drawn with no link. A server before this release deletes from the live document
+  every attribute its tree lacks at the next write, so it would strip these links. The document
+  schema the server publishes (`/api/v1/schema/blocks`) is version 3 (INFRA-190).
 - Dispatch admits a document websocket read-write only when it presents both the document schema
   version (`schema_version`) and the editor schema the dashboard bundle was built with
   (`editor_schema`, `contracts.DocumentEditorSchemaVersion`), in the query and as the Hocuspocus
