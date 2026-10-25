@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -59,27 +60,43 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it, so no
-// producer can reconcile the graph without holding what moved: replace itself is unexported.
+// that source appends has to name. Every write that indexes a body goes through it or
+// ReplaceCountedRefs, so no producer can reconcile the graph without holding what moved:
+// replaceRefs itself is unexported.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	changed, err := replace(ctx, tx, fromKind, fromID, body, serverURL)
+	return ReplaceCountedRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil, nil)
+}
+
+// ReplaceCountedRefs is ReplaceCounted for references a caller has already extracted: a new edge
+// takes insertedAt as its created_at (nil: the transaction's time), and the counted targets it
+// resolves are those replaceRefs moved together with moved, the targets the same write moved
+// elsewhere - a document version's block mentions (IndexBlocks) - so its event names them all.
+func ReplaceCountedRefs(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID string,
+	found []text.Ref,
+	insertedAt *time.Time,
+	moved []Target,
+) (model.ReferenceChanges, error) {
+	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, insertedAt)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return CountedChanges(ctx, tx, changed)
+	return CountedChanges(ctx, tx, append(changed, moved...))
 }
 
-// replace reconciles the Dispatch references written by one source with body: targets no
-// longer mentioned are deleted, new ones inserted, and an edge that persists keeps its
-// created_at and source_seq. It returns the targets whose inbound edges moved — deleted or
-// inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
-// batched backlink count.
-func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
-	kinds, ids := targets(body, serverURL)
+// replaceRefs reconciles the Dispatch references written by one source with found: targets no
+// longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
+// an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
+// edges moved — deleted or inserted, oldest state first — so ReplaceCountedRefs can resolve the
+// ones whose readers carry a batched backlink count.
+func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
+	kinds, ids := refTargets(found)
 	changed, err := scanTargets(tx.Query(ctx, `
 		delete from refs
 		where from_kind = $1 and from_id = $2
@@ -96,11 +113,12 @@ func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL s
 		return changed, nil
 	}
 	added, err := scanTargets(tx.Query(ctx, `
-		insert into refs (from_kind, from_id, to_kind, to_id)
-		select $1, $2, target.kind, target.id from unnest($3::text[], $4::text[]) as target(kind, id)
+		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+		from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
 		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids))
+	`, fromKind, fromID, kinds, ids, insertedAt))
 	if err != nil {
 		return nil, fmt.Errorf("write reference: %w", err)
 	}
@@ -123,34 +141,52 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 	return changed, rows.Err()
 }
 
-// targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays.
-func targets(body, serverURL string) ([]string, []string) {
+// targetOf is the graph target a parsed reference names; an external URL names none.
+func targetOf(ref text.Ref) (Target, bool) {
+	if ref.Kind == "url" {
+		return Target{}, false
+	}
+	return Target{Kind: ref.Kind, ID: ToID(ref)}, true
+}
+
+// refTargets is the deduplicated (to_kind, to_id) set found names, as parallel arrays.
+func refTargets(found []text.Ref) ([]string, []string) {
 	kinds, ids := []string{}, []string{}
-	seen := make(map[[2]string]struct{})
-	for _, ref := range text.Extract(body, serverURL) {
-		if ref.Kind == "url" {
+	seen := make(map[Target]struct{})
+	for _, ref := range found {
+		target, ok := targetOf(ref)
+		if !ok {
 			continue
 		}
-		target := [2]string{ref.Kind, ToID(ref)}
 		if _, dup := seen[target]; dup {
 			continue
 		}
 		seen[target] = struct{}{}
-		kinds = append(kinds, target[0])
-		ids = append(ids, target[1])
+		kinds = append(kinds, target.Kind)
+		ids = append(ids, target.ID)
 	}
 	return kinds, ids
 }
 
 // Stamp records eventID as the write that introduced every edge of one source that has no
-// provenance yet. It runs after the source's event is appended, in the same transaction, and
-// leaves edges that survived a reconcile untouched.
+// provenance yet: the source's own refs and, for a document, the mentions its blocks hold. It runs
+// after the source's event is appended, in the same transaction, and leaves edges that survived a
+// reconcile untouched.
 func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int64) error {
 	if _, err := tx.Exec(ctx, `
 		update refs set source_seq = $3
 		where from_kind = $1 and from_id = $2 and source_seq is null
 	`, fromKind, fromID, eventID); err != nil {
 		return fmt.Errorf("stamp references: %w", err)
+	}
+	if fromKind != "artifact" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		update block_refs set source_seq = $2
+		where artifact_id = $1 and source_seq is null
+	`, fromID, eventID); err != nil {
+		return fmt.Errorf("stamp block references: %w", err)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -12,39 +13,78 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// IndexDocumentReferences indexes the mentions of version's markdown, which the calling
-// transaction has just stored as the document's version (refs.ReplaceCounted), and stores each
-// mention's excerpt from the rendering of the tree that transaction wrote: an upload's
-// replacement, or a seeded spec. A seed renders its tree once. An upload that changes the
-// document renders it twice - ReplaceText's render of the replacement, which is the version's
-// markdown, and applyLive's render of the fork, which the ledger records - so the excerpts are cut
+// IndexDocumentReferences indexes version's markdown, which the calling transaction has just
+// stored as the document's version (indexDocument): its references, each mention's excerpt and
+// its blocks, all from the rendering of the tree that transaction wrote: an upload's replacement,
+// or a seeded spec. A seed renders its tree once. An upload that changes the document renders it
+// twice - ReplaceText's render of the replacement, which is the version's markdown, and
+// applyLive's render of the fork, which the ledger records - so the excerpts and blocks are cut
 // from applyLive's render only when the two agree. It refuses a context that was not joined.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
 		return model.ReferenceChanges{}, errUnjoined
 	}
-	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
-	if err != nil {
-		return model.ReferenceChanges{}, err
+	var versionAt time.Time
+	if err := tx.QueryRow(ctx, `select created_at from artifact_versions where artifact_id = $1 and number = $2`,
+		artifactID, version).Scan(&versionAt); err != nil {
+		return model.ReferenceChanges{}, fmt.Errorf("read version %d of %s: %w", version, artifactID, err)
 	}
 	rendered := ledgerFrom(ctx).writtenRendering(artifactID)
 	if rendered.tree != nil && rendered.markdown != markdown {
-		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
+		slog.Warn("dispatch: a document version left its reference excerpts and blocks to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
 			"artifact", artifactID, "version", version)
 		rendered = renderedTree{}
 	}
-	return changes, s.recordTreeExcerpts(ctx, tx, artifactID, version, rendered)
+	return s.indexDocument(ctx, tx, artifactID, version, versionAt, markdown, rendered)
+}
+
+// indexDocument indexes one document version, written at versionAt, in its writer's transaction,
+// which holds the document's owner row: its references, the excerpt of each mention, and its
+// blocks with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown.
+// The blocks are rendered.offsets, the render the version's markdown came from; GET …/blocks
+// lists one block per offset of the same renderer (renderedBlocks), so both list one set of
+// blocks. A version with no rendering - an upload whose replacement changed nothing, which
+// writes no tree - indexes no blocks: migration 0118's trigger left the document owed when the
+// version's row was inserted, for the reconciliation, which reads the document itself. The event
+// the caller appends names the counted targets both the document's references and its blocks'
+// mentions moved, since a node is counted once for each block citing it.
+func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, rendered renderedTree) (model.ReferenceChanges, error) {
+	located := text.ExtractAt(markdown, s.serverURL)
+	var moved []refs.Target
+	if rendered.tree != nil {
+		blocks := make([]refs.Block, len(rendered.offsets))
+		for i, offset := range rendered.offsets {
+			blocks[i] = refs.Block{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
+		}
+		// The blocks are indexed before the document's own references are reconciled: a first
+		// indexing dates a block's mention from the document's refs row for its target, which a
+		// surviving target already holds and a new one gets with this same time.
+		var err error
+		if moved, err = refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, rendered.markdown, blocks, located); err != nil {
+			return model.ReferenceChanges{}, err
+		}
+	}
+	found := make([]text.Ref, len(located))
+	for i, mention := range located {
+		found[i] = mention.Ref
+	}
+	changes, err := refs.ReplaceCountedRefs(ctx, tx, "artifact", artifactID, found, &versionAt, moved)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return changes, s.recordTreeExcerpts(ctx, tx, artifactID, version, rendered, located)
 }
 
 // recordTreeExcerpts stores the excerpt of every mention the document's version writes, cut from
 // rendered, the render the version's markdown came from, so the block ids are the ones the
-// document carries. A version with no rendering - an upload whose replacement changed nothing,
-// which writes no tree - marks its mentions owed (refs.ClearExcerpts) for the reconciliation,
-// which reads the document itself.
-func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID string, version int, rendered renderedTree) error {
+// document carries. located is the version's one extraction (indexDocument). A version with no
+// rendering - an upload whose replacement changed nothing, which writes no tree - marks its
+// mentions owed (refs.ClearExcerpts) for the reconciliation, which reads the document itself.
+func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID string, version int, rendered renderedTree, located []text.Located) error {
 	if rendered.tree == nil {
 		return refs.ClearExcerpts(ctx, tx, artifactID)
 	}
@@ -52,7 +92,7 @@ func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID 
 	for index, offset := range rendered.offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(rendered.markdown, blocks, s.serverURL))
+	return refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(rendered.markdown, blocks, located))
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
@@ -164,7 +204,7 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 				"artifact", document.FromID, "error", err)
 			continue
 		default:
-			excerpts = refs.MentionExcerpts(markdown, blocks, s.serverURL)
+			excerpts = refs.MentionExcerpts(markdown, blocks, text.ExtractAt(markdown, s.serverURL))
 		}
 		if err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
 			if ctx.Err() != nil {

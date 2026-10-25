@@ -222,8 +222,8 @@ func renderTree(tree *pmdoc.Node) (string, error) {
 }
 
 // renderTreeWithOffsets is renderTree with each identified block's byte range in the markdown,
-// which the same render records, so a write that stores the rendering cuts its mentions' excerpts
-// (recordTreeExcerpts) from it rather than rendering the tree again for them.
+// which the same render records, so a write that stores the rendering indexes its blocks and cuts
+// its mentions' excerpts (indexDocument) from it rather than rendering the tree again for them.
 func renderTreeWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, error) {
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {

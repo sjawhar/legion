@@ -18,22 +18,23 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// MentionExcerpts is, for each target markdown mentions, the block holding its first mention that
-// lies inside a block - blocks index markdown by byte, in document order - as the references route
-// shows it: the block's id and its markdown cut to BlockExcerptRunes. A target none of whose
-// mentions lies inside a block has none.
-func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL string) map[Target]model.GraphExcerpt {
+// MentionExcerpts is, for each target the mentions located in markdown name, the block holding its
+// first mention that lies inside a block - blocks index markdown by byte, in document order - as
+// the references route shows it: the block's id and its markdown cut to BlockExcerptRunes. A
+// target none of whose mentions lies inside a block has none. located is text.ExtractAt(markdown,
+// …), the one extraction a version's index reads.
+func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []text.Located) map[Target]model.GraphExcerpt {
 	excerpts := make(map[Target]model.GraphExcerpt)
-	for _, located := range text.ExtractAt(markdown, serverURL) {
-		if located.Kind == "url" {
+	for _, mention := range located {
+		target, ok := targetOf(mention.Ref)
+		if !ok {
 			continue
 		}
-		target := Target{Kind: located.Kind, ID: ToID(located.Ref)}
 		if _, found := excerpts[target]; found {
 			continue
 		}
 		for _, block := range blocks {
-			if block.From <= located.Offset && located.Offset < block.To {
+			if block.From <= mention.Offset && mention.Offset < block.To {
 				excerpts[target] = model.GraphExcerpt{
 					BlockID: block.ID,
 					Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
@@ -57,8 +58,9 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL st
 // marks its mentions owed only when its transaction recorded no rendering of the tree it wrote,
 // which is an upload whose replacement left the document as it was (ReplaceText returns before
 // applyLive records one). Every other version write cuts its excerpts from the render its
-// markdown came from (recordTreeExcerpts), so IndexDocumentReferences' check that the recorded
-// rendering is the version's markdown never clears. That unchanged upload's markdown is the
+// markdown came from (docs' indexDocument, which indexes the version's references, excerpts and
+// blocks from one extraction), so IndexDocumentReferences' check that the recorded rendering is
+// the version's markdown never clears. That unchanged upload's markdown is the
 // document the reconciliation read, so the excerpt stored under the older number is the one the
 // version would have stored. StoredExcerpts hides an owed row, and the reconciliation's non-null
 // version makes that same excerpt current again.

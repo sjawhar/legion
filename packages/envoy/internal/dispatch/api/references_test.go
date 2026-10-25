@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -562,4 +563,396 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 	if again := readRefRows(t, database); !reflect.DeepEqual(again, rebuilt) {
 		t.Fatalf("second rebuild changed the index: %#v -> %#v", rebuilt, again)
 	}
+}
+
+// blockIndexHandler is a test server whose documents never settle during the test, so every
+// version a test reads is one its own requests wrote.
+func blockIndexHandler(t *testing.T) (http.Handler, *store.Store) {
+	t.Helper()
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	return handler, database
+}
+
+func createSpecIssue(t *testing.T, handler http.Handler, project, spec string) model.Issue {
+	t.Helper()
+	response := createIssueRequest(t, handler, map[string]any{"project": project, "title": "Block index", "spec": spec})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue with spec: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[model.Issue](t, response)
+}
+
+// blockIDsByText is, for each block GET …/blocks lists, its id keyed by its text: the document's
+// markdown over the block's range.
+func blockIDsByText(t *testing.T, handler http.Handler, artifactID string) map[string]string {
+	t.Helper()
+	markdown := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", nil, "alice")).Markdown
+	ids := map[string]string{}
+	for _, block := range decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/blocks", nil, "alice")) {
+		ids[markdown[block.From:block.To]] = block.ID
+	}
+	return ids
+}
+
+// editSpec applies ops to an issue's spec as a named version and returns the version it wrote.
+func editSpec(t *testing.T, handler http.Handler, key string, ops []map[string]any) model.Version {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/artifacts/spec/edits", map[string]any{
+		"ops": ops, "summary": "edit",
+	}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("edit the spec: status=%d body=%s", response.Code, response.Body.String())
+	}
+	version := decodeBody[struct {
+		Version *model.Version `json:"version"`
+	}](t, response).Version
+	if version == nil {
+		t.Fatalf("the edit wrote no version: %s", response.Body.String())
+	}
+	return *version
+}
+
+type indexedBlock struct {
+	Type           string
+	Excerpt        string
+	ChangedVersion int
+}
+
+// readIndexedBlocks is the document's block nodes by block id, and each one's changed_at.
+func readIndexedBlocks(t *testing.T, database *store.Store, artifactID string) (map[string]indexedBlock, map[string]time.Time) {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select d.block_id, d.node_id, a.ref_key, d.type, d.excerpt, d.changed_version, d.changed_at
+		from document_blocks d join artifacts a on a.id = d.artifact_id where d.artifact_id = $1
+	`, artifactID)
+	if err != nil {
+		t.Fatalf("read document_blocks: %v", err)
+	}
+	defer rows.Close()
+	blocks, changedAt := map[string]indexedBlock{}, map[string]time.Time{}
+	for rows.Next() {
+		var id, node, refKey string
+		var block indexedBlock
+		var at time.Time
+		if err := rows.Scan(&id, &node, &refKey, &block.Type, &block.Excerpt, &block.ChangedVersion, &at); err != nil {
+			t.Fatalf("scan document_blocks: %v", err)
+		}
+		if node != refKey+"#"+id {
+			t.Fatalf("block %q node id = %q, want %q", id, node, refKey+"#"+id)
+		}
+		blocks[id], changedAt[id] = block, at
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate document_blocks: %v", err)
+	}
+	return blocks, changedAt
+}
+
+// readBlockTexts is the text each block's row at version records: nil for a block it deleted.
+func readBlockTexts(t *testing.T, database *store.Store, artifactID string, version int) map[string]*string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select block_id, text from document_block_texts where artifact_id = $1 and version = $2
+	`, artifactID, version)
+	if err != nil {
+		t.Fatalf("read document_block_texts: %v", err)
+	}
+	defer rows.Close()
+	texts := map[string]*string{}
+	for rows.Next() {
+		var id string
+		var body *string
+		if err := rows.Scan(&id, &body); err != nil {
+			t.Fatalf("scan document_block_texts: %v", err)
+		}
+		texts[id] = body
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate document_block_texts: %v", err)
+	}
+	return texts
+}
+
+type blockRefRow struct {
+	BlockID, FromNode, ToKind, ToID, Kind string
+	CreatedVersion                        int
+	CreatedAt                             time.Time
+	SourceSeq                             *int64
+}
+
+func readBlockRefs(t *testing.T, database *store.Store, artifactID string) []blockRefRow {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select block_id, from_node, to_kind, to_id, kind, created_version, created_at, source_seq
+		from block_refs where artifact_id = $1 order by block_id, to_kind, to_id, kind
+	`, artifactID)
+	if err != nil {
+		t.Fatalf("read block_refs: %v", err)
+	}
+	defer rows.Close()
+	var result []blockRefRow
+	for rows.Next() {
+		var row blockRefRow
+		if err := rows.Scan(&row.BlockID, &row.FromNode, &row.ToKind, &row.ToID, &row.Kind, &row.CreatedVersion, &row.CreatedAt, &row.SourceSeq); err != nil {
+			t.Fatalf("scan block_refs: %v", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate block_refs: %v", err)
+	}
+	return result
+}
+
+// requireIndexedAt fails unless the document's blocks are indexed at version: its
+// document_block_versions row names it, and document_indexed_versions records it.
+func requireIndexedAt(t *testing.T, database *store.Store, artifactID string, version int) {
+	t.Helper()
+	var indexed *int
+	var recorded bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select (select version from document_block_versions where artifact_id = $1),
+		       exists (select 1 from document_indexed_versions where artifact_id = $1 and version = $2)
+	`, artifactID, version).Scan(&indexed, &recorded); err != nil {
+		t.Fatalf("read the block index version: %v", err)
+	}
+	if indexed == nil || *indexed != version || !recorded {
+		t.Fatalf("document %s blocks indexed at %v (version %d recorded indexed: %v), want version %d", artifactID, indexed, version, recorded, version)
+	}
+}
+
+func latestVersion(t *testing.T, database *store.Store, artifactID string) model.Version {
+	t.Helper()
+	var version model.Version
+	if err := database.Pool.QueryRow(context.Background(), `
+		select number, created_at from artifact_versions where artifact_id = $1 order by number desc limit 1
+	`, artifactID).Scan(&version.Number, &version.CreatedAt); err != nil {
+		t.Fatalf("read the latest version of %s: %v", artifactID, err)
+	}
+	return version
+}
+
+// A version records each block GET …/blocks lists as a node with its text, and a mention written
+// inside a block as an edge out of the innermost block holding it, dated by the version that wrote
+// it and the event that recorded that version.
+func TestAVersionIndexesItsBlocksAndTheMentionsInThem(t *testing.T) {
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	callout := ":::callout{#ship_it kind=\"note\" title=\"\"}\nShip it.\n:::"
+	issue := createSpecIssue(t, handler, "CORE", callout+"\n\nOther paragraph.\n")
+	spec := issue.PrimaryArtifactID
+
+	ids := blockIDsByText(t, handler, spec)
+	inner, other := ids["Ship it."], ids["Other paragraph."]
+	if len(ids) != 3 || ids[callout] != "ship_it" || inner == "" || other == "" {
+		t.Fatalf("GET /blocks = %#v, want the callout ship_it, its paragraph and the other paragraph", ids)
+	}
+	blocks, _ := readIndexedBlocks(t, database, spec)
+	want := map[string]indexedBlock{
+		"ship_it": {Type: "callout", Excerpt: callout, ChangedVersion: 1},
+		inner:     {Type: "paragraph", Excerpt: "Ship it.", ChangedVersion: 1},
+		other:     {Type: "paragraph", Excerpt: "Other paragraph.", ChangedVersion: 1},
+	}
+	if !reflect.DeepEqual(blocks, want) {
+		t.Fatalf("document_blocks after version 1 = %#v, want %#v", blocks, want)
+	}
+	requireIndexedAt(t, database, spec, 1)
+	if texts := readBlockTexts(t, database, spec, 1); len(texts) != 3 || *texts["ship_it"] != callout || *texts[inner] != "Ship it." || *texts[other] != "Other paragraph." {
+		t.Fatalf("block texts of version 1 = %#v, want each block's text", texts)
+	}
+	if pairs := readBlockRefs(t, database, spec); len(pairs) != 0 {
+		t.Fatalf("block_refs of a spec citing nothing = %#v", pairs)
+	}
+
+	version := editSpec(t, handler, issue.Key, []map[string]any{
+		{"op": "replace", "find": "Other paragraph.", "with": "Other paragraph. See dispatch://" + target.Key + "."},
+		{"op": "replace", "find": "Ship it.", "with": "Ship it after dispatch://" + target.Key + "."},
+	})
+	var eventID int64
+	if err := database.Pool.QueryRow(context.Background(), `
+		select id from events
+		where type = 'artifact.version' and payload->>'artifact_id' = $1 and (payload->'version'->>'number')::int = $2
+	`, spec, version.Number).Scan(&eventID); err != nil {
+		t.Fatalf("read the event of version %d: %v", version.Number, err)
+	}
+	pairs := readBlockRefs(t, database, spec)
+	// The callout holds the paragraph that cites the issue, but the paragraph is the innermost
+	// block holding the mention: the callout itself writes no edge.
+	wantPairs := []blockRefRow{
+		{BlockID: inner, FromNode: issue.Key + "/spec#" + inner, ToKind: "issue", ToID: target.Key, Kind: "mentions"},
+		{BlockID: other, FromNode: issue.Key + "/spec#" + other, ToKind: "issue", ToID: target.Key, Kind: "mentions"},
+	}
+	if inner > other {
+		wantPairs[0], wantPairs[1] = wantPairs[1], wantPairs[0]
+	}
+	for index := range wantPairs {
+		wantPairs[index].CreatedVersion, wantPairs[index].CreatedAt, wantPairs[index].SourceSeq = version.Number, version.CreatedAt, &eventID
+	}
+	if len(pairs) != len(wantPairs) {
+		t.Fatalf("block_refs after the citing edit = %#v, want %#v", pairs, wantPairs)
+	}
+	for index, pair := range pairs {
+		wanted := wantPairs[index]
+		if pair.SourceSeq == nil || *pair.SourceSeq != eventID || !pair.CreatedAt.Equal(wanted.CreatedAt) {
+			t.Fatalf("block_refs[%d] = %#v (source_seq %v), want created at %s by event %d", index, pair, pair.SourceSeq, wanted.CreatedAt, eventID)
+		}
+		pair.SourceSeq, pair.CreatedAt = wanted.SourceSeq, wanted.CreatedAt
+		if pair != wanted {
+			t.Fatalf("block_refs[%d] = %#v, want %#v", index, pair, wanted)
+		}
+	}
+	requireIndexedAt(t, database, spec, version.Number)
+}
+
+// A5: a block's changed version moves only when its own text (its markdown, children included)
+// changes. Editing the paragraph inside the callout moves the paragraph and the callout; editing
+// another paragraph moves only that one. Deleting the callout records both texts as gone, and
+// restoring the callout's id records it anew.
+func TestABlocksChangedVersionMovesOnlyWithItsText(t *testing.T) {
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	callout := func(body string) string { return ":::callout{#ship_it kind=\"note\" title=\"\"}\n" + body + "\n:::" }
+	issue := createSpecIssue(t, handler, "CORE", callout("Ship it.")+"\n\nQ holds steady.\n\nR holds steady.\n")
+	spec := issue.PrimaryArtifactID
+	ids := blockIDsByText(t, handler, spec)
+	p, q, r := ids["Ship it."], ids["Q holds steady."], ids["R holds steady."]
+	if len(ids) != 4 || ids[callout("Ship it.")] != "ship_it" || p == "" || q == "" || r == "" {
+		t.Fatalf("GET /blocks = %#v, want the callout, its paragraph P, and Q and R", ids)
+	}
+	versionAt := map[int]time.Time{1: latestVersion(t, database, spec).CreatedAt}
+	requireBlocks := func(stage string, want map[string]int) {
+		t.Helper()
+		blocks, changedAt := readIndexedBlocks(t, database, spec)
+		got := make(map[string]int, len(blocks))
+		for id, block := range blocks {
+			got[id] = block.ChangedVersion
+			if !changedAt[id].Equal(versionAt[block.ChangedVersion]) {
+				t.Fatalf("%s: block %q changed_at = %s, want version %d's %s", stage, id, changedAt[id], block.ChangedVersion, versionAt[block.ChangedVersion])
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: changed versions = %#v, want %#v", stage, got, want)
+		}
+	}
+	requireTexts := func(stage string, version int, want map[string]*string) {
+		t.Helper()
+		if got := readBlockTexts(t, database, spec, version); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: block texts of version %d = %#v, want %#v", stage, version, got, want)
+		}
+	}
+	requireBlocks("version 1", map[string]int{"ship_it": 1, p: 1, q: 1, r: 1})
+
+	edited := editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "Ship it.", "with": "Ship it now."}})
+	versionAt[edited.Number] = edited.CreatedAt
+	requireBlocks("P edited", map[string]int{"ship_it": edited.Number, p: edited.Number, q: 1, r: 1})
+	requireTexts("P edited", edited.Number, map[string]*string{"ship_it": new(callout("Ship it now.")), p: new("Ship it now.")})
+
+	movedQ := editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "Q holds steady.", "with": "Q moves."}})
+	versionAt[movedQ.Number] = movedQ.CreatedAt
+	requireBlocks("Q edited", map[string]int{"ship_it": edited.Number, p: edited.Number, q: movedQ.Number, r: 1})
+	requireTexts("Q edited", movedQ.Number, map[string]*string{q: new("Q moves.")})
+
+	deleted := editSpec(t, handler, issue.Key, []map[string]any{{"op": "delete", "block": "ship_it"}})
+	versionAt[deleted.Number] = deleted.CreatedAt
+	requireBlocks("callout deleted", map[string]int{q: movedQ.Number, r: 1})
+	requireTexts("callout deleted", deleted.Number, map[string]*string{"ship_it": nil, p: nil})
+
+	restored := editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": callout("Ship it now.")}})
+	versionAt[restored.Number] = restored.CreatedAt
+	restoredP := blockIDsByText(t, handler, spec)["Ship it now."]
+	requireBlocks("callout restored", map[string]int{"ship_it": restored.Number, restoredP: restored.Number, q: movedQ.Number, r: 1})
+	requireTexts("callout restored", restored.Number, map[string]*string{"ship_it": new(callout("Ship it now.")), restoredP: new("Ship it now.")})
+	requireIndexedAt(t, database, spec, restored.Number)
+}
+
+// A node one document cites from two blocks is cited twice, so a version that moves a citation
+// from one citing block to two, or back, moves the node's count even though the document cites it
+// throughout: each such version's event names it.
+func TestAVersionWriteNamesATargetWhoseBlockCountChanged(t *testing.T) {
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	cite := "dispatch://" + target.Key
+	source := createSpecIssue(t, handler, "OPS", "First cites "+cite+".\n\nSecond paragraph.\n")
+	events := "/api/v1/issues/" + source.Key + "/events"
+	named := []model.ChangedReference{{Kind: "issue", ID: target.Key}}
+	requireBlockCitations := func(stage string, want int) {
+		t.Helper()
+		var got int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from graph_edges where from_kind = 'block' and to_kind = 'issue' and to_id = $1
+		`, target.Key).Scan(&got); err != nil {
+			t.Fatalf("count block citations: %v", err)
+		}
+		if got != want {
+			t.Fatalf("%s: blocks citing %s = %d, want %d", stage, target.Key, got, want)
+		}
+	}
+	requireBlockCitations("one citing block", 1)
+
+	editSpec(t, handler, source.Key, []map[string]any{{"op": "replace", "find": "Second paragraph.", "with": "Second cites " + cite + "."}})
+	requireArtifactEventNames(t, handler, events, source.PrimaryArtifactID, named)
+	requireBlockCitations("two citing blocks", 2)
+
+	editSpec(t, handler, source.Key, []map[string]any{{"op": "replace", "find": "Second cites " + cite + ".", "with": "Second paragraph."}})
+	requireArtifactEventNames(t, handler, events, source.PrimaryArtifactID, named)
+	requireBlockCitations("one citing block again", 1)
+}
+
+// Migration 0118's trigger marks a document owed on every version insert; each path a block-aware
+// build writes a version through indexes that version's blocks in the same transaction, so none
+// leaves its document owed: issue creation, the edit route, the upload route (a new document and
+// a replacement) and an accepted suggestion.
+func TestEveryVersionWriteLeavesItsDocumentIndexed(t *testing.T) {
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	requireWritten := func(path, artifactID, text string) {
+		t.Helper()
+		version := latestVersion(t, database, artifactID)
+		requireIndexedAt(t, database, artifactID, version.Number)
+		blocks, _ := readIndexedBlocks(t, database, artifactID)
+		for _, block := range blocks {
+			if block.Excerpt == text {
+				return
+			}
+		}
+		t.Fatalf("%s: version %d of %s indexed blocks %#v, none of them %q", path, version.Number, artifactID, blocks, text)
+	}
+
+	issue := createSpecIssue(t, handler, "CORE", "Created paragraph.\n")
+	spec := issue.PrimaryArtifactID
+	requireWritten("issue creation", spec, "Created paragraph.")
+
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "Created paragraph.", "with": "Edited paragraph."}})
+	requireWritten("edit route", spec, "Edited paragraph.")
+
+	uploaded := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "notes.md", "text/markdown", []byte("Uploaded paragraph.\n"), "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload a document: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	notes := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact.ID
+	requireWritten("upload of a new document", notes, "Uploaded paragraph.")
+	if replaced := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "notes.md", "text/markdown", []byte("Replaced paragraph.\n"), "alice"); replaced.Code != http.StatusCreated {
+		t.Fatalf("replace the document: status=%d body=%s", replaced.Code, replaced.Body.String())
+	}
+	requireWritten("upload replacing a document", notes, "Replaced paragraph.")
+
+	suggestion := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"anchor":     map[string]any{"artifact": "spec", "quote": "Edited paragraph."},
+		"body":       "Reword it.",
+		"suggestion": map[string]any{"replace_with": "Suggested paragraph."},
+	}, "alice")
+	if suggestion.Code != http.StatusCreated {
+		t.Fatalf("suggest a rewording: status=%d body=%s", suggestion.Code, suggestion.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+decodeBody[writtenRecord](t, suggestion).ID+"/accept", nil, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("accept the suggestion: status=%d body=%s", response.Code, response.Body.String())
+	}
+	requireWritten("accepted suggestion", spec, "Suggested paragraph.")
 }

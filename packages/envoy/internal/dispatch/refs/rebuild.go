@@ -6,6 +6,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // Pool is the part of the Dispatch connection pool a rebuild uses.
@@ -113,7 +115,7 @@ func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, body, serverU
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := replace(ctx, tx, fromKind, fromID, body, serverURL); err != nil {
+	if _, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
