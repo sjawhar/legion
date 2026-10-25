@@ -41,27 +41,15 @@ export interface NewAsk {
 /** How many code points of an ask's text name it: as many as `dispatch doc-read --blocks` shows. */
 const OPENING_CODE_POINTS = 60;
 
-/**
- * The new asks in a call's arguments. `currentIds` are the block ids the document an upload
- * replaces already holds: a `dispatch artifact` upload skips an ask block with one of them, since a
- * new version of a spec carries its old asks. Every other call ignores them.
- */
-export function newAsks(
-  toolName: string,
-  input: Readonly<Record<string, unknown>>,
-  currentIds?: ReadonlySet<string>
-): NewAsk[] {
+/** The new asks in a call's arguments. */
+export function newAsks(toolName: string, input: Readonly<Record<string, unknown>>): NewAsk[] {
   switch (toolName) {
     case "dispatch_ask":
       return [questionAsk(input)];
     case "dispatch_issue":
       return typeof input.spec === "string" ? askBlocks(input.spec) : [];
     case "dispatch_artifact":
-      return typeof input.content === "string"
-        ? askBlocks(input.content).filter(
-            (ask) => ask.id === undefined || currentIds?.has(ask.id) !== true
-          )
-        : [];
+      return typeof input.content === "string" ? askBlocks(input.content) : [];
     case "dispatch_doc_edit":
       return (Array.isArray(input.ops) ? input.ops : []).flatMap((op: unknown): NewAsk[] => {
         if (typeof op !== "object" || op === null) return [];
@@ -102,7 +90,7 @@ function questionAsk(input: Readonly<Record<string, unknown>>): NewAsk {
 }
 
 /** The first `OPENING_CODE_POINTS` code points of `text` with its whitespace runs made one space. */
-function openingOf(text: string): string {
+export function openingOf(text: string): string {
   return Array.from(text.replace(/\s+/g, " ").trim()).slice(0, OPENING_CODE_POINTS).join("");
 }
 

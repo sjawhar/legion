@@ -781,6 +781,39 @@ describe("the Dispatch reader", () => {
     });
   });
 
+  test("the documents are read eight at a time, their records kept in the project's order", async () => {
+    const sessions = Array.from({ length: 20 }, (_, index) => `ses-${index}`);
+    const project = dispatchProject(
+      sessions.map((session) => ({
+        name: `askgate-decisions-${session}.md`,
+        markdown: decisionDocument(session, [
+          decision({ time: at(1), session, source: "pod", rule: "no_change", target: ASK_1 }),
+        ]),
+      }))
+    );
+    let reading = 0;
+    let mostReading = 0;
+    const read = await readDecisionDocuments(
+      {
+        listProjectArtifacts: project.listProjectArtifacts,
+        // Counted around the read's own await, which every reader reaches before the first of
+        // them resumes: no clock, and the high-water mark is the bound itself.
+        docRead: async (id) => {
+          reading += 1;
+          mostReading = Math.max(mostReading, reading);
+          const document = await project.docRead(id);
+          reading -= 1;
+          return document;
+        },
+      },
+      PROJECT,
+      Date.parse(SINCE)
+    );
+    expect(mostReading).toBe(8);
+    expect(read.documents).toBe(sessions.length);
+    expect(read.records.map((record) => record.session)).toEqual(sessions);
+  });
+
   test("a line that is not a record and a document the read refuses are counted, not fatal", async () => {
     const documents: ProjectDocument[] = [
       { name: `askgate-decisions-${POD_SESSION}.md`, markdown: POD_DOCUMENT },

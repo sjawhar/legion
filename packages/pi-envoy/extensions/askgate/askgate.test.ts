@@ -23,8 +23,15 @@ import {
   unreadableDispatchWrite,
 } from "./askgate-core";
 import * as fx from "./askgate-fixtures";
-import type { RecordClient } from "./decision-record";
-import { type DispatchSession, parseRuleVerdict, type RuleMatch } from "./rules-check";
+import { RECORD_TIMEOUT_MS, type RecordClient } from "./decision-record";
+import {
+  type DispatchSession,
+  describeAsks,
+  parseRuleVerdict,
+  type RuleMatch,
+  type RulesCheckCall,
+  runRulesCheck,
+} from "./rules-check";
 import { renderTemplate } from "./text";
 
 /** Runs a `dispatch` command's --dry-run as the entry's binding does. */
@@ -881,7 +888,9 @@ describe("deadline and abandonment", () => {
   test("the deadline sits under the runner's handler ceiling, and each entry records it", async () => {
     const defaults = bind({ ceiling: 30_000 });
     await defaults.device("t1", "dispatch_comment", COMMENT);
-    expect(defaults.entries[0].deadlineMs).toBe(25_000);
+    // The margin covers what the handler still pays once the deadline passes: the aborted call's
+    // usage report (2 s) and the decision record the handler awaits after the verdict.
+    expect(defaults.entries[0].deadlineMs).toBe(30_000 - 2_000 - RECORD_TIMEOUT_MS);
     const raised = bind({ ceiling: 120_000 });
     await raised.device("t1", "dispatch_comment", COMMENT);
     expect(raised.entries[0].deadlineMs).toBe(90_000);
@@ -3437,6 +3446,61 @@ describe("rules check", () => {
     expect(user).toContain("3 further new ask(s) in this call are not listed here.");
     // Six asks cut to 8 KiB each, and the three of them the 32 KiB list had no room for.
     expect(g.entries[0].ruleAsksCut).toBe(9);
+  });
+  test("an ask the escaping pushes past the bound is clipped and counted as cut (E6)", () => {
+    // Under 8 KiB as written, over it once `<`, `>` and `&` become entities, which is the text
+    // the bound clips.
+    const described = describeAsks([
+      { kind: "block", id: "a1", text: "<&>".repeat(2 * 1024), opening: "<&>" },
+    ]);
+    expect(bytes(described.list)).toBeLessThan(9 * 1024);
+    expect(described.list).toContain("elided");
+    expect(described.asksCut).toBe(1);
+  });
+  /** The document Dispatch holds for the upload below, under the name it trimmed on the way in. */
+  const BRIEF = ":::ask{#window}\nWhich deployment window?\n:::\n";
+  /** One rules check on its own, driven with the walk and the Dispatch the core lends it. */
+  const checkRules = (call: Pick<RulesCheckCall, "toolName" | "tool" | "input">) =>
+    runRulesCheck(
+      {
+        now: () => 0,
+        env: {},
+        dispatchClient: dispatchServing([
+          { id: "doc-brief", name: "brief.md", slug: "brief", markdown: BRIEF },
+        ]).session,
+        walk: async () => ({ answer: { kind: "answer" as const, text: RULES_NONE }, called: {} }),
+      },
+      {
+        directory: async () => "/work",
+        system: "rules",
+        context: () => ({ primarySystemPrompt: "", transcript: "" }),
+        signal: new AbortController().signal,
+        ...call,
+      }
+    );
+  test("a re-upload judges only the asks the stored version does not hold, by the trimmed name Dispatch stores", async () => {
+    const check = await checkRules({
+      toolName: "dispatch_artifact",
+      tool: "dispatch artifact",
+      input: {
+        issue: "X-1",
+        name: "  brief.md  ",
+        content: `${BRIEF}\n:::ask{#region}\nWhich region?\n:::\n`,
+      },
+    });
+    expect(check?.names).toEqual(["The ask block #region that starts 'Which region?'"]);
+  });
+  test("only an upload leaves out the ids the document holds: a doc-edit insert of one is a new ask", async () => {
+    const check = await checkRules({
+      toolName: "dispatch_doc_edit",
+      tool: "dispatch doc-edit",
+      input: {
+        issue: "X-1",
+        artifact: "brief",
+        ops: [{ op: "insert", after: "end", markdown: BRIEF }],
+      },
+    });
+    expect(check?.names).toEqual(["The ask block #window that starts 'Which deployment window?'"]);
   });
 });
 

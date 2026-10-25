@@ -14,9 +14,9 @@ import {
   readDocumentBlocks,
 } from "@legion/envoy-client/dispatch-execute";
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http";
-import { type NewAsk, newAsks } from "./new-asks";
+import { type NewAsk, newAsks, openingOf } from "./new-asks";
 import requestTemplate from "./rule-check-request.md" with { type: "text" };
-import { byteLength, escaped, escapeXml, lastLineJson, renderTemplate } from "./text";
+import { byteLength, clipBytes, escapeXml, lastLineJson, renderTemplate } from "./text";
 
 /** The whole asks list in one request. */
 const ASKS_MAX_BYTES = 32 * 1024;
@@ -24,8 +24,6 @@ const ASKS_MAX_BYTES = 32 * 1024;
 const ASK_MAX_BYTES = 8 * 1024;
 /** How many matching asks a refusal names before it only counts the rest. */
 const REFUSAL_MATCHES = 5;
-/** How many code points of an ask's text name it in a refusal: as many as `dispatch doc-read --blocks` shows. */
-const OPENING_CODE_POINTS = 60;
 
 export type RuleName = "no_change" | "untried_access";
 /** The two rules, by the name the answer gives each: how the agent reads it, and what to do instead. */
@@ -230,10 +228,12 @@ export function describeAsks(asks: readonly NewAsk[]): {
   for (const [index, ask] of asks.entries()) {
     const n = index + 1;
     const id = ask.id === undefined ? "" : ` id="${attribute(ask.id)}"`;
+    // The bound clips the escaped text, so an ask is cut by what that text measures, not the raw one.
+    const escapedText = escapeXml(ask.text.trim());
     const body = ask.textMissing
       ? "The text of this block is not available, so judge it on what the call and the transcript show."
-      : escaped(ask.text.trim(), ASK_MAX_BYTES);
-    if (ask.textMissing || byteLength(ask.text.trim()) > ASK_MAX_BYTES) cut++;
+      : clipBytes(escapedText, ASK_MAX_BYTES);
+    if (ask.textMissing || byteLength(escapedText) > ASK_MAX_BYTES) cut++;
     names.push(askName(ask));
     const text = `<ask n="${n}" kind="${ask.kind}"${id}>\n${body}\n</ask>`;
     const size = byteLength(text) + (listed.length > 0 ? 1 : 0);
@@ -264,9 +264,17 @@ function askName(ask: NewAsk): string {
 }
 
 /**
+ * The name an upload's document is stored under: Dispatch trims the name it is given
+ * (`packages/envoy/internal/dispatch/api/artifacts.go`), while the dry run prints it as the
+ * command wrote it, so the read and the comparison both go by the trimmed one.
+ */
+const uploadName = (input: Readonly<Record<string, unknown>>) =>
+  typeof input.name === "string" ? input.name.trim() : undefined;
+
+/**
  * The new asks a call opens, read from `first` (the scan of its arguments): a retype gets its
  * block's own text from the document, and an upload leaves out the asks the version it replaces
- * already holds, which the same scan reads again with those ids.
+ * already holds.
  */
 async function readAsks(
   deps: RulesCheckDeps,
@@ -294,20 +302,22 @@ async function readAsks(
         continue;
       }
       ask.text = block.text.trim();
-      ask.opening = Array.from(ask.text.replace(/\s+/g, " ").trim())
-        .slice(0, OPENING_CODE_POINTS)
-        .join("");
+      ask.opening = openingOf(ask.text);
     }
     return { asks: first, textMissing };
   }
-  // An upload replaces the document of its exact name, as the server matches one; the asks that
-  // version already holds are not new. Any other document the reference found says nothing about
-  // this upload, so every opener in it is judged.
+  // An upload replaces the document of its name, as the server matches one; the asks that version
+  // already holds are not new. Any other document the reference found says nothing about this
+  // upload, so every opener in it is judged.
+  const name = uploadName(call.input);
   const currentIds =
-    read !== "not-found" && read.name === call.input.name
+    read !== "not-found" && read.name === name
       ? new Set(read.blocks.map((block) => block.id))
       : undefined;
-  return { asks: newAsks(call.toolName, call.input, currentIds), textMissing: false };
+  return {
+    asks: first.filter((ask) => ask.id === undefined || currentIds?.has(ask.id) !== true),
+    textMissing: false,
+  };
 }
 
 /** The blocks of the document the call names, or why there are none. */
@@ -317,7 +327,8 @@ async function readDocument(
 ): Promise<DocumentBlocks | "not-found" | "failed"> {
   const { issue, project, ref } = call.input;
   // An upload names its document by `--name`; every other call by the document argument doc-edit takes.
-  const named = call.toolName === "dispatch_artifact" ? call.input.name : call.input.artifact;
+  const named =
+    call.toolName === "dispatch_artifact" ? uploadName(call.input) : call.input.artifact;
   const target: DocumentTarget = {
     ...(typeof issue === "string" ? { issue } : {}),
     ...(typeof project === "string" ? { project } : {}),

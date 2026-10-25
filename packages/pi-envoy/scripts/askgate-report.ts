@@ -7,9 +7,11 @@
 //   bun askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
 import type { DecisionRecord } from "../extensions/askgate/decision-record";
+import type { RuleName, RuleOutcome } from "../extensions/askgate/rules-check";
 
 /**
  * One advisor-gate entry, with the write's text: the arguments the model reviewed (`reviewedText`),
@@ -251,8 +253,16 @@ export function percentile(values: number[], p: number): number | null {
   return sorted[rank - 1] ?? null;
 }
 
-const RULES = ["no_change", "untried_access"];
-const RULE_OUTCOMES = ["match", "none", "error", "timeout", "no-verdict", "abandoned", "shutdown"];
+const RULES: readonly RuleName[] = ["no_change", "untried_access"];
+const RULE_OUTCOMES: readonly RuleOutcome[] = [
+  "match",
+  "none",
+  "error",
+  "timeout",
+  "no-verdict",
+  "abandoned",
+  "shutdown",
+];
 /** How many of the commonest rules error texts the report prints. */
 const ERROR_TEXTS_SHOWN = 5;
 
@@ -308,7 +318,7 @@ function overrides<T extends Overridable>(
     // Walk back from the end, so each target's next outcome is known when its refusal is reached.
     const next = new Map<string, string>();
     for (let i = ordered.length - 1; i >= 0; i--) {
-      const { record } = ordered[i] as (typeof ordered)[number];
+      const { record } = ordered[i];
       if (record.target === null) continue;
       if (record.rule !== null) {
         const after = next.get(record.target);
@@ -458,8 +468,8 @@ export function sampleSentBack(records: GateRecord[], n: number, seed: number): 
   // Partial Fisher-Yates shuffle.
   for (let i = 0; i < count; i++) {
     const j = i + Math.floor(random() * (pool.length - i));
-    const picked = pool[j] as GateRecord;
-    pool[j] = pool[i] as GateRecord;
+    const picked = pool[j];
+    pool[j] = pool[i];
     pool[i] = picked;
   }
   return pool.slice(0, count);
@@ -577,10 +587,15 @@ export interface DocumentRead {
   unparsedLines: number;
 }
 
+/** How many decision documents are read at once, as `scripts/dispatch/ask-census.ts` reads issues. */
+const DOCUMENT_CONCURRENCY = 8;
+
 /**
- * Reads every decision document of the project, keeping the records at or after since (epoch ms).
- * A document that cannot be read is counted rather than thrown: one session's loss leaves the
- * rest of the day's counts standing, and the count says how much of the day is missing.
+ * Reads every decision document of the project, keeping the records at or after since (epoch ms),
+ * `DOCUMENT_CONCURRENCY` of them in flight: a fortnight holds one document per session, each one
+ * round trip, and read one at a time they are the whole run. A document that cannot be read is
+ * counted rather than thrown: one session's loss leaves the rest of the day's counts standing,
+ * and the count says how much of the day is missing.
  */
 export async function readDecisionDocuments(
   client: ReportClient,
@@ -593,11 +608,25 @@ export async function readDecisionDocuments(
       artifact.name.startsWith(DECISION_DOCUMENT_PREFIX) ||
       artifact.slug.startsWith(DECISION_DOCUMENT_PREFIX)
   );
-  for (const artifact of artifacts) {
-    let markdown: string;
-    try {
-      markdown = (await client.docRead(artifact.id)).markdown;
-    } catch {
+  // Each document's text, or undefined when its read failed, kept in the artifacts' own order, so
+  // the counts and the records below read as one serial pass does.
+  const markdowns: (string | undefined)[] = [];
+  let next = 0;
+  const reader = async (): Promise<void> => {
+    while (next < artifacts.length) {
+      const index = next++;
+      try {
+        markdowns[index] = (await client.docRead(artifacts[index].id)).markdown;
+      } catch {
+        markdowns[index] = undefined;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(DOCUMENT_CONCURRENCY, artifacts.length) }, reader)
+  );
+  for (const markdown of markdowns) {
+    if (markdown === undefined) {
       read.unreadable += 1;
       continue;
     }
@@ -734,14 +763,11 @@ function sessionDispatch(): DispatchClient {
   );
   // Said on stderr, so --json keeps stdout to the one object.
   for (const warning of warnings) console.error(`askgate-report: ${warning}`);
-  if (!dispatch.enabled) {
-    throw new Error(
-      dispatch.error === null
-        ? `Dispatch is not configured: ${dispatch.notice}`
-        : `dispatch config: ${dispatch.error}`
-    );
+  const config = activeDispatchSettings(dispatch);
+  if (config === null) {
+    throw new Error(`Dispatch is not configured: ${dispatch.enabled ? "" : dispatch.notice}`);
   }
-  return new DispatchClient(dispatch.url, dispatch.token, fetch);
+  return new DispatchClient(config.url, config.token, fetch);
 }
 
 function nonNegativeInt(flag: string, value: string): number {

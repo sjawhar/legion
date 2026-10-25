@@ -73,11 +73,13 @@
 // drops it); `block` refuses a revised call with the reason as the call's error result. Each entry
 // records the mode it ran under as `verdictMode`.
 //
-// Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
-// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
-// handler entry. A ceiling that leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no
-// positive integer, throw when the gate binds: the entry then refuses each write the gate would
-// review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
+// Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped under the runner's own ceiling for a
+// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) by the two stops
+// the handler still pays once that deadline passes — the aborted call's usage report and the
+// decision record — and raced from handler entry. A ceiling that leaves under 10 s, and an
+// OMP_ASKGATE_TIMEOUT_MS that is no positive integer, throw when the gate binds: the entry then
+// refuses each write the gate would review (`loadFailureGate`), since only `askgate.enabled:
+// false` turns AskGate off.
 //
 // Per gated call, in order:
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
@@ -216,11 +218,12 @@ const REBUTTAL_KEY = "advisor_rebuttal";
 const REBUTTAL_FLAG = "--advisor-rebuttal";
 export const DRY_RUN_TIMEOUT_MS = 10_000;
 const GATE_TIMEOUT_MS = 90_000;
-// The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
-// gate's deadline stays this far under it: room for the aborted call to report its usage
-// (ABORT_GRACE_MS) and for the record. Below MIN_DEADLINE_MS a verdict is hopeless and the gate does not bind.
-const CEILING_MARGIN_MS = 5_000;
 const ABORT_GRACE_MS = 2_000;
+// The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
+// gate's deadline stays this far under it: the two stops the handler pays after its deadline, the
+// aborted call's usage report (ABORT_GRACE_MS) and the decision record `handleCall` awaits
+// (RECORD_TIMEOUT_MS). Below MIN_DEADLINE_MS a verdict is hopeless and the gate does not bind.
+const CEILING_MARGIN_MS = ABORT_GRACE_MS + RECORD_TIMEOUT_MS;
 const MIN_DEADLINE_MS = 10_000;
 // The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
 // the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler

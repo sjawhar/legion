@@ -392,45 +392,6 @@ describe("newAsks", () => {
     ).toEqual([]);
   });
 
-  test("an upload skips an ask block whose id the document already holds", () => {
-    const content = [
-      ':::ask{#window state="answered"}',
-      "Which deployment window?",
-      ":::",
-      "",
-      ":::ask{#region}",
-      "Which region?",
-      ":::",
-      "",
-      ":::ask{}",
-      "Which team?",
-      ":::",
-    ].join("\n");
-    expect(
-      newAsks(
-        "dispatch_artifact",
-        { issue: "DSP-1", name: "brief.md", content },
-        new Set(["window", "intro"])
-      ).map((ask) => ask.opening)
-    ).toEqual(["Which region?", "Which team?"]);
-  });
-
-  test("only an upload skips the ids the document holds", () => {
-    expect(
-      ids(
-        newAsks(
-          "dispatch_doc_edit",
-          {
-            issue: "DSP-1",
-            artifact: "spec",
-            ops: [{ op: "insert", markdown: ":::ask{#window}\nWhich?\n:::", after: "end" }],
-          },
-          new Set(["window"])
-        )
-      )
-    ).toEqual(["window"]);
-  });
-
   for (const [tool, input] of [
     ["dispatch_edit_ask", { ask: "a-1", question: "Which window?" }],
     ["dispatch_comment", { issue: "DSP-1", body: ":::ask{#window}\nWhich?\n:::" }],
