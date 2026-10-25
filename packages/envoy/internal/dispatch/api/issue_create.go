@@ -236,19 +236,26 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !assigneeProvided {
-		assignee = defaultAssignee(actor, parentAssignee)
-	}
-
 	var number int
+	var projectDefaultAssignee *string
 	if err := tx.QueryRow(r.Context(), `
 		update projects
 		set next_number = next_number + 1
 		where key = $1
-		returning next_number - 1
-	`, input.Project).Scan(&number); err != nil {
+		-- The default_assignee subquery is not the raw stored value: it yields the stored default
+		-- only when that email still names a person who has signed in (people.email is the primary
+		-- key, so this is one index probe inside a statement the create runs anyway), and null for
+		-- a project with no default or one whose default has gone stale.
+		returning next_number - 1, (select email from people where email = projects.default_assignee)
+	`, input.Project).Scan(&number, &projectDefaultAssignee); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	// The project's stored default is the chain's last step, and this update already holds the
+	// project row: the decision moves below it so a create in a project with no default costs no
+	// round trip and takes no lock of its own.
+	if !assigneeProvided {
+		assignee = defaultAssignee(actor, parentAssignee, projectDefaultAssignee)
 	}
 	// The project row is locked from here; the mapping check takes its key-share lock only now, in
 	// the project-then-mapping order every mapping write follows (lockRepoProjectWrite).

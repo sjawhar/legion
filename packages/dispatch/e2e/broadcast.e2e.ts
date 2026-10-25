@@ -7,6 +7,7 @@ import {
   refuseBroadcasts,
   setLiveSessions,
   setSessionLive,
+  setSessionRecord,
   setSessionSendStatus,
 } from "./agents";
 import {
@@ -276,9 +277,12 @@ test("a session that goes away before the send is excluded by the server and nam
     await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
     const send = composer.getByRole("button", { name: "Send to 3" });
     await expect(send).toBeEnabled();
-    // The Observer goes away after the browser judged the selection and before the send lands:
-    // the race the server re-checks for, and the only exclusion the browser cannot predict.
-    await setSessionLive(observer.session_id, false);
+    // The Observer ends after the browser judged the selection and before the send lands: the
+    // race the server re-checks for, and the only exclusion the browser cannot predict. It has
+    // to be the ended session rather than one merely missing from the listener's list, because
+    // the server now asks about each selected session by id and a session the list has dropped
+    // while its record stands still answers - and is still sent to.
+    await setSessionRecord(observer.session_id, "absent");
     await send.click();
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
 
@@ -299,6 +303,56 @@ test("a session that goes away before the send is excluded by the server and nam
     await failed.getByRole("button", { name: "Retry" }).click();
     await expect(failed.getByText("Asking Tester (BTW)")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("broadcast-retry.png"), fullPage: true });
+  } finally {
+    await alice.close();
+  }
+});
+
+// INFRA-249. The listener's live list is its in-memory cache, and a cache that is refilling -
+// after the session bucket was recreated, or while another listener's registrations arrive -
+// names none of the sessions working behind it. The server resolves each selected session by id
+// against the store instead, so a broadcast the human already composed still reaches them.
+test("a broadcast reaches sessions the listener's list has dropped while their records stand", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
+  await setLiveSessions([planner, tester]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    await page
+      .getByRole("region", { name: "Agents" })
+      .getByRole("button", { name: "No Dispatch activity (2)" })
+      .click();
+    for (const title of ["Planner", "Tester"]) {
+      await page.getByRole("checkbox", { name: `Select ${title} for broadcast` }).check();
+    }
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("btw");
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
+    const send = composer.getByRole("button", { name: "Send to 2" });
+    await expect(send).toBeEnabled();
+    // Both sessions vanish from the listener's list between the page's read and the send, with
+    // their records untouched: they are working, and the send must reach them.
+    for (const session of [planner, tester]) {
+      await setSessionLive(session.session_id, false);
+    }
+    await send.click();
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+
+    const view = page.getByRole("region", { name: "Broadcast" });
+    await expect(view.getByRole("article", { name: "Planner" })).toContainText(
+      "Asking Planner (BTW)"
+    );
+    await expect(view.getByRole("article", { name: "Tester" })).toContainText(
+      "Asking Tester (BTW)"
+    );
+    await expect(page.getByText(/Excluded:/)).toHaveCount(0);
+    await expect
+      .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
+      .toEqual(["planner-session", "tester-session"]);
   } finally {
     await alice.close();
   }
@@ -387,7 +441,9 @@ test("a session that leaves between a refused send and its restore is still in t
     );
     expect(posted[0]?.session_ids).toEqual(["planner-session", "observer-session"]);
 
-    await setSessionLive(observer.session_id, false);
+    // Genuinely ended, not merely dropped from the listener's list: the server resolves each
+    // selected session by id now, so only a session the store holds no record of is excluded.
+    await setSessionRecord(observer.session_id, "absent");
     await expect(page.getByRole("checkbox", { name: "Select Observer for broadcast" })).toHaveCount(
       0,
       { timeout: 30_000 }

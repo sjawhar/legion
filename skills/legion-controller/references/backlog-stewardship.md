@@ -1,9 +1,9 @@
 # Backlog stewardship
 
 The controller keeps the Dispatch backlog's facts aligned with the deployment's current weekly
-plan. The plan is the source of the work order and its one-owner map; Dispatch priority and board
-rank are the executable form of that order. The deployment instructions name the weekly-planning
-issue and its `plan-week-*` artifact.
+plan. The plan is the source of the work order and its one-owner map; Dispatch board rank is the
+executable form of that order. The deployment instructions name the weekly-planning issue and its
+`plan-week-*` artifact.
 
 ## Controller routing address
 
@@ -18,12 +18,13 @@ Run this pass on the first turn of every UTC day and after every ruling from a p
 
 1. Read the weekly-planning issue and select its newest `plan-week-*` artifact by its latest
    `artifact.version` event. Read that artifact before changing any issue.
-2. For every current plan line in this deployment's project, make Dispatch's sort order exactly
-   match the line order: set the coarse priority and board rank together so the admission rule
-   (highest priority, then board rank) produces the plan's order. Keep each line's own stated
-   sequence. Do not invent a second order from a title, a stale route, or an instruction.
-   Reorder through Dispatch's board-rank API described in
-   `skill://dispatch/references/issues.md#board-rank-priority-and-assignee-on-a-read`.
+2. For every current plan line in this deployment's project, make the project's board order match
+   the line order exactly: Legion admits waiting roots by board rank alone — unlike the ready order
+   an agent takes its own next issue by, which is priority, then board rank — so board rank is what
+   carries the plan's order. Set the coarse priority too, as the signal people and filters read; it
+   changes no order. Keep each line's own stated sequence. Do not invent a second order from a
+   title, a stale route, or an instruction. Reorder with
+   `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`.
 3. Reconcile the plan's one-owner map. For each listed owner, verify the named session is live.
    For unowned work, find a suitable live owner with `envoy_sessions` filtered by `title` or `dir`,
    route the issue to that exact session, and tell it what it owns. Routing hands the work to that

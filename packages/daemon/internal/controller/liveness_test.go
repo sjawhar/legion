@@ -51,13 +51,13 @@ func newTestProber(url, token string, bootTimeout time.Duration, log *bytes.Buff
 	})
 }
 
-// The window is two plugin heartbeats, never less than the boot timeout: 240 s at the default
+// The window is four plugin heartbeats, never less than the boot timeout: 360 s at the default
 // 120 s boot timeout.
-func TestLivenessWindowIsTwoHeartbeatsAtLeastTheBootTimeout(t *testing.T) {
+func TestLivenessWindowIsFourHeartbeatsAtLeastTheBootTimeout(t *testing.T) {
 	for _, tc := range []struct{ boot, want time.Duration }{
-		{120 * time.Second, 240 * time.Second},
-		{60 * time.Second, 240 * time.Second},
-		{300 * time.Second, 300 * time.Second},
+		{120 * time.Second, 360 * time.Second},
+		{60 * time.Second, 360 * time.Second},
+		{420 * time.Second, 420 * time.Second},
 	} {
 		if got := LivenessWindow(tc.boot); got != tc.want {
 			t.Errorf("LivenessWindow(%s) = %s, want %s", tc.boot, got, tc.want)
@@ -70,7 +70,7 @@ func TestLivenessWindowIsTwoHeartbeatsAtLeastTheBootTimeout(t *testing.T) {
 // bearer.
 func TestProbeIsAliveWhileTheSessionHoldsTheRoleWithinTheWindow(t *testing.T) {
 	var log bytes.Buffer
-	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-240*time.Second+time.Millisecond))}
+	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-360*time.Second+time.Millisecond))}
 	url := l.serve(t)
 	if got := newTestProber(url, "envoy-bearer", 120*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Alive {
 		t.Fatalf("Probe = %s, want alive; log %s", got, log.String())
@@ -105,9 +105,9 @@ func TestProbeIsGone(t *testing.T) {
 		{name: "the role is unheld", status: http.StatusNotFound, body: `{"error":"no live holder","reason":"none"}`, boot: 120 * time.Second},
 		{name: "another session holds the role", status: http.StatusOK, body: holder("ses_other", probeNow), boot: 120 * time.Second,
 			wantLogs: []string{"ses_other", "ses_ctl"}},
-		{name: "last seen at the window", status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-240*time.Second)), boot: 120 * time.Second,
-			wantLogs: []string{"240"}},
-		{name: "last seen beyond a boot timeout wider than two heartbeats", status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-301*time.Second)), boot: 300 * time.Second},
+		{name: "last seen at the window", status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-360*time.Second)), boot: 120 * time.Second,
+			wantLogs: []string{"360"}},
+		{name: "last seen beyond a boot timeout wider than four heartbeats", status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-421*time.Second)), boot: 420 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var log bytes.Buffer
@@ -125,13 +125,13 @@ func TestProbeIsGone(t *testing.T) {
 	}
 }
 
-// A boot timeout wider than two heartbeats widens the window.
+// A boot timeout wider than four heartbeats widens the window.
 func TestProbeWindowFollowsAWideBootTimeout(t *testing.T) {
 	var log bytes.Buffer
-	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-299*time.Second))}
+	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-419*time.Second))}
 	url := l.serve(t)
-	if got := newTestProber(url, "envoy-bearer", 300*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Alive {
-		t.Fatalf("Probe = %s, want alive inside a 300 s window", got)
+	if got := newTestProber(url, "envoy-bearer", 420*time.Second, &log).Probe(context.Background(), "ses_ctl"); got != Alive {
+		t.Fatalf("Probe = %s, want alive inside a 420 s window", got)
 	}
 }
 

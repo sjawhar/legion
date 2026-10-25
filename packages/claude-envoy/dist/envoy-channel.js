@@ -36612,6 +36612,7 @@ function dispatchToolSchema(spec, z2, opts) {
   return spec.validation === undefined ? z2.object(shape, schemaOptions) : z2.refineObject(shape, spec.validation.check, spec.validation.refusal ?? spec.validation.message, schemaOptions);
 }
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
+var BOARD_NEIGHBOUR_REFUSAL = "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
@@ -36629,9 +36630,10 @@ function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false)
     message: alwaysRequireArtifact ? "Exactly one of issue and project is required; artifact or ref must name the document." : "Exactly one of issue and project is required; with project, artifact names the document."
   };
 }
+var documentEditOwner = documentOwnerValidation(true);
 var documentEditValidation = {
   check: (value) => {
-    if (!documentOwnerValidation(true, true).check(value))
+    if (!documentEditOwner.check(value))
       return false;
     const input = value;
     if (input.precondition === undefined)
@@ -36641,7 +36643,7 @@ var documentEditValidation = {
     const precondition = input.precondition;
     return typeof precondition.document === "string" !== Array.isArray(precondition.blocks);
   },
-  message: "Exactly one of issue and project is required; artifact or ref must name the document. A precondition selects exactly one of document or blocks."
+  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`
 };
 var commentOwner = documentOwnerValidation(true);
 var commentValidation = {
@@ -36651,7 +36653,7 @@ var commentValidation = {
   },
   message: `${commentOwner.message} turn requires reply_to_ask.`
 };
-var ISSUE_UPDATE_FIELDS_RULE = "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+var ISSUE_UPDATE_FIELDS_RULE = "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 var ISSUE_UPDATE_DONE_RULE = "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
 var ISSUE_UPDATE_REASON_RULE = "reason goes only with status done";
 var ISSUE_UPDATE_RULE = `${ISSUE_UPDATE_FIELDS_RULE} ${ISSUE_UPDATE_DONE_RULE}; ${ISSUE_UPDATE_REASON_RULE}.`;
@@ -36665,7 +36667,7 @@ function issueUpdateProblem(value) {
     const status = typeof input.status === "string" ? `status ${input.status}` : "an update without status done";
     return `${ISSUE_UPDATE_REASON_RULE}: it is the note posted on the issue as it closes, and ${status} closes nothing. Drop reason, or set status done to close the issue.`;
   }
-  const changesAField = typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || Array.isArray(input.blocked_by) || typeof input.components === "object" && input.components !== null || typeof input.repo === "string";
+  const changesAField = typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || Array.isArray(input.blocked_by) || typeof input.components === "object" && input.components !== null || typeof input.repo === "string" || typeof input.before === "string" || typeof input.after === "string";
   return changesAField ? undefined : ISSUE_UPDATE_FIELDS_RULE;
 }
 var messageValidation = {
@@ -36741,7 +36743,7 @@ var dispatchToolSpecs = [
       spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Optional initial labels, at most 20 labels of up to 40 characters.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).describe("Optional coarse priority, a number from 0 to 3: 0 is highest and 3 is lowest.").optional(),
-      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
+      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else the project's default assignee when it still names a person who has signed in, else unassigned.").optional(),
       components: componentsArgument(z2).optional(),
       repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; a child inherits its parent's when unset, and an issue with none on its parent chain takes the project's default.").optional()
     })
@@ -36750,10 +36752,10 @@ var dispatchToolSpecs = [
     name: "dispatch_issue_update",
     example: {
       issue: "DSP-1",
-      status: "done",
-      reason: "Shipped in owner/repo#7; verified on the production dashboard."
+      priority: 1,
+      before: "DSP-2"
     },
-    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, attach it to " + "architecture components, or set the repository it targets. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. A non-empty external_links is " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link; an empty external_links removes every link instead. components " + "replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only rank, components, " + "a reopening status (any status but done), and an external_links write that adds no new " + "link (so a link can move to the issue that replaced it); everything else, priority " + "included, waits for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
+    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, attach it to " + "architecture components, set the repository it targets, or move it on its project's " + "board. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. A non-empty external_links is " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link; an empty external_links removes every link instead. components " + "replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only a board move " + "(before, after), components, " + "a reopening status (any status but done), and an external_links write that adds no new " + "link (so a link can move to the issue that replaced it); everything else, priority " + "included, waits for the reopen. " + "priority is yours to set and a human overrides it. before and after move the issue on " + "its project's board: before puts it above that issue, after below, and both together " + "land it between them. A project's board order is one agent's to keep; in a Legion " + "deployment that is the controller. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       status: z2.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
@@ -36766,7 +36768,9 @@ var dispatchToolSpecs = [
       parent: z2.string().describe("Parent issue key in the same project; an empty string clears the parent.").optional(),
       blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle.").optional(),
       components: componentsArgument(z2).optional(),
-      repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again.").optional()
+      repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again.").optional(),
+      before: z2.string().describe(`Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`).optional(),
+      after: z2.string().describe(`Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`).optional()
     }),
     validation: {
       check: (value) => issueUpdateProblem(value) === undefined,
@@ -36778,7 +36782,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, and the result names who moves the status: you, with " + "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " + "else is undone. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       release: z2.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -36955,7 +36959,7 @@ var dispatchToolSpecs = [
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
-      artifact: z2.string().describe("Project document artifact id, slug, or filename; optional when ref names it.").optional(),
+      artifact: z2.string().describe("Optional project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z2.array(z2.object({
         op: z2.enum(DOC_EDIT_OPS).describe("Edit operation."),
@@ -37119,7 +37123,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
+    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
     strict: true
   }
@@ -40212,7 +40216,7 @@ function renderAdvice(tool, key, advice, opts) {
   if (advice.decision_blocks === 0 && opts.isPrimarySpec === true && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
     lines.push('This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
   }
-  if (advice.issue_status === "triage" && tool !== "dispatch_issue" && !(tool === "dispatch_issue_update" && opts.setsStatus === true) && !triageAdviceShown.has(key)) {
+  if (advice.issue_status === "triage" && advice.legion_managed_status !== true && tool !== "dispatch_issue" && !(tool === "dispatch_issue_update" && opts.setsStatus === true) && !triageAdviceShown.has(key)) {
     triageAdviceShown.add(key);
     lines.push(`${key} is still in triage \u2014 nobody can see its development status. See the \`dispatch\` skill, "Issue status is yours to move".`);
   }
@@ -40369,6 +40373,7 @@ function componentsChange(input, after) {
   }
 }
 var architectureComponentsAction = 'Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
+var LEGION_OWNS_STATUS = "Legion's daemon moves this issue's status on an issue it runs, so leave it alone \u2014 a status written here is undone.";
 async function architectureGuidance(client, project, components) {
   if (components.mode === "none" || components.ids.length > 0)
     return;
@@ -40717,8 +40722,8 @@ function innerRefProblem(tool, ref, refText) {
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
-  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
+  const suggestTool = tool === "dispatch_suggest";
+  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${suggestTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
   const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
@@ -41663,7 +41668,7 @@ async function executeDispatchTool(input) {
     const identity = await client2.whoami();
     const owner2 = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     const service = identity.kind === "agent" ? identity.service ?? null : null;
-    const unowned = "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
+    const unowned = "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
     return {
       text: owner2 !== null ? `Session ${sessionId} acts for ${owner2}: issues you create without an assignee are assigned to ${owner2}.` : service !== null ? `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${sessionId} runs under the shared token: ${unowned}`,
       details: { session: sessionId, owner: owner2, service }
@@ -41788,6 +41793,8 @@ async function executeDispatchTool(input) {
       const parent = optionalString(args, "parent");
       const components = optionalComponents(args, "components");
       const repo2 = optionalString(args, "repo");
+      const rankBefore = optionalString(args, "before");
+      const rankAfter = optionalString(args, "after");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? args.labels : undefined;
       const blockedBy = Array.isArray(args.blocked_by) ? args.blocked_by : undefined;
@@ -41816,6 +41823,10 @@ async function executeDispatchTool(input) {
       const linked = before.external_links.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url2) => !linked.includes(url2)) ?? [];
       const sentLinks = requestedLinks === undefined ? undefined : requestedLinks.length === 0 ? [] : [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))];
+      const rank = rankBefore === undefined && rankAfter === undefined ? undefined : {
+        ...rankBefore === undefined ? {} : { before: rankBefore },
+        ...rankAfter === undefined ? {} : { after: rankAfter }
+      };
       let after;
       try {
         after = await client.updateIssue(issueKey, {
@@ -41829,6 +41840,7 @@ async function executeDispatchTool(input) {
           ...components === undefined ? {} : { components },
           ...repo2 === undefined ? {} : { repo: repo2 === "" ? null : repo2 },
           ...sentLinks === undefined ? {} : { external_links: sentLinks },
+          ...rank === undefined ? {} : { rank },
           actor
         });
       } catch (error48) {
@@ -41850,6 +41862,12 @@ async function executeDispatchTool(input) {
         ...title === undefined ? [] : [`title "${after.title}"`],
         ...labels === undefined ? [] : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`],
         ...priority === undefined ? [] : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`],
+        ...rank === undefined ? [] : [
+          `rank -> ${[
+            ...rankAfter === undefined ? [] : [`after ${rankAfter}`],
+            ...rankBefore === undefined ? [] : [`before ${rankBefore}`]
+          ].join(", ")}`
+        ],
         ...requestedLinks === undefined ? [] : [
           requestedLinks.length === 0 ? "external links cleared" : newLinks.length === 0 ? `already linked ${requestedLinks.join(", ")} ${linkCount}` : `linked ${newLinks.join(", ")} ${linkCount}`
         ],
@@ -41891,14 +41909,17 @@ async function executeDispatchTool(input) {
         throw refusalWithCode(error48);
       }
       const held = after.claim;
+      const legionManaged = after.legion_managed_status === true;
       let text;
       if (release) {
-        text = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} \u2014 move it yourself if that is no longer where the work is.`;
+        const released = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status}`;
+        text = legionManaged ? `${released}; ${LEGION_OWNS_STATUS}` : `${released} \u2014 move it yourself if that is no longer where the work is.`;
       } else {
         if (held === null) {
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+        const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
+        text = legionManaged ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.` : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
@@ -42256,7 +42277,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       };
     }
     case "dispatch_doc_edit": {
-      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), optionalString(args, "artifact"));
       const ops = args.ops;
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
@@ -43313,8 +43334,14 @@ function dispatchSettings(env, config2) {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 120000;
-var MIN_HEARTBEAT_MS = 25;
+var DEFAULT_HEARTBEAT_MS = 90000;
+var MIN_PASS_DEADLINE_MS = 30000;
+var MIN_INTERVAL_MS = 25;
+var MAX_INTERVAL_MS = 2147483647;
+function namedInterval(raw) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 function natsSeedFromEnvironment(env) {
   const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
   if (file2 !== undefined) {
@@ -43401,13 +43428,17 @@ function envoySettings(env, config2, options = {}) {
       inbound = { off: messageFor(error48) };
     }
   }
-  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
     token,
     inbound,
-    heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+    heartbeatMs,
+    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
+    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
   };
 }
 function normalizeEnvoyUrl(value) {
@@ -43460,6 +43491,9 @@ function startNotice(config2, dispatch, envoy, nats) {
   if (envoy.enabled && nats && "off" in envoy.inbound) {
     parts.push(`Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`);
   }
+  if (envoy.enabled && envoy.passDeadlineRaisedFrom !== undefined) {
+    parts.push(`Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${envoy.passDeadlineRaisedFrom} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`);
+  }
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
@@ -43470,7 +43504,11 @@ function sessionSettings(file2, env, options) {
   const config2 = readEnvoyConfig(file2.path, env, options);
   const dispatch = dispatchSettings(env, config2);
   const envoy = envoySettings(env, config2, { nats: options.nats });
-  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy, options.nats !== false) };
+  return {
+    dispatch,
+    envoy,
+    notice: startNotice(config2, dispatch, envoy, options.nats !== false)
+  };
 }
 function sessionDispatchSettings(file2, env, options) {
   if (file2.path === null)
@@ -44229,6 +44267,7 @@ var legionPullRequestView = exports_external.strictObject({
   repo: nonEmptyString,
   number: exports_external.number().int().positive(),
   head: nonEmptyString,
+  state: exports_external.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: exports_external.number().int().nonnegative()
@@ -47124,7 +47163,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 35
+  daemonApiVersion: 36
 };
 
 // src/channel-forwarder.ts
@@ -47713,8 +47752,77 @@ function claudeProjectDirectory(environment, fallback) {
 }
 
 // src/session-identity.ts
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
+import { basename as basename3, join as join5 } from "path";
+
+// src/session-state.ts
+import { readFileSync as readFileSync5 } from "fs";
+import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join4 } from "path";
+async function writeAtomicStateFile(file2, contents) {
+  await mkdir(dirname2(file2), { recursive: true, mode: 448 });
+  const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  await writeFile(temporary, contents, { mode: 384 });
+  await rename(temporary, file2);
+}
+async function touchStateFile(file2) {
+  const now = new Date;
+  await utimes(file2, now, now);
+}
+async function pruneStateDirectory(directory, isStale) {
+  const entries = await readdir(directory).catch((error48) => {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return [];
+    throw error48;
+  });
+  for (const entry of entries) {
+    const file2 = join4(directory, entry);
+    if (!await isStale(file2))
+      continue;
+    await rm(file2, { recursive: true, force: true });
+  }
+}
+var STATE_FILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+async function writtenLongAgo(file2) {
+  const modified = await stat(file2).then((stats) => stats.mtimeMs, () => {
+    return;
+  });
+  return modified !== undefined && Date.now() - modified > STATE_FILE_MAX_AGE_MS;
+}
+var TITLES_DIRECTORY = "titles";
+function sessionTitleFile(stateDirectory, sessionId) {
+  return join4(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+}
+async function writeChosenTitle(file2, title) {
+  await writeAtomicStateFile(file2, `${title}
+`);
+}
+async function removeChosenTitle(file2) {
+  await rm(file2, { force: true });
+}
+function readChosenTitleSync(file2) {
+  try {
+    return readFileSync5(file2, "utf8");
+  } catch {
+    return;
+  }
+}
+async function recordChosenTitle(sessionId, title) {
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
+  if (pluginData === undefined)
+    return;
+  const file2 = sessionTitleFile(pluginData, sessionId);
+  const chosen = configuredValue(title);
+  if (chosen === undefined)
+    await removeChosenTitle(file2);
+  else
+    await writeChosenTitle(file2, chosen);
+}
+async function pruneStaleSessionTitles(stateDirectory) {
+  await pruneStateDirectory(join4(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+}
+
+// src/session-identity.ts
 var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
 
 class SessionIdentity {
@@ -47732,32 +47840,40 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join4(stateDirectory, "sessions", String(claudePid));
+  return join5(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join4(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join5(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
+var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join4(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+  return join5(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+}
+
+class UnparseableRoleRecordError extends Error {
+  name = "UnparseableRoleRecordError";
+  constructor(roleFile, cause) {
+    super(`the role record ${roleFile} cannot be parsed (${messageFor(cause)})`, { cause });
+  }
 }
 async function readPersistedRole(roleFile) {
+  let bytes;
   try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")));
+    bytes = await readFile(roleFile, "utf8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT"))
       return;
     throw error48;
   }
+  try {
+    return PersistedRole.parse(JSON.parse(bytes));
+  } catch (error48) {
+    throw new UnparseableRoleRecordError(roleFile, error48);
+  }
 }
 async function writePersistedRole(roleFile, state) {
   await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}
 `);
-}
-async function writeAtomicStateFile(file2, contents) {
-  await mkdir(dirname2(file2), { recursive: true, mode: 448 });
-  const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await writeFile(temporary, contents, { mode: 384 });
-  await rename(temporary, file2);
 }
 async function writeSessionHandoff(file2, sessionId) {
   await writeAtomicStateFile(file2, `${sessionId.trim()}
@@ -47782,17 +47898,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  const sessions = join4(stateDirectory, "sessions");
-  const entries = await readdir(sessions).catch((error48) => {
-    if (hasErrnoCode(error48, "ENOENT"))
-      return [];
-    throw error48;
+  await pruneStateDirectory(join5(stateDirectory, "sessions"), (file2) => {
+    const pid = basename3(file2);
+    return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || processExists(Number(entry)))
-      continue;
-    await rm(join4(sessions, entry), { recursive: true, force: true });
-  }
+}
+async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
+  const own = roleStateFile(stateDirectory, currentSessionId);
+  await pruneStateDirectory(join5(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
 }
 
 // src/envoy-off.ts
@@ -47841,8 +47954,8 @@ async function serveEnvoyOff(serverInfo, refusal) {
 }
 
 // src/legion-claim.ts
-import { readdir as readdir2, stat } from "fs/promises";
-import { join as join5 } from "path";
+import { readdir as readdir2, stat as stat2 } from "fs/promises";
+import { join as join6 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -47931,13 +48044,13 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join5(configDir, "projects");
+  const projects = join6(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file2 = join5(projects, directory, name);
-      if (await stat(file2).then((info) => info.isFile(), () => false))
+      const file2 = join6(projects, directory, name);
+      if (await stat2(file2).then((info) => info.isFile(), () => false))
         return file2;
     }
     await delay(pollMs, undefined, { signal });
@@ -48217,8 +48330,8 @@ async function executeLegionTool(runtime, input) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync5 } from "fs";
-import { basename as basename3 } from "path";
+import { readFileSync as readFileSync6 } from "fs";
+import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
   "#{window_name}",
@@ -48240,8 +48353,8 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat2 = readFileSync5(`/proc/${pid}/stat`, "utf8");
-      const parent2 = Number(stat2.slice(stat2.lastIndexOf(")") + 2).split(" ")[1]);
+      const stat3 = readFileSync6(`/proc/${pid}/stat`, "utf8");
+      const parent2 = Number(stat3.slice(stat3.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent2) ? parent2 : undefined;
     }
     const parent = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
@@ -48291,7 +48404,14 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, query = queryTmux, ownPane = (panePid) => isAncestor(panePid)) {
+function sessionTitle(environment, directory, sources = {}) {
+  const {
+    query = queryTmux,
+    ownPane = (panePid) => isAncestor(panePid),
+    chosen = () => {
+      return;
+    }
+  } = sources;
   const explicit = oneLine(configuredValue(environment.ENVOY_SESSION_TITLE) ?? "");
   if (visible(explicit))
     return () => explicit;
@@ -48299,9 +48419,12 @@ function sessionTitle(environment, directory, query = queryTmux, ownPane = (pane
   const socket = parts.slice(0, -2).join(",");
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
-  const directoryName = oneLine(basename3(directory) || directory);
+  const directoryName = oneLine(basename4(directory) || directory);
   const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
-  return (sessionId) => `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  return (sessionId) => {
+    const own = oneLine(chosen(sessionId) ?? "");
+    return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  };
 }
 
 // src/envoy-channel-server.ts
@@ -48563,12 +48686,27 @@ async function startChannelSession(options) {
 `);
     });
   };
+  let roleRefreshFailureReported = false;
+  const refreshRoleRecord = async () => {
+    const roleFile = roleStateFile(options.stateDirectory, identity.id);
+    try {
+      await touchStateFile(roleFile);
+      roleRefreshFailureReported = false;
+    } catch (error48) {
+      if (!roleRefreshFailureReported) {
+        roleRefreshFailureReported = true;
+        process.stderr.write(`envoy-channel: could not refresh the role record ${roleFile} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
+  };
   const reassertRole = async (afterOutage) => {
     if (heldRole === undefined)
       return;
     const role = heldRole;
     const holder = await options.client.getRole(role).then((info) => info.holder, undefinedOnNotFound);
     if (holder === identity.id) {
+      await refreshRoleRecord();
       if (afterOutage)
         fireRegained(role, "reregistered");
       return;
@@ -48586,11 +48724,22 @@ async function startChannelSession(options) {
     fireRegained(role, "reclaimed");
   };
   let roleTransferFrom;
+  let roleTransferFailureReported = false;
   const transferRole = async () => {
-    if (roleTransferFrom === undefined)
+    const from = roleTransferFrom;
+    if (from === undefined)
       return;
-    await restoreRole(roleTransferFrom);
-    roleTransferFrom = undefined;
+    try {
+      await restoreRole(from);
+      roleTransferFrom = undefined;
+      roleTransferFailureReported = false;
+    } catch (error48) {
+      if (!roleTransferFailureReported) {
+        roleTransferFailureReported = true;
+        process.stderr.write(`envoy-channel: could not take back the role held by ${from} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
   };
   const adoptHandoff = async () => {
     if (handoffFile === undefined)
@@ -48695,9 +48844,28 @@ async function startChannelSession(options) {
   await options.connection.flush();
   await serialized(async () => {
     await register();
-    await restoreRole();
+    await restoreRole().catch((error48) => {
+      if (error48 instanceof UnparseableRoleRecordError) {
+        process.stderr.write(`envoy-channel: ${messageFor(error48)}; the session starts without a role
+`);
+        return;
+      }
+      roleTransferFrom = identity.id;
+      roleTransferFailureReported = true;
+      process.stderr.write(`envoy-channel: could not restore the role (${messageFor(error48)}); the next heartbeat retries
+`);
+    });
   });
-  await pruneStaleSessionHandoffs(options.stateDirectory);
+  for (const prune of [
+    () => pruneStaleSessionHandoffs(options.stateDirectory),
+    () => pruneStaleSessionTitles(options.stateDirectory),
+    () => pruneStaleSessionRoles(options.stateDirectory, identity.id)
+  ]) {
+    await prune().catch((error48) => {
+      process.stderr.write(`envoy-channel: could not prune stale session state (${messageFor(error48)})
+`);
+    });
+  }
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
@@ -48862,11 +49030,14 @@ async function runEnvoyChannelServer() {
     process.stderr.write(`envoy-channel: ${notice}
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
   const title = sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
-  }, directory);
+  }, directory, {
+    chosen: (sessionId) => pluginData === undefined ? undefined : readChosenTitleSync(sessionTitleFile(pluginData, sessionId))
+  });
   const stampTitle = (sessionId, value) => {
     writeSessionTitle(sessionDirectory(process.env, sessionId), value);
   };
