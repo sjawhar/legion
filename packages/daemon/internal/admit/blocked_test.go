@@ -347,6 +347,38 @@ func TestATreeTakenBackAfterItsLingerStartsAgainWhateverItsLinksSay(t *testing.T
 	}
 }
 
+// A tree taken back is one that ran and finished. A root that never held a slot — it stood
+// blocked on the waiting line, a person moved it out of todo (to backlog, say, or took it off the
+// board) and later back — has no run of its own to resume and finished nothing: it is checked
+// like any other root, and the blocker it still waits on keeps it on the waiting line with no
+// slot. Its round trip out of the workflow must not turn it into a tree taken back.
+func TestABlockedRootThatLeftTheQueueAndCameBackIsStillChecked(t *testing.T) {
+	const root, blocker = "LEGION-ROOT", "LEGION-BLOCKER"
+	pool := migratedPool(t)
+	admission := quiet(t, 1)
+	seedWaiting(t, pool, root, "A")
+	seedMirror(t, pool, root, "todo", blocker)
+	seedMirror(t, pool, blocker, "backlog")
+	moved := func(seq int64, status string) intake.DispatchIssue {
+		return intake.DispatchIssue{Key: root, ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated",
+			Status: status, Title: root, Rank: "A", HandedOver: handed, Blockers: []string{blocker}}
+	}
+
+	tick(t, pool, admission, "tick")
+	assertSlots(t, pool, nil)
+	assertWaiting(t, pool, []string{root})
+
+	applyMirrored(t, pool, admission, "to-backlog", moved(2, "backlog"), admission.engine)
+	assertWaiting(t, pool, nil)
+
+	applyMirrored(t, pool, admission, "back-to-todo", moved(3, "todo"), admission.engine)
+	if got := issue(t, pool, root); got.TakenBack {
+		t.Fatalf("the root back in todo = %#v, marked taken back though it never ran", got)
+	}
+	assertSlots(t, pool, nil)
+	assertWaiting(t, pool, []string{root})
+}
+
 // A child still waiting on blockers when its tree finishes is handed to Legion as a root of its
 // own, carrying no run, and starting no phase, where the blocked-root rule admits it once its
 // blockers are done. It is no tree taken back: the re-admission that gives it a tree of its own
