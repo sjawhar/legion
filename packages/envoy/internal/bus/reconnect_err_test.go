@@ -146,8 +146,11 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 	}
 
 	// The reset on ReconnectedCB: the new outage reports itself at once, without a minute of the
-	// fake clock, which never passes again. The server keeps running this time; the gate alone
-	// takes its address away.
+	// fake clock, which never passes again. The outage is made the same way the first one was,
+	// and in the same order: the gate's address goes first, so no reconnect reaches a listening
+	// socket, and stopping the server then drops the live connection the gate's own close would
+	// have left joined, so the client's next dial is refused rather than accepted.
 	gate.Close()
+	testnats.Stop(t, ctr)
 	awaitWarnings(12)
 }

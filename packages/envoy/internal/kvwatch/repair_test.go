@@ -113,12 +113,24 @@ func deleteTestBucket(t *testing.T, js natsgo.JetStreamContext) {
 	}
 }
 
-// waitForTheStopWarn waits for the one WARN the stop writes.
+// stopNoticeBudget is how long waitForTheStopWarn waits for the stop. It is six times the
+// measured notice, so a slow runner has room.
+const stopNoticeBudget = 60 * time.Second
+
+// waitForTheStopWarn waits for the one WARN the stop writes. It polls on its own budget rather
+// than through the package's eventually, because nats.go's ordered consumer reports its stream
+// gone only after two missed 5 s idle heartbeats: the notice was measured at 10.017 s, 10.022 s
+// and 10.006 s against a real nats-server v2.11.4, so eventually's 5 s deadline can never see
+// this WARN. Polling keeps a passing case at about those ten seconds.
 func waitForTheStopWarn(t *testing.T, records func() []map[string]any) {
 	t.Helper()
-	eventually(t, "the stopped watcher's WARN", func() bool {
-		return len(matching(records(), "WARN", stoppedWarn)) == 1
-	})
+	deadline := time.Now().Add(stopNoticeBudget)
+	for len(matching(records(), "WARN", stoppedWarn)) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the stopped watcher's WARN")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // A stop a Rewatch repairs a moment later is a WARN and nothing more. The repair disarms the wait,

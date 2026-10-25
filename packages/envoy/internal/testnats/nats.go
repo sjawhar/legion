@@ -527,7 +527,9 @@ func (g *Gate) endpoint(ctx context.Context) (string, error) {
 func (g *Gate) URL() string { return "nats://" + g.address }
 
 // Close stops listening, so every dial of the gate's address is refused. It does nothing when the
-// gate is already closed.
+// gate is already closed. It does not break a connection already joined through the gate, whose
+// relay keeps copying until one side ends, so a test that needs a connected client to lose its
+// connection stops the server too.
 func (g *Gate) Close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
