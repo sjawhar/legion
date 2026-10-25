@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -56,7 +57,13 @@ type Target struct {
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
 // that source appends has to name. Every write that indexes a body goes through it, so no
-// producer can reconcile the graph without holding what moved: replace itself is unexported.
+// producer can reconcile the graph without holding what moved: replace itself is unexported. It
+// ends by deleting the source's refs_owed row (migration 0117), which the write's own trigger made
+// in the same transaction, so a write this build indexes is not re-indexed by the drain
+// (docs.Service.RunReferenceReindex); a build before it never deletes one, so its writes stay
+// owed. A row the drain or a rebuild has claimed is skipped rather than waited for: the claimer
+// re-reads the source, and waiting here while holding this source's edges could close a cycle with
+// it.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -65,6 +72,12 @@ func ReplaceCounted(
 	changed, err := replace(ctx, tx, fromKind, fromID, body, serverURL)
 	if err != nil {
 		return model.ReferenceChanges{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		delete from refs_owed
+		where (kind, id) in (select kind, id from refs_owed where kind = $1 and id = $2 for update skip locked)
+	`, fromKind, fromID); err != nil {
+		return model.ReferenceChanges{}, fmt.Errorf("settle the owed re-index of %s %s: %w", fromKind, fromID, err)
 	}
 	return CountedChanges(ctx, tx, changed)
 }
@@ -75,6 +88,13 @@ func ReplaceCounted(
 // inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
 // batched backlink count.
 func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
+	return replaceAt(ctx, tx, fromKind, fromID, body, serverURL, nil)
+}
+
+// replaceAt is replace with the created_at of the edges it inserts: writtenAt, the source's own
+// write time, for a re-index of stored text (Reindex), so old text does not sort as new under
+// "Referenced by"; the transaction's time when nil, for the write that stores the text.
+func replaceAt(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string, writtenAt *time.Time) ([]Target, error) {
 	kinds, ids, err := targets(ctx, tx, fromKind, fromID, body, serverURL)
 	if err != nil {
 		return nil, fmt.Errorf("read references: %w", err)
@@ -95,11 +115,12 @@ func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL s
 		return changed, nil
 	}
 	added, err := scanTargets(tx.Query(ctx, `
-		insert into refs (from_kind, from_id, to_kind, to_id)
-		select $1, $2, target.kind, target.id from unnest($3::text[], $4::text[]) as target(kind, id)
+		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+		from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
 		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids))
+	`, fromKind, fromID, kinds, ids, writtenAt))
 	if err != nil {
 		return nil, fmt.Errorf("write reference: %w", err)
 	}

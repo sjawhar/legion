@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -191,6 +192,49 @@ func TestQuestionIDsListUnderTheQuestionOfTheirOwnDocument(t *testing.T) {
 	}
 	if rebuilt := citers(t, handler, otherQ2Ref); !reflect.DeepEqual(rebuilt, underOther) {
 		t.Errorf("after a rebuild the rollout's q2 lists %v; want %v", rebuilt, underOther)
+	}
+}
+
+// A2's same edit, A5's drain: one write of a spec declares q1, saying "see #q2", and q2. Settlement
+// makes q1's row and indexes its question before it makes q2's, so q1's `#q2` names nothing yet;
+// q2's row owes the spec as a scope, and one tick of the re-index lists q1 under q2, beside the
+// spec's own text. The negative control: a second document declaring its own q2 in the upload
+// that cites it lists under that q2 only after the tick, never under the spec's.
+func TestQuestionIDsWrittenWithTheirQuestionListAfterOneReindexTick(t *testing.T) {
+	handler, database, documents := settlingCarryDocuments(t, 20*time.Millisecond)
+	service, ok := documents.(*docs.Service)
+	if !ok {
+		t.Fatalf("the document service is %T; want *docs.Service", documents)
+	}
+	issue := createInteractionIssue(t, handler, "ACME", "Questions in one edit",
+		"Context.\n\n"+questionBlock("q1", "Ship on Monday? See #q2.")+"\n"+questionBlock("q2", "Ship the docs too?"))
+	spec := issue.PrimaryArtifactID
+	q1 := blockQuestion(t, database, spec, "q1")
+	q2 := blockQuestion(t, database, spec, "q2")
+	other := uploadIssueDocument(t, handler, issue.Key, "rollout.md", "Rollout, see #q2.\n\n"+questionBlock("q2", "Roll out by region?"))
+	otherQ2 := blockQuestion(t, database, other.ID, "q2")
+
+	q1Ref := "dispatch://" + issue.Key + "/ask/" + q1
+	q2Ref := "dispatch://" + issue.Key + "/ask/" + q2
+	otherQ2Ref := "dispatch://" + issue.Key + "/ask/" + otherQ2
+	specRef := "dispatch://" + issue.Key + "/spec"
+	otherRef := "dispatch://" + issue.Key + "/artifact/" + other.Slug
+	if citers(t, handler, q2Ref)[q1Ref] {
+		t.Fatalf("q2 lists q1 before the re-index; settlement indexed q1 after q2's row exists, so this test no longer shows the drain")
+	}
+
+	if _, _, err := service.ReindexReferences(context.Background()); err != nil {
+		t.Fatalf("re-index tick: %v", err)
+	}
+	underQ2 := citers(t, handler, q2Ref)
+	if !underQ2[q1Ref] || !underQ2[specRef] {
+		t.Errorf("q2 lists %v after one tick; want q1 (%s) and the spec (%s)", underQ2, q1Ref, specRef)
+	}
+	if underQ2[otherRef] {
+		t.Errorf("q2 lists the rollout (%s), which cites its own q2", otherRef)
+	}
+	if underOther := citers(t, handler, otherQ2Ref); len(underOther) != 1 || !underOther[otherRef] {
+		t.Errorf("the rollout's q2 lists %v after one tick; want the rollout's text alone", underOther)
 	}
 }
 

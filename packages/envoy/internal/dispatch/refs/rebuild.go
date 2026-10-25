@@ -30,12 +30,15 @@ type Rebuild struct {
 // RebuildAll reparses every reference source and reconciles refs with it, one transaction per
 // source, so the index converges on what the live write paths produce: the latest version of
 // every document, every ask question, every comment body, and every issue message (issue-less
-// messages are never indexed). An edge that survives keeps its created_at and source_seq; one
-// the rebuild introduces has no source_seq, since no event introduced it, and no current excerpt:
-// a document mention's excerpt is cut from the document's tree, which only the document service
-// reads, so its reconciliation (docs.Service.RunReferenceExcerptReconciliation) stores it. An
-// edge that survives keeps its payload, but StoredExcerpts hides it until the row has a current
-// excerpt_version.
+// messages are never indexed), each read as LoadSource reads it. Each transaction first deletes
+// the source's refs_owed row (migration 0117), so the drain does not re-index it again, and then
+// reads the source, so a write that lands after the delete waits on it and stays owed. An edge
+// that survives keeps its created_at and source_seq; one the rebuild introduces takes the source's
+// own write time as created_at (Reindex) and has no source_seq, since no event introduced it, and
+// no current excerpt: a document mention's excerpt is cut from the document's tree, which only the
+// document service reads, so its reconciliation (docs.Service.RunReferenceExcerptReconciliation)
+// stores it. An edge that survives keeps its payload, but StoredExcerpts hides it until the row has
+// a current excerpt_version.
 func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, error) {
 	var report Rebuild
 	sources := []struct {
@@ -44,28 +47,26 @@ func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, erro
 		count *int
 	}{
 		{"artifact", `
-			select a.id::text, v.markdown
-			from artifacts a
-			join lateral (
-				select markdown from artifact_versions
-				where artifact_id = a.id and markdown is not null
-				order by number desc limit 1
-			) v on true
+			select a.id::text from artifacts a
+			where exists (select 1 from artifact_versions v where v.artifact_id = a.id and v.markdown is not null)
 			order by a.id`, &report.Documents},
-		{"ask", `select id::text, question from asks order by id`, &report.Asks},
-		{"comment", `select id::text, body from comments order by id`, &report.Comments},
-		{"message", `select id::text, body from messages where issue_key is not null order by id`, &report.Messages},
+		{"ask", `select id::text from asks order by id`, &report.Asks},
+		{"comment", `select id::text from comments order by id`, &report.Comments},
+		{"message", `select id::text from messages where issue_key is not null order by id`, &report.Messages},
 	}
 	for _, source := range sources {
-		rows, err := loadSources(ctx, pool, source.query)
+		ids, err := loadSourceIDs(ctx, pool, source.query)
 		if err != nil {
 			return report, fmt.Errorf("load %s sources: %w", source.kind, err)
 		}
-		for _, row := range rows {
-			if err := replaceInTx(ctx, pool, source.kind, row[0], row[1], serverURL); err != nil {
-				return report, fmt.Errorf("rebuild %s %s: %w", source.kind, row[0], err)
+		for _, id := range ids {
+			exists, err := rebuildSource(ctx, pool, source.kind, id, serverURL)
+			if err != nil {
+				return report, fmt.Errorf("rebuild %s %s: %w", source.kind, id, err)
 			}
-			*source.count++
+			if exists {
+				*source.count++
+			}
 		}
 	}
 	orphans, err := pool.Exec(ctx, `
@@ -90,31 +91,31 @@ func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, erro
 	return report, nil
 }
 
-func loadSources(ctx context.Context, pool Pool, query string) ([][2]string, error) {
+func loadSourceIDs(ctx context.Context, pool Pool, query string) ([]string, error) {
 	rows, err := pool.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	sources := [][2]string{}
-	for rows.Next() {
-		var source [2]string
-		if err := rows.Scan(&source[0], &source[1]); err != nil {
-			return nil, err
-		}
-		sources = append(sources, source)
-	}
-	return sources, rows.Err()
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
-func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, body, serverURL string) error {
+// rebuildSource re-indexes one source in a transaction of its own and reports whether it still
+// exists.
+func rebuildSource(ctx context.Context, pool Pool, kind, id, serverURL string) (bool, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := replace(ctx, tx, fromKind, fromID, body, serverURL); err != nil {
-		return err
+	if _, err := tx.Exec(ctx, `delete from refs_owed where kind = $1 and id = $2`, kind, id); err != nil {
+		return false, fmt.Errorf("clear its owed re-index: %w", err)
 	}
-	return tx.Commit(ctx)
+	source, err := LoadSource(ctx, tx, kind, id)
+	if err != nil {
+		return false, err
+	}
+	if err := Reindex(ctx, tx, source, serverURL); err != nil {
+		return false, err
+	}
+	return source.Exists, tx.Commit(ctx)
 }
