@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-366",
+  "completed": "2026-10-25T16:38:33Z",
+  "plan": "dispatch://INFRA-366/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, with references pr-body.md (template, proofs, simplify pass), default-branch-check.md, conflicts-and-rewrites.md (the forward merge of INFRA-364's branch) and tools.md (the rootless harness tools)",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the head that merges",
+      "dispatch: LEGSMOKE fixtures and the production record written on the issue"
+    ],
+    "test": [
+      "legion-worker: pr-body.md's tester rules; re-run the driver, the browser rows and the A12 two-build proof, and try to break pins and deletion",
+      "dispatch: reading LEGSMOKE and the issue's production record"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md and review-threads.md for the review round",
+      "thermonuclear-deep-review (skills/thermonuclear-deep-review/SKILL.md): correctness of migrations, triggers, lock order and graph readers",
+      "thermonuclear-code-quality (skills/thermonuclear-code-quality/SKILL.md): structure of the large diff across Go, SQL and TypeScript"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F01 Stored version markdown carries no paragraph id, so pins cannot be read by re-parsing old versions.",
+        "answer": "Design 1: document_block_texts (a block's full text each time it changes, null when deleted) plus document_indexed_versions, written by IndexBlocks. A pin resolves for every version a block-aware build indexed; an earlier version answers 404 naming the earliest. Architect accepted 2026-10-25 (R9's rule)."
+      },
+      {
+        "finding": "F02 A shared refs_owed queue could be drained by a pre-block INFRA-189 build with the old grammar.",
+        "answer": "Design 2: a dedicated block_grammar_owed queue drained only by the block-aware loop; refs_owed is not reused even if INFRA-189 merges first. Architect accepted and told INFRA-189's architect."
+      },
+      {
+        "finding": "F03 A first-hour sweep is not durable against an older build writing later.",
+        "answer": "Triggers replace MarkStaleBlocks: artifact_versions insert marks the document owed (0118); comments/asks/issue messages holding #b- enqueue (0119-0121); seed after triggers (0122). Tests TestTheBlockIndexTriggersOweWhatAnyBuildWrites, TestEveryVersionWriteLeavesItsDocumentIndexed."
+      },
+      {
+        "finding": "F04 INFRA-364's change may not cover the legacy outgoing reader and counts.",
+        "answer": "INFRA-364's approved plan filters resolveNodes, BacklinkCounts and Outgoing by the nodeLoaders registry; this plan registers block there. The A12 two-build matrix reads the legacy route and referenced_by_count on the old build."
+      },
+      {
+        "finding": "F05 The pin contract was incomplete (480-rune text, change version source, removed node, from= and CLI behaviour).",
+        "answer": "Design 1 table: pin {version, ref, text (full), state, removed_version}; node text full current text; removed answers 200 with edges []; three 404 messages; CLI prints each state and exits 0 for removed. Test with a 600-rune paragraph changed after rune 500."
+      },
+      {
+        "finding": "F06 R9's first-index version cannot prove 'changed since'; reverted text is ambiguous.",
+        "answer": "Pin state compares current text with the text at N; the node's changed_version names the last change; reverted text reads unchanged. Test TestAPinnedReferenceWhoseTextReturnedIsUnchanged."
+      },
+      {
+        "finding": "F07 Pinned links need a browser destination; version URLs use ?v= and ?version=.",
+        "answer": "A pinned link opens version N's page (?v=N issue documents, spec via the primary slug; ?version=N project documents) with no in-page landing; dashboard URLs keep today's meaning; pin only in dispatch:// form. Browser row 3 asserts the click."
+      },
+      {
+        "finding": "F08 INFRA-189's resolver-aware Mentions and ReplaceCounted acknowledgement must compose with indexDocument.",
+        "answer": "Order section: the second to merge makes indexDocument's single extraction text.Mentions and puts the refs_owed ack in the shared replaceRefs."
+      },
+      {
+        "finding": "F09 Lease capacity and drain lock order.",
+        "answer": "One loop, lease block-index, leasePoolSize +1 at the head; item drain lists without locks, then source row for update, then owed delete guarded by enqueued_at (writer order). Tests TestADrainedItemKeepsAConcurrentEdit and the multiprocess lease row."
+      },
+      {
+        "finding": "F10 Per-block counts change without the document target set changing.",
+        "answer": "Design 3: IndexBlocks returns changed pair targets, merged before one CountedChanges. Test TestAVersionWriteNamesATargetWhoseBlockCountChanged."
+      },
+      {
+        "finding": "F11 Outgoing and Closure would keep links through a deleted block.",
+        "answer": "Design 4: one current-block rule (join document_blocks) for Edges, counts, Outgoing, Closure and BlockLinks. Test TestADeletedBlockLeavesEveryListAndReturnsWithItsID."
+      },
+      {
+        "finding": "F12 Closed documents owed a settlement never get block nodes.",
+        "answer": "Skip only when live text is ahead and differs; index a pending document whose live markdown equals its stored version. The count is logged (live_ahead) and measured by block-coverage.sh; architect accepted and asked for the count in the handoff and on the PR."
+      },
+      {
+        "finding": "F13 Re-indexed old references would look newly authored.",
+        "answer": "Provenance rule: document pairs take the indexed version's created_at and event source_seq; item refs take the source's write time and no source_seq; first indexing copies the document row's provenance. Test TestOlderItemTextCitingABlockIsReindexed."
+      },
+      {
+        "finding": "F14 ReferencedBy groups two citing blocks under one key and one path.",
+        "answer": "Design 5: rows keyed on node id with kind and direction; each row links its own block. Browser row 2."
+      },
+      {
+        "finding": "F15 Inherited fixtures and driver are weaker than the v16 acceptance.",
+        "answer": "Literal fixtures: A1 no whole-document edge via ?from=comment; A4 two forward and one back; A5 every block's changed_version; R6 part_of set equals /blocks; pinned A2 and A15 in the driver and API tests."
+      },
+      {
+        "finding": "F16 No browser red-at-base procedure.",
+        "answer": "'Red at the base' section: git archive of the merge-base into $TMPDIR, copy only block-references.e2e.ts, behavioural failures only, both runs quoted on the PR."
+      },
+      {
+        "finding": "F17 The copy-link row cited a nonexistent test and used clipboard grants.",
+        "answer": "Copy encoding is held by builder unit tests; real ids are ASCII (directive ids, minted UUIDs), so no browser row claims a non-ASCII copy."
+      },
+      {
+        "finding": "F18 A12 needs a route matrix with exact edge sets and older-build writes.",
+        "answer": "'A12: two builds' section: old (INFRA-364) and new builds on one database, six reads per build with exact sets, older-build writes converging within 60 s, pre-INFRA-364 build as the 500 witness."
+      },
+      {
+        "finding": "F19 Production A12 evidence and the READY gate.",
+        "answer": "READY gate: five /healthz samples, each containing INFRA-364's merge; the merger tells the architect otherwise. Production check after the close; the overlap during the roll is recorded as not observed (architect accepted; INFRA-371 covers production)."
+      },
+      {
+        "finding": "F20 Stale cites (migration number, route count, replace callers, report writer, fragment writer, driver precedent, README section).",
+        "answer": "Corrections table in plan.md, each with its main 371d6c87 location."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 3
+  },
+  "specDepartures": [
+    {
+      "spec": "R1: a pinned link shows the block's text at that document version.",
+      "plan": "A pin resolves for every version a block-aware build indexed; a pin to an earlier version (before the deploy, or written by an older build during the roll) answers 404 naming the earliest resolvable version.",
+      "evidence": "Stored version markdown holds no paragraph id (pmdoc/render.go:291-312; ParseRendering mints ids, pmdoc/parse.go:97-113) and compaction keeps no old CRDT state (docs/persistence.go:784-788). Same rule as R9. Accepted by the architect 2026-10-25 as not changing what the spec delivers.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "R2/R9: every block of a document is a node; existing blocks take the version of their first indexing.",
+      "plan": "A closed issue's document whose live text is ahead of its last version and differs from it is not indexed until its next version write; the count is logged (live_ahead) and measured by block-coverage.sh.",
+      "evidence": "Block ids belong to the live text; settlement never resumes on a closed issue (docs/resume.go:48-52). Accepted by the architect 2026-10-25; the count goes in the handoff and on the PR.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "Issue spec: this issue's rollout is where A12 is first observed in production.",
+      "plan": "A12 is proven before the merge on two real server builds sharing one database; in production the check runs after the roll and the overlap during the roll is recorded as not observed.",
+      "evidence": "No Legion role is present while a Dispatch deploy rolls and no worker may ask for one (issue spec, Deploy order). Accepted by the architect 2026-10-25; INFRA-371 covers production.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "Issue spec: if INFRA-189 has merged when this is planned, reuse its refs_owed queue rather than adding a second sweep.",
+      "plan": "INFRA-189 has not merged; a dedicated trigger-fed block_grammar_owed queue is used, and stays even if INFRA-189 merges first.",
+      "evidence": "During the roll a pre-block build's refs_owed drain would take shared rows and index #b- text with the old grammar (text/refs.go:93-119,149-205,263-327). Accepted by the architect 2026-10-25.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
