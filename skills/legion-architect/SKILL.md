@@ -168,8 +168,11 @@ reads the approval from Dispatch as it registers, opens the gate, and delivers `
 once. The same read covers a human who answers between your `dispatch request-approval` and
 `register_gate` calls, so no approval is lost to timing; you never approve anything yourself.
 
-Then end the turn: the closed gate returns the root's slot, and the daemon suspends this session and
-resumes it with a task naming the human's answer. Release no wave before `design-approved`. On
+Then end the turn: the closed gate returns the root's slot when nothing else holds it — no other
+issue of the tree mid-phase or held, the `legion` label still on, and no person or outside session
+holding the root's Dispatch claim — and the daemon then suspends this session and resumes it with a
+task naming the human's answer. The root keeps its slot otherwise, and this session runs on.
+Release no wave before `design-approved`. On
 `design-changes-requested`, or a resume task saying the gate is still closed, (1) revise the spec as
 the human asks, (2) run `task(agent="plan-gap-analyst")` on that version with the code, the command
 output it relies on and the human's words, and resolve every finding, (3) request approval again
@@ -449,9 +452,11 @@ human to-do may use `dispatch ask`; workers may reach the human directly with it
 create a wait loop for any wake source.
 
 Never yield while waiting on a human. Open the root-level `dispatch ask` or the root approval
-request before the turn ends; the daemon then suspends this session and returns its slot (a root
-whose claim another holds keeps it), and resumes it with a task naming the person's act or a newer
-spec version. Open ordinary asks on the root issue, never a child, so the tree stays live.
+request before the turn ends; the daemon then returns the root's slot and suspends this session
+when nothing else holds that slot — no other issue of the tree mid-phase or held, the `legion`
+label still on, and no person or outside session holding the root's claim — and resumes it with a
+task naming the person's act or a newer spec version. The root keeps its slot otherwise, and this
+session runs on. Open ordinary asks on the root issue, never a child, so the tree stays live.
 
 ## Architecture components
 

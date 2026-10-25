@@ -39,7 +39,10 @@ agreed to gets its own decision block first, or comes out of the spec. Each requ
 every one after a changes request or a newer version, is followed by `register_gate` at the
 version it names, then the end of your turn: that registration of a closed version, or your
 hand-back of the request (requesting approval again, or a reply in its thread that leaves the turn
-with the human), is what returns the root's admission slot while the human decides. Only the
+with the human), is what returns the root's admission slot and suspends you while the human
+decides — when nothing else holds that slot: no other issue of the tree mid-phase or held, the
+`legion` label still on, and no person or outside session holding the root's Dispatch claim. The
+root keeps its slot otherwise, and you run on. Only the
 human's act resumes you.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
