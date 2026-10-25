@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-376",
+  "completed": "2026-10-25T11:05:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "reviewedCodeHead": "51fbebcf38e8b3553e0e365f5a993354423e69dd",
+  "checks": {
+    "move": "Independently: main 14571f6f4aea (== 9b062abddd79 == main@origin 3ff609722797, sha1 1105983592e1) SKILL.md lines 429-457 cmp-identical to skills/legion-architect/references/wake-routing.md; branch SKILL.md lines 1-428 + 435-end diff-identical to main's 1-428 + 459-end; the six-line block at 429-434 is the heading and the skill:// pointer; both packages/claude-envoy/legion/skills/legion-architect files cmp-identical to source; SKILL.md 33,651 bytes.",
+    "pointerResolution": "packages/daemon/internal/prompts/go/architect-common.md:10 ('the pr-blocked row of skill://legion-architect's wake routing') still resolves through the kept heading; packages/daemon/internal/prompts/go/claude-mechanics.md:7 maps skill://<name>/<path> for Claude Code; SKILL.md:278 'as that row says' kept verbatim per the spec's no-rewording rule.",
+    "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head 51fbebcf38e8 (newest pull_request run): every check completed success or skipped (Tests 40185615826, Legion Envoy and Contracts 40185615782, Docs 40185615791, Worker Image 40185615780, PR Title 40185615802); compare 51fbebcf38e8...c13a698f35f4 touches only .legion/.",
+    "threads": "0 review threads, 0 conversation comments.",
+    "e2e": "E2E (implementer) and E2E (tester) both present in the PR body, each with surface, command, observation, head 51fbebcf38e8 and a negative control.",
+    "thermonuclear": "Not run: docs-only diff (skill markdown and CHANGELOGs)."
+  }
+}
