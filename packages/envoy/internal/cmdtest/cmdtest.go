@@ -5,10 +5,12 @@ package cmdtest
 
 import (
 	"bytes"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -115,38 +117,53 @@ var (
 	handedOut   = map[int]bool{}
 )
 
+// freePortLow and freePortHigh bound the ports FreeTCPPort hands out: below the range a kernel
+// takes ports from for itself (Linux's default 32768-60999, and the 49152-65535 macOS and Windows
+// use), for a listener on port 0 and for an outgoing connection's source port alike. So no socket
+// the kernel places a port for, a booting process's own connection to its database among them,
+// takes one of these while its process boots.
+const (
+	freePortLow  = 20000
+	freePortHigh = 32767
+)
+
 // FreeTCPPort is a loopback port, for a process to serve on, that nothing listened on a moment ago
 // and that FreeTCPPort hands to no other caller of this binary until the test it went to ends.
 //
-// The port is free from the moment this returns until its process binds it, and the kernel hands
-// out any port nothing holds, so a test that draws a second port before the first one's process
-// has bound it can be handed the first again. In CI run 40162140539 one process of a pair exited on
-// "address already in use" for port 35881 while a health check of that port passed, which of the
-// servers that test runs only the pair's other process could have answered. A draw that repeats a
-// held port is kept open until a new port comes, so the kernel cannot hand it back.
+// The port is free from the moment this returns until its process binds it. In CI run 40162140539
+// a test drew a second port in that window and was handed the first again: one process of a pair
+// exited on "address already in use" for port 35881 while a health check of that port passed,
+// which of the servers that test runs only the pair's other process could have answered. So this
+// chooses each port number itself and skips one it handed out before binding anything. A listener
+// on port 0 would bind the port before it could be checked, and the process the port went to could
+// lose its own bind in that moment.
 //
-// Only the callers of this function are kept apart: any other socket can still take the port before
-// its process binds it, and that process then exits on the bind.
+// Only the callers of this function are kept apart: a socket bound by number to a port in this
+// range can still take the port before its process binds it, and that process then exits on the
+// bind.
 func FreeTCPPort(t testing.TB) int {
+	t.Helper()
+	return freeTCPPortFrom(t, func() int { return freePortLow + rand.IntN(freePortHigh-freePortLow+1) })
+}
+
+// freeTCPPortFrom is FreeTCPPort with the port numbers it tries coming from candidate, which a
+// test replaces to propose a port it chose.
+func freeTCPPortFrom(t testing.TB, candidate func() int) int {
 	t.Helper()
 	handedOutMu.Lock()
 	defer handedOutMu.Unlock()
-	var drawn []net.Listener
-	defer func() {
-		for _, listener := range drawn {
-			_ = listener.Close()
-		}
-	}()
-	for {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("pick a port: %v", err)
-		}
-		drawn = append(drawn, listener)
-		port := listener.Addr().(*net.TCPAddr).Port
+	var refused error
+	for range 1000 {
+		port := candidate()
 		if handedOut[port] {
 			continue
 		}
+		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			refused = err
+			continue
+		}
+		_ = listener.Close()
 		handedOut[port] = true
 		t.Cleanup(func() {
 			handedOutMu.Lock()
@@ -155,6 +172,8 @@ func FreeTCPPort(t testing.TB) int {
 		})
 		return port
 	}
+	t.Fatalf("pick a port: 1000 tries found none free that this binary has not handed out; the last bind said %v", refused)
+	return 0
 }
 
 // LockedBuffer is a buffer a process's output, or a logger, writes from more than one goroutine

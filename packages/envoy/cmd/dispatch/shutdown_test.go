@@ -485,13 +485,16 @@ func (p *dispatchProcess) checkSettledAtShutdown(t *testing.T, database *store.S
 
 // A process that lost its port to another server is not healthy because the port answers: the
 // other server answers /healthz in its place, as the other process of a pair did in the CI run
-// cmdtest.FreeTCPPort names. The wait takes the bind from the process's own output, so it refuses
-// that answer, and takes the same answer from a process whose output says it bound the port.
+// cmdtest.FreeTCPPort names. Nor is one that bound the port and has exited since, leaving the port
+// to another server. The wait takes the bind from the process's own output and refuses any
+// process that has exited, so it refuses both answers, and takes the same answer from a running
+// process whose output says it bound the port.
 func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) {
 	holder := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	t.Cleanup(holder.Close)
 	port := holder.Listener.Addr().(*net.TCPAddr).Port
 	address := "addr=127.0.0.1:" + strconv.Itoa(port)
+	listening := `level=INFO msg="dispatch: listening" ` + address
 	process := func(output string, exited bool) *dispatchProcess {
 		logged := &cmdtest.LockedBuffer{}
 		_, _ = logged.Write([]byte(output + "\n"))
@@ -506,9 +509,13 @@ func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) 
 	if err := lost.healthyWithin(5 * time.Second); err == nil || !strings.Contains(err.Error(), "exited before it became healthy") {
 		t.Errorf("a process that exited on its bind passed as healthy on a port another server holds: %v", err)
 	}
-	bound := process(`level=INFO msg="dispatch: listening" `+address, false)
+	gone := process(listening+"\n"+`level=INFO msg="dispatch: shutting down"`, true)
+	if err := gone.healthyWithin(5 * time.Second); err == nil || !strings.Contains(err.Error(), "exited before it became healthy") {
+		t.Errorf("a process that logged its bind and then exited passed as healthy on a port another server holds: %v", err)
+	}
+	bound := process(listening, false)
 	if err := bound.healthyWithin(5 * time.Second); err != nil {
-		t.Errorf("a process that logged its bind, on a port that answers, was not healthy: %v", err)
+		t.Errorf("a running process that logged its bind, on a port that answers, was not healthy: %v", err)
 	}
 }
 
@@ -609,17 +616,27 @@ func (p *dispatchProcess) waitHealthy(t *testing.T) {
 }
 
 // healthyWithin waits up to within for the process to log that it bound its own port and for
-// /healthz there to answer 200, and says why it did not, with the process's output. An answer on the
-// port alone does not show the bind: a process that cannot bind its port exits (main.go's listen),
-// and whatever else holds the port answers in its place (cmdtest.FreeTCPPort names the CI run where
-// that happened). The port is bound after the SIGTERM handler is installed, so a server that
-// answers is one a signal stops in order.
+// /healthz there to answer 200 while the process still runs, and says why it did not, with the
+// process's output. An answer on the port alone does not show the bind: a process that cannot bind
+// its port exits (main.go's listen), and whatever else holds the port answers in its place
+// (cmdtest.FreeTCPPort names the CI run where that happened). Nor does a logged bind and an answer
+// from a process that has exited since, which left the port to whatever took it next. The port is
+// bound after the SIGTERM handler is installed, so a server that answers is one a signal stops in
+// order.
 func (p *dispatchProcess) healthyWithin(within time.Duration) error {
 	listening := `msg="dispatch: listening" addr=127.0.0.1:` + strconv.Itoa(p.port)
+	exited := func() bool {
+		select {
+		case <-p.Exited:
+			return true
+		default:
+			return false
+		}
+	}
 	deadline := time.Now().Add(within)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
-	for time.Now().Before(deadline) {
+	for time.Now().Before(deadline) && !exited() {
 		if strings.Contains(p.Output.String(), listening) {
 			request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url("/healthz"), nil)
 			if err != nil {
@@ -628,16 +645,18 @@ func (p *dispatchProcess) healthyWithin(within time.Duration) error {
 			response, err := http.DefaultClient.Do(request)
 			if err == nil {
 				_ = response.Body.Close()
-				if response.StatusCode == http.StatusOK {
+				if response.StatusCode == http.StatusOK && !exited() {
 					return nil
 				}
 			}
 		}
 		select {
 		case <-p.Exited:
-			return fmt.Errorf("Dispatch exited before it became healthy:\n%s", p.Output.String())
 		case <-time.After(200 * time.Millisecond):
 		}
+	}
+	if exited() {
+		return fmt.Errorf("Dispatch exited before it became healthy:\n%s", p.Output.String())
 	}
 	return fmt.Errorf("Dispatch never became healthy:\n%s", p.Output.String())
 }
