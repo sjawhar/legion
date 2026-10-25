@@ -1,15 +1,12 @@
 package tmux
 
 import (
-	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -37,7 +34,7 @@ func (claudeLauncher) Marker() string { return " claude-bridge -- " }
 
 // ClaudeMCPServer is the name the pane's one MCP server is configured under, which prefixes each of
 // its tools in Claude Code: `mcp__legion__legion`, `mcp__legion__envoy_publish`, …
-const ClaudeMCPServer = "legion"
+const ClaudeMCPServer = claudelaunch.MCPServer
 
 // ClaudeConfigDir is a claim's own Claude Code directory, its CLAUDE_CONFIG_DIR: the session
 // transcripts `--resume` reads, the MCP configuration, the bridge's phase-stall state. It is named
@@ -47,44 +44,21 @@ func ClaudeConfigDir(stateDir string, token claim.Token) string {
 	return filepath.Join(stateDir, "claude", string(token))
 }
 
-// claudeTranscript is a transcript Claude Code writes: `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session>.jsonl`.
-var claudeTranscript = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
-
-// claudeResumeSession is the session id a recorded transcript continues, refusing a recorded session
-// that is not a transcript of the claim's own Claude Code directory: an Oh My Pi session, recorded
-// before the role's backend changed, which `--resume` could not continue.
+// claudeResumeSession is the session id the pane's recorded transcript continues
+// (claudelaunch.ResumeSession), refusing a session that is not a transcript of the claim's own
+// Claude Code directory.
 func claudeResumeSession(configDir, file string) (string, error) {
-	rel, err := filepath.Rel(filepath.Join(configDir, "projects"), file)
-	parts := strings.Split(rel, string(filepath.Separator))
-	if err != nil || len(parts) != 2 || parts[0] == ".." {
-		return "", fmt.Errorf("the recorded session %s is not a Claude Code transcript under %s: the role's backend changed since it was recorded", file, configDir)
-	}
-	match := claudeTranscript.FindStringSubmatch(parts[1])
-	if match == nil {
-		return "", fmt.Errorf("the recorded session %s is not named for a Claude Code session id", file)
-	}
-	return match[1], nil
+	return claudelaunch.ResumeSession(configDir, file)
 }
 
-// newSessionID is a random (version 4) UUID, the form `--session-id` takes.
-func newSessionID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
+// newSessionID is the session id a fresh pane starts (claudelaunch.NewSessionID).
+func newSessionID() string { return claudelaunch.NewSessionID() }
 
-// writeClaudeMCPConfig writes the pane's MCP configuration into configDir, 0600, and returns its
-// path: the claude-envoy server under ClaudeMCPServer, on bun, its plugin data under configDir.
-// Claude Code runs it with the pane's environment, which names the daemon, Envoy and Dispatch.
+// writeClaudeMCPConfig writes the pane's MCP configuration (claudelaunch.MCPConfig) into configDir,
+// 0600, and returns its path. The pane's Claude Code reads it off the daemon's own disk, which is
+// why the writing stays here; a pod's launcher writes the same document into its own directory.
 func writeClaudeMCPConfig(configDir string, launch ClaudeLaunch) (string, error) {
-	config := map[string]any{"mcpServers": map[string]any{ClaudeMCPServer: map[string]any{
-		"command": launch.Bun,
-		"args":    []string{filepath.Join(launch.PluginDir, "dist", "envoy-channel.js")},
-		"env":     map[string]string{"CLAUDE_PLUGIN_DATA": filepath.Join(configDir, "envoy-plugin-data")},
-	}}}
-	raw, err := json.Marshal(config)
+	raw, err := claudelaunch.MCPConfig(launch.Bun, launch.PluginDir, configDir)
 	if err != nil {
 		return "", err
 	}
@@ -95,35 +69,24 @@ func writeClaudeMCPConfig(configDir string, launch ClaudeLaunch) (string, error)
 	return path, nil
 }
 
-// claudeInnerCommand is the command the shim runs for a Claude Code role: `legion claude-bridge`
-// around `claude -p` in stream-json both ways, with every permission granted (a headless worker has
-// no one to ask), only the MCP server mcpConfig names (an operator's own servers never load), the
-// claude-envoy plugin and the generated Legion plugin for their skills, agents and the `dispatch`
-// command, the session — `--session-id` for a fresh one, `--resume` to continue one — and the one
-// system prompt word every pane gets.
+// claudeInnerCommand is the command the shim runs for a Claude Code role: the agent command
+// claudelaunch.Argv builds from the pane's boot-resolved paths, every word quoted for the pane's
+// shell, and the one system prompt word every pane gets, whose `$(cat …)` that shell reads.
 func claudeInnerCommand(legion string, launch ClaudeLaunch, mcpConfig, session string, resume bool, parts runtime.PromptParts) string {
-	flag := "--session-id"
-	if resume {
-		flag = "--resume"
-	}
-	return shellprefix.Word(legion) + " claude-bridge -- " + shellprefix.Word(launch.Binary) +
-		" -p --input-format stream-json --output-format stream-json --verbose --permission-mode bypassPermissions" +
-		" --strict-mcp-config --mcp-config " + shellprefix.Word(mcpConfig) +
-		" --plugin-dir " + shellprefix.Word(launch.PluginDir) +
-		" --plugin-dir " + shellprefix.Word(filepath.Join(launch.PluginDir, "legion")) +
-		" " + flag + " " + session + " " + omplaunch.SystemPromptArgument(parts)
+	paths := claudelaunch.Paths{Legion: legion, Claude: launch.Binary, PluginDir: launch.PluginDir}
+	return shellprefix.Command(claudelaunch.Argv(paths, mcpConfig, session, resume)) + " " +
+		omplaunch.SystemPromptArgument(parts)
 }
 
-// claudeEnvironment are the -e pairs a Claude Code pane carries beside every pane's: its claim's own
-// configuration directory, and Claude Code's background tasks and scheduled prompts off, since the
-// bridge reports a turn's end when its last user message's result arrives and nothing may run after
-// it unseen.
+// claudeEnvironment are the -e pairs a Claude Code pane carries beside every pane's: tmux's form of
+// the environment claudelaunch.Environment names, the claim's own configuration directory included.
 func claudeEnvironment(configDir string) []string {
-	return []string{
-		"-e", "CLAUDE_CONFIG_DIR=" + configDir,
-		"-e", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1",
-		"-e", "CLAUDE_CODE_DISABLE_CRON=1",
+	assignments := claudelaunch.Environment(configDir)
+	pairs := make([]string, 0, 2*len(assignments))
+	for _, assignment := range assignments {
+		pairs = append(pairs, "-e", assignment)
 	}
+	return pairs
 }
 
 // Launch is the inner command and the extra -e pairs of a Claude Code launch: the claim's
