@@ -2,51 +2,52 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-95",
-  "completed": "2026-10-25T06:06:30Z",
+  "completed": "2026-10-25T07:20:26Z",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
+  "important": 2,
   "minor": 2,
+  "round": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/styles.css:97-98",
-      "description": "The note's Inbox row is wrong about the call site it names by file. It says an Inbox ask card (AskCard.tsx) is 14px on 20px lines and the 3px clears the line above by 1px. AskCard.tsx:522 wraps MarkdownBody in text-[15px] leading-relaxed, and .dispatch-markdown{font-size:inherit;line-height:inherit} wins over .prose-sm{font-size:.875rem;line-height:1.71429} in the built bundle (packages/dispatch/web/dist/assets/index-BKmvhNR3.css, same specificity, .dispatch-markdown 56k later in the file), which is also why the message turn measures 16px/24px rather than prose-sm's own size. So that surface is 15px on 24.375px lines, about 2px of clearance, which is what this pull request's own gap analysis already carried (.legion/INFRA-95/plan.json, F3: 'the Inbox ask card is about 24.4px (AskCard.tsx:522-523)'). 14px/20px is text-sm, which AskCard uses for its other paragraphs. The same number is in the PR body's pitch table and in the enumeration comment on dispatch://INFRA-95. The enumeration's conclusion is unaffected: the tight surface is the 12px/16px agent turn, and dispatch://INFRA-304 owns it."
+      "file": "packages/dispatch/e2e/phone.e2e.ts:654 and :521",
+      "description": "Round 2 moved probeClear above the clicks and left lowerClearance behind, so the row still carries one instance of the defect this round fixed. The mutation probe sits at upperText.bottom + 1 (:521) and the lower anchor's padding box starts at upperText.bottom + lowerClearance, measured as 2 on every machine anyone has run this on; the probe therefore clears its neighbour by exactly one pixel, out of a quantity that comes from the font's content-area height. The only assertion on it, expect(line.lowerClearance).toBeGreaterThanOrEqual(0) at :654, permits 1 and 0 and runs after the two clicks at :569 and :576 that it is the precondition for. At a clearance of 1 or 0 the mutation-sensitive click at :576 resolves to a point inside the lower anchor's padded box and the row dies with a 5 s TimeoutError naming the Lower line anchor - which the comment at :574-575 has already told the next reader means the three pixels of .prose a are gone. Move the assertion above the clicks, beside probeClear's at :553, and bound it at the margin the probe needs (>= 2), or derive probeY from the middle of the free band [upperText.bottom, upperText.bottom + lowerClearance] so the point cannot drift into the neighbour."
     },
     {
       "severity": "important",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:639-642",
-      "description": "The composer guard is asserted 95 lines after the clicks it is there to explain. In the state it names - the turn left under the fixed comment composer - the first trial click at :557 refuses first with a 5 s actionability timeout, so the message 'the turn was left under the fixed comment composer' is essentially never printed and the next investigation starts from a bare timeout. .legion/INFRA-95/test.json's note claims the row 'keeps an assertion that names that state ... so the row is independent of INFRA-303 rather than blind to it at its own point'; the code as ordered does not carry that claim. probeClear also fails open when the composer element is not found (:545, composer === null || ...), so a change to the form's accessible name silently degrades check 4 to a viewport-bounds test."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:583-586",
-      "description": "The tap's read-back is the one unsynchronised read left in a row whose acceptance line is that it gives the same answer every time: tap(), then a single page.evaluate of dataset.e2eTappedLink with 'no-click' as the fallback. The click Chromium synthesises from a touch sequence is not guaranteed to be dispatched in the task that resolves tap(); if it ever lands a tick late the row goes red as 'no-click'. The determinism evidence for it (240 taps, 30 of 30, 10 of 10 under load) is all from this one pod, and a GitHub runner is the machine this row's flake lived on. The suite's convention for a value that arrives asynchronously is expect.poll (packages/dispatch/e2e/attention.e2e.ts:155)."
+      "file": "packages/dispatch/e2e/phone.e2e.ts:566-568 and :651-653",
+      "description": "'16px prose on 24px lines, the tightest pitch a body reaches' is refuted by the note the same commit corrected: styles.css:99-100 now records an agent turn's reasoning at 12px on 16px lines, and that surface is a .prose body too (AgentThread.tsx:112 wraps MarkdownBody, and markdown-engine.ts:171-172 gives every MarkdownBody the prose class list). Round 2 copied the superlative into a new comment at :566-568 while correcting the measurement that refutes it. It is the tightest pitch a *message* body reaches."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:478-503",
-      "description": "A second, wall-clock settle stands beside the suite's own frame-based one, whose doc comment argues against exactly this form: deep-links.e2e.ts:112-120 counts stillness in animation frames because 'a machine under load stretches them and stretches this with them, which a wall-clock window cannot do'. The same block also writes 'the seeded upper link outside the ask cards' a third time (:481-483, :506-509 and the CSS form at :553-555), each with its own error string."
+      "file": "packages/dispatch/e2e/phone.e2e.ts:600-603",
+      "description": "Hardening: expect.poll invokes its callback outside the matcher's try, so an exception from the callback rethrows rather than polling again. If the capture listener at :585-596 ever failed to attach, the tap at :597 would navigate to https://example.invalid/upper and the row would die with 'Execution context was destroyed' rather than the designed no-click. A catch inside the poll callback keeps the diagnostic."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:628-654",
-      "description": "The numbered checklist at the foot of the row no longer maps to the code: item 5 (:643-645) has no expect at all, its check being the trial click at :562, and item 3 (:632-635) narrates a click that happened 95 lines above while the expect under it is only lowerClearance >= 0."
+      "file": "packages/dispatch/e2e/phone.e2e.ts:547",
+      "description": "Hardening: probeClear requires probeY < composer.getBoundingClientRect().top, but the composer is fixed inset-x-0 bottom-16 (MentionComposer.tsx:1324), so the 64 px band beneath it is not covered by the composer at all; a probe there would be refused with a message blaming the composer. Comparing against the composer's rect rather than its top edge alone would be exact."
     }
   ],
+  "round1FindingsVerified": [
+    "styles.css:97-98 now reads 15px on 24.375px lines clearing by about 3.4px. Verified against AskCard.tsx:522 (text-[15px] leading-relaxed font-medium) and the built bundle, where .dispatch-markdown{font-size:inherit;line-height:inherit} sits after @layer utilities closes and .prose-sm is inside it, so the call site decides. The tester's control run in a text-sm wrapper returns exactly the refuted 14px/20px/1px, which explains the first note. The thread's own 'about 2px' was my arithmetic, not a measurement; the measured 3.38px is what stands, and the architect has corrected dispatch://INFRA-304.",
+    "expect(line.probeClear, ...) now runs at :553-556, before both trial clicks, and probeClear starts composer !== null so the lookup fails closed. The tester drove the state the finding was about rather than only the implementer's selector-rename control: with the settle's scrollIntoView replaced by window.scrollTo(0, 0) the row is red 3 of 3 in about 6.5 s at phone.e2e.ts:556:7 with the guard's own message and zero TimeoutError in the run, so the first trial click no longer pre-empts it; the renamed-selector control is red at the same line in 7.4 s.",
+    "The tap read-back is expect.poll at :600-603, on attention.e2e.ts:155's pattern. Bounded at 15 s by playwright.config.ts:93,102, inside the row's own 120 s. It held in all 48 repeats of this round, ten of them under two-core contention where each repeat stretched from 7.6-8.4 s to 11.9-12.7 s."
+  ],
   "ci": {
-    "codeHead": "8bd43a9218fa8f5bc5ba0c15fd733c945fffcd4c",
+    "codeHead": "e0aefdca1f423c7a59cf408b86ae84d26a5c3ecb",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "read": "All four required checks completed success at the code head; the browser job dispatch (not required on main) success too. gh api repos/sjawhar/legion/compare/8bd43a9218fa...4146492078b2 lists only .legion/INFRA-95/implement.json and .legion/INFRA-95/test.json, so those are the checks that stand for the code reviewed."
+    "read": "All four required checks completed success at the code head (the newest pr-title check-run, completed 06:53:01Z from run 40169522007, is success; an earlier pr-title run was cancelled when superseded). compare/e0aefdca1f42...b37d0c9d7d78 lists only .legion/INFRA-95/implement.json and .legion/INFRA-95/test.json. The dispatch browser job (run 40169430214, not required on main) was still in_progress at 07:20 UTC, 48 minutes after it started; this round requests changes, so it does not wait for it."
   },
   "thermonuclear": {
-    "head": "4146492078b2352e54cbf9e33dde7ec6a3b21b7d",
-    "deepReview": "APPROVE at 41464920 - two Minors: the composer diagnostic cannot fire for the case it names, and probeClear fails open when the composer is not found. It confirmed the offset arithmetic against playwright-core's _offsetPoint and Blink's border quad for an inline box, that the trial click really hit-tests, that tapped cannot read a stale click, and that the settle terminates.",
-    "codeQuality": "CHANGES at 41464920 - five findings: the deferred-assertion model and its checklist, the dead probeClear guard, the rival wall-clock settle and the triple link lookup, the unsynchronised tap read-back, and the styles.css pitch."
+    "head": "b37d0c9d7d788c0ef1d22e558d9f68559343198a",
+    "deepReview": "CHANGES at b37d0c9d - three findings: the stale pull request body (two of its three bullets are the reviewer's own lines, rewritten this round; the Size line is the implementer's), the refuted 'tightest pitch a body reaches' superlative, and the unasserted one-pixel margin the mutation probe depends on. It confirmed all three round-1 fixes independently, the position arithmetic against playwright-core's _offsetPoint, expect.poll's 15 s bound, and that a late jumpToLatest can no longer re-create the under-composer state once a [data-turn] exists.",
+    "codeQuality": "CHANGES at b37d0c9d - the footer checklist survived its own renumbering (two assertions still sit 180 lines and two navigations from their measurement), and the 26-line wall-clock settle is deletable by the polled predicate this round introduced. Both are the fast-follow named in round 1, restated; the lowerClearance half of the first is carried as this round's finding 1."
   },
   "threads": {
-    "opened": 3,
-    "botThreadsAdjudicated": 0,
-    "note": "No review thread existed on the pull request before this round (gh api graphql reviewThreads: 0 nodes), and no bot has opened one. The three threads this round opens are the three important findings; the two minor ones are the review body's Fast-follow line and a remark inside the second thread."
+    "round1": "All three round-1 threads carry the implementer's disposition reply and are resolved by it, the pull request's author; each carries the reviewer's confirming reply at this round.",
+    "openedThisRound": 2,
+    "botThreadsAdjudicated": 0
   }
 }
