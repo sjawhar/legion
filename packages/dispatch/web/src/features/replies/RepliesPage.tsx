@@ -41,6 +41,10 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
       : row.document !== undefined
         ? { document: row.document }
         : undefined;
+  // The newest write's own item: an answer's id is its ask's, and a reply in a message thread is
+  // a message, in an ask's or comment's thread a comment.
+  const replyKind =
+    row.reply.kind === "answer" ? "ask" : row.kind === "message" ? "message" : "comment";
   return (
     <li
       className={`rounded-xl border p-3 ${card} ${borderDefault}`}
@@ -61,6 +65,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         fullTitle
         lines={2}
         markdown={row.reply.first_line}
+        source={{ id: row.reply.id, kind: replyKind }}
       />
       <MarkdownPreview
         className={`mt-1 text-xs ${textMutedOnCanvas}`}
@@ -68,6 +73,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         lead="In "
         lines={1}
         markdown={row.subject}
+        source={{ id: row.thread_id, kind: row.kind }}
       />
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
         {/* The server's `ref` names the thread's root, never the reply: an anchored root redirects

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
+import type { ReferenceSource } from "../../api/client";
 import type { Ask, AskAnswer, AskEdit, AskResolution } from "../../api/types";
 import {
   badgeLow,
@@ -26,6 +27,7 @@ import { AskApprovalLink } from "./AskApprovalLink";
 import { AskOptionList } from "./AskOptionList";
 
 export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): ReactNode {
+  const source = { id: ask.id, kind: "ask" } as const;
   if (ask.edited_at === null) {
     return null;
   }
@@ -45,9 +47,9 @@ export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): 
             {edits.map((edit) => (
               <div key={edit.at}>
                 <div className={`font-medium ${textPrimaryOnSurface}`}>
-                  <MarkdownBody markdown={edit.previous.question} />
+                  <MarkdownBody markdown={edit.previous.question} source={source} />
                 </div>
-                <AskOptionList options={edit.previous.options} selected={[]} />
+                <AskOptionList options={edit.previous.options} selected={[]} source={source} />
                 <p className="mt-1">
                   Reworded by {actorLabel(edit.edited_by)} · <Timestamp at={edit.at} />
                 </p>
@@ -60,8 +62,15 @@ export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): 
   );
 }
 
-/** Earlier answers to an ask whose answer was changed, oldest first. */
-export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNode {
+/** Earlier answers to an ask whose answer was changed, oldest first. `source` is the ask, which
+ *  a `#id` in an answer resolves against. */
+export function AskAnswerHistory({
+  answers,
+  source,
+}: {
+  answers: AskAnswer[];
+  source: ReferenceSource;
+}): ReactNode {
   const earlier = answers.slice(0, -1);
   const latest = answers.at(-1);
   if (earlier.length === 0 || latest === undefined) return null;
@@ -81,7 +90,7 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNo
             <div key={previous.at}>
               {previous.selected.length === 0 ? null : <p>{previous.selected.join(", ")}</p>}
               {previous.text === null || previous.text === "" ? null : (
-                <MarkdownBody markdown={previous.text} />
+                <MarkdownBody markdown={previous.text} source={source} />
               )}
               <p className="mt-1">
                 {previous.user} · <Timestamp at={previous.at} />
@@ -145,6 +154,7 @@ function AnsweredAsk({
   onChangeAnswer?: () => void;
 }): ReactNode {
   const { answer } = ask;
+  const source = { id: ask.id, kind: "ask" } as const;
   // A chosen "Other" answer carries no real option (answer.selected is empty) but still has
   // free text - render it under an Other label so the record reads as a chosen option, not an
   // unlabeled addendum. An ask with no options at all has no Other row to have chosen, so its
@@ -161,7 +171,7 @@ function AnsweredAsk({
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
       {frame === "block" ? null : (
         <div className={`font-medium ${textPrimaryOnSuccessCallout}`}>
-          <MarkdownBody markdown={ask.question} />
+          <MarkdownBody markdown={ask.question} source={source} />
         </div>
       )}
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
@@ -171,17 +181,17 @@ function AnsweredAsk({
         </p>
       ) : null}
       <AskEditHistory ask={ask} edits={edits} />
-      <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
+      <AskOptionList options={ask.options} selected={answer?.selected ?? []} source={source} />
       {otherText !== null && otherText !== "" ? (
         <div className="mt-2">
           <p className={`text-sm font-medium ${textPrimaryOnSuccessCallout}`}>Other</p>
           <div className="mt-1">
-            <MarkdownBody markdown={otherText} />
+            <MarkdownBody markdown={otherText} source={source} />
           </div>
         </div>
       ) : answer === null || answer.text === null || answer.text === "" ? null : (
         <div className="mt-1">
-          <MarkdownBody markdown={answer.text} />
+          <MarkdownBody markdown={answer.text} source={source} />
         </div>
       )}
       {answer === null ? (
@@ -194,7 +204,7 @@ function AnsweredAsk({
           <span className="font-semibold">{answer.user}</span> <Timestamp at={answer.at} />
         </p>
       )}
-      <AskAnswerHistory answers={answers} />
+      <AskAnswerHistory answers={answers} source={source} />
       {onChangeAnswer === undefined ? null : (
         <button
           className={`mt-2 min-h-11 text-sm font-semibold underline ${textPrimaryOnSuccessCallout}`}
@@ -220,6 +230,7 @@ function ResolvedAsk({
   frame: AskFrame;
 }): ReactNode {
   const { resolution } = ask;
+  const source = { id: ask.id, kind: "ask" } as const;
   return (
     <article
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${card}`}
@@ -228,7 +239,7 @@ function ResolvedAsk({
       <AskAnchorHeader ask={ask} inBlock={frame === "block"} tone="surface" />
       {frame === "block" ? null : (
         <div className={`font-medium ${textPrimaryOnSurface}`}>
-          <MarkdownBody markdown={ask.question} />
+          <MarkdownBody markdown={ask.question} source={source} />
         </div>
       )}
       <span
@@ -243,11 +254,11 @@ function ResolvedAsk({
           <AskApprovalLink ask={ask} />
         </p>
       ) : null}
-      <AskOptionList options={ask.options} selected={[]} />
+      <AskOptionList options={ask.options} selected={[]} source={source} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Asked <Timestamp at={ask.created_at} /> · {describeAskResolutionActor(resolution)} -{" "}
-        <MarkdownBody markdown={resolution.reason} variant="inline" />
+        <MarkdownBody markdown={resolution.reason} source={source} variant="inline" />
       </p>
     </article>
   );

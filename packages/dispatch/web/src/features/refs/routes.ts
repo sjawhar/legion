@@ -682,7 +682,7 @@ export interface ComposerReference {
 /**
  * The references body cites, in order of first appearance: every `dispatch://` reference and
  * dashboard URL of `appOrigin` that names an issue, a document or an item. The composer's
- * reference pills and the unfurl cards read text through it.
+ * reference pills read text through it.
  */
 export function composerReferences(
   body: string,

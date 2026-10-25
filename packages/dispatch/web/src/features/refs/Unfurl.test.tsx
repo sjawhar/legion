@@ -4,11 +4,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { api } from "../../api/client";
+import { ApiError, api, type ReferenceSource } from "../../api/client";
 import type { Artifact, AskRead, CommentRead, IssueDetails } from "../../api/types";
-import { isBareReferenceBody, Unfurl } from "./Unfurl";
+import type { BareReferences } from "./RefLink";
+import { isReferenceOnlyBody, Unfurl } from "./Unfurl";
 
-test("Unfurl trims terminal punctuation before resolving a GitHub reference", async () => {
+test("Unfurl resolves a body that is one GitHub reference", async () => {
   const githubRest = spyOn(api, "githubRest").mockResolvedValue(
     new Response(JSON.stringify({ title: "Issue title" }), {
       headers: { "Content-Type": "application/json" },
@@ -21,7 +22,7 @@ test("Unfurl trims terminal punctuation before resolving a GitHub reference", as
   try {
     const view = render(
       <QueryClientProvider client={queryClient}>
-        <Unfurl body={"See https://github.com/owner/repository/issues/1."} />
+        <Unfurl body={"https://github.com/owner/repository/issues/1"} />
       </QueryClientProvider>
     );
 
@@ -100,7 +101,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
   try {
     const view = render(
       <QueryClientProvider client={queryClient}>
-        <Unfurl body="See dispatch://CORE-1/artifact/design@v3" />
+        <Unfurl body="dispatch://CORE-1/artifact/design@v3" />
       </QueryClientProvider>
     );
 
@@ -147,7 +148,7 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
   try {
     const view = render(
       <QueryClientProvider client={queryClient}>
-        <Unfurl body="See dispatch://CORE/artifact/design-notes@v3" />
+        <Unfurl body="dispatch://CORE/artifact/design-notes@v3" />
       </QueryClientProvider>
     );
 
@@ -253,7 +254,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
 
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <Unfurl body="See dispatch://CORE-1/ask/ask-1" />
+      <Unfurl body="dispatch://CORE-1/ask/ask-1" />
     </QueryClientProvider>
   );
 
@@ -329,7 +330,7 @@ test("Unfurl unfurls a dispatch comment reference with its own words, not the is
 
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <Unfurl body="See dispatch://CORE-1/comment/comment-1" />
+      <Unfurl body="dispatch://CORE-1/comment/comment-1" />
     </QueryClientProvider>
   );
 
@@ -346,16 +347,59 @@ test("Unfurl unfurls a dispatch comment reference with its own words, not the is
   }
 });
 
-test("isBareReferenceBody accepts only whitespace-joined bare references", () => {
-  expect(isBareReferenceBody("dispatch://CORE-1")).toBe(true);
-  expect(isBareReferenceBody("  dispatch://CORE-1  ")).toBe(true);
-  expect(isBareReferenceBody("dispatch://CORE-1 dispatch://CORE-2")).toBe(true);
-  expect(isBareReferenceBody("dispatch://CORE-1\nhttps://dispatch.test/issues/CORE-2")).toBe(true);
-  expect(isBareReferenceBody("dispatch://CORE-1https://dispatch.test/issues/CORE-2")).toBe(true);
-  expect(isBareReferenceBody("See dispatch://CORE-1")).toBe(false);
-  expect(isBareReferenceBody("dispatch://CORE-1 for details")).toBe(false);
-  expect(isBareReferenceBody("dispatch://")).toBe(false);
-  expect(isBareReferenceBody("")).toBe(false);
+const origin = "https://dispatch.test";
+const resolved: BareReferences = {
+  issues: new Set(["CORE-12"]),
+  questions: new Map([["q2", "dispatch://CORE-1/ask/ask-2"]]),
+};
+const nothingResolved: BareReferences = { issues: new Set(), questions: new Map() };
+
+test("isReferenceOnlyBody accepts a body that is one reference in each form Dispatch reads", () => {
+  expect(isReferenceOnlyBody("dispatch://CORE-1", nothingResolved, origin)).toBe(true);
+  expect(isReferenceOnlyBody("https://dispatch.test/issues/CORE-2", nothingResolved, origin)).toBe(
+    true
+  );
+  expect(isReferenceOnlyBody("CORE-12", resolved, origin)).toBe(true);
+  expect(isReferenceOnlyBody("#q2", resolved, origin)).toBe(true);
+  expect(isReferenceOnlyBody("https://github.com/owner/repository/pull/2", resolved, origin)).toBe(
+    true
+  );
+  expect(isReferenceOnlyBody("  CORE-12 \n", resolved, origin)).toBe(true);
+});
+
+test("isReferenceOnlyBody accepts several references with only whitespace between them", () => {
+  expect(isReferenceOnlyBody("dispatch://CORE-1 dispatch://CORE-2", resolved, origin)).toBe(true);
+  expect(
+    isReferenceOnlyBody("CORE-12\n#q2\thttps://dispatch.test/issues/CORE-2", resolved, origin)
+  ).toBe(true);
+});
+
+test("isReferenceOnlyBody refuses a key or #id that names nothing", () => {
+  // A key whose issue does not exist, or has not answered yet, is text.
+  expect(isReferenceOnlyBody("CORE-999999", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("CORE-12", nothingResolved, origin)).toBe(false);
+  // A #id no question of the body's document holds, or one read with no source.
+  expect(isReferenceOnlyBody("#q9", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("#q2", nothingResolved, origin)).toBe(false);
+  // One unresolved word makes the whole body text.
+  expect(isReferenceOnlyBody("dispatch://CORE-1 CORE-999999", resolved, origin)).toBe(false);
+});
+
+test("isReferenceOnlyBody refuses a body with anything beside its references", () => {
+  expect(isReferenceOnlyBody("See dispatch://CORE-1", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("dispatch://CORE-1 for details", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("Blocked on CORE-12", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("CORE-12.", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("**CORE-12**", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("#q2_", resolved, origin)).toBe(false);
+  expect(
+    isReferenceOnlyBody("See **https://github.com/owner/repository/pull/2**.", resolved, origin)
+  ).toBe(false);
+  // An address that names nothing Dispatch or GitHub has is not a reference.
+  expect(isReferenceOnlyBody("https://example.com/notes", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("dispatch://", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("", resolved, origin)).toBe(false);
+  expect(isReferenceOnlyBody("   ", resolved, origin)).toBe(false);
 });
 
 // Every comment body and ask question passes this check as it renders, and a comment holds up to
@@ -363,41 +407,48 @@ test("isBareReferenceBody accepts only whitespace-joined bare references", () =>
 // exponentially many ways, and a pattern that tried them ran for minutes in V8 on one of these
 // bodies, hanging every reader's tab; JavaScriptCore, which runs these tests, gives up after a
 // second or so per body.
-test(`isBareReferenceBody reads ${DISPATCH_BODY_MAX}-character bodies of repeated schemes in one pass`, () => {
+test(`isReferenceOnlyBody reads ${DISPATCH_BODY_MAX}-character bodies in one pass`, () => {
   const start = performance.now();
   for (const scheme of ["http://", "https://", "dispatch://"]) {
     // The repeat leaves room for the two units the ` x` and `\nx` cases append, so every body
     // here is at or just under the cap.
     const references = scheme.repeat(Math.floor((DISPATCH_BODY_MAX - 2) / scheme.length));
-    expect(isBareReferenceBody(`${references} x`)).toBe(false);
-    expect(isBareReferenceBody(`${references}\nx`)).toBe(false);
-    expect(isBareReferenceBody(references)).toBe(true);
+    expect(isReferenceOnlyBody(`${references} x`, resolved, origin)).toBe(false);
+    expect(isReferenceOnlyBody(`${references}\nx`, resolved, origin)).toBe(false);
+    // One word that names nothing.
+    expect(isReferenceOnlyBody(references, resolved, origin)).toBe(false);
   }
+  const word = "CORE-12 ";
+  const keys = word.repeat(Math.floor(DISPATCH_BODY_MAX / word.length));
+  expect(isReferenceOnlyBody(keys, resolved, origin)).toBe(true);
+  expect(isReferenceOnlyBody(`${keys.slice(0, -1)}x`, resolved, origin)).toBe(false);
   expect(performance.now() - start).toBeLessThan(2000);
 });
 
-test("Unfurl resolves a bold GitHub link without its emphasis", async () => {
-  const githubRest = spyOn(api, "githubRest").mockResolvedValue(
-    new Response(JSON.stringify({ title: "Pull title" }), {
-      headers: { "Content-Type": "application/json" },
-    })
-  );
+test("Unfurl shows no card, and asks GitHub nothing, for references with text beside them", async () => {
+  const githubRest = spyOn(api, "githubRest");
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [],
+    key: "CORE-12",
+    status: "todo",
+    title: "Fix the thing",
+  } as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <Unfurl body={"See **https://github.com/owner/repository/pull/2**."} />
+      <Unfurl body={"See **https://github.com/owner/repository/pull/2**, after CORE-12."} />
     </QueryClientProvider>
   );
 
   try {
-    await waitFor(() => {
-      expect(githubRest).toHaveBeenCalledWith("/repos/owner/repository/issues/2");
-    });
-    expect(within(view.container).getByRole("link").getAttribute("href")).toBe(
-      "https://github.com/owner/repository/pull/2"
-    );
+    // The key's existence is asked, as the body's own MarkdownBody asks it; nothing else is.
+    await waitFor(() => expect(getIssue).toHaveBeenCalledWith("CORE-12"));
+    await Bun.sleep(20);
+    expect(view.container.querySelector("section")).toBeNull();
+    expect(githubRest).not.toHaveBeenCalled();
   } finally {
     githubRest.mockRestore();
+    getIssue.mockRestore();
     view.unmount();
   }
 });
@@ -438,7 +489,7 @@ test("Unfurl renders a GitHub issue's body formatted, on one run of text, with n
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <Unfurl body="See https://github.com/owner/repository/issues/4" />
+      <Unfurl body="https://github.com/owner/repository/issues/4" />
     </QueryClientProvider>
   );
 
@@ -459,6 +510,133 @@ test("Unfurl renders a GitHub issue's body formatted, on one run of text, with n
     expect(body.querySelector("h2, ul, li, p")).toBeNull();
   } finally {
     githubRest.mockRestore();
+    view.unmount();
+  }
+});
+
+function notFound(): ApiError {
+  return new ApiError(404, { code: "NOT_FOUND", error: "not found" });
+}
+
+const commentSource: ReferenceSource = { id: "comment-1", kind: "comment" };
+
+test("Unfurl shows the issue's card for a body that is one existing bare key", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [],
+    key: "CORE-12",
+    status: "todo",
+    title: "Fix the thing",
+  } as never);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body=" CORE-12 " source={commentSource} />
+    </QueryClientProvider>
+  );
+
+  try {
+    const card = await within(view.container).findByRole("link", {
+      name: /^CORE-12 Fix the thing/,
+    });
+    expect(card.getAttribute("href")).toBe("/issues/CORE-12");
+    expect(getIssue).toHaveBeenCalledWith("CORE-12");
+  } finally {
+    getIssue.mockRestore();
+    view.unmount();
+  }
+});
+
+test("Unfurl shows no card for a bare key whose issue does not exist", async () => {
+  const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="CORE-999999" source={commentSource} />
+    </QueryClientProvider>
+  );
+
+  try {
+    await waitFor(() => expect(getIssue).toHaveBeenCalledWith("CORE-999999"));
+    await Bun.sleep(20);
+    expect(view.container.querySelector("section")).toBeNull();
+  } finally {
+    getIssue.mockRestore();
+    view.unmount();
+  }
+});
+
+test("Unfurl shows the question's card for a #id its source's document holds", async () => {
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue({
+    document: "dispatch://CORE-1/spec",
+    questions: [{ ask: "dispatch://CORE-1/ask/ask-2", block_id: "q2" }],
+  });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    answers: [],
+    ask: { id: "ask-2", issue_key: "CORE-1", question: "Ship the docs too?" },
+    edits: [],
+    followers: [],
+    replies: [],
+  } as never);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="#q2" source={commentSource} />
+    </QueryClientProvider>
+  );
+
+  try {
+    const card = await within(view.container).findByRole("link", { name: "Ship the docs too?" });
+    expect(card.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-2");
+    expect(getReferenceQuestions).toHaveBeenCalledWith(commentSource);
+  } finally {
+    getAsk.mockRestore();
+    getReferenceQuestions.mockRestore();
+    view.unmount();
+  }
+});
+
+test("Unfurl shows no card for a #id when the body names no source", async () => {
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions");
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="#q2" />
+    </QueryClientProvider>
+  );
+
+  try {
+    await Bun.sleep(20);
+    expect(view.container.querySelector("section")).toBeNull();
+    expect(getReferenceQuestions).not.toHaveBeenCalled();
+  } finally {
+    getReferenceQuestions.mockRestore();
+    view.unmount();
+  }
+});
+
+test("Unfurl shows one card per reference for a body of several references", async () => {
+  const getIssue = spyOn(api, "getIssue").mockImplementation(
+    async (key: string) =>
+      ({ artifacts: [], key, status: "todo", title: `Title of ${key}` }) as never
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body={"CORE-12\ndispatch://CORE-13 CORE-12"} source={commentSource} />
+    </QueryClientProvider>
+  );
+
+  try {
+    const section = await within(view.container).findByRole("region", { name: "References" });
+    await within(section).findByRole("link", { name: /^CORE-13 Title of CORE-13/ });
+    // CORE-12, written twice, is one card.
+    expect(
+      within(section)
+        .getAllByRole("link")
+        .map((card) => card.getAttribute("href"))
+    ).toEqual(["/issues/CORE-12", "/issues/CORE-13"]);
+  } finally {
+    getIssue.mockRestore();
     view.unmount();
   }
 });

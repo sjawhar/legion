@@ -13,7 +13,7 @@ import {
 import type { ComposerAnchor, ComposerKind, ComposerOwner } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { AskCard } from "../inbox/AskCard";
-import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
+import { Unfurl } from "../refs/Unfurl";
 import { marginComposeSendKey } from "./margin-context";
 import { ThreadList } from "./ThreadList";
 import type { CommentActionFailure } from "./useCommentActionQueue";
@@ -153,7 +153,7 @@ export function MarginAskCard({
         owner={owner.kind === "document" ? owner : undefined}
         variant="compact"
       />
-      {isBareReferenceBody(ask.question) ? <Unfurl body={ask.question} /> : null}
+      <Unfurl body={ask.question} source={{ id: ask.id, kind: "ask" }} />
     </div>
   );
 }

@@ -57,6 +57,8 @@ function AnswerRow({
     row.current &&
     row.ask_state === "answered" &&
     row.ask_kind !== "approval";
+  // The ask the row is about, whose question and answer a `#id` names into.
+  const source = { id: row.ask_id, kind: "ask" } as const;
   return (
     <li className={`rounded-xl border p-3 ${card} ${borderDefault}`} data-answer-row={row.ask_id}>
       <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${textMutedOnCanvas}`}>
@@ -70,6 +72,7 @@ function AnswerRow({
         fullTitle
         lines={2}
         markdown={row.question}
+        source={source}
       />
       {row.kind === "answer" && row.answer !== undefined ? (
         <div className={`mt-2 text-sm ${textPrimaryOnCanvas}`}>
@@ -84,7 +87,7 @@ function AnswerRow({
           )}
           {row.answer.text === null || row.answer.text === "" ? null : (
             <div className="mt-1">
-              <MarkdownBody markdown={row.answer.text} />
+              <MarkdownBody markdown={row.answer.text} source={source} />
             </div>
           )}
         </div>
@@ -92,7 +95,11 @@ function AnswerRow({
       {row.kind === "reply" && row.reply !== undefined ? (
         <p className={`mt-2 text-sm ${textPrimaryOnCanvas}`}>
           <span className={`font-medium ${textMutedOnCanvas}`}>Replied:</span>{" "}
-          <MarkdownBody markdown={row.reply.body} variant="inline" />
+          <MarkdownBody
+            markdown={row.reply.body}
+            source={{ id: row.reply.id, kind: "comment" }}
+            variant="inline"
+          />
         </p>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">

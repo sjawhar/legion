@@ -29,9 +29,13 @@ const NO_PICTURES: readonly PictureAnchor[] = [];
  * a question once the question map of the document source's text belongs to names it
  * (`referenceQuestionsQuery`), which is asked only for a body that writes a `#id` and a surface
  * that names its source. A 404 is final (`referenceRetry`). Until an answer lands, and when
- * it is a 404, the key or `#id` names nothing, and the body shows it as written.
+ * it is a 404, the key or `#id` names nothing, and the body shows it as written. The unfurl cards
+ * read a body through it too (`Unfurl`), from the same cached queries.
  */
-function useBareReferences(markdown: string, source: ReferenceSource | undefined): BareReferences {
+export function useBareReferences(
+  markdown: string,
+  source: ReferenceSource | undefined
+): BareReferences {
   const { keys, writesQuestion } = useMemo(() => {
     const distinct = new Set<string>();
     let question = false;

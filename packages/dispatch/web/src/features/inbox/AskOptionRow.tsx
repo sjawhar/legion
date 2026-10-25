@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import type { ReferenceSource } from "../../api/client";
 import type { AskOption } from "../../api/types";
 import {
   borderDefault,
@@ -17,16 +18,23 @@ const ROW_CLASS = `flex min-h-11 items-start gap-3 rounded-lg border px-3 py-2 t
 /** The label/description column is a flex item; `min-w-0` overrides its `min-width: auto` so it
  *  shrinks to the row and `MarkdownBody`'s own `break-words` folds a long word. The row's parent
  *  `<fieldset>` needs `min-w-0` too: its UA default `min-inline-size: min-content` would let the
- *  longest unbroken word widen the fieldset past a narrow card before anything here applies. */
-function OptionText({ option }: { option: AskOption }): ReactNode {
+ *  longest unbroken word widen the fieldset past a narrow card before anything here applies.
+ *  `source` is the ask the option belongs to, which a `#id` in its words resolves against. */
+function OptionText({
+  option,
+  source,
+}: {
+  option: AskOption;
+  source: ReferenceSource | undefined;
+}): ReactNode {
   return (
     <span className="min-w-0">
       <span className={`font-medium ${textPrimaryOnSurface}`}>
-        <MarkdownBody markdown={option.label} variant="inline" />
+        <MarkdownBody markdown={option.label} source={source} variant="inline" />
       </span>
       {option.description === undefined ? null : (
         <span className={`mt-0.5 block text-sm ${textOptionDescription}`}>
-          <MarkdownBody markdown={option.description} variant="inline" />
+          <MarkdownBody markdown={option.description} source={source} variant="inline" />
         </span>
       )}
     </span>
@@ -45,6 +53,7 @@ export function AskChoiceRow({
   name,
   onChange,
   option,
+  source,
 }: {
   checked: boolean;
   className?: string;
@@ -54,6 +63,8 @@ export function AskChoiceRow({
   name: string;
   onChange: () => void;
   option: AskOption;
+  /** The ask the option belongs to (`ReferenceSource`). */
+  source?: ReferenceSource;
 }): ReactNode {
   // A chosen option takes the same border and fill the recorded answer shows afterwards, so
   // choosing and having chosen read alike.
@@ -69,7 +80,7 @@ export function AskChoiceRow({
         onChange={onChange}
         type={multiple ? "checkbox" : "radio"}
       />
-      <OptionText option={option} />
+      <OptionText option={option} source={source} />
     </label>
   );
 }
@@ -79,10 +90,13 @@ export function AskRecordRow({
   className = "",
   option,
   selected,
+  source,
 }: {
   className?: string;
   option: AskOption;
   selected: boolean;
+  /** The ask the option belongs to (`ReferenceSource`). */
+  source?: ReferenceSource;
 }): ReactNode {
   return (
     <li
@@ -96,7 +110,7 @@ export function AskRecordRow({
       ) : (
         <span aria-hidden className="w-3" />
       )}
-      <OptionText option={option} />
+      <OptionText option={option} source={source} />
     </li>
   );
 }
