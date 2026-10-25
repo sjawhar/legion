@@ -2,63 +2,69 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-25T11:25:00Z",
+  "completed": "2026-10-25T13:05:00Z",
   "decision": "changes_requested",
-  "critical": 1,
+  "critical": 0,
   "important": 1,
-  "minor": 2,
-  "round": 4,
-  "roundFourFindingsClosed": [
-    "cmd/listener/delivery.go:866-900 (5dfa3c9746f7): the direct-agent give-up is terminal whatever becomes of its no_holder notice. applyDeliveryOutcome writes the counter and the give-up line first and publishes the notice through exceptionReason; a notice that cannot be published logs exceptionPublishFailedLine and nothing else - it no longer NAKs the message nor clears its attempt-cache entry - and the message is ACKed, since ShouldNAK cannot be set on this branch (HandleAgentMessage sets it only with Err, which is answered above). Keeping the attempt entry is what stops a further push on the redelivery a lost ACK brings, inside attemptCacheTTL. The deployed CloudWatch filter on `listener exception publish failed` (infra/aws/rendering/metricfilters.go:65) still matches, so the operator signal survives the removal of the retry. TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal pins it.",
-    "internal/bus/confirm.go:30-33 and nats.go:902-904 (5dfa3c9746f7): no message is emitted once its context has ended, by two checks that see different things. publishConfirmed refuses a deadline already spent immediately before it publishes, closing the class for every caller of it; publishCoreTo refuses a ctx whose Err is set, which catches a cancellation whose deadline is still ahead and which publishConfirmed cannot see, since it is given a deadline and not a context. errWindowElapsed keeps the previous error text so a deployed filter still matches. TestAPublishWithAnEndedContextSendsNothing and TestAPublishConfirmedWithASpentDeadlinePublishesNothing pin them, and the JetStream half's dependence on nats.Context(ctx) is pinned too rather than only documented."
+  "minor": 3,
+  "round": 5,
+  "roundFiveFindingsClosed": [
+    "internal/testnats/nats.go:20 (4df4db34b290): main is merged forward and crypto/rand is aliased crand on this branch's side, so math/rand/v2 keeps the bare name and main's rand.IntN at :537 is untouched; crand.Read draws the secret at :155. typecheck and test are both success at the code head 9ef9fe7505, which is the read that matters since the failure existed only in the merge GitHub builds. The merge cost this pull request nothing else: its own three-dot diff is 37 files, all under packages/envoy, .legion/INFRA-141/ and one workflow line, and both thermonuclear passes compared the pre-merge and post-merge patches and found the alias, its call and its comment the only difference.",
+    "cmd/listener/delivery.go (30c1d1614806): publishNoHolderExceptionOrNak is deleted and the no-interests fanout branch reduced to its logger.Info and ACK with a comment stating the routing complement. Nothing was orphaned: exceptionPublishFailedLine is still live at :251 including the agent give-up, the deployed CloudWatch filter on it (infra/aws/rendering/metricfilters.go:65) still matches, and messagesNAKed still has live producers on the deferral and ordinary retry paths.",
+    "internal/bus/publish_cancel_reconnect_test.go (30c1d1614806): the cancellation during a reconnect wait is pinned two-sidedly - removing the ctx.Done() arm fails it with the subscriber receiving the message while the publish answers nil, and a live-context control requires delivery after the same reconnect. This is the architect's condition for closing it by test rather than by a third unverified check, and it is met for the case it names."
   ],
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": "packages/envoy/internal/testnats/nats.go:19",
-      "description": "Two required checks are red at the code head 3175373656f8: typecheck (job 121147417642) and test (job 121147417424). Both fail on one Go compile error, and it is in the merge GitHub builds for a pull_request event rather than in this branch's own tree: 'packages/envoy/internal/testnats/nats.go:25:2: rand redeclared in this block', '\"math/rand/v2\" imported as rand and not used', ':535:61: undefined: rand.IntN'. main now imports math/rand/v2 as rand in that file and calls rand.IntN (read at refs/heads/main, line 505); this branch adds crypto/rand to the same import block for accountSecret. Git merges both import lines without reporting a conflict, and Go then refuses the package: rand is declared twice, the branch's rand.Read binds crypto/rand, and main's rand.IntN no longer resolves. The branch's own tree compiles, which is why nothing before this read caught it - the tester cited Tests as in progress and did not wait. This is a semantic conflict with the base, so bringing main forward is justified under the conflict rule rather than being an unprompted base merge; the import needs an alias on one side. Never approve a head whose code is red."
-    },
-    {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/delivery.go:272",
-      "description": "This round made publishNoHolderExceptionOrNak dead and kept it. Its only remaining caller is fanoutDelivery (delivery.go:917), and listenerDeliveryHandler routes every role topic to roleTopicDelivery and every agent topic to agentSubjectDelivery (delivery.go:293-300), so a topic reaching fanoutDelivery is never a control topic and the function's first statement returns true before anything is published. The publish, the exceptionPublishFailedLine log, the messagesNAKed increment and the finalize(true) NAK in its body are now unreachable, as is the `if !...{ return }` at the call site. The function's own doc comment states this, so the deadness is deliberate rather than overlooked. Code made obsolete by a cutover is in scope for the change that obsoletes it: delete the helper and reduce the call site to its logger.Info line. The code-quality pass raised the same thing. Not a behaviour defect; raised because an unreachable NAK path in the one file whose retry policy this issue rewrote is exactly what a later reader will reason from."
+      "file": "packages/envoy/AGENTS.md:1913",
+      "description": "This round added the sentence 'A fanout delivery that fails to a *live* session still NAKs through its own outcome's exceptionFailureRetries.' That mechanism cannot execute. exceptionFailureRetries is read only at delivery.go:255, inside the exception-publication branch whose guard at :249 is isControlTopic(item.Topic) || outcome.fanoutRefusal; its sole setter at :990 is the generic fanout outcome, which does not set fanoutRefusal, and listenerDeliveryHandler routes both control prefixes elsewhere (:300-306) so a fanout topic is never a control topic. The live retry on that path is retry: retryable at :991 and the final finalize(true) at :1012-1014 - which the very next bullet of the same file already states correctly, so the new sentence is both false and redundant. New this round: the phrase is absent from packages/envoy/AGENTS.md at refs/heads/main, read there rather than from a patch series. It is one sentence, it needs no code change, and the correct mechanism is named above. Raised because this is the class this change has been held to five times, in the file every agent working this repository loads, and because the round that deleted one dead path wrote a new claim attributing behaviour to a different dead field."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/bus/nats.go:902",
-      "description": "publishCoreTo checks ctx.Err() before ensureConnWithContext, which can then wait for a reconnect; a cancellation arriving during that wait is not seen again, because publishConfirmed is given a deadline rather than a context and the deadline may still be ahead. The window is the reconnect wait, and the consequence is the one this round just closed at a different instant: a core publish emitted for a caller that has gone. Raised by the code-quality pass, verified in the code, and not blocking - the two checks close the reachable cases and this one needs the caller to cancel inside the wait."
+      "file": "packages/envoy/internal/bus/nats.go:630",
+      "description": "The cancellation window is narrowed, not closed, and the body entry that said it was closed is corrected by the reviewer rather than sent back. ensureConnWithContext is a loop whose top returns nil on a connected or draining connection without consulting ctx; its ctx.Done() arm sits only in the select taken when the connection is down but not closed, beside a 10 ms timer that can win Go's random choice when both are ready; and a successful connectWithContext installs and returns nil whatever the context did meanwhile. publishCoreTo then reaches publishConfirmed, which is handed only the deadline and publishes. About one 10 ms tick. The mild end of the class, since the caller has cancelled and so is not told failure and does not retry. Both thermonuclear passes reached this interleaving independently. The architect's ruling - closed only by a test, else recorded - stands, so it stays in Not proven / risk, narrowed."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/listener/delivery.go:894",
-      "description": "The terminal give-up's no-second-push property rests on the attempt-cache entry, which is process memory with a five-minute TTL (attemptCacheTTL, main.go). A lost ACK whose redelivery arrives after a restart, or after the TTL, finds no entry and pushes again. The architect already scoped this and the give-up's own comment names attemptCacheTTL; the durable's AckWait is 60 s, so the redelivery a lost ACK brings is well inside the TTL for a live process. Recorded, not blocking."
+      "file": "packages/envoy/cmd/listener/delivery.go:990",
+      "description": "The architect asked for a verdict on deliveryOutcome.exceptionFailureRetries rather than an observation. Verdict: pre-existing, not this change's. It is unreachable by the same complement that condemned the deleted helper - sole setter at :990 without fanoutRefusal, guard at :249 - but packages/envoy/cmd/listener/delivery.go read at refs/heads/main carries the identical field, reader, sole setter and routing complement, so the cutover did not make it dead. Recorded in Not proven / risk with its two line references for the architect to route; the merge is not held for it. Both thermonuclear passes independently reached the same provenance."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/bus/publish_cancel_reconnect_test.go",
+      "description": "The cancellation test releases after a 300 ms sleep rather than on a handshake at the wait's entry, so it is a reliable lock on the outage case and not a deterministic proof of every cancellation/reconnect interleaving. Named by the code-quality pass, agreed, and recorded in Not proven / risk beside the residual above."
     }
   ],
+  "notFindings": [
+    "File growth: delivery.go 727 -> 1,018 and internal/bus/nats.go 935 -> 1,003. Both thermonuclear passes return CHANGES on this as their only remaining item. It is owned by dispatch://INFRA-49/ask/8262a4d5-bf39-44d9-8bc0-f1b8dbe03437, which names the units; it changes no behaviour, hides no error and breaks no gate, so it is not held against this change. The thermonuclear rubric's 1,000-line bar is its own, not this repository's."
+  ],
   "ciRead": {
-    "codeHead": "3175373656f8bec5363ea929e6d90dc8e91d600d",
-    "prHead": "e5df1c76db4797e75f6fb3b1dcfe7896d9ee4983",
-    "compare": "ahead; only .legion/INFRA-141/implement.json and .legion/INFRA-141/test.json changed since the code head.",
+    "codeHead": "9ef9fe7505464c4c7ce267d0a0b9a08f3af691dd",
+    "prHead": "c1d45f9068fd56e3968d92c455f1e1baed4c3e16",
+    "compare": "ahead; the file list was printed and read rather than inferred from an all() over a list that could have been empty: exactly .legion/INFRA-141/implement.json and .legion/INFRA-141/test.json.",
     "requiredChecks": [
       "lint",
       "typecheck",
       "test",
       "pr-title"
     ],
-    "observed": "lint success, pr-title success, typecheck FAILURE (job 121147417642), test FAILURE (job 121147417424). envoy-e2e-local was in progress when read, so it is not quoted for this head; the previous code head b60f4684 is green there with steps 6 and 7 executed, but this round changed delivery.go, the bus and their tests, so that run does not stand for this one. The red is the blocking finding and the round ends on it."
+    "observed": "All four required checks success. envoy-e2e-local success (job 121159268085), read as a step list: step 6 Pull the NATS image the script starts and step 7 Local end-to-end acceptance both completed/success. Every other lane at that commit is success or skipped. This is the first head of this pull request at which the whole required set and the acceptance job are green together. The merge commit 4df4db34b290 has its own runs and is not the evidence."
   },
   "thermonuclear": {
-    "head": "e5df1c76db4797e75f6fb3b1dcfe7896d9ee4983",
-    "ran": "code-quality pass completed at the reviewed head; the security pass was still running when the red required checks ended the round, and its result is not quoted here.",
-    "result": "The code-quality pass returns CHANGES on three P2s: the terminal give-up resting on attemptCacheTTL, the cancellation lost during ensureConnWithContext, and the unreachable exception/NAK helper. The reviewer verified each in the code; the helper is carried as this round's second finding and the other two as minors."
+    "head": "c1d45f9068fd56e3968d92c455f1e1baed4c3e16",
+    "ran": "both passes at the reviewed head",
+    "result": "Both CHANGES. Both confirm the round's three requested items and both reach the reconnect-completion interleaving and the file growth. The security pass alone found the AGENTS.md sentence, which is this round's one finding; the code-quality pass alone named the test's 300 ms timing. Both independently established that exceptionFailureRetries is pre-existing. Every finding recorded here was verified by the reviewer against the code, and every claim about main was read at refs/heads/main rather than from a patch series."
   },
   "threads": {
-    "openedByReviewer": 15,
+    "openedByReviewer": 19,
     "answeredThisRound": [
-      "PRRT_kwDORFy7ds6v_SMC"
+      "PRRT_kwDORFy7ds6wAwgH",
+      "PRRT_kwDORFy7ds6wAwgJ",
+      "PRRT_kwDORFy7ds6wAwgL",
+      "PRRT_kwDORFy7ds6wAwgM"
     ],
     "unresolvedByReviewer": [],
     "botThreadsAccepted": [],
-    "note": "Every thread is the reviewer's own; no bot opened one. PRRT_kwDORFy7ds6v_SMC, the push_failed bound left unresolved last round, is answered and closed this round. The two threads this round's review opens are new."
-  },
-  "fastFollow": "dispatch://INFRA-49/ask/8262a4d5-bf39-44d9-8bc0-f1b8dbe03437 owns the file growth: api.go 1127 -> 1408 and delivery.go 727 -> 1042."
+    "note": "Every thread is the reviewer's own; no bot opened one. The four the implementer answered since the round-five review each carry one reply this round; none is unresolved, since the cancellation entry was corrected in the body rather than sent back."
+  }
 }
