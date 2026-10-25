@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-388",
+  "completed": "2026-10-25T18:03:11Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2203",
+  "codeHead": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+  "proof": [
+    {
+      "criterion": "An open check gets a new look at each successful Apply after its merge, and the log names the run",
+      "surface": "the Legion daemon process (run) over real Postgres 16 and NATS 2.10 JetStream with its durable GitHub intake consumer and outbox; GitHub answered by api.github.com through a gh api proxy; real sjawhar/legion release.yaml runs; check on merged PR #2182",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=... LEGION_TEST_NATS_MONITOR_URL=... go test -tags liveproof ./internal/daemon -run 'TestLiveDeployRunWake$' -count=1 -v (throwaway driver, copy at $TMPDIR/liveproof_deploy_test.go; output https://github.com/sjawhar/legion/pull/2203#issuecomment-6401192305)",
+      "observed": "run 40184206819 attempt 1 -> look 2 woken by 'deploy run' detail 'sjawhar/legion .github/workflows/release.yaml run 40184206819 attempt 1, job changes: ... succeeded at 2026-10-25T10:48:04Z'; daemon log 'workflow: production check woken' kind=deploy run and 'outbox check compare found a deploy after the merge' with the run's html_url",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "LIVEPROOF_NO_DEPLOY=1 (projects.<KEY>.deploys removed): the same envelope queued no check_compare row, made no GitHub read of the run, and the check stayed at look 1"
+    },
+    {
+      "criterion": "Two applies give two looks; an apply while a look is open is kept for the next look",
+      "surface": "same live daemon run as above",
+      "command": "same command, cases (5a)/(5b)",
+      "observed": "run 40186577548 published while look 2 was open -> 'production check wake kept for the next look'; the implementer's pending report on look 2 -> look 3 opened at once woken by run 40186577548",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "the same run 40184206819 published again under a second envelope id -> compared again but no look 3 and no pending cause (duplicate wake event)"
+    },
+    {
+      "criterion": "The same run seen twice gives one",
+      "surface": "same live daemon run as above",
+      "command": "same command, case (2)",
+      "observed": "second delivery of run 40184206819 read GitHub again (4 reads of attempt/jobs in all) and left looks=2, no pending cause",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "a different run (40186577548) does add a wake (case 5a), so the dedupe is per run/attempt/job"
+    },
+    {
+      "criterion": "An older run that applies a tree carrying the merge wakes it",
+      "surface": "same live daemon run as above",
+      "command": "same command, case (6b)",
+      "observed": "run 40177490116 attempt 1, head 6ede52ccb3 (GitHub compare head...merge = ahead, i.e. before the merge), step at 09:25:20Z after merged_at 08:54:08Z -> look 4 woken by it. No release.yaml re-run attempt meets the condition, so the re-run variant is the rig test only",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "run 40173636181 whose step finished 07:59:28Z, before the merge -> no look, logged why 'succeeded only at or before the merge'"
+    },
+    {
+      "criterion": "A preview-only run, an apply that finished before the merge, and a run of another workflow give none",
+      "surface": "same live daemon run as above, plus TestLiveDeployRunReRunWake on merged PR #2018",
+      "command": "same command (cases 3, 4) and go test -tags liveproof ./internal/daemon -run 'TestLiveDeployRunReRunWake$' -count=1 -v",
+      "observed": "run 40173636181 (before the merge) -> no look; a pr-and-main.yaml run 40205628520 on its own subject -> 0 GitHub reads, no compare, no look; run 39304834688 attempt 1 -> look 2, attempt 2 whose changes job GitHub lists as kept (new id 118247428626, step times of attempt 1) -> no look 3, logged 'succeeded only in jobs this attempt kept from an earlier one'. The preview-only (skipped step) case is the rig and outbox tests only: no real release.yaml run skips that step",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "attempt 1 of the same run 39304834688 does wake (look 2), so the refusal of attempt 2 is the kept-job rule, not a read failure"
+    },
+    {
+      "criterion": "Configuration refuses a malformed deploy",
+      "surface": "the branch's legion binary",
+      "command": "cd packages/daemon && go build -o $TMPDIR/legion-bin ./cmd/legion && $TMPDIR/legion-bin start --config <file> --check-config on valid, nested-workflow, repeated, no-step and bad-repo files",
+      "observed": "valid -> 'Config OK: project=ACME' exit 0; nested -> 'deploys[0].workflow ... must be a file directly under .github/workflows/ ...' exit 1; repeated (case differs) -> 'deploys names Acme/Infra .github/workflows/envoy.yaml twice' exit 1; no step -> 'deploys[0].step is required' exit 1; bad repo -> 'deploys[0].repo must be \"owner/name\"' exit 1",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "each malformed file is the valid file with one change, and only the valid one passes"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/config/stage3.go, config_test.go: projects.<KEY>.deploys",
+    "packages/daemon/internal/api/settings.go, settings_test.go, state_golden_test.go, state.go; packages/contracts/fixtures/daemon-api/state.json; packages/contracts/src/legion-api.ts: settings mirror and CheckWakeView kind",
+    "packages/daemon/internal/record/outbox.go, outbox_test.go: CheckCompare.Deploy (DeployRun), exactly one of build/deploy",
+    "packages/daemon/internal/intake/facts.go, decode.go, intake_test.go; packages/envoy/scripts/fixtures/github/workflow-run-completed.json; packages/envoy/internal/contracts/golden_test.go; packages/contracts/fixtures/github-envelopes/workflow-run-completed.json: WorkflowRunCompleted from Envoy's workflow_run completed envelope",
+    "packages/daemon/internal/workflow/engine.go, check.go, check_test.go; packages/daemon/internal/daemon/workflow.go: deployRunCompleted and the deploy run wake kind",
+    "packages/daemon/internal/daemon/outbox.go, outbox_check_test.go: checkDeployRun",
+    "packages/daemon/internal/daemon/check_wake_test.go: rig cases a-g through the real GitHub intake",
+    "packages/daemon/internal/testnats/nats.go, nats_test.go; README.md: LEGION_TEST_NATS_URL / LEGION_TEST_NATS_MONITOR_URL",
+    "AGENTS.md, skills/legion-worker/references/merge-gate.md (+ claude-envoy copy), packages/daemon/internal/prompts/go/implementer.md, docs/site concepts.md, running-legion.md, how-it-fits.md, deploy/kubernetes/daemon/legion.yaml.example"
+  ],
+  "trickyParts": [
+    "GitHub lists a re-run attempt's kept jobs under new job ids with run_attempt equal to the new attempt and the earlier attempt's step times (verified on run 39304834688 attempt 2). The plan's run_attempt filter excluded nothing; checkDeployRun now counts a step only when its started_at is not before the attempt's run_started_at, so a kept Apply does not wake the check a second time.",
+    "The coalescing rule is unchanged: one pending cause; a later wake while one is kept is ignored and its fact id is recorded, which is lossless because the next look reads production after every ignored deploy finished.",
+    "A deploy row carries no build; rows queued before this change decode as before (build only)."
+  ],
+  "deviations": [
+    "Plan decision 6's 'a job of an earlier attempt listed under this attempt is ignored' rests on run_attempt; real GitHub data contradicts it, so the kept-job test uses run_started_at instead (fix commit 1e00c2e1).",
+    "Acceptance row 5 (older run): no release.yaml re-run attempt fits, so the live proof uses a real older-head attempt-1 run (40177490116) and the rig's case (e); the re-run variant is proven live only as its negative (kept job of 39304834688 attempt 2 wakes nothing).",
+    "The preview-only run (Apply skipped) is proven by the rig and outbox tests only: no real release.yaml run skips the configured step.",
+    "Simplify pass removed WorkflowRunCompleted.HeadSHA (unused) and reduced deployRunCompleted to the one deploy config can match.",
+    "Test fixtures use placeholder repositories (acme/infra), per the repository's private-name rule."
+  ],
+  "openQuestions": [
+    "For the root: the INFRA deployment's legion.yaml value (projects.INFRA.deploys naming the deployment repository's envoy.yaml and its Apply step) and its ordering (after INFRA's daemon runs a release carrying this PR) are as plan.json forRoot says; sent to the architect over Envoy, not written here because this tree is public."
+  ],
+  "discoveredComplexity": [
+    "Daemon tests in a Sandbox pod need LEGION_TEST_NATS_URL/LEGION_TEST_NATS_MONITOR_URL (added) and still skip nine tests that need Docker, a tmux-era git credential helper, or /proc SigIgn, which gVisor does not provide."
+  ]
+}
