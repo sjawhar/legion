@@ -49,16 +49,22 @@ func roleInit(cfg RoleInitConfig) error {
 	// The kernel delivers a signal from outside to a PID namespace's init only once it handles
 	// it, so role-init takes the launcher's stop from its first instruction: a stop that arrives
 	// while the namespace is still being set up reaches the shim the moment it starts, rather
-	// than waiting out the launcher's grace for a kill.
-	signals := make(chan os.Signal, 8)
-	signal.Notify(signals, syscall.SIGCHLD, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(signals)
+	// than waiting out the launcher's grace for a kill. Stops and child exits arrive on channels
+	// of their own: Go drops a signal whose channel is full, and a burst of the role's orphans
+	// exiting must never crowd out the stop. A dropped SIGCHLD costs nothing, since one reap
+	// pass takes every exited orphan.
+	stops := make(chan os.Signal, 2)
+	signal.Notify(stops, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(stops)
+	exits := make(chan os.Signal, 1)
+	signal.Notify(exits, syscall.SIGCHLD)
+	defer signal.Stop(exits)
 	// The shim never inherits the launcher's status pipe: role-init alone reports the role's exit.
 	syscall.CloseOnExec(cfg.StatusFD)
 	if err := prepareRoleNamespace(cfg); err != nil {
 		return fmt.Errorf("role-init: %w", err)
 	}
-	return runRoleShim(cfg, signals)
+	return runRoleShim(cfg, stops, exits)
 }
 
 // prepareRoleNamespace is everything the role's mount namespace holds that the container's does
@@ -275,7 +281,7 @@ func carryOver(dir, stage string, place func() error) error {
 // it forwards the launcher's stop (signals, held since role-init began) to every process of the
 // role, reaps the orphans the role leaves behind, reports the shim's own wait status, and ends
 // the namespace with its own exit.
-func runRoleShim(cfg RoleInitConfig, signals <-chan os.Signal) error {
+func runRoleShim(cfg RoleInitConfig, stops, exits <-chan os.Signal) error {
 	cmd := exec.Command(cfg.Argv[0], cfg.Argv[1:]...)
 	cmd.Env = os.Environ()
 	cmd.Stdout, cmd.Stderr = cfg.Stdout, cfg.Stderr
@@ -295,16 +301,13 @@ func runRoleShim(cfg RoleInitConfig, signals <-chan os.Signal) error {
 		select {
 		case <-ended:
 			running = false
-		case received := <-signals:
-			sig, ok := received.(syscall.Signal)
-			switch {
-			case !ok:
-			case sig == syscall.SIGCHLD:
-				if _, err := reapNamespace(cmd.Process.Pid); err != nil {
-					roleLogf(cfg, "role-init: %v", err)
-				}
-			default:
-				// Every process of the role, a detached one included: this is its PID 1.
+		case <-exits:
+			if _, err := reapNamespace(cmd.Process.Pid); err != nil {
+				roleLogf(cfg, "role-init: %v", err)
+			}
+		case received := <-stops:
+			// Every process of the role, a detached one included: this is its PID 1.
+			if sig, ok := received.(syscall.Signal); ok {
 				if err := signalGeneration(cmd.Process.Pid, sig); err != nil {
 					roleLogf(cfg, "role-init: %v", err)
 				}
