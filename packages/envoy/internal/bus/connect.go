@@ -6,10 +6,48 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 )
+
+// reconnectErrEvery is how often one connection reports a failed reconnect attempt. nats.go
+// retries about once a second forever (ReconnectWait, MaxReconnect -1), so an outage of an hour
+// would be thousands of identical lines; one a minute still names the outage in every log window
+// that matters.
+const reconnectErrEvery = time.Minute
+
+// reconnectErrThrottle lets the first failed reconnect attempt of an outage through and then one
+// per reconnectErrEvery of its clock. now is the clock so a test can pass a fake one: ./internal/bus
+// runs under -race with parallel tests, so there is no package-level clock any test could swap.
+type reconnectErrThrottle struct {
+	mu   sync.Mutex
+	now  func() time.Time
+	last time.Time
+}
+
+// allow reports whether this failure is logged: the first one is, and after it only one per
+// reconnectErrEvery.
+func (t *reconnectErrThrottle) allow() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	at := t.now()
+	if !t.last.IsZero() && at.Sub(t.last) < reconnectErrEvery {
+		return false
+	}
+	t.last = at
+	return true
+}
+
+// reset forgets the last allowed failure, so the first failure of the next outage is logged at
+// once rather than swallowed by the previous outage's minute.
+func (t *reconnectErrThrottle) reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.last = time.Time{}
+}
 
 // options starts from nats.GetDefaultOptions: Connect fills in only some zero fields, and the
 // defaults are what turn on reconnecting, the client's pings and the drain and flusher timeouts. A
@@ -20,7 +58,15 @@ import (
 // recovery that dials a replacement. The reconnect buffer is off, so nothing is held and sent after its caller
 // saw an error: a publish while reconnecting waits for the reconnect instead
 // (ensureConnWithContext), and a publish that fails was not sent.
-func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
+func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func(), now func() time.Time) nats.Options {
+	if now == nil {
+		now = time.Now
+	}
+	// The throttle is built here, one per call, so it is per connection and has its own mutex:
+	// options is rebuilt for every dial attempt in connectWithContext's loop and only the attempt
+	// that connects leaves its closures on the *nats.Conn, so one live connection has exactly one
+	// throttle and a second client's first failure is never swallowed by this one's minute.
+	throttle := &reconnectErrThrottle{now: now}
 	opts := nats.GetDefaultOptions()
 	opts.Servers = urls
 	opts.Name = name
@@ -38,7 +84,31 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		}
 		slog.Info("envoy nats disconnected", slog.String("name", name))
 	}
+	// A reconnect attempt that fails is otherwise silent: nats.go retries in place forever, so a
+	// broker that is down leaves no line at all in the process's log. The servers come from urls,
+	// the list this client was configured with, never from the connection: nc.ConnectedUrl() is
+	// empty while reconnecting. The line goes through the package-level slog, like every other bus
+	// line, because a listener process test fails if a bus line stops being Go's text format
+	// (cmd/listener/startup_test.go:598-612 names the deployed metric filters). No field can carry
+	// the credential: options never sees it, since nkeyCredential is applied to the options value
+	// afterwards (connect.go, connectWithContext) and holds a public key and a signer only.
+	opts.ReconnectErrCB = func(_ *nats.Conn, err error) {
+		if !throttle.allow() {
+			return
+		}
+		text := "unknown"
+		if err != nil {
+			text = err.Error()
+		}
+		slog.Warn("envoy nats reconnect attempt failed",
+			slog.String("name", name),
+			slog.String("servers", strings.Join(urls, ",")),
+			slog.String("error", text))
+	}
 	opts.ReconnectedCB = func(nc *nats.Conn) {
+		// Each outage reports its own first failed attempt at once, rather than staying silent for
+		// what is left of the previous outage's minute.
+		throttle.reset()
 		slog.Info("envoy nats reconnected", slog.String("name", name), slog.String("url", nc.ConnectedUrl()))
 		if reconnectCB != nil {
 			reconnectCB(nc)
@@ -75,8 +145,8 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 // deadline cuts either to what remains of it.
 const connectTimeout = 5 * time.Second
 
-func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
-	return connectWithContext(context.Background(), name, urls, credential, dialer, reconnectCB, closedCB)
+func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func(), now func() time.Time) (*nats.Conn, error) {
+	return connectWithContext(context.Background(), name, urls, credential, dialer, reconnectCB, closedCB, now)
 }
 
 // connectWithContext dials urls with envoy's options, when credential is not nil as the NATS user
@@ -90,7 +160,7 @@ func connect(name string, urls []string, credential nats.Option, dialer *socks5D
 // nats.go's ErrNoServers alone, which names neither, so the proxy's own dial error stands in for
 // it. The address carries no credentials: CheckSOCKS5Proxy admits only an IP address with no zone
 // or a DNS name.
-func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func()) (_ *nats.Conn, err error) {
+func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func(), now func() time.Time) (_ *nats.Conn, err error) {
 	if dialer != nil {
 		defer func() {
 			if err != nil {
@@ -103,7 +173,7 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		next := options(name, urls, reconnectCB, closedCB)
+		next := options(name, urls, reconnectCB, closedCB, now)
 		if credential != nil {
 			if err := credential(&next); err != nil {
 				return nil, err
