@@ -42,11 +42,12 @@
 #                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
 #                   built with --envoy-json holding {"askgate":{"enabled":false}}).
 #                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
-#                   that do not help the choice), `link` (an ask linking the person's comment) or
-#                   `upload` (an upload of the comment as a document to link). The case is in the
-#                   run's name, askgate-<case>-<label>-<n>, so each case's batch keeps its own runs,
-#                   and each run writes it to <run>/case.txt (run_askgate). Scored by askgateReview,
-#                   counted per case and label.
+#                   that do not help the choice), `link` (an ask linking the person's comment, on a
+#                   choice the comment leaves open) or `upload` (an upload of the comment as a
+#                   document to link). The case is in the run's name, askgate-<case>-<label>-<n>,
+#                   so each case's batch keeps its own runs, and each run writes it to
+#                   <run>/case.txt (run_askgate). Scored by askgateReview, counted per case and
+#                   label.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
 # whose skills state it. So every comparison carries an ablate label: a checkout of the head with
@@ -488,6 +489,10 @@ run_measure_before_ask() {
 
 # The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
 # write the agent makes. The case's prompt names that issue, and `link` names the comment too.
+# `link` asks a choice the comment leaves open, so only AskGate's rule 10 (the person's words with
+# no link to them) bears on it: an ask whether to do what the person asked is authority 6 (applying
+# a ruling they already gave), and the reindex fact names its source, the crontab, for content 9
+# (an unsourced claim about what we run today).
 run_askgate() {
   local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
   printf '%s\n' "$askCase" >"$R/case.txt"
@@ -495,7 +500,7 @@ run_askgate() {
   ref=$(jq -r .comment_ref "$R/fixture.json")
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
-  link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Move the nightly export to 04:00 UTC, as %s asks? I recommend moving it." Options: "Move it to 04:00", "Keep it at 02:00".\n' "$issue" "$ref" ;;
+  link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "The crontab on the export host lists the weekly reindex at 04:00 UTC on Sundays. Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref" ;;
   upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
   *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
   esac >"$R/prompt.txt"

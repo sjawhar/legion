@@ -13,7 +13,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `askgate-<case>-<label>-<n>`, so the batches of the three cases keep their own runs, and
   `rig.sh score askgate` counts each case and label on its own. `score.ts` reads AskGate's
   verdicts from the transcript. `rig.sh profile` takes `--envoy-json <file>` and merges that object
-  into the envoy.json the label's sessions read, so a label can turn AskGate off.
+  into the envoy.json the label's sessions read, so a label can turn AskGate off. A `dispatch`
+  call with `--help` or `--dry-run` sends nothing, and AskGate does not review it. A call that
+  AskGate refused as unreadable got no model review. The score reads neither of these calls as a
+  verdict of the gate. The `link` prompt asks a choice that the person's comment leaves open, with a
+  link to that comment, because an ask whether to do what the person asked fails AskGate's rule
+  authority 6. The seeded issue's title, "Release and nightly job settings", fits the write of
+  each case.
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
