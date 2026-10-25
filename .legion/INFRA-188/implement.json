@@ -2,10 +2,26 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-188",
-  "completed": "2026-10-25T06:45:00Z",
+  "completed": "2026-10-25T06:40:00Z",
   "pullRequest": "sjawhar/legion#2174",
-  "round": "Review round 1's corrective push. Code head b079634292d9; the first code head was 066ac315a446.",
+  "round": "Review round 2's corrective push, one string. Code head af1e1b816584; round 1's was b079634292d9 and the first was 066ac315a446. All four review threads are answered and resolved (PRRT_kwDORFy7ds6v-1K8, -1K-, -1K_ fixed in b079634292d9 and accepted by the reviewer, PRRT_kwDORFy7ds6v-8JH fixed in af1e1b816584), and the pull request body's Threads section records each.",
   "proof": [
+    {
+      "criterion": "Review round 2's one finding: packages/contracts/src/dispatch-tools.test.ts:553 was named for coverage its body does not have — the before/after acceptance it claimed lives in the accepted-rows test at :468-473.",
+      "surface": "The contracts test suite, whose reporter prints each test's name, so the name is what a reader of a failure or of the suite's output sees.",
+      "command": "bun test packages/contracts",
+      "observed": "210 pass, 0 fail. The test now runs as \"dispatch_issue_update takes the four priority buckets and null, and refuses a rank field\", which is what its body asserts: the four buckets, their refusals, and the strict refusal of { issue, rank: \"a0\" }. The comment above it keeps the reasoning, and no assertion changed.",
+      "headSha": "af1e1b816584",
+      "negativeControl": "The neighbour acceptance the old name promised is asserted elsewhere and still is: packages/contracts/src/dispatch-tools.test.ts:468-473 accepts { issue, before }, { issue, after }, both together and { issue, before: \"\" }; deleting those rows fails the suite, which is how the claim is kept somewhere real."
+    },
+    {
+      "criterion": "A1 and the no-neighbour regression, re-run at the head that merges after the rename.",
+      "surface": "Live production Dispatch, driven by the command built from this branch, with fixtures SMOKE-32, SMOKE-33 and SMOKE-34 in project SMOKE — no `legion` label, neighboured only by each other, all closed with a reason at the end of the run.",
+      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-32 --after SMOKE-33 | --before SMOKE-33 | --after SMOKE-33 --before SMOKE-34 | --status todo, each followed by bun packages/envoy-client/bin/dispatch.ts issues --project SMOKE --status todo --limit 250",
+      "observed": "`rank -> after SMOKE-33` and the board read 33, 32, 34; `rank -> before SMOKE-33` and 32, 33, 34; `rank -> after SMOKE-33, before SMOKE-34` and 33, 32, 34; the status-only call printed `status todo -> todo` and left the board at 33, 32, 34. A refusal at this head still prints `Example: dispatch issue-update --issue DSP-1 --priority 1 --before DSP-2`.",
+      "headSha": "af1e1b816584",
+      "negativeControl": "The pod's installed `dispatch` (the released build without this change) refuses the same call: `unknown flag --before`."
+    },
     {
       "criterion": "Review round 1, finding 2 (packages/contracts/AGENTS.md:62): the spec's example must be updated with the argument shape, and it is the one command line dispatch issue-update --help and every refusal print.",
       "surface": "The command built from this branch, run against live production Dispatch: a refusal (no field besides issue, which sends no write) and the command's own help.",
@@ -56,6 +72,7 @@
     }
   ],
   "filesChanged": [
+    "Review round 2: packages/contracts/src/dispatch-tools.test.ts:553 — the rank test is renamed to \"dispatch_issue_update takes the four priority buckets and null, and refuses a rank field\"; the body, its comment and every other test are untouched, and the committed claude-envoy build needed no rebuild (check-dist fresh, since the bundle carries no test file).",
     "Review round 1: packages/contracts/src/dispatch-tools.ts — the dispatch_issue_update spec's example is now { issue: \"DSP-1\", priority: 1, before: \"DSP-2\" }.",
     "Review round 1: skills/dispatch/references/issues.md:40 — the closed-issue bullet names the board move's flags in place of the `rank` field.",
     "Review round 1: packages/envoy-client/src/__tests__/dispatch-execute.test.ts — the board-move test gains the empty-neighbour case.",
