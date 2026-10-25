@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,6 +178,123 @@ func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.
 	}
 	if t.Failed() {
 		t.Logf("Dispatch's output:\n%s", process.Output.String())
+	}
+}
+
+// A deploy can stop Dispatch while a person's send to one session is with the listener. The send's
+// request is in flight, so HTTP shutdown waits for it, and its delivery runs on past any cut-off:
+// the listener answers after the signal, the attempt settles sent, and only then does Dispatch
+// exit. A process that exited first would leave the attempt pending under a claim no process
+// holds, which the page's retry under the key reads as a send still on its way.
+func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T) {
+	const sessionID = "s1"
+	held, release := make(chan struct{}), make(chan struct{})
+	var holding atomic.Bool
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"` + sessionID + `","title":"planner","capabilities":["aside","btw","steer"],"last_seen":200}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			if holding.CompareAndSwap(false, true) {
+				close(held)
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					// Dispatch gave the send up: the listener never answers it.
+					return
+				}
+			}
+			_, _ = w.Write([]byte(`{"event_id":"envelope-` + sessionID + `","recipient":"` + sessionID + `"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(listener.Close)
+	// Registered after the listener's close, so it runs first and a failed test never leaves the
+	// held send blocking that close.
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
+	database := storetest.Open(t)
+	process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{
+		Env: map[string]string{"ENVOY_URL": listener.URL},
+	})
+	process.waitHealthy(t)
+	type answer struct {
+		status int
+		body   []byte
+		err    error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		response, err := process.send(http.MethodPost, "/api/v1/agents/"+sessionID+"/messages",
+			`{"body":"Ship it once the checks are green.","delivery":"steer","idempotency_key":"press-1"}`)
+		if err != nil {
+			answered <- answer{err: err}
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		answered <- answer{status: response.StatusCode, body: body, err: err}
+	}()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the send never reached the listener:\n%s", process.Output.String())
+	}
+
+	signalled := process.Terminate(t)
+	select {
+	case <-process.Exited:
+		t.Fatalf("Dispatch exited %v after SIGTERM with the send still at the listener:\n%s", time.Since(signalled), process.Output.String())
+	case <-time.After(time.Second):
+	}
+	releaseOnce()
+	t.Logf("the listener answered the send %v after SIGTERM", time.Since(signalled))
+	process.WaitExit(t, "the listener's answer")
+	t.Logf("exited %v after SIGTERM", time.Since(signalled))
+	if code := process.Cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("Dispatch exited %d after SIGTERM, want 0", code)
+	}
+
+	var got answer
+	select {
+	case got = <-answered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the send had no answer 5s after Dispatch exited:\n%s", process.Output.String())
+	}
+	var message struct {
+		ID         string `json:"id"`
+		Deliveries []struct {
+			Attempt int    `json:"attempt"`
+			State   string `json:"state"`
+		} `json:"deliveries"`
+	}
+	if got.err != nil || got.status != http.StatusCreated || json.Unmarshal(got.body, &message) != nil ||
+		len(message.Deliveries) != 1 || message.Deliveries[0].State != "sent" {
+		t.Fatalf("the send answered %d %s (%v), want 201 with its one attempt sent:\n%s", got.status, got.body, got.err, process.Output.String())
+	}
+	// Read once the process is gone: what it wrote before it exited is all there is.
+	rows, err := database.Pool.Query(context.Background(),
+		`select attempt, state from message_deliveries where message_id = $1 order by attempt`, message.ID)
+	if err != nil {
+		t.Fatalf("read the send's attempts: %v", err)
+	}
+	defer rows.Close()
+	var attempts []string
+	for rows.Next() {
+		var attempt int
+		var state string
+		if err := rows.Scan(&attempt, &state); err != nil {
+			t.Fatalf("read an attempt: %v", err)
+		}
+		attempts = append(attempts, strconv.Itoa(attempt)+" "+state)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the send's attempts: %v", err)
+	}
+	if !slices.Equal(attempts, []string{"1 sent"}) {
+		t.Fatalf("the send's attempts after exit = %v, want [1 sent]", attempts)
 	}
 }
 
