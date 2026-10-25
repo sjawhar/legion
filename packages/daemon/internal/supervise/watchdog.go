@@ -119,13 +119,17 @@ func (m *Machine) lastTurnEvent() time.Time {
 // armWatchdog starts the turn watchdog's clock for a turn now running: the role's whole limit from
 // now, or nothing at all for a role the watchdog is off for. The claim's own turn-event mark moves
 // with it, since a turn starting is an event of the agent's.
+//
+// The limit is read before the clock, so a machine the watchdog is off for — a deployment that set
+// `turn_watchdog_seconds: 0`, and a test whose Deps carry no TurnLimit — reads no clock and needs
+// none. NewMachine arms a restored working claim, so this runs during construction too.
 func (m *Machine) armWatchdog() {
-	m.turnEventAt = m.deps.Clock.Now()
 	limit := m.turnLimit()
 	if limit <= 0 {
 		m.disarm(TimerWatchdog)
 		return
 	}
+	m.turnEventAt = m.deps.Clock.Now()
 	m.arm(TimerWatchdog, limit, "")
 }
 
