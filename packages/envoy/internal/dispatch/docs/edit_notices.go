@@ -51,29 +51,32 @@ const openEditNotice = `
 // settlement then has nothing of it to version. An upload writes its version through no room and
 // lists its uploader alone; it opens no window, and the plan leaves it out on purpose.
 //
-// The notice's last editor is latest, the room's latest edit source when the version's authors
-// were taken (authorCapture.latest), when the version lists it as a person; otherwise the last
-// person authors lists. It is never the version's writer as such: an agent naming a version over
-// two people's edits did not edit, and the authors' order is their ids', not their edits'.
+// The notice's last editor is latest, the person the version's own capture names as the one who
+// edited last (authorCapture.latest): the newest person its transaction's write credits, else the
+// room's newest in-flight credit naming a person, else the newest person of the document's
+// durable pending authors, ordered by the doc_updates version that wrote each row. Every tier is
+// read from the write, the room or the database at the capture, so one process's memory of an
+// earlier edit never stands in for it. There is no fallback to the authors' own order: that order
+// is their ids' (actorSlice), which says nothing about who edited last, and naming the wrong
+// person is worse than naming none. A version that lists a person but names no latest cannot
+// happen - every person it lists reaches one of those tiers - so it is logged and opens no
+// window, which the next person's edit opens.
 func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID string, version int, authors []model.Actor, latest *model.Actor) error {
 	var editors []string
-	var last *model.Actor
 	for index := range authors {
 		if authors[index].Kind == "user" {
 			editors = append(editors, authors[index].ID)
-			last = &authors[index]
 		}
 	}
 	if len(editors) == 0 {
 		return nil
 	}
-	if latest != nil && latest.Kind == "user" {
-		for index := range authors {
-			if authors[index].SameAs(*latest) {
-				last = &authors[index]
-			}
-		}
+	if latest == nil || latest.Kind != "user" {
+		slog.Error("dispatch: a version lists a person but names no latest editor, so it opens no edit notice",
+			"artifact", artifactID, "version", version, "editors", editors)
+		return nil
 	}
+	last := *latest
 	editorsJSON, err := json.Marshal(editors)
 	if err != nil {
 		return fmt.Errorf("encode edit notice editors: %w", err)

@@ -21,14 +21,38 @@ export function humanEditHead(edit: HumanEditHeadFields): string {
 export const HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
 
 /**
+ * The most of a diff a card shows, the same 4,096 bytes Dispatch cuts at (editNoticeDiffBytes).
+ * Dispatch's own notices arrive within it; this bounds what a card renders whatever reaches the
+ * client, since one oversized payload would otherwise fill a session's turn.
+ */
+export const HUMAN_EDIT_DIFF_MAX = 4096;
+
+/**
  * The diff a person's edit carries, as the fenced `diff` block that follows the card's TOON
- * block, then the cut note when Dispatch cut it; empty when the payload holds no diff. A fence
- * longer than any run of backticks in the diff keeps the block closed whatever the document holds.
+ * block, then the cut note when Dispatch cut it or this cut it; empty when the payload holds no
+ * diff. A diff longer than HUMAN_EDIT_DIFF_MAX is cut at its last line end within that many
+ * bytes, as Dispatch cuts its own (text.UnifiedDiffCut), and carries the note. A fence longer
+ * than any run of backticks in the diff keeps the block closed whatever the document holds.
  */
 export function humanEditDiffBlock(diff: string | undefined, cut: boolean | undefined): string {
   if (diff === undefined || diff === "") return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
-  const longestRun = Math.max(0, ...(diff.match(/`+/g) ?? []).map((run) => run.length));
+  const bytes = new TextEncoder();
+  let shown = diff;
+  let note = cut === true;
+  if (bytes.encode(shown).length > HUMAN_EDIT_DIFF_MAX) {
+    let kept = "";
+    let size = 0;
+    for (const line of shown.split("\n").slice(0, -1)) {
+      size += bytes.encode(`${line}\n`).length;
+      if (size > HUMAN_EDIT_DIFF_MAX) break;
+      kept += `${line}\n`;
+    }
+    shown = kept;
+    note = true;
+  }
+  if (shown === "") return HUMAN_EDIT_DIFF_CUT_NOTE;
+  const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(Math.max(3, longestRun + 1));
-  const body = diff.endsWith("\n") ? diff : `${diff}\n`;
-  return `${fence}diff\n${body}${fence}${cut === true ? `\n${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
+  const body = shown.endsWith("\n") ? shown : `${shown}\n`;
+  return `${fence}diff\n${body}${fence}${note ? `\n${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 }

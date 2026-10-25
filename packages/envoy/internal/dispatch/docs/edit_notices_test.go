@@ -904,3 +904,70 @@ func TestEditNoticeAPersonsQuestionEditSendsOne(t *testing.T) {
 		t.Fatalf("edit notices = %+v, want one whose diff adds the new question", edits)
 	}
 }
+
+// The outside review's first case (dispatch://INFRA-140/artifact/outside-review-2137-md): the
+// document is not loaded in this process, and an agent's version is written here. Zoe edits, then
+// Adam, and the notice must name Adam. The person who edited last comes from the database, the
+// durable pending authors ordered by the update that wrote each row (readPendingAuthors), so no
+// room's memory in another process decides it.
+func TestOutsideReviewColdAgentVersionLastHuman(t *testing.T) {
+	first, artifactID := newTestService(t)
+	first.settle = time.Hour
+	seedServiceText(t, first, artifactID, "First.\n\nSecond.\n\nThird.\n")
+	settleCurrentGeneration(t, first, artifactID)
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	editAsConnectedPeer(t, first, artifactID, 1, zoe, replaceRun("First.", "First, by zoe."))
+	editAsConnectedPeer(t, first, artifactID, 2, adam, replaceRun("Second.", "Second, by adam."))
+	waitForLandedAppends(t, first, artifactID)
+	second := New(Deps{Store: storetest.SecondProcess(t, first.store), Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = second.Shutdown(context.Background()) })
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if err := joinedWrite(second, func(ctx context.Context) error {
+		if _, err := second.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "replace", Find: "Third.", With: "Third, by agent."}}, agent, nil); err != nil {
+			return err
+		}
+		_, err := second.NamedVersion(ctx, artifactID, "agent checkpoint", agent)
+		return err
+	}); err != nil {
+		t.Fatalf("the second process's agent version: %v", err)
+	}
+	row, open := readEditNotice(t, second, artifactID)
+	if !open {
+		t.Fatal("the agent's version over two people's edits opened no edit notice")
+	}
+	if row.lastEditor != adam {
+		t.Fatalf("last editor = %+v, want adam, who edited last; zoe only sorts first", row.lastEditor)
+	}
+}
+
+// The outside review's second case: a person's edit and a named version run in one transaction.
+// The room's lastActor takes the write's actor only at commit, so the capture takes the person
+// from the write's own credits instead (newestWritePerson). Zoe edits, Adam edits and names the
+// version, and the notice must name Adam.
+func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("First.", "First, by zoe."))
+	waitForLandedAppends(t, service, artifactID)
+	if err := joinedWrite(service, func(ctx context.Context) error {
+		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "replace", Find: "Second.", With: "Second, by adam."}}, adam, nil); err != nil {
+			return err
+		}
+		_, err := service.NamedVersion(ctx, artifactID, "adam checkpoint", adam)
+		return err
+	}); err != nil {
+		t.Fatalf("adam's joined edit and named version: %v", err)
+	}
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("adam's joined edit and named version opened no edit notice")
+	}
+	if row.lastEditor != adam {
+		t.Fatalf("last editor = %+v, want adam, who edited last; zoe only sorts first", row.lastEditor)
+	}
+}

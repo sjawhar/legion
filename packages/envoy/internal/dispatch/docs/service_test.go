@@ -1006,7 +1006,7 @@ func pendingAuthors(t *testing.T, service *Service, artifactID string) []model.A
 		maps.Copy(owed, record.authors)
 	}
 	state.mu.Unlock()
-	durable, err := readPendingAuthors(context.Background(), service.store.Pool, artifactID)
+	durable, _, err := readPendingAuthors(context.Background(), service.store.Pool, artifactID)
 	if err != nil {
 		t.Fatalf("read the document's pending authors: %v", err)
 	}

@@ -1040,7 +1040,7 @@ func TestAVersionsCreditIsConsumedExactlyWhenItsCommitLands(t *testing.T) {
 	state := service.lockState(artifactID)
 	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: map[string]model.Actor{actorKey(bob): bob}}
 	state.inflight[record.seq] = record
-	capture := captureAuthors(state, nil, nil, nil)
+	capture := captureAuthors(state, nil, nil, nil, nil)
 	service.unlockState(artifactID, state)
 	t.Cleanup(func() {
 		state.mu.Lock()

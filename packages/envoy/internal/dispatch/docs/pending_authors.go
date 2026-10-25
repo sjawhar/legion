@@ -482,13 +482,13 @@ type uploadHold struct {
 // capturePendingAuthors reads R in tx, which holds the document's advisory lock, and takes whom a
 // version lists (captureAuthors) under room's state lock.
 func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor) (authorCapture, error) {
-	owed, err := readPendingAuthors(ctx, tx, room)
+	owed, durableLatest, err := readPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return authorCapture{}, err
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	return captureAuthors(state, owed, write, actor), nil
+	return captureAuthors(state, owed, durableLatest, write, actor), nil
 }
 
 // captureAuthors is whom a version lists: owed, the pending authors its transaction read under
@@ -497,7 +497,15 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 // commit deletes the pending authors it read and marks the in-flight credits it took consumed
 // (commitConsuming); a credit observed after this take is not among them and stays pending for
 // the next version. The caller holds state.mu.
-func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
+//
+// It also names the person among them who edited last (authorCapture.latest), newest first: the
+// newest person the calling transaction's own write credits (newestWritePerson), since its edits
+// land after everything the capture read; then the room's newest in-flight credit that names a
+// person, whose append lands after every row R holds; then durableLatest, R's newest person
+// (readPendingAuthors); then actor, the version's writer, when a person. Each is read from the
+// write, the room or the database with the version's authors, so no process's memory of an
+// earlier edit stands in for it, and no order is taken from the authors' ids.
+func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
 	capture := authorCapture{
 		state:    state,
 		authors:  make(map[string]model.Actor, len(owed)+1),
@@ -517,10 +525,77 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWr
 	if actor != nil {
 		capture.authors[actorKey(*actor)] = *actor
 	}
-	if state.lastActor != nil {
-		capture.latest = new(*state.lastActor)
+	switch {
+	case newestWritePerson(write) != nil:
+		capture.latest = newestWritePerson(write)
+	case newestInflightPerson(capture.inflight) != nil:
+		capture.latest = newestInflightPerson(capture.inflight)
+	case durableLatest != nil:
+		capture.latest = new(*durableLatest)
+	case actor != nil && actor.Kind == "user":
+		capture.latest = new(*actor)
 	}
 	return capture
+}
+
+// newestWritePerson is the person the calling transaction's own write credited last, or nil when
+// it credits none. Each credit records the update that carried it (liveWrite.creditedBy, a
+// doc_updates version given under the document's advisory lock), so the write's own operations are
+// in order: a person's edit followed by an agent's named version in one transaction still names
+// the person. Two people credited at one version are a tie no order settles, and the first by
+// actor id is named.
+func newestWritePerson(write *liveWrite) *model.Actor {
+	if write == nil {
+		return nil
+	}
+	var newest *model.Actor
+	var at persistence.Version
+	for key, author := range write.credits {
+		if author.Kind != "user" {
+			continue
+		}
+		version := write.creditedBy[key]
+		if newest == nil || version > at || (version == at && key < actorKey(*newest)) {
+			newest = new(author)
+			at = version
+		}
+	}
+	return newest
+}
+
+// newestInflightPerson is the person the newest of records that names one credits: its sole
+// connected peer when that is a person, else the first person it credits by actor id, since an
+// edit made while several people were connected cannot be pinned on one of them. Nil when no
+// record names a person.
+func newestInflightPerson(records []*inflightCredit) *model.Actor {
+	var newest *inflightCredit
+	for _, record := range records {
+		if (newest == nil || record.seq > newest.seq) && creditsAPerson(record) {
+			newest = record
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	if newest.lastActor != nil && newest.lastActor.Kind == "user" {
+		return new(*newest.lastActor)
+	}
+	var first *model.Actor
+	for _, author := range newest.authors {
+		if author.Kind == "user" && (first == nil || actorKey(author) < actorKey(*first)) {
+			first = new(author)
+		}
+	}
+	return first
+}
+
+func creditsAPerson(record *inflightCredit) bool {
+	for _, author := range record.authors {
+		if author.Kind == "user" {
+			return true
+		}
+	}
+	return false
 }
 
 // uploadCapture is an upload's capture over write: the in-flight credits observed by its last read
@@ -636,30 +711,44 @@ func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors [
 	return nil
 }
 
-// readPendingAuthors is R for room, keyed by actorKey. A version reads it in its own transaction
-// under the document's advisory lock, so no append or write changes it until that version ends.
-func readPendingAuthors(ctx context.Context, q Queryer, room string) (map[string]model.Actor, error) {
-	rows, err := q.Query(ctx, `select actor from doc_pending_authors where artifact_id = $1`, room)
+// readPendingAuthors is R for room, keyed by actorKey, and the person whose landed edit R holds is
+// newest: the person of the row with the greatest written_through, the doc_updates version of the
+// update that wrote it. A doc_updates version is given under the document's advisory lock, in the
+// order updates were stored, so it is the order of the edits whatever process or room took them.
+// Several people credited by one update (each was connected when it landed) share its version, and
+// no order is known between them; the first of them by actor id is named. A version reads R in its
+// own transaction under that lock, so no append or write changes it until that version ends.
+func readPendingAuthors(ctx context.Context, q Queryer, room string) (map[string]model.Actor, *model.Actor, error) {
+	rows, err := q.Query(ctx, `
+		select actor, actor_kind = 'user' as person from doc_pending_authors
+		where artifact_id = $1
+		order by written_through desc, actor_kind, actor_id
+	`, room)
 	if err != nil {
-		return nil, fmt.Errorf("read the document's pending authors: %w", err)
+		return nil, nil, fmt.Errorf("read the document's pending authors: %w", err)
 	}
 	defer rows.Close()
 	owed := make(map[string]model.Actor)
+	var latestPerson *model.Actor
 	for rows.Next() {
 		var encoded []byte
-		if err := rows.Scan(&encoded); err != nil {
-			return nil, fmt.Errorf("read the document's pending authors: %w", err)
+		var person bool
+		if err := rows.Scan(&encoded, &person); err != nil {
+			return nil, nil, fmt.Errorf("read the document's pending authors: %w", err)
 		}
 		var actor model.Actor
 		if err := json.Unmarshal(encoded, &actor); err != nil {
-			return nil, fmt.Errorf("decode a pending author of the document: %w", err)
+			return nil, nil, fmt.Errorf("decode a pending author of the document: %w", err)
 		}
 		owed[actorKey(actor)] = actor
+		if person && latestPerson == nil {
+			latestPerson = new(actor)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the document's pending authors: %w", err)
+		return nil, nil, fmt.Errorf("read the document's pending authors: %w", err)
 	}
-	return owed, nil
+	return owed, latestPerson, nil
 }
 
 // deletePendingAuthors deletes the R rows of authors in tx, the transaction of the version that

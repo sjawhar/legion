@@ -5,14 +5,15 @@ import type {
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
 
-// The secrets broker's two UI-bearer reads Dispatch relays on every Inbox and Settings load:
+// The secrets broker's reads Dispatch relays on every Inbox and Settings load:
 // `GET /v1/pending` (the credential requests waiting on an approver), `GET /v1/credential-requests/{id}`
 // (one record's full detail, for the record page) and `GET /v1/grants` (the live grants of a
 // person's sessions and those the person approved). The server reaches this through
 // DISPATCH_AGENT_SECRETS_URL (run-server.sh) whenever the harness switch is left unset
 // (e2e/harness-broker.ts), and it lists nothing until a test seeds a request through
-// /__fixture/pending or a record through /__fixture/records. Every other broker route answers
-// 404.
+// /__fixture/pending or a record through /__fixture/records. It verifies no caller: the token the
+// server presents, e2e/fake-broker-account-token's, is never read. Every other broker route
+// answers 404.
 
 /** A pending credential request as the broker lists it, beside the approver it waits on: the row
  *  is the SPA's own type, so a change to the contract fails the typecheck here too. */

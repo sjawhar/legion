@@ -2,7 +2,6 @@ package bus_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +23,7 @@ import (
 // place rather than closing, so a JetStream handle taken from it before the restart is still bound
 // to a live connection afterwards.
 func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -39,10 +38,8 @@ func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
 		t.Fatalf("create bucket: %v", err)
 	}
 
-	testnats.Stop(t, ctr)
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
+	srv.Stop(t)
+	srv.Start(t)
 	waitFor(t, 30*time.Second, "the client to reconnect", client.Connected)
 	var putErr error
 	deadline := time.Now().Add(15 * time.Second)
@@ -59,14 +56,14 @@ func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
 // callers treat an error as not delivered (a role-lane forward as delivery_failed, a webhook as a
 // 500 for the sender to retry), so a copy held and sent after reconnecting would arrive twice.
 func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
 
-	testnats.Stop(t, ctr)
+	srv.Stop(t)
 	waitFor(t, 15*time.Second, "the client to notice the server is gone", func() bool { return !client.Connected() })
 	item := contracts.Envelope{
 		EventID:       "evt-publish-while-reconnecting",
@@ -80,9 +77,7 @@ func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
 		t.Fatal("a core publish while the server was away reported success")
 	}
 
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
+	srv.Start(t)
 	observer := testnats.Connect(t, uri)
 	t.Cleanup(observer.Close)
 	received := make(chan *natsgo.Msg, 1)
@@ -104,19 +99,20 @@ func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
 // rather than failing at once: a webhook that gets an error answers 503, and the sender does not
 // redeliver, so a failure fast enough to beat a one-second NATS restart loses the event.
 func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
 
-	testnats.Stop(t, ctr)
+	srv.Stop(t)
 	waitFor(t, 15*time.Second, "the client to start reconnecting", func() bool { return client.Conn.IsReconnecting() })
-	restarted := make(chan error, 1)
+	restarted := make(chan struct{})
 	go func() {
+		defer close(restarted)
 		time.Sleep(time.Second)
-		restarted <- ctr.Start(context.Background())
+		srv.Start(t)
 	}()
 	item := contracts.Envelope{
 		EventID:        "evt-publish-across-restart",
@@ -129,9 +125,11 @@ func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
 		TraceID:        "trace-publish-across-restart",
 	}
 	publishErr := client.Publish(item)
-	if err := <-restarted; err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
+	// The restart has to be done before the publish's error is judged. When the server will not
+	// start again, srv.Start fails the test from the goroutine that made it and ends that
+	// goroutine there; the deferred close still releases this one, which then reports the
+	// publish's failure below the start's own, the consequence under the cause.
+	<-restarted
 	if publishErr != nil {
 		t.Fatalf("a JetStream publish during a one-second NATS restart failed: %v", publishErr)
 	}
@@ -140,7 +138,7 @@ func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
 // A connection that reconnects while Drain is still draining belongs to a process that is shutting
 // down: the reconnect closes it, quietly, instead of re-subscribing or logging a failure.
 func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -166,10 +164,8 @@ func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
 	drained := make(chan error, 1)
 	go func() { drained <- client.Drain(15 * time.Second) }()
 	time.Sleep(200 * time.Millisecond)
-	testnats.Stop(t, ctr)
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
+	srv.Stop(t)
+	srv.Start(t)
 	select {
 	case <-drained:
 	case <-time.After(14 * time.Second):
@@ -281,7 +277,7 @@ func captureBusLogs(t *testing.T) *busLogs {
 // push binding, which refuses the new bind with "consumer is already bound to a subscription" and
 // logs a resubscribe failure at ERROR (LEGION-278).
 func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -307,10 +303,8 @@ func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
 	})
 
 	logs := captureBusLogs(t)
-	testnats.Stop(t, ctr)
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
+	srv.Stop(t)
+	srv.Start(t)
 	select {
 	case <-reconnected:
 	case <-time.After(30 * time.Second):
@@ -363,7 +357,7 @@ func TestAReconnectHookFailureIsAnErrorUnlessTheClientStopped(t *testing.T) {
 		{name: "without a stop", stop: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctr, uri := testnats.StartRestartable(t)
+			srv, uri := testnats.Start(t)
 			client, err := bus.ConnectOwningStream([]string{uri})
 			if err != nil {
 				t.Fatalf("connect: %v", err)
@@ -381,10 +375,8 @@ func TestAReconnectHookFailureIsAnErrorUnlessTheClientStopped(t *testing.T) {
 			})
 
 			logs := captureBusLogs(t)
-			testnats.Stop(t, ctr)
-			if err := ctr.Start(context.Background()); err != nil {
-				t.Fatalf("start NATS again: %v", err)
-			}
+			srv.Stop(t)
+			srv.Start(t)
 			select {
 			case <-hooked:
 			case <-time.After(30 * time.Second):
