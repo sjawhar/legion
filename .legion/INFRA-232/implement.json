@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-232",
-  "completed": "2026-10-25T13:43:00Z",
+  "completed": "2026-10-25T14:12:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2195",
   "proof": [
     {
@@ -10,7 +10,7 @@
       "surface": "this issue's role container, against the applied cluster, through the role's own bash tool",
       "command": "P1: the sh block after 'The whole sequence' in docs/kubernetes.md, extracted at the head (jj file show), its three bracketed lines filled from the deployment's declaration in $TMPDIR, run as published through its flock ... setsid -f form, with one line added after the logs read: echo \"uid: $uid\"; kubectl get pod -l job-name=\"$workload\" -o jsonpath='{.items[0].metadata.labels}'. Then kubectl get jobs | grep <name>.",
       "observed": "2026-10-25T13:40:37Z: 'workload: infra-232-postgres-22shp' printed after the create; 'service/infra-232-postgres-22shp created'; both waits 'condition met'; 'answered'; the pod's batch.kubernetes.io/controller-uid equal to the uid kubectl create returned (835ffce6-...); the trap deleted the Job and listed 'No resources found'; 'sequence: exit 0'; 0 Jobs of that name in kubectl get jobs. The same run at 91847e71 (block byte-identical, cmp) gave infra-232-postgres-vkn5z with the same outcomes and the call returning 92 s after it started.",
-      "headSha": "81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7",
+      "headSha": "81e2fa83374f515a0badcbbc5f6133ac22129e40",
       "negativeControl": "P2: the same block with the create line replaced by the pre-change step 'kubectl apply -f \"$dir/job.yaml\"' -> 'error: from infra-232-postgres-: cannot use generate name with apply' client-side, trap 'cleanup: no Job name was read; nothing removed', 'sequence: exit 1': apply cannot carry a generated name."
     },
     {
@@ -50,7 +50,7 @@
       "surface": "the branch's diff",
       "command": "jj diff --stat -r 'e922ac4c..81e2fa83'; jj diff --git of the same range; cd packages/daemon && go test ./internal/runtime/sandbox/ -run Reclaim",
       "observed": "Only docs/kubernetes.md changed (+79/-33). Hunks only inside the section: the gate paragraph (T4), the naming paragraphs (T2), the Job-manifest sentence (T3), the sequence's workload line, trap guard, generateName and create lines (T1), the trap paragraph and recovery sentence (T5), the evidence passage (T6). Lines 100 and 1959 and AGENTS.md untouched. go test: ok. The sequence block is byte-identical (cmp) between 91847e71 and 81e2fa83.",
-      "headSha": "81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7",
+      "headSha": "81e2fa83374f515a0badcbbc5f6133ac22129e40",
       "negativeControl": "The filled block has exactly three bracketed lines replaced and 'bash -n' passes; grep for '<[a-z]' in the filled copy finds none."
     },
     {
@@ -58,7 +58,7 @@
       "surface": "the branch's diff, the PR body, this handoff",
       "command": "the plan's section 3 sweep: patterns built in shell variables from the projected credential's namespace file and the deployment's declaration, grep -Eoi over the diff's added lines, the PR body file and this handoff; bash .github/scripts/check-private-names.sh",
       "observed": "0 hits in the diff's added lines, 0 in the PR body, 0 in this handoff; check-private-names.sh exit 0.",
-      "headSha": "81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7",
+      "headSha": "81e2fa83374f515a0badcbbc5f6133ac22129e40",
       "negativeControl": "A scratch string in $TMPDIR carrying the deployment's owner name -> 1 hit: the sweep fires."
     }
   ],
@@ -74,7 +74,8 @@
     "The code (documentation prose) was written by the implementer directly rather than by a deep-worker subagent: the diff is one docs file whose every sentence is bound to the live runs and to the elision rule, which a subagent without this context could not hold.",
     "The trap's no-name line is 'cleanup: no Job name was read; nothing removed' (the plan offered 'cleanup: no Job was created' as an example) because the latter is false in the in-flight-stop window.",
     "P5 used a 30 s tool timeout (the plan names none); P4's pod was ContainerCreating rather than Pending at the delete, on a warm node.",
-    "The new evidence bullet ends 'on that date the namespace's admission did not require a generated name' without naming the successor policy, since the successor child is not yet filed and the sentence must stay true after the apply."
+    "The new evidence bullet ends 'on that date the namespace's admission did not require a generated name' without naming the successor policy, since the successor child is not yet filed and the sentence must stay true after the apply.",
+    "Round 2 (tester's fail at dcc72543): the A1, A6 and A7 headSha and the PR body's E2E (implementer) line and its link carried 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7, a SHA I typed rather than read, which is no commit. Corrected to 81e2fa83374f515a0badcbbc5f6133ac22129e40, read with jj log -T commit_id and confirmed by gh api repos/sjawhar/legion/commits/<sha> (200) and the blob link (HTTP 200). No code changed: the code head stays 81e2fa83, and the runs recorded are the same runs."
   ],
   "openQuestions": []
 }
