@@ -210,6 +210,13 @@ func keepingOpen(active, marks, following []Mark) []Mark {
 	return ordered
 }
 
+// isLinkedImage reports whether node is an image written inside its link's syntax, opening with
+// the link's `[`.
+func isLinkedImage(node *Node) bool {
+	link, _ := node.Attrs["link"].(string)
+	return node.Type == "image" && link != ""
+}
+
 // writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink, isBareWWWLink),
 // which linkify reads again from the text alone.
 func writesBareURL(nodes []*Node, escapePipes bool) bool {
@@ -432,6 +439,9 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				closer:         adjacentDelimiter(next[sharedMarks(next, following):]),
 				flankFirst:     flankFirst,
 				flankLast:      flankLast,
+
+				// Only where no mark's closer is written between the text and the image.
+				beforeLinkedImage: len(next) == 0 && index+1 < len(nodes) && isLinkedImage(nodes[index+1]),
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -453,7 +463,13 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			src, _ := n.Attrs["src"].(string)
 			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			r.writeSyntax("![" + imageAlt(alt, context) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
+			image := "![" + imageAlt(alt, context) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")"
+			// A linked image is written inside its link's syntax, spelled as a text link's.
+			if link, _ := n.Attrs["link"].(string); link != "" {
+				linkTitle, _ := n.Attrs["linkTitle"].(string)
+				image = "[" + image + "](" + escapeLinkDestination(link, escapePipes) + titleSuffix(linkTitle, escapePipes) + ")"
+			}
+			r.writeSyntax(image)
 			position.atLineStart, position.atTextStart = false, false
 		case "html":
 			r.closeMarks(active, escapePipes)

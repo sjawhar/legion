@@ -44,6 +44,9 @@ type escapeContext struct {
 	// link's `]`, a hard break's backslash, the next node's first character. A block-final
 	// backslash reads back as itself and is left as written.
 	followed bool
+	// beforeLinkedImage reports whether a linked image's `[` is written right after the text,
+	// where a `!` ending it would open an image of the link's syntax.
+	beforeLinkedImage bool
 	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
 	// the run they are in does not read back with them as written (inlineWithEscapes).
 	delimiters delimiterEscapes
@@ -135,6 +138,8 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, textLineStart)
+	case '!':
+		return offset+1 == len(value) && context.beforeLinkedImage
 	default:
 		return false
 	}
@@ -241,7 +246,7 @@ func isLineWhitespace(value byte) bool {
 
 // inlineSignature describes inline nodes as the reader sees them: each run of text with the marks
 // it renders, merged across nodes that carry the same marks, and every other node by its type and
-// what it writes.
+// what it writes, an image's link and link title included.
 func inlineSignature(nodes []*Node) []string {
 	var signature []string
 	lastMarks := ""
@@ -250,7 +255,9 @@ func inlineSignature(nodes []*Node) []string {
 			value, _ := node.Attrs["value"].(string)
 			src, _ := node.Attrs["src"].(string)
 			label, _ := node.Attrs["label"].(string)
-			signature = append(signature, node.Type+"|"+value+"|"+src+"|"+label)
+			link, _ := node.Attrs["link"].(string)
+			linkTitle, _ := node.Attrs["linkTitle"].(string)
+			signature = append(signature, node.Type+"|"+value+"|"+src+"|"+label+"|"+link+"|"+linkTitle)
 			lastMarks = "\x00"
 			continue
 		}

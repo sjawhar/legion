@@ -189,6 +189,38 @@ func TestUploadArtifactJSONReturnsCanonicalMarkdown(t *testing.T) {
 	}
 }
 
+// A link around one whole image is stored as the image's link and link title, so a JSON upload of
+// a linked image reads back unchanged; a link around text and an image stays as it was stored
+// before (INFRA-190): the link marks the text, and the image is stored without it.
+func TestUploadArtifactJSONKeepsALinkedImagesLink(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	for _, test := range []struct{ name, content, stored string }{
+		{"linked-image.md", "[![x](i.png)](https://u.com \"t\")\n", "[![x](i.png)](https://u.com \"t\")\n"},
+		{"linked-text-and-image.md", "[a ![x](i.png) b](https://u.com)\n", "[a ](https://u.com)![x](i.png)[ b](https://u.com)\n"},
+	} {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+			"name": test.name, "content": test.content,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("upload %q: status=%d body=%s", test.content, response.Code, response.Body.String())
+		}
+		upload := decodeBody[struct {
+			Artifact model.Artifact `json:"artifact"`
+		}](t, response)
+		text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+upload.Artifact.ID+"/text", nil, "alice")
+		if text.Code != http.StatusOK {
+			t.Fatalf("read %q: status=%d body=%s", test.content, text.Code, text.Body.String())
+		}
+		document := decodeBody[struct {
+			Markdown string `json:"markdown"`
+		}](t, text)
+		if document.Markdown != test.stored {
+			t.Errorf("upload of %q stored %q, want %q", test.content, document.Markdown, test.stored)
+		}
+	}
+}
+
 func TestUploadRejectsMarkdownOutsideProofSchema(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)

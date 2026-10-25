@@ -94,14 +94,17 @@ func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T)
 	}
 }
 
-// A linked image is read as the browser editor stores it: the image without the link, which the
-// editor's store keeps on text alone (LEGION-365). A refusal would leave a document the editor
-// holds unsavable, so the link's text around the image keeps its link and the write is taken.
-func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
+// A link around one whole image is kept as the image's link and link title, as the browser editor
+// stores it (INFRA-190). A link around an image and text keeps its link on the text alone, since
+// the editor's store keeps a mark on text only, and a mark around the linked image is lost; each
+// write is taken, since a refusal would leave a document the editor holds unsavable.
+func TestParseKeepsALinkedImagesLink(t *testing.T) {
 	for _, test := range []struct{ linked, stored string }{
-		{"[![x](i.png)](https://u.com)\n", "![x](i.png)\n"},
+		{"[![x](i.png)](https://u.com)\n", "[![x](i.png)](https://u.com)\n"},
+		{"[![x](i.png)](https://u.com \"t\")\n", "[![x](i.png)](https://u.com \"t\")\n"},
+		{"[a ![x](i.png) b](https://u.com)\n", "[a ](https://u.com)![x](i.png)[ b](https://u.com)\n"},
 		{"see [a ![x](i.png) b](https://u.com \"t\") now\n", "see [a ](https://u.com \"t\")![x](i.png)[ b](https://u.com \"t\") now\n"},
-		{"- **[![x](i.png)](https://u.com)**\n", "- ![x](i.png)\n"},
+		{"- **[![x](i.png)](https://u.com)**\n", "- [![x](i.png)](https://u.com)\n"},
 	} {
 		got, err := ParseForWrite(test.linked, nil)
 		if err != nil {
@@ -112,9 +115,12 @@ func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", test.stored, err)
 		}
-		if !got.Equal(want) {
-			markdown, _ := Render(got)
-			t.Errorf("ParseForWrite(%q) reads as %q, want what %q reads as", test.linked, markdown, test.stored)
+		markdown, err := Render(got)
+		if err != nil {
+			t.Fatalf("Render(ParseForWrite(%q)): %v", test.linked, err)
+		}
+		if !got.Equal(want) || markdown != test.stored {
+			t.Errorf("ParseForWrite(%q) reads as %q, want %q", test.linked, markdown, test.stored)
 		}
 	}
 }

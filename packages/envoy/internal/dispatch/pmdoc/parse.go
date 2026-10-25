@@ -833,9 +833,11 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
-		"src":   unescapeMarkdownText(image.Destination),
-		"alt":   text.String(),
-		"title": titleOrNil(image.Title),
+		"src":       unescapeMarkdownText(image.Destination),
+		"alt":       text.String(),
+		"title":     titleOrNil(image.Title),
+		"link":      nil,
+		"linkTitle": nil,
 	}}, nil
 }
 
@@ -949,6 +951,21 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			if tableCell {
 				href = string(util.UnescapePunctuations(current.Destination))
 			}
+			// A link around one whole image, and nothing else, is that image's link: the browser
+			// editor stores it as the image's link and linkTitle attributes, since its store
+			// (y-prosemirror) keeps a mark on text alone (INFRA-190). Any other link holding an
+			// image - beside text or whitespace, around a marked image, or with no destination -
+			// marks its text and leaves the image without it, as that editor reads it.
+			if image, ok := current.FirstChild().(*ast.Image); ok && current.ChildCount() == 1 && href != "" {
+				node, err := parseImage(image, source, footnotes)
+				if err != nil {
+					return nil, nil, err
+				}
+				node.Attrs["link"] = href
+				node.Attrs["linkTitle"] = titleOrNil(current.Title)
+				children = append(children, node)
+				continue
+			}
 			content, err := within(current, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}})
 			if err != nil {
 				return nil, nil, err
@@ -965,9 +982,9 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 		case *extensionast.TaskCheckBox:
 			continue
 		case *ast.Image:
-			// An image is read without the marks around it, a link among them: the browser
-			// editor's store (y-prosemirror) keeps a mark on text alone, so the editor stores a
-			// linked image without its link as well (LEGION-365).
+			// An image is read without the marks around it: the browser editor's store
+			// (y-prosemirror) keeps a mark on text alone, so the editor stores an image without its
+			// marks as well. A link around the whole image alone is read above, as its attributes.
 			image, err := parseImage(current, source, footnotes)
 			if err != nil {
 				return nil, nil, err

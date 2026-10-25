@@ -14670,7 +14670,9 @@
               "attrs": {
                 "src": "u",
                 "alt": "a\nb",
-                "title": null
+                "title": null,
+                "link": null,
+                "linkTitle": null
               }
             }
           ]
@@ -14703,7 +14705,9 @@
                       "attrs": {
                         "src": "u",
                         "alt": "a\nb",
-                        "title": null
+                        "title": null,
+                        "link": null,
+                        "linkTitle": null
                       }
                     }
                   ]
@@ -14777,7 +14781,9 @@
                           "attrs": {
                             "src": "u",
                             "alt": "c\nd",
-                            "title": null
+                            "title": null,
+                            "link": null,
+                            "linkTitle": null
                           }
                         }
                       ]
@@ -14799,7 +14805,9 @@
               "attrs": {
                 "src": "https://example.test/a.png",
                 "alt": "alt ending in a tab\nand more",
-                "title": null
+                "title": null,
+                "link": null,
+                "linkTitle": null
               }
             },
             {
@@ -14811,7 +14819,9 @@
               "attrs": {
                 "src": "https://example.test/b.png",
                 "alt": "a tab before two spaces\nas well",
-                "title": null
+                "title": null,
+                "link": null,
+                "linkTitle": null
               }
             }
           ]
@@ -14838,7 +14848,9 @@
               "attrs": {
                 "src": "https://example.com/a (b)",
                 "alt": "a]b",
-                "title": "say \"hi\""
+                "title": "say \"hi\"",
+                "link": null,
+                "linkTitle": null
               }
             }
           ]
@@ -14865,7 +14877,9 @@
               "attrs": {
                 "src": "https://example.com/image.png",
                 "alt": "Fixture image",
-                "title": "Image title"
+                "title": "Image title",
+                "link": null,
+                "linkTitle": null
               }
             }
           ]
@@ -15716,6 +15730,318 @@
     },
     "yjs_update_v1_b64": "AQYBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgYAAQEEbGluazh7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL2EoYikiLCJ0aXRsZSI6InNheSBcImhpXCIifYQBAgVwYXJlboYBBwRsaW5rBG51bGwoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMQA=",
     "rendered_by_milkdown": "[paren](https://example.com/a\\(b\\) \"say \\\"hi\\\"\")\n"
+  },
+  {
+    "name": "linked-image",
+    "markdown": "[![Both titles](https://example.com/both.png \"Image title\")](https://example.com/both \"Link title\")\n\n[![Neither title](https://example.com/neither.png)](https://example.com/neither)\n\n[![Image title only](https://example.com/image.png \"Image title\")](https://example.com/image)\n\n[![Link title only](https://example.com/link.png)](https://example.com/link \"Link title\")\n\n[![Angle destination](https://example.com/angle.png)](<https://example.com/a (b)>)\n\n| Where | Cell |\n| --- | --- |\n| linked image | [![one\\|two](https://example.test/one\\|two.png \"one\\|two\")](https://example.test/one\\|two \"one\\|two\") |\n\nWow\\![![Bang](https://example.com/bang.png)](https://example.com/bang)\n\n[![One](https://example.com/one.png)](https://example.com/one)[![Two](https://example.com/two.png)](https://example.com/two)\n\n[![build](https://ci.example/badge.svg)](https://ci.example/build) and [the build](https://ci.example/build)\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/both.png",
+                "alt": "Both titles",
+                "title": "Image title",
+                "link": "https://example.com/both",
+                "linkTitle": "Link title"
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/neither.png",
+                "alt": "Neither title",
+                "title": null,
+                "link": "https://example.com/neither",
+                "linkTitle": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/image.png",
+                "alt": "Image title only",
+                "title": "Image title",
+                "link": "https://example.com/image",
+                "linkTitle": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/link.png",
+                "alt": "Link title only",
+                "title": null,
+                "link": "https://example.com/link",
+                "linkTitle": "Link title"
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/angle.png",
+                "alt": "Angle destination",
+                "title": null,
+                "link": "https://example.com/a (b)",
+                "linkTitle": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000007"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000008"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000009"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Where"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000011"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Cell"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000013"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000014"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "linked image"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000016"
+                      },
+                      "content": [
+                        {
+                          "type": "image",
+                          "attrs": {
+                            "src": "https://example.test/one|two.png",
+                            "alt": "one|two",
+                            "title": "one|two",
+                            "link": "https://example.test/one|two",
+                            "linkTitle": "one|two"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Wow!"
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/bang.png",
+                "alt": "Bang",
+                "title": null,
+                "link": "https://example.com/bang",
+                "linkTitle": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000018"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/one.png",
+                "alt": "One",
+                "title": null,
+                "link": "https://example.com/one",
+                "linkTitle": null
+              }
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/two.png",
+                "alt": "Two",
+                "title": null,
+                "link": "https://example.com/two",
+                "linkTitle": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000019"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://ci.example/badge.svg",
+                "alt": "build",
+                "title": null,
+                "link": "https://ci.example/build",
+                "linkTitle": null
+              }
+            },
+            {
+              "type": "text",
+              "text": " and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://ci.example/build",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "the build"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AWkBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEAAwVpbWFnZSgAAQEDc3JjAXccaHR0cHM6Ly9leGFtcGxlLmNvbS9ib3RoLnBuZygAAQEDYWx0AXcLQm90aCB0aXRsZXMoAAEBBXRpdGxlAXcLSW1hZ2UgdGl0bGUoAAEBBGxpbmsBdxhodHRwczovL2V4YW1wbGUuY29tL2JvdGgoAAEBCWxpbmtUaXRsZQF3CkxpbmsgdGl0bGUoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABCAMFaW1hZ2UoAAEJA3NyYwF3H2h0dHBzOi8vZXhhbXBsZS5jb20vbmVpdGhlci5wbmcoAAEJA2FsdAF3DU5laXRoZXIgdGl0bGUoAAEJBGxpbmsBdxtodHRwczovL2V4YW1wbGUuY29tL25laXRoZXIoAAEIB2Jsb2NrSWQBdwhiLTAwMDAwMocBCAMJcGFyYWdyYXBoBwABDgMFaW1hZ2UoAAEPA3NyYwF3HWh0dHBzOi8vZXhhbXBsZS5jb20vaW1hZ2UucG5nKAABDwNhbHQBdxBJbWFnZSB0aXRsZSBvbmx5KAABDwV0aXRsZQF3C0ltYWdlIHRpdGxlKAABDwRsaW5rAXcZaHR0cHM6Ly9leGFtcGxlLmNvbS9pbWFnZSgAAQ4HYmxvY2tJZAF3CGItMDAwMDAzhwEOAwlwYXJhZ3JhcGgHAAEVAwVpbWFnZSgAARYDc3JjAXccaHR0cHM6Ly9leGFtcGxlLmNvbS9saW5rLnBuZygAARYDYWx0AXcPTGluayB0aXRsZSBvbmx5KAABFgRsaW5rAXcYaHR0cHM6Ly9leGFtcGxlLmNvbS9saW5rKAABFglsaW5rVGl0bGUBdwpMaW5rIHRpdGxlKAABFQdibG9ja0lkAXcIYi0wMDAwMDSHARUDCXBhcmFncmFwaAcAARwDBWltYWdlKAABHQNzcmMBdx1odHRwczovL2V4YW1wbGUuY29tL2FuZ2xlLnBuZygAAR0DYWx0AXcRQW5nbGUgZGVzdGluYXRpb24oAAEdBGxpbmsBdxlodHRwczovL2V4YW1wbGUuY29tL2EgKGIpKAABHAdibG9ja0lkAXcIYi0wMDAwMDWHARwDBXRhYmxlBwABIgMQdGFibGVfaGVhZGVyX3JvdwcAASMDDHRhYmxlX2hlYWRlcgcAASQDCXBhcmFncmFwaAcAASUGBAABJgVXaGVyZSgAASUHYmxvY2tJZAF3CGItMDAwMDA5KAABJAdjb2xzcGFuAX0BKAABJAdyb3dzcGFuAX0BKAABJAdibG9ja0lkAXcIYi0wMDAwMDiHASQDDHRhYmxlX2hlYWRlcgcAATADCXBhcmFncmFwaAcAATEGBAABMgRDZWxsKAABMQdibG9ja0lkAXcIYi0wMDAwMTEoAAEwB2NvbHNwYW4BfQEoAAEwB3Jvd3NwYW4BfQEoAAEwB2Jsb2NrSWQBdwhiLTAwMDAxMCgAASMHYmxvY2tJZAF3CGItMDAwMDA3hwEjAwl0YWJsZV9yb3cHAAE8Awp0YWJsZV9jZWxsBwABPQMJcGFyYWdyYXBoBwABPgYEAAE/DGxpbmtlZCBpbWFnZSgAAT4HYmxvY2tJZAF3CGItMDAwMDE0KAABPQdjb2xzcGFuAX0BKAABPQdyb3dzcGFuAX0BKAABPQdibG9ja0lkAXcIYi0wMDAwMTOHAT0DCnRhYmxlX2NlbGwHAAFQAwlwYXJhZ3JhcGgHAAFRAwVpbWFnZSgAAVIDc3JjAXcgaHR0cHM6Ly9leGFtcGxlLnRlc3Qvb25lfHR3by5wbmcoAAFSA2FsdAF3B29uZXx0d28oAAFSBXRpdGxlAXcHb25lfHR3bygAAVIEbGluawF3HGh0dHBzOi8vZXhhbXBsZS50ZXN0L29uZXx0d28oAAFSCWxpbmtUaXRsZQF3B29uZXx0d28oAAFRB2Jsb2NrSWQBdwhiLTAwMDAxNigAAVAHY29sc3BhbgF9ASgAAVAHcm93c3BhbgF9ASgAAVAHYmxvY2tJZAF3CGItMDAwMDE1KAABPAdibG9ja0lkAXcIYi0wMDAwMTIoAAEiB2Jsb2NrSWQBdwhiLTAwMDAwNocBIgMJcGFyYWdyYXBoBwABXgYEAAFfBFdvdyGHAV8DBWltYWdlKAABZANzcmMBdxxodHRwczovL2V4YW1wbGUuY29tL2JhbmcucG5nKAABZANhbHQBdwRCYW5nKAABZARsaW5rAXcYaHR0cHM6Ly9leGFtcGxlLmNvbS9iYW5nKAABXgdibG9ja0lkAXcIYi0wMDAwMTeHAV4DCXBhcmFncmFwaAcAAWkDBWltYWdlKAABagNzcmMBdxtodHRwczovL2V4YW1wbGUuY29tL29uZS5wbmcoAAFqA2FsdAF3A09uZSgAAWoEbGluawF3F2h0dHBzOi8vZXhhbXBsZS5jb20vb25lhwFqAwVpbWFnZSgAAW4Dc3JjAXcbaHR0cHM6Ly9leGFtcGxlLmNvbS90d28ucG5nKAABbgNhbHQBdwNUd28oAAFuBGxpbmsBdxdodHRwczovL2V4YW1wbGUuY29tL3R3bygAAWkHYmxvY2tJZAF3CGItMDAwMDE4hwFpAwlwYXJhZ3JhcGgHAAFzAwVpbWFnZSgAAXQDc3JjAXccaHR0cHM6Ly9jaS5leGFtcGxlL2JhZGdlLnN2ZygAAXQDYWx0AXcFYnVpbGQoAAF0BGxpbmsBdxhodHRwczovL2NpLmV4YW1wbGUvYnVpbGSHAXQGBAABeAUgYW5kIIYBfQRsaW5rMHsiaHJlZiI6Imh0dHBzOi8vY2kuZXhhbXBsZS9idWlsZCIsInRpdGxlIjpudWxsfYQBfgl0aGUgYnVpbGSGAYcBBGxpbmsEbnVsbCgAAXMHYmxvY2tJZAF3CGItMDAwMDE5AA==",
+    "rendered_by_milkdown": "[![Both titles](https://example.com/both.png \"Image title\")](https://example.com/both \"Link title\")\n\n[![Neither title](https://example.com/neither.png)](https://example.com/neither)\n\n[![Image title only](https://example.com/image.png \"Image title\")](https://example.com/image)\n\n[![Link title only](https://example.com/link.png)](https://example.com/link \"Link title\")\n\n[![Angle destination](https://example.com/angle.png)](<https://example.com/a (b)>)\n\n| Where        | Cell                                                                                                  |\n| ------------ | ----------------------------------------------------------------------------------------------------- |\n| linked image | [![one\\|two](https://example.test/one\\|two.png \"one\\|two\")](https://example.test/one\\|two \"one\\|two\") |\n\nWow\\![![Bang](https://example.com/bang.png)](https://example.com/bang)\n\n[![One](https://example.com/one.png)](https://example.com/one)[![Two](https://example.com/two.png)](https://example.com/two)\n\n[![build](https://ci.example/badge.svg)](https://ci.example/build) and [the build](https://ci.example/build)\n"
   },
   {
     "name": "links",
@@ -30789,7 +31115,9 @@
                           "attrs": {
                             "src": "https://example.test/one|two.png",
                             "alt": "one|two",
-                            "title": "one|two"
+                            "title": "one|two",
+                            "link": null,
+                            "linkTitle": null
                           }
                         }
                       ]
@@ -31031,7 +31359,9 @@
                           "attrs": {
                             "src": "https://example.test/one\\|two.png",
                             "alt": "one\\|two",
-                            "title": "one\\|two"
+                            "title": "one\\|two",
+                            "link": null,
+                            "linkTitle": null
                           }
                         }
                       ]

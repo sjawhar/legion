@@ -435,6 +435,57 @@ func TestRenderEscapesImageDelimiters(t *testing.T) {
 	}
 }
 
+// A linked image is written inside its link's syntax, each title and destination spelled as a
+// text link's, and reads back with its link and link title (INFRA-190).
+func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
+	image := func(title, link, linkTitle any) *Node {
+		return &Node{Type: "image", Attrs: Attrs{"src": "i.png", "alt": "x", "title": title, "link": link, "linkTitle": linkTitle}}
+	}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	inCell := func(img *Node) *Node {
+		doc, err := Parse("| h |\n| - |\n| ![x](i.png) |\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.Children[0].Children[1].Children[0].Children[0].Children = []*Node{img}
+		return doc
+	}
+	for _, test := range []struct {
+		name string
+		doc  *Node
+		want string
+	}{
+		{"both titles", paragraph(image("t", "https://u.com", "lt")), `[![x](i.png "t")](https://u.com "lt")` + "\n"},
+		{"neither title", paragraph(image(nil, "https://u.com", nil)), "[![x](i.png)](https://u.com)\n"},
+		{"a destination needing angle brackets", paragraph(image(nil, "https://u.com/a (b)", nil)), "[![x](i.png)](<https://u.com/a (b)>)\n"},
+		{"quotes and backslashes in titles", paragraph(image(`say "hi"`, "https://u.com", `a\b`)), `[![x](i.png "say \"hi\"")](https://u.com "a\\b")` + "\n"},
+		{"a table cell with a pipe in the link", inCell(image(nil, "https://u.com/a|b", "c|d")), "| h |\n| --- |\n| [![x](i.png)](https://u.com/a\\|b \"c\\|d\") |\n"},
+		{"after text ending in !", paragraph(&Node{Type: "text", Text: "wow!"}, image(nil, "https://u.com", nil)), "wow\\![![x](i.png)](https://u.com)\n"},
+		{"after bold text ending in !", paragraph(&Node{Type: "text", Text: "wow!", Marks: []Mark{{Type: "strong", Attrs: Attrs{"marker": "*"}}}}, image(nil, "https://u.com", nil)), "**wow!**[![x](i.png)](https://u.com)\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			markdown, err := Render(test.doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !back.Equal(test.doc) {
+				got, _ := back.JSON()
+				want, _ := test.doc.JSON()
+				t.Fatalf("Parse(%q)\n got: %s\nwant: %s", markdown, got, want)
+			}
+		})
+	}
+}
+
 func TestRenderPrefixesNestedCodeBlockLines(t *testing.T) {
 	doc, err := Parse("> - item\n>\n>       code\n")
 	if err != nil {
