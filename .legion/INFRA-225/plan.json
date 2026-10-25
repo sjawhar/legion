@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-225",
+  "completed": "2026-10-25T01:18:00Z",
+  "plan": "dispatch://INFRA-225/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — the phase's own rules: the shared workspace, the jj commit and push recipe, the handoff write, and handoff_complete as the only completion.",
+      "skill://legion-worker/references/pr-body.md — the pull request body template, what a proof is (a production-like surface, a command or run id, a head SHA and one negative control), and that the implementer pushes and completes without waiting on CI.",
+      "skill://ce-simplify-code — mandatory once per pull request, in the first implementing round, because this diff is runtime Go and TypeScript, not docs alone.",
+      "skill://dispatch — every Dispatch write this phase makes, including a comment on INFRA-225 and any dispatch ask for a finding outside the issue."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's workspace rules, its handoff fields (implementerProof, failures, proof) and its verdict.",
+      "skill://legion-worker/references/pr-body.md — the tester drives the application rather than re-running CI, verifies the implementer's proof, and records a missing proof as a failure rather than filling the gap.",
+      "skill://dispatch — any Dispatch write the tester makes."
+    ],
+    "review": [
+      "skill://legion-worker — the reviewer's phase, its handoff (decision, counts, keyFindings) and its completion.",
+      "skill://legion-worker/references/merge-gate.md — the order of a review round and the approval of the head by SHA.",
+      "skill://legion-worker/references/review-threads.md — one disposition reply per thread, read before it is answered, never resolved in bulk."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1 — The 'look again' that starts a held child has no owner, no scan and no surface today: record.Waiting carries roots only, and Engine.gateOpened is reached only from enterChild and from advanceAdmittedTree when the design gate opens.",
+        "answer": "Plan task T4 adds the exported Engine.StartUnblockedChildren and calls it from Admission.promoteHolds after the root loop, passing the issues slice and mirror rows that call already holds. Every fact, the controller tick (admit.go:103-110), the hold release (admit.go:963, which calls promoteHolds directly) and the boot Reconcile (admit.go:328) reach promoteHolds, so each is a look. T11 pins it with a workflow test asserting phase.Planning, the IssueBranch row and the planner start inside the blocker's own fact transaction."
+      },
+      {
+        "finding": "F2 — The mirror write has no safe seam: in admit.Admission (second) the engine judges a child against a stale row in the same transaction; in workflow.Engine four early returns skip it, one of them engine.go:186-188, the blocked-by-only edit the feature exists for; and settleObserved sets handlers = nil for an Observed fact whose issue is already recorded (facts.go:691-697).",
+        "answer": "Decision D1: a blockers.Mirror handler of its own, placed first in the chain at daemon/workflow.go:268-271, so both handlers and every fact kind see the row. The one path it does not see is the apply == false Observed fact; the plan states why nothing depends on it (release_children builds its held list from the Dispatch read releasableChild already makes) and that the next event, the periodic turn or boot repairs the row. T11 pins the order by behaviour with an intake test: a blocked-by-only issue.updated whose status did not change writes the row, and one ApplyFact for the blocker's close both admits the waiting root and starts the held child."
+      },
+      {
+        "finding": "F3 — The mirror's rows, lifecycle and sequence fence are underspecified in four places: which issues get a row, when a row is removed, what the comparison is, and whether the boot read's own deferral applies.",
+        "answer": "Decisions D2, D3 and plan task T2 state all four: a row for every issue of the project the daemon observes, blockers empty or not; never removed, because Dispatch has no issue delete (routes_table.go:86-95) and moves no issue between projects; written only when the incoming sequence is strictly greater, the comparison record.Issue.LastDispatchSeq already uses at admit.go:289 and :481, expressed as an on-conflict guard in SQL, so a zero-seq synthetic fact (admit.go:1105-1112) writes nothing; and the boot write happens for a summary Reconcile defers to the consumer too, since the fence protects it. T11 pins each direction."
+      },
+      {
+        "finding": "F4 — The periodic turn's re-read has no place to run, no bound and no failure rule; admission runs inside the fact transaction and does no I/O.",
+        "answer": "Decision D11 and plan task T6: the read runs in workflowRuntime.tickController before ApplyFact, in a short read transaction that collects the waiting set and its unfinished blocker keys; GetIssue per key while they number 25 or fewer, one whole-project ListIssues above that (the listing is a single unpaged request, client.go:40-70, and Dispatch caps an issue at 20 blockers, issue_parent.go:48-51); the rows ride on intake.ControllerTick{Observed}. A failed read logs at warn and the tick is applied anyway, because it is also the controller's daily-report wake and the only wake a tree on a refused claim gets."
+      },
+      {
+        "finding": "F5 — record.Waiting has four callers and only two may learn the check; filtering inside it would make record.TreeLive false for a blocked root and turn its children into orphans admitted as roots of their own.",
+        "answer": "Decision D5: record.Waiting is left exactly as it is; the check goes in promoteHolds, as a third continue beside ErrCleanupReserved (:805-807) and ErrAuthorityHeld (:811-813) and before OpenTreeLifecycle (:804), and in slotFree's count only. T11 pins both consequences: a child of a blocked root is recorded as that child, and slotFree reports free when every root in the queue is blocked."
+      },
+      {
+        "finding": "F6 — The contract bump names six artefacts and two strict wire shapes, and nobody has named the field.",
+        "answer": "Plan task T8 lists them: api.Admission gains blocked []{issue, blockedBy[]} with waiting left as roots only; WaveReleaseResponse gains started and held (decision D9); DaemonAPIVersion 35 to 36 with its ledger entry; legionAdmission and LegionWaveReleaseResponse in packages/contracts/src/legion-api.ts; the six recorded examples rewritten with go test ./internal/api/ -update and ./internal/projection/ -update, each already registered in the fixture-to-schema table; and legion.daemonApiVersion in packages/pi-legion/package.json and packages/claude-envoy/package.json."
+      },
+      {
+        "finding": "F7 — Every start path must be classified: three must learn the check and three must not, or one is missed in either direction.",
+        "answer": "Plan task T4 names all six. Learn it: Engine.enterChild (all three child doors funnel through it), Engine.advanceAdmittedTree, Admission.promoteHolds. Do not, and are named so nobody edits them: Admission.startMidPhaseMembers (already skips phase.Admitted because RoleFor is empty), Admission.reenterStrandedChildren (guarded on phase.Done), and the carry branches of readmit/consumeHandover, whose test is startedRun — which decision D6 also applies to a waiting root, so a candidate carrying a run is admitted whatever its links say."
+      },
+      {
+        "finding": "F8 — The notice the spec relies on is not the notice the code sends: child-status cannot fire for a held child's start, because the child is already todo; what fires is phase-finished with phase admitted and an empty role.",
+        "answer": "Decision D7: reuse the existing phase-finished notice, which is what the spec's words ('the notice it already receives') allow, and add one sentence to the architect skill's phase-finished row saying what it means for a child that was waiting. No new notice kind. Named to the architect in the completion summary, since the spec's sentence describes child-status."
+      },
+      {
+        "finding": "F9 — The hand-over of a never-started child is narrow or broad, and the two change different sets of trees; the owner must confirm.",
+        "answer": "Decision D8 plans the narrow rule — hand over an admitted child only when its mirror row shows an unfinished blocker — because the spec's 'such a child' reads back to 'a child still waiting on blockers', and the broad rule would turn every never-gated child of every finishing tree into a root that takes a slot, which nothing in the spec asks for. Reported to the architect to confirm or correct, since it is a scope question about trees with no blockers at all."
+      },
+      {
+        "finding": "F10 — Three acceptance lines no machine can decide as written: 'the only writes that follow are admission's own', 'reads the status table once per look', and 'the rule it encodes survives'.",
+        "answer": "The plan restates each as a check. The first is a daemon test admitting an unblocked root and a formerly blocked one and comparing them row for row — the same outbox payload kinds and the same issue-record and slot mutations. The second is 'at most one mirror query per promoteHolds call, whatever the number of blocked candidates', proven by a counting store in the workflow/stranded_test.go:42-60 style. The third re-points TestIssueEventIgnoresUnconsumedBlockedByFields at priority alone, renames it, and keeps its assertion that the decoded fact is unchanged."
+      },
+      {
+        "finding": "F11 — Unsaid everywhere: what the check does when a blocker key has no mirror row, which a child created moments earlier can produce.",
+        "answer": "Decision D4: a blocker with no row counts as not done, so the child is held; the periodic turn and the boot listing bound how long. T11 pins it with an API test — a release naming a blocker the daemon has never observed holds the child and names that blocker in the answer."
+      },
+      {
+        "finding": "F12 — The driven proof cannot run in a worker pod as the harness stands: turning Dispatch's events on needs a NATS server, testnats.URL can only start a testcontainer, and this pod has no Docker and may not submit a cluster workload (kubectl answers yes/no/no against the three the docs require).",
+        "answer": "Decision D12 and plan task T10: testnats gains the door packages/envoy/cmd/dispatch/multiprocess_test.go:51-74 already has — LEGION_TEST_NATS_URL, plus LEGION_TEST_NATS_MONITOR_URL, which the plan reviewer's note showed is not optional because drained reads <monitorURL>/connz and only monitor(container) produces that address today. The container path stays for CI. The plan's command section gives the whole local recipe; the planner ran its Postgres half and the existing scratch-Dispatch test passed against it in 6.2 s."
+      },
+      {
+        "finding": "F13 — The docs bullet is missing the controller skill, whose tick row documents the payload, and the generated Claude plugin mirror, whose drift check fails.",
+        "answer": "Plan task T9 adds skills/legion-controller/SKILL.md:244 and :394 to the documentation task and requires bun scripts/build.ts in packages/claude-envoy, whose tests/legion-plugin-fresh.test.ts fails on drift."
+      },
+      {
+        "finding": "F14 — Sourcing: the spec's claims about Dispatch hold, with one qualification — the cycle refusal is enforced at write time only and assertNoWaitPath gives up past parentDepthCap, so a pre-existing cycle costs a permanent wait rather than a loop.",
+        "answer": "Recorded so nobody adds cycle detection: the plan adds none, and the spec's own 'an issue nobody ever finishes' paragraph already covers the permanent wait, which decision D11's periodic re-read and plan task T8's reporting make visible to the operator and the controller."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance: a held child's start reaches its architect through 'the notice it already receives when a child of its tree changes state' — which in the architect's notices table is child-status.",
+      "plan": "The plan relies on the phase-finished notice the admitted-to-planning transition already emits (table.go:59, engine.go:801 and :827-835), routed to the tree's architect, and adds one sentence to the architect skill's phase-finished row about a child that was waiting. No new notice kind.",
+      "evidence": "child-status is emitted only by Engine.leave (linger.go:99-104) when a child leaves or re-enters the workflow by a Dispatch status change. A held child is already in todo — release_children writes todo for every child it releases (api/architect.go:488-497) — and the admitted-to-planning row carries no EffectStatus (table.go:59), so its start moves no Dispatch status and child-status cannot fire.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A child waiting on blockers starts its first phase when its last blocker closes … and the tree's architect learns it started through the notice it already receives when a child of its tree changes state."
+        ]
+      }
+    }
+  ]
+}
