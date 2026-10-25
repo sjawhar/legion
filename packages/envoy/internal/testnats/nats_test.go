@@ -307,6 +307,47 @@ func TestTheLogHoldsWhatTheServerSaidAcrossARestart(t *testing.T) {
 	}
 }
 
+// A gate's port must lie below the machine's ephemeral range, where no :0 bind can take it while
+// the gate is closed. The range is fed in as text, each kernel's answer in turn, so the band is
+// pinned whatever range the machine running this test has: a CI runner's default range would hide
+// a band that lands inside the 16000-65535 a Legion worker pod (gVisor) has.
+func TestTheGateBandLiesBelowTheEphemeralRangeItIsGiven(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		text  string
+		low   int
+		first int
+	}{
+		{name: "gVisor's range in a Legion worker pod", text: "16000\t65535\n", low: 16000, first: 15000},
+		{name: "Linux's default range", text: "32768\t60999\n", low: 32768, first: 31768},
+		{name: "text that is no range", text: "not a range\n", low: 16000, first: 15000},
+		{name: "empty text", text: "", low: 16000, first: 15000},
+		{name: "the lowest range that leaves a band", text: "3048\t65535\n", low: 3048, first: 2048},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, count, err := gatePorts(tc.text)
+			if err != nil {
+				t.Fatalf("gatePorts(%q) = %v, want a band", tc.text, err)
+			}
+			if first != tc.first || count != 1000 {
+				t.Errorf("gatePorts(%q) = %d ports from %d, want 1000 from %d", tc.text, count, first, tc.first)
+			}
+			if last := first + count - 1; last >= tc.low {
+				t.Errorf("gatePorts(%q) = %d-%d, which reaches the range starting at %d", tc.text, first, last, tc.low)
+			}
+		})
+	}
+	t.Run("a range too low to leave a band", func(t *testing.T) {
+		first, count, err := gatePorts("1024\t65535\n")
+		if err == nil {
+			t.Fatalf("gatePorts = %d ports from %d, want a refusal", count, first)
+		}
+		if !strings.Contains(err.Error(), "1024\\t65535") {
+			t.Errorf("refusal %q does not name the range it read", err)
+		}
+	})
+}
+
 // Terminate ends the server for good and gives up the port its URL named, so nothing answers there
 // any more; the cleanup that runs at the test's end finds the work done and does it no second time.
 func TestTerminateEndsTheServerAndGivesUpItsPort(t *testing.T) {
