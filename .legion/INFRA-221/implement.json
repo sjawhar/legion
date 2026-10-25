@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T02:49:15Z",
+  "completed": "2026-10-25T06:55:29Z",
   "proof": [
     {
       "criterion": "A role that needs a tool its work requires can get it, in one documented step, without a person — the image half: the five clients are in the pod.",
@@ -35,6 +35,14 @@
       "observed": "20 packages, 6,216,928 bytes = 5.9 MiB of downloads, the same set for the virtual name `dnsutils` and the real `bind9-dnsutils`. Compressed image size, measured like for like against this branch's own base after the reviewer rejected the deployment's pinned digest as a baseline (its revision 3bab1a8a7381af585e5a0a54f2fbe0a9851d564e is eight commits of main behind this branch's base): head :sha-afa29128061f (revision afa29128061f...) 24 layers / 1,076,764,060 bytes (1026.9 MiB) against base :sha-92dbeea3d391 (revision 92dbeea3d391..., the commit this branch forks from) 24 layers / 1,068,477,764 bytes (1019.0 MiB) = 8,286,296 bytes, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 -> 335,441,703); the other 23 layers carrying 1,105 bytes between them and none of them differing by more than 3,164 bytes (layer 11, 120,624,977 -> 120,621,813, is the largest single difference, and layer 8, 226,140 -> 228,880, the largest increase). Each size from that image's own manifest, each revision from its config blob. Both numbers and the two rejected options are in docs/kubernetes.md's 'The tools a role's own work needs'.",
       "headSha": "21c0047b30ea9bc1a31d0f14afe352d03aeb947c",
       "negativeControl": "apt-cache policy dnsutils in this image prints 'Candidate: (none)' — the name the first draft installed is virtual in trixie, so the shipped THIRD_PARTY_NOTICES sentence would have pointed at a /usr/share/doc/dnsutils/copyright that does not exist. The apt line, the comments, the notices sentence and the docs now name bind9-dnsutils, and the Job above proves dig is present under that name."
+    },
+    {
+      "criterion": "Every learning note this pull request annotated with the rule points at the one statement of the test and carries both of its conditions, and none endorses a build under /tmp (review round 8, threads PRRT_kwDORFy7ds6v_F35 and PRRT_kwDORFy7ds6v_F38).",
+      "surface": "The tree at the round's code head, the files a role is sent to from skills/legion-worker/references/tools.md:174-186 — the four docs/solutions notes and the heading they name.",
+      "command": "H='The test: where it lands, and what it leaves resolving'; for each of the LEGION-695, INFRA-42, INFRA-43 and INFRA-44 notes: tr '\\n' ' ' < <note> | sed 's/  */ /g' | grep -o \"$H\" | wc -l; grep -c \"^### $H\" skills/legion-worker/references/tools.md; grep -rn 'by what a prefix leaves resolving\\|about scope rather than about unpacking' docs/solutions; jj diff --from 21c0047b --to b82e5899a5e4 --name-only",
+      "observed": "Each of the four notes names the heading once (1, 1, 1, 1); tools.md carries the heading exactly once (1); the two one-condition paraphrases appear nowhere in docs/solutions ('none'). The LEGION-695 note now says the /tmp placement is replaced by a root on the issue's volume (the INFRA-43 learning) and that a build under /tmp fails the first condition; the INFRA-42 note places <root> and <data> on the volume. Since code head 21c0047b only docs/solutions and .legion/ changed, neither of which the worker image copies (worker.Dockerfile's COPY lines name skills/ and packages/, never docs/solutions), so the image proof above at sha-21c0047b30ea re-passes unchanged.",
+      "headSha": "b82e5899a5e486366001d2cea990d3dc6b683b43",
+      "negativeControl": "The same heading count over the same four notes at the previous head c89a473c26c9 is 0, and that head's LEGION-695 note opens 'still the step' directly under the recipe that 'builds one under `/tmp`' (:37, :43) — the endorsement the reviewer found."
     }
   ],
   "filesChanged": [
@@ -52,7 +60,11 @@
     "packages/daemon/internal/capabilities/image_test.go",
     "skills/legion-architect/SKILL.md",
     "skills/legion-worker/SKILL.md",
-    "skills/legion-worker/references/tools.md"
+    "skills/legion-worker/references/tools.md",
+    "docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md",
+    "docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md",
+    "docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md",
+    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md"
   ],
   "trickyParts": [
     "`dnsutils` is a virtual package in Debian trixie with no candidate of its own (apt-cache policy says Candidate: (none)); apt resolves it to its single provider, bind9-dnsutils. The apt line, the three Dockerfile comments, the shipped notices sentence and the docs all name bind9-dnsutils now, so the notices sentence's /usr/share/doc/<package>/copyright claim is true and the build does not depend on one provider staying unique.",
