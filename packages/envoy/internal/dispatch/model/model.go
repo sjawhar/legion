@@ -347,9 +347,10 @@ type SearchCoverageKinds struct {
 
 // SearchCoverageCounts splits Items, the searchable items of a kind (or of all of them), into
 // Current (embedded at the item's current text by the configured identity), Failed (dead and not
-// current) and Lacking (the rest). OldestLackingSeconds is how long the longest-waiting lacking
-// item has waited for its vector, counted from when its row last became pending or from when the
-// item was written, whichever is later; null when nothing lacks.
+// current) and Lacking (the rest). An item whose text is empty or only white space is not
+// searchable by meaning and is in none of them: it needs no vector. OldestLackingSeconds is how
+// long the longest-waiting lacking item has waited for its vector, counted from when its row last
+// became pending or from when the item was written, whichever is later; null when nothing lacks.
 type SearchCoverageCounts struct {
 	Items                int64  `json:"items"`
 	Current              int64  `json:"current"`

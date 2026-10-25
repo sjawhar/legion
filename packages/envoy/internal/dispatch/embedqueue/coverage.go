@@ -40,7 +40,9 @@ type coverageSource struct {
 }
 
 // coverageSources is the single list of what meaning search covers, read by the coverage pass
-// (Cover) and the coverage report (Coverage) alike.
+// (Cover) and the coverage report (Coverage) alike. An item whose text has nothing to embed
+// (nothingToEmbed: the empty string, or only white space) is not covered: it matches nothing by
+// meaning, so items leaves it out and the queue settles its row with no vector.
 //
 //   - issue: 0073 enqueues new.key, new.title.
 //   - document: 0074 enqueues new.artifact_id::text, new.markdown for every artifact_versions
@@ -70,10 +72,18 @@ var coverageSources = []coverageSource{
 	{kind: "message", from: "messages m join issues i on i.key = m.issue_key", id: "m.id::text", text: "m.body", writtenAt: "m.created_at"},
 }
 
-// items renders the kind's searchable items as a query of (id, text, hash, written_at). hash is
-// embeddings_enqueue's own content_hash expression (0072, 0117) over the trigger's text, so an
-// item's hash equals the content_hash its trigger would store.
+// items renders the kind's searchable items, those whose text has something to embed (not
+// nothingToEmbed), as a query of (id, text, hash, written_at). hash is embeddings_enqueue's own
+// content_hash expression (0072, 0117) over the trigger's text, so an item's hash equals the
+// content_hash its trigger would store.
 func (s coverageSource) items() string {
+	return s.allItems() + " where not " + nothingToEmbed("s.text")
+}
+
+// allItems is items with the ones whose text has nothing to embed kept in: repairStale needs
+// them, so a row whose item's text became empty with the trigger off takes that text and the
+// queue settles it, dropping the vector of the text the item no longer holds.
+func (s coverageSource) allItems() string {
 	where := ""
 	if s.where != "" {
 		where = " where " + s.where
@@ -97,7 +107,8 @@ func (s coverageSource) insertMissing() string {
 
 // repairStale points up to $2 of the kind's rows whose content_hash is not the hash of the item's
 // current text (text changed with the trigger off, as a restore or replication does) at that
-// text, starting the row's wait and attempts again as embeddings_enqueue does on a text change.
+// text, starting the row's wait and attempts again as embeddings_enqueue does on a text change;
+// a text with nothing to embed is repaired too, and scanPending then settles the row.
 // It is a compare-and-swap: the stale CTE captures each row's content_hash as seen, and the
 // update writes only where the row still holds seen. Under READ COMMITTED an update that finds
 // its row changed since the statement's snapshot re-checks its WHERE against the newest version,
@@ -118,7 +129,7 @@ func (s coverageSource) repairStale() string {
 		    confirmed_failures = 0, dead = false, dead_model = null, next_attempt_at = now(),
 		    pending_since = now()
 		from stale
-		where e.kind = stale.kind and e.id = stale.id and e.content_hash = stale.seen`, s.items())
+		where e.kind = stale.kind and e.id = stale.id and e.content_hash = stale.seen`, s.allItems())
 }
 
 // dropForeignVectors takes up to $3 of the kind's rows holding a vector another identity made
@@ -162,6 +173,24 @@ const readmitForeignDead = `
 	from picked
 	where e.kind = picked.kind and e.id = picked.id`
 
+// settleDeadNothingToEmbed settles up to $3 of the kind's dead rows whose text has nothing to
+// embed ($2 is the configured identity) as scanPending settles a pending one, which a dead row
+// never reaches: such a row died from a model service refusing its text (Azure AI Foundry answers
+// HTTP 500 to an empty input) before the queue settled these, and it needs no vector. SKIP LOCKED
+// leaves a row a write is changing to the next pass; a row the write gives text to embed matches
+// no longer, its trigger having made it alive and pending.
+var settleDeadNothingToEmbed = `
+	with picked as (
+		select kind, id from embeddings
+		where kind = $1 and dead and ` + nothingToEmbed("text_snapshot") + `
+		limit $3
+		for update skip locked
+	)
+	update embeddings e
+	set ` + settledNothingToEmbed("$2") + `
+	from picked
+	where e.kind = picked.kind and e.id = picked.id`
+
 // coverStep is one statement of the coverage pass, run until it changes nothing.
 type coverStep struct {
 	changed *int64
@@ -170,21 +199,23 @@ type coverStep struct {
 }
 
 // Cover is the coverage pass: for every kind in coverageSources it adds a row for each item that
-// has none, repairs each row whose text is stale, drops each vector another identity made and
-// re-admits each row dead under another identity, then logs one line with what it changed and the
-// coverage that leaves (Coverage). Every step is a statement of at most coverageStatementRows rows
-// in its own short transaction, repeated until one changes nothing, and each is safe beside a live
-// write and beside another process's pass, so it takes no lease: two envoy-dispatch processes may
-// run it at once. One deployment configures one identity; two processes configured differently
-// would each drop the other's vectors, which is why every replica gets the same settings.
+// has none, repairs each row whose text is stale, drops each vector another identity made, settles
+// each dead row whose text has nothing to embed and re-admits each other row dead under another
+// identity, then logs one line with what it changed and the coverage that leaves (Coverage). Every
+// step is a statement of at most coverageStatementRows rows in its own short transaction, repeated
+// until one changes nothing, and each is safe beside a live write and beside another process's
+// pass, so it takes no lease: two envoy-dispatch processes may run it at once. One deployment
+// configures one identity; two processes configured differently would each drop the other's
+// vectors, which is why every replica gets the same settings.
 func Cover(ctx context.Context, deps Deps) error {
 	identity := deps.Embedder.Identity()
-	var added, repaired, dropped, readmitted int64
+	var added, repaired, dropped, settled, readmitted int64
 	for _, source := range coverageSources {
 		for _, step := range []coverStep{
 			{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
 			{&repaired, source.repairStale(), []any{source.kind, coverageStatementRows}},
 			{&dropped, dropForeignVectors, []any{source.kind, identity, coverageStatementRows}},
+			{&settled, settleDeadNothingToEmbed, []any{source.kind, identity, coverageStatementRows}},
 			{&readmitted, readmitForeignDead, []any{source.kind, identity, coverageStatementRows}},
 		} {
 			for {
@@ -209,7 +240,7 @@ func Cover(ctx context.Context, deps Deps) error {
 	}
 	slog.Info("dispatch embedqueue: coverage pass",
 		"identity", identity, "added", added, "repaired", repaired,
-		"foreignVectorsDropped", dropped, "foreignDeadReadmitted", readmitted,
+		"foreignVectorsDropped", dropped, "deadNothingToEmbedSettled", settled, "foreignDeadReadmitted", readmitted,
 		"items", report.Total.Items, "current", report.Total.Current, "lacking", report.Total.Lacking,
 		"failed", report.Total.Failed, "oldestLackingSeconds", oldest)
 	return nil

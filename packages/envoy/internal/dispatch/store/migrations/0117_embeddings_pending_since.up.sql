@@ -10,7 +10,8 @@
 --
 -- dead_model is the embedder identity (embed.Embedder.Identity) under which a row was confirmed
 -- dead. A row dead under another model or place gets this place's attempts once (the coverage
--- pass re-admits it); a row dead under the configured identity stays dead until its text changes.
+-- pass re-admits it); a row dead under the configured identity stays dead until its text changes,
+-- or, when its text has nothing to embed, until the pass settles it with no vector.
 --
 -- Both are additive with a default, so the release before this one keeps reading and writing the
 -- table: it inserts only through embeddings_enqueue, replaced below, or with an insert that names

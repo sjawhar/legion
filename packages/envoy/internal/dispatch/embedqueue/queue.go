@@ -4,9 +4,11 @@
 // text and a hash of it in the same transaction as the write, and this package's poller embeds
 // whatever that enqueue left pending, with the same scan-then-retry shape as the event outbox
 // (internal/dispatch/outbox): a write never fails because the embedder did, since the model
-// service is never called inside the enqueueing transaction. The coverage pass (coverage.go) adds
-// what no trigger saw - items written before the triggers existed or with them off - and drops
-// vectors another model or place made, so the server keeps meaning search's coverage itself.
+// service is never called inside the enqueueing transaction. A text with nothing to embed
+// (nothingToEmbed) is settled with no vector and no model call instead. The coverage pass
+// (coverage.go) adds what no trigger saw - items written before the triggers existed or with them
+// off - and drops vectors another model or place made, so the server keeps meaning search's
+// coverage itself.
 package embedqueue
 
 import (
@@ -150,9 +152,11 @@ type pendingRow struct {
 // looped on a blocked batch would otherwise select the same stuck row forever), and whether the
 // whole batch failed because the model service is throttling (embed.IsThrottled) rather than
 // because of anything about the rows themselves - its caller (scan) uses that to back off its own
-// cadence rather than hammering a provider that has already said to slow down. Every poller
-// drives the queue through this one function; scanPending's claim is what lets the pollers of
-// two envoy-dispatch processes run safely at once, each claiming a different set of pending rows
+// cadence rather than hammering a provider that has already said to slow down. A row whose text
+// has nothing to embed, which scanPending settles with no vector and no model call, counts as
+// committed: it is done, so a full batch of them keeps scan draining. Every poller drives the
+// queue through this one function; scanPending's claim is what lets the pollers of two
+// envoy-dispatch processes run safely at once, each claiming a different set of pending rows
 // rather than racing to embed the same ones twice.
 //
 // A throttled whole-batch failure never counts toward any row's dead-letter threshold, however
@@ -175,16 +179,16 @@ type pendingRow struct {
 // came back: handleGroupFailure checks for it before confirmSoloFailure or bisectSplit ever run,
 // and retries the whole group instead.
 func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocked, throttled bool, err error) {
-	rows, err := scanPending(ctx, deps)
+	rows, settled, err := scanPending(ctx, deps)
 	if err != nil {
 		return 0, 0, false, false, err
 	}
 	if len(rows) == 0 {
-		return 0, 0, false, false, nil
+		return settled, 0, false, false, nil
 	}
 	if ctx.Err() != nil {
 		blocked = retryRows(ctx, deps, rows, false)
-		return 0, len(rows), blocked, false, nil
+		return settled, len(rows), blocked, false, nil
 	}
 	// renewal is created before this call's very first reservation, not only once bisection is
 	// known to be needed: a single reservation for a full batch of maximum-length documents can
@@ -201,7 +205,7 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 	if len(result.retry) > 0 {
 		blocked = retryRows(ctx, deps, result.retry, false) || blocked
 	}
-	return result.succeeded, len(rows) - result.succeeded, blocked, result.throttled, nil
+	return settled + result.succeeded, len(rows) - result.succeeded, blocked, result.throttled, nil
 }
 
 // bisectResult is embedRows' own report (and handleGroupFailure's, and bisectSplit's): every row
@@ -529,40 +533,83 @@ func waitOutDebt(ctx context.Context, wait time.Duration, renewal *claimRenewal,
 	}
 }
 
+// nothingToEmbed renders, over the text expression expr, the one SQL test for a text with nothing
+// to embed: no character but white space, the empty string included. Such a text matches nothing
+// by meaning, so it needs no vector, and a model service may refuse it outright (Azure AI
+// Foundry's deployment answers HTTP 500 to an empty input, which bisection would confirm as the
+// row's own failure and dead-letter). The queue settles its row with no model call
+// (scanPending, settleDeadNothingToEmbed), and the coverage pass and report leave the item out
+// (coverageSource.items).
+func nothingToEmbed(expr string) string {
+	return "(" + expr + " !~ '[^[:space:]]')"
+}
+
+// settledNothingToEmbed is the SET clause that settles a row whose text has nothing to embed, as
+// commitEmbeddings would commit it but with no vector: embedded at its current text
+// (embedded_hash = content_hash, so no scan selects it again) by the configured identity (the
+// parameter identity names), with a committed row's retry state, and alive. A later text with
+// something to embed changes content_hash, and the row is pending again like any other.
+func settledNothingToEmbed(identity string) string {
+	return `embedding = null, embedded_hash = e.content_hash, model = ` + identity + `::text, embedded_at = now(),
+		attempt_count = 0, confirmed_failures = 0, dead = false, dead_model = null, next_attempt_at = now()`
+}
+
 // scanPending claims at most one embedder batch (Limits().MaxBatchTexts) of pending rows,
 // oldest-eligible first, atomically advancing their next_attempt_at by claimWindow so a
 // concurrent scanner (another envoy-dispatch process's poller) does not also claim them - without
 // holding a lock across the embed call that follows; see claimWindow's own comment for why not.
-func scanPending(ctx context.Context, deps Deps) ([]pendingRow, error) {
+// In the same statement it settles each of those rows whose text has nothing to embed
+// (nothingToEmbed, settledNothingToEmbed) instead of claiming it, and reports how many it settled:
+// no such row ever reaches the embedder, and the batch it returns holds only the rest. head locks
+// every row it picks, and FOR UPDATE re-reads a row a write changed since the statement began, so
+// whether a row has nothing to embed and the content_hash settling records are read from the
+// same text: a write landing after head picked the row waits for this statement, and its own
+// trigger makes the row pending again with the new text.
+func scanPending(ctx context.Context, deps Deps) (pending []pendingRow, settled int, err error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
-		update embeddings set next_attempt_at = now() + $2
-		where (kind, id) in (
-			select kind, id from embeddings
+		with head as (
+			select kind, id, `+nothingToEmbed("text_snapshot")+` as nothing from embeddings
 			where embedded_hash is distinct from content_hash
 			  and next_attempt_at <= now()
 			  and not dead
 			order by next_attempt_at, kind, id
 			limit $1
 			for update skip locked
+		),
+		settled as (
+			update embeddings e set `+settledNothingToEmbed("$3")+`
+			from head where head.nothing and e.kind = head.kind and e.id = head.id
+			returning e.kind, e.id
+		),
+		claimed as (
+			update embeddings e set next_attempt_at = now() + $2
+			from head where not head.nothing and e.kind = head.kind and e.id = head.id
+			returning e.kind, e.id, e.text_snapshot, e.content_hash, e.attempt_count, e.confirmed_failures
 		)
-		returning kind, id, text_snapshot, content_hash, attempt_count, confirmed_failures
-	`, deps.Embedder.Limits().MaxBatchTexts, claimWindow)
+		select false, kind, id, text_snapshot, content_hash, attempt_count, confirmed_failures from claimed
+		union all
+		select true, kind, id, '', '', 0, 0 from settled
+	`, deps.Embedder.Limits().MaxBatchTexts, claimWindow, deps.Embedder.Identity())
 	if err != nil {
-		return nil, fmt.Errorf("scan pending embeddings: %w", err)
+		return nil, 0, fmt.Errorf("scan pending embeddings: %w", err)
 	}
 	defer rows.Close()
-	var pending []pendingRow
 	for rows.Next() {
 		var row pendingRow
-		if err := rows.Scan(&row.kind, &row.id, &row.text, &row.contentHash, &row.attempts, &row.confirmedFailures); err != nil {
-			return nil, fmt.Errorf("scan pending embeddings: %w", err)
+		var wasSettled bool
+		if err := rows.Scan(&wasSettled, &row.kind, &row.id, &row.text, &row.contentHash, &row.attempts, &row.confirmedFailures); err != nil {
+			return nil, 0, fmt.Errorf("scan pending embeddings: %w", err)
+		}
+		if wasSettled {
+			settled++
+			continue
 		}
 		pending = append(pending, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("scan pending embeddings: %w", err)
+		return nil, 0, fmt.Errorf("scan pending embeddings: %w", err)
 	}
-	return pending, nil
+	return pending, settled, nil
 }
 
 // commitEmbeddings bulk-writes every row whose vector is finite in one statement (unnest instead

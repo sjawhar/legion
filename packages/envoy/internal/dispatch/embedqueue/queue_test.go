@@ -265,9 +265,9 @@ func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
 	seedIssue(t, database, "STAL", "STAL-1", "Original title")
 	ctx := context.Background()
 	deps := Deps{Store: database, Embedder: &fakeEmbedder{}}
-	rows, err := scanPending(ctx, deps)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("scanPending = %v, %v, want one row", rows, err)
+	rows, settled, err := scanPending(ctx, deps)
+	if err != nil || len(rows) != 1 || settled != 0 {
+		t.Fatalf("scanPending = %v, %d settled, %v, want one row", rows, settled, err)
 	}
 	stale := rows[0]
 	// A concurrent write changes the title (and so the trigger re-enqueues with a new hash)
@@ -326,7 +326,7 @@ func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t 
 		t.Errorf("dead_model = %v, want the embedder's Identity %q", deadModel, embedder.Identity())
 	}
 
-	rows, err := scanPending(ctx, deps)
+	rows, _, err := scanPending(ctx, deps)
 	if err != nil {
 		t.Fatalf("scanPending: %v", err)
 	}
