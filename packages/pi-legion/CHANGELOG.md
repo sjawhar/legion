@@ -560,8 +560,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `ip6-loopback`) and any name under `localhost.`, so an NFS volume's `server`, `bind` and
   `advertise_host` refuse them too. An http(s) URL in `runtime.kubernetes.plugins`, which
   `bun add` fetches inside the pod, is now held to the same rules and to ASCII, where its host was
-  not checked at all. `agent_secrets.url` takes plain `http` for every host this calls loopback,
-  the zoned and named forms included.
+  not checked at all. `agent_secrets.url` keeps its own, stricter rule for plain `http`: a loopback
+  address literal, now zoned or IPv4-mapped too, or `localhost` with any trailing dots. Every other
+  name a refusal calls loopback (`localhost.localdomain`, `ip6-localhost`, `ip6-loopback`, a name
+  under `localhost.`) is asked of DNS by a CGO_ENABLED=0 binary, so that URL, which carries the
+  daemon's and every pod's ServiceAccount token, must be `https` for it.
 - A reviewer no longer passes a `verdict` to `handoff_complete`, which the daemon refuses from
   every role but the tester (`VERDICT_ROLE_FORBIDDEN`). The reviewer's task names the tester's
   result as `Tester's verdict: pass` rather than `Handoff verdict: pass`; the `legion` tool's

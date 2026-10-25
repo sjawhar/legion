@@ -280,7 +280,7 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	if err := refuseNonASCIIHost(agentSecretsKey+".url host", u.Hostname()); err != nil {
 		return nil, err
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+	if u.Scheme != "https" && !(u.Scheme == "http" && plainHTTPHost(u.Hostname())) {
 		return nil, fmt.Errorf("%s.url must use https unless the host is a loopback address; got %q", agentSecretsKey, block.URL)
 	}
 	block.URL = strings.TrimSuffix(block.URL, "/")
@@ -391,17 +391,34 @@ func hostAddr(host string) (netip.Addr, bool) {
 	return addr.WithZone("").Unmap(), true
 }
 
-// loopbackNames are the names every pod and node resolves to loopback without asking DNS: the
-// hosts file Kubernetes writes into every pod (`localhost`, `ip6-localhost`, `ip6-loopback`) and the
-// one glibc distributions write (`localhost.localdomain`). Any name under `localhost.` is loopback
-// too (RFC 6761, section 6.3).
+// loopbackNames are the names a resolver can answer with a loopback address without the operator
+// having said so: `localhost` and the hosts file entries a pod's or a node's image writes beside it
+// (`ip6-localhost`, `ip6-loopback`, glibc's `localhost.localdomain`). A name under `localhost.` is
+// reserved for loopback too (RFC 6761, section 6.3). A check that refuses an address refuses every
+// one of them; one that trusts an address (plainHTTPHost) trusts none but `localhost` itself, since
+// a CGO_ENABLED=0 binary, which both of Legion's are, asks DNS for every other name
+// (`$GOROOT/src/net/conf.go`: only cgo with myhostname answers them locally).
 var loopbackNames = []string{"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
 
 // isLoopbackHost is a loopback name (loopbackNames, or one under `localhost.`), with or without
-// trailing dots (`localhost.`, `localhost..`), or a loopback IP address, zoned or IPv4-mapped.
+// trailing dots (`localhost.`, `localhost..`), or a loopback IP address, zoned or IPv4-mapped. It
+// decides what to refuse, never what to trust.
 func isLoopbackHost(host string) bool {
 	name := strings.ToLower(strings.TrimRight(host, "."))
 	if slices.Contains(loopbackNames, name) || strings.HasSuffix(name, ".localhost") {
+		return true
+	}
+	addr, ok := hostAddr(host)
+	return ok && addr.IsLoopback()
+}
+
+// plainHTTPHost is a host a URL may carry credentials to over plain http: a loopback address
+// literal, zoned or IPv4-mapped, or `localhost` with any trailing dots, which a Go resolver answers
+// from its own rule rather than from DNS. Every other name, `secrets.localhost` and
+// `localhost.localdomain` among them, is asked of DNS by a CGO_ENABLED=0 binary, so whatever answers
+// would receive the token the request carries.
+func plainHTTPHost(host string) bool {
+	if strings.EqualFold(strings.TrimRight(host, "."), "localhost") {
 		return true
 	}
 	addr, ok := hostAddr(host)
