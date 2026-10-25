@@ -1,6 +1,6 @@
 ---
 name: legion-retro
-description: Use when the Legion daemon starts you, the implementer, on `Phase: retro` after the architect accepted the reviewed head, or when READY was refused `READY_HEAD_CARRIES_HANDOFFS` and the issue came back to retro. Also when the `.legion/<issue>/` handoff directory must be removed from the head that merges.
+description: "Use when the Legion daemon starts you, the implementer, on `Phase: retro` after the architect accepted the reviewed head, or when READY was refused `READY_HEAD_CARRIES_HANDOFFS` and the issue came back to retro. Also when the `.legion/<issue>/` handoff directory must be removed from the head that merges."
 ---
 
 # Legion retro
@@ -99,8 +99,8 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
    EOF
    ```
 
-   After the merge the daemon starts your production check on Dispatch's `issue.deployed`
-   event; wait for no reply
+   The merge's close hands you the production check's first look in this session; Dispatch's
+   `issue.deployed` wakes a later look only after you report `pending`
    (`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
 8. **Complete** with the `legion` tool's `handoff_complete`, its summary two sentences for the
    architect. It reports your workspace's `@-`, so push first. In the workspace retro changes only
@@ -110,9 +110,9 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
 
 ## Before you complete
 
-- `jj -R "$LEGION_WORKSPACE" diff --from <approved> --to @- --name-only` lists only
-  `docs/solutions/` and `.legion/<issue>/` paths. `<approved>` is the `commit_id` of the last
-  `APPROVED` review in `gh api repos/<owner>/<repo>/pulls/<n>/reviews`.
+- Before the push, `jj -R "$LEGION_WORKSPACE" diff --from "legion/${LEGION_ISSUE:?}@origin" --to @- --name-only`
+  lists only `docs/solutions/` and `.legion/<issue>/` paths. It covers your commits; READY checks
+  the approved head the review round recorded, which `read_record` does not show.
 - `jj -R "$LEGION_WORKSPACE" file list -r @- "root:.legion/${LEGION_ISSUE:?}"` prints nothing.
 - Each body line you added or changed that says work was done names work your commits did.
 - `gh pr view <n> -R <owner>/<repo> --json headRefOid -q .headRefOid` is your `@-`, and the

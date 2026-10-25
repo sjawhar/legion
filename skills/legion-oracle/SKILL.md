@@ -18,9 +18,9 @@ If the deployment instructions (the `# Deployment instructions` part of your sys
 `legion.yaml`'s `instructions:`) name a role and say it answers research questions (a role, not the
 `oracle` task agent), send your question to it first with
 `envoy_publish(topic="notifications.role.<name>", expects_reply="required")`, because that role may
-already hold the answer. If the publish returns an error, research yourself and put the error in
-your output. Otherwise wait up to 15 minutes for the reply, so a silent role cannot hold your work;
-if none comes, research yourself and say that the role did not answer.
+already hold the answer. Then end your turn: the reply arrives as a delivery that starts your next
+one, and research before it duplicates the role's work. If the publish returns an error (no session
+holds the role), put the error in your output and research at once.
 
 Run steps 1 and 2, in parallel if you choose, since neither needs the other's result. Run step 3
 when the question names a library, and step 4 when it asks for general practice, each only when

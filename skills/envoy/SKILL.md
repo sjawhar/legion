@@ -49,14 +49,14 @@ Every topic starts with `notifications.`.
 | Your own inbox | `agent.<session_id>` |
 | Slack, Ghost Wispr, WhatsApp | `skill://envoy/references/sources.md` |
 
-- Write the owner and the repository as one token each, with every dot in a name written `_`: `acme/site.io` is `github.acme.site_io`. A topic spelled with the dot receives nothing.
+- Write the owner, the repository, a branch or tag name and a workflow file as one token each, with every dot written `_`: `acme/site.io` is `github.acme.site_io`, and `ci.yml` is `workflow.ci_yml`. A slash stays. A topic spelled with the dot receives nothing.
 - Subscribe to the pull request's whole family, `pr.<n>.>`. Envoy also subscribes you to the lifecycle subject `pr.<n>`, which NATS `>` alone does not match, because `>` needs one or more trailing tokens.
 - Read the `warnings` that `envoy_subscribe` returns, and confirm the active topics with `envoy_list`. A warning names the spelling Envoy publishes, or a token that is not a GitHub topic kind; fix the topic it names. "No GitHub event ... in the stream's retention window" means nothing came from that repository in the last 72 hours: check that the GitHub App that sends Envoy its webhooks is installed on that repository before you rely on a wake.
 
 ## Wait for CI or a merge
 
 - Subscribe to `github.<owner>.<repo>.pr.<n>.>` and end the turn. Never start a `gh` poller: the event wakes you, and a poller burns turns.
-- One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A head pushed with GitHub's `skip-checks` trailer runs no checks: wait for the settlement whose `sha` is the head's parent.
+- One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A push with GitHub's `skip-checks` trailer runs no checks, and several can sit on top (a Legion handoff push is one): wait for the settlement of the nearest ancestor that is not such a push, the CI head `skill://legion-worker/references/merge-gate.md` reads.
 - Settlement waits until the commit has had no check event for 5 seconds (`ENVOY_CI_DEBOUNCE`) and every reported check run and check suite of it has finished. No event arrives before that. Envoy does not read GitHub's required-checks list, so a green settlement does not mean GitHub will merge the PR.
 - A `pr.<n>` event with `closed` and `merged: true` means the PR merged; it carries `merge_commit_sha`, `merged_by` and `head_sha`.
 - A later settlement of the same commit can carry `superseded_settlement: "true"`. Code that orders settlements follows `skill://envoy/references/check-settlement.md`.
