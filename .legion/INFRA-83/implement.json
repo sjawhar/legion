@@ -2,47 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-83",
-  "completed": "2026-10-25T11:55:00Z",
-  "round": 16,
+  "completed": "2026-10-25T12:55:00Z",
+  "round": 17,
   "proof": [
     {
-      "criterion": "The pull request merges again, and this branch's content survived a merge whose hazard was a relocation rather than a conflict",
-      "surface": "GitHub's mergeability for #2121; `skills/legion-architect/SKILL.md` and `skills/legion-architect/references/wake-routing.md` with their bundle copies, read against `main@origin`.",
-      "command": "`gh api repos/sjawhar/legion/pulls/2121 --jq '[.mergeable,.mergeable_state]'` before and again after the push; `jj new legion/INFRA-83 \"main\"@origin`; `grep -c '^| `' skills/legion-architect/SKILL.md`; `wc -c` both files against `jj file show -r main@origin`; a word-level diff of each against main@origin; `grep -c 'merge-notices.md#merge-' skills/legion-architect/references/wake-routing.md`; `cd packages/claude-envoy && bun run build && bun run check-dist`.",
-      "observed": "Before: CONFLICTING / DIRTY at 05cd4b22, the retro head READY named, 73 ahead and 7 behind. dispatch://INFRA-376 had merged as 56ba79b8 and moved the whole `## Wake routing` table byte for byte out of SKILL.md into references/wake-routing.md, and this branch edits rows of that table. Resolved theirs-for-structure, ours-for-content: SKILL.md takes main's three-line pointer; our four merge-notice rows and the merge-notices paragraph are re-placed in references/wake-routing.md. Verified by reading: SKILL.md holds zero wake-table rows, so no section main deleted was reintroduced; it differs from main@origin by exactly one line and 11 bytes, the `--paginate` this branch added; references/wake-routing.md differs from main@origin by 11 lines, our four rows replacing its three with `merge-waiting` among them and the four-line paragraph; all four rows present. check-dist prints `dist/ and legion/ match a fresh build`. After the push: mergeable true at 5d8e06267f5736550fc83f6ea4177fa2cc261c17.",
-      "headSha": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
-      "negativeControl": "The control that mattered is the one a conflict never prompts: counting wake-table rows left in SKILL.md. A resolution that kept our side would have left fifteen there and conflicted with nothing, both sides intact and the combination wrong. Zero is the measurement that rules it out, and the byte count beside it rules out a partial keep."
+      "criterion": "No sentence this change adds claims the wake-routing table is in a file that no longer holds it",
+      "surface": "`skills/legion-architect/references/merge-notices.md` and its bundled copy, and every text this change adds or edits that names `legion-architect/SKILL.md`.",
+      "command": "The two files read at line 6 before and after; `cd packages/claude-envoy && bun run build && bun run check-dist`; `diff` of the paragraph between source and bundle; `grep -rn 'legion-architect/SKILL.md' skills packages/daemon/internal/prompts docs --include=*.md`; the skills guard, the pi-legion suite, `go test ./internal/prompts/...`, `bunx biome check .`, `.github/scripts/check-private-names.sh`.",
+      "observed": "The sentence read `The wake-routing table in `skill://legion-architect/SKILL.md` gives each notice its move in one sentence`. Since main's #2192 that table is in `skills/legion-architect/references/wake-routing.md`, so the claim was false in a file this change adds. It now names the reference and what it gives, so it states content rather than a location's current name. Source and bundle are identical over the paragraph, the bundle regenerated rather than hand-edited, and check-dist prints `dist/ and legion/ match a fresh build`. The wider grep returns no remaining claim that the table lives in SKILL.md: every surviving mention is in docs/plans/ or docs/solutions/, dated history this change does not touch. Guard 11 pass 0 fail; pi-legion 493 pass, 8 skip, 0 fail; internal/prompts ok; biome exit 0; private names clean over 4,943 files.",
+      "headSha": "504bfe8b652f20cf4299348da50dbfc55d3bf597",
+      "negativeControl": "The control is the finding generalised rather than the finding repeated: instead of re-reading the one line, the whole branch's added instruction text was grepped for the path that moved. That is what would have caught it the first time, and it is the rule the second learning states - after a relocation, grep your own added text for the path that moved, not only for the lines you deleted."
     },
     {
-      "criterion": "The fingerprint's move is attributed, and the attribution distinguishes a relocation from a change",
-      "surface": "The branch's diff against its fork point, before and after, compared per file.",
-      "command": "The fingerprint at both tips (`--context 0`, `'~(.legion | docs/solutions)'`, `@@` and `index` lines dropped, `pipefail` kept); a per-file comparison of the two branch diffs, run without `--context 0` because a per-file comparison needs the hunk bodies.",
-      "observed": "287c9008... -> 582b1bf7..., and four paths moved: skills/legion-architect/SKILL.md and its bundle copy, whose diff shrank as the rows left, and skills/legion-architect/references/wake-routing.md and its bundle copy, new to this branch's diff and carrying the rows. The branch's diff went from 61 files to 63. The same four rows and the same paragraph, in the file that now holds the table.",
-      "headSha": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
-      "negativeControl": "The per-file comparison separates the two readings a bare fingerprint cannot: `only after` for the reference and `both, differing` for the skill is the signature of a relocation, where a change of content would differ in place with no new path. The word-level diffs then confirm the moved text is ours unchanged."
-    },
-    {
-      "criterion": "The merge undid no deletion, and the control that did not apply is named",
-      "surface": "The merged tree, and the five texts the skills guard pins.",
-      "command": "The deletion-survival sweep over every removed line of 40 characters or more from the pre-merge diff against the fork point (493), each hit read; the merge's own file list checked against the five pinned texts; `bun test src/skills-guard.test.ts`; `gofmt -l`, `go build`, `go vet`, `go test` of six daemon packages; `bun test` of packages/pi-legion; `bunx biome check .`; `.github/scripts/check-private-names.sh`.",
-      "observed": "52 of the 493 survive, every one in the families accounted for in earlier rounds, no deletion of this branch's came back. The merge reached none of the five pinned texts, so the five-way control did not apply and was not run; the lane is green at this head, 11 pass 0 fail. gofmt silent; build, vet and all six daemon packages ok; pi-legion 493 pass, 8 skip, 0 fail; biome exit 0; private names clean over 4,940 files.",
-      "headSha": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
-      "negativeControl": "Whether the control fires is itself derived rather than habitual: the merge's file list decides it, and it is reported either way. Last time it reached a pinned text and the control ran; this time it did not and the control is reported as not run."
+      "criterion": "The reason no instrument caught it is established rather than assumed",
+      "surface": "The three standing checks: the skills guard's link reader, the deletion-survival sweep, the unchanged-diff fingerprint.",
+      "command": "Read `packages/pi-legion/src/skills-guard.test.ts`'s link case against the sentence; compare the sentence against the pre-merge removed-line list the sweep reads; re-read last round's fingerprint attribution.",
+      "observed": "The guard reads `skill://` links and anchors, and `skill://legion-architect/SKILL.md` resolves - the file exists, and only the claim about its contents was wrong, which a link check does not read. The sweep reads lines the branch removed; this line was added, so it was never in the list. The fingerprint moved for the relocation and was correctly attributed to it, which is exactly the explanation that would have absorbed this defect. Nothing was wrong with any of the three: no check in this repository reads a claim about where text lives.",
+      "headSha": "504bfe8b652f20cf4299348da50dbfc55d3bf597",
+      "negativeControl": "Each instrument's silence was traced to its own mechanism rather than inferred from the fact that it was silent, which is the distinction between knowing why a check missed something and assuming it is weak. That is also what makes the gap reportable as a gap rather than as a bug in the guard."
     }
   ],
+  "architectsTest": "The architect's own test decided this round: a sentence false when written is a failure; a divergence between two true sentences is a finding with its fix named. `merge-notices.md:6` was false, in a file this change adds, so it came back for a round. `skills/legion-worker/references/pr-body.md:131` is true and merely coarser than its corrected sibling `prompts/roles/core/tester.md:13`, which governs because the daemon composes it into the prompt, so it ships with its follow-up named. Both decisions are in the pull request body with their reasoning rather than as verdicts.",
   "filesChanged": [
-    "The forward merge `merge: resolve conflict against \"main\"@origin`: skills/legion-architect/SKILL.md resolved to main's pointer, this branch's four merge-notice rows and paragraph re-placed in skills/legion-architect/references/wake-routing.md, and the claude-envoy bundle regenerated with `bun run build`",
-    "The pull request body: the Verification head re-derived, round 16's E2E block added, and a line recording that retro's commits stand below this merge"
+    "skills/legion-architect/references/merge-notices.md — the wake-routing sentence names the reference and what it gives",
+    "packages/claude-envoy/legion/skills/legion-architect/references/merge-notices.md — the regenerated bundle copy",
+    "The pull request body: the Verification head re-derived and round 17's E2E block added"
   ],
   "trickyParts": [
-    "The dangerous outcome here conflicts with nothing. When a base moves a block of text to another file and this branch edits a row inside it, a resolution that keeps our side reintroduces a section the base deleted, with both sides individually intact. The check is a count in the file the text left, not a conflict marker.",
-    "Retro already ran, so this round's handoff puts `.legion/INFRA-83/` back on the branch. `skill://legion-retro` covers it: any round after retro writes the handoff again, and the next retro removes it again, or READY is refused."
+    "A `skill://` link can resolve while the sentence around it is false. The guard's link check is a check on the target's existence, never on the claim about its contents, and that distinction is what let a false pointer through a lane that was working correctly.",
+    "This round's handoff puts `.legion/INFRA-83/` back on the branch for the third time. Retro removes it again; `skill://legion-retro` covers exactly this case, and READY refuses a head that still carries it."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "This is the fifth forced merge on this branch and the first after retro, so the retro commits now sit below a merge rather than at the head. They still do not void the approval - the learning changes only docs/solutions/ and the removal only .legion/ - but the merge above them does, which is why this round goes back through the tester and the reviewer.",
-    "No CI verdict is stated for this head. The last observation with a time on it is the architect's acceptance read at the previous head.",
-    "The follow-up this retro named stands unchanged: `pr-body.md:131`'s bare-gates definition against the corrected `prompts/roles/core/tester.md:13`, with `roles/core/tester.md` governing because the daemon composes it into the prompt."
+    "Retro is held rather than redone from scratch: its second learning is written and parked outside the workspace, and the first learning stays committed and untouched at b967b376 as the architect ruled. The removal of `.legion/INFRA-83/` and the body pass run once this round is through the tester and the reviewer.",
+    "`mergeable` was read before pushing: true. No CI verdict is stated for this head; the last observation with a time on it is the architect's acceptance read at 57e082fa, where the whole list read 23 success and 2 skipped."
   ]
 }
