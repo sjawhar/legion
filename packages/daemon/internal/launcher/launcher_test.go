@@ -876,3 +876,53 @@ func TestTheContainersLogKeepsEveryLineWholeAcrossGenerations(t *testing.T) {
 		t.Fatalf("the container's log is\n%q\nwant\n%q", got, want)
 	}
 }
+
+// PID 1's reaper reaps every exited process of its namespace but the generations its managers
+// run, whatever the number of managers: an orphan a `kubectl exec` left in an issue pod's roles
+// container is reaped, and each role's own generation is left to its manager's wait, which still
+// reads that generation's own exit status.
+func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
+	start := func(script string) *exec.Cmd {
+		cmd := exec.Command("/bin/sh", "-c", script)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return cmd
+	}
+	tester, reviewer := start("exit 7"), start("exit 9")
+	orphan := start("exit 0")
+	managers := []*manager{
+		{role: "tester", namespaced: true, log: &roleLog{}, child: &child{pid: tester.Process.Pid}},
+		{role: "reviewer", namespaced: true, log: &roleLog{}, child: &child{pid: reviewer.Process.Pid}},
+	}
+	// Every one has exited and waits as a zombie for whoever reaps it.
+	for _, cmd := range []*exec.Cmd{tester, reviewer, orphan} {
+		deadline := time.Now().Add(5 * time.Second)
+		for !zombie(cmd.Process.Pid) {
+			if time.Now().After(deadline) {
+				t.Fatalf("process %d never exited", cmd.Process.Pid)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	go func() { reapOrphans(ctx, signals, managers); close(done) }()
+	signals <- syscall.SIGCHLD
+	// A reaped process is gone from the process table; a zombie still takes signal 0.
+	deadline := time.Now().Add(5 * time.Second)
+	for !errors.Is(syscall.Kill(orphan.Process.Pid, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			t.Fatal("the reaper left the orphan unreaped")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	for cmd, want := range map[*exec.Cmd]int{tester: 7, reviewer: 9} {
+		if err := cmd.Wait(); cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != want {
+			t.Errorf("a manager's generation reads %v (%v), want its own exit %d: the reaper took it", cmd.ProcessState, err, want)
+		}
+	}
+}

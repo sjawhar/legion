@@ -80,19 +80,19 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	// PID 1 adopts every orphan of its PID namespace and must reap it. The controller's pod runs
+	// one role, whose processes are this namespace's; an issue pod's roles each have a namespace
+	// of their own, whose init reaps theirs, but anything else started in the container (a
+	// `kubectl exec` and what it leaves behind) is this process's. The reaper never waits on a
+	// generation's own process, whose exit its manager reads.
+	if os.Getpid() == 1 {
+		exits := make(chan os.Signal, 1)
+		signal.Notify(exits, syscall.SIGCHLD)
+		defer signal.Stop(exits)
+		go reapOrphans(ctx, exits, managers)
+	}
 	if cfg.RolesDir == "" {
-		m := managers[0]
-		// The controller's pod runs one role, whose processes are this PID namespace's: PID 1
-		// adopts the role's orphans and reaps them. An issue pod's roles each have a namespace
-		// of their own, where their own init does that, and this process has no child but those
-		// inits, which its managers wait on.
-		if os.Getpid() == 1 {
-			exits := make(chan os.Signal, 1)
-			signal.Notify(exits, syscall.SIGCHLD)
-			defer signal.Stop(exits)
-			go m.reapOrphans(ctx, exits)
-		}
-		return m.serveUntil(ctx, address)
+		return managers[0].serveUntil(ctx, address)
 	}
 	var running sync.WaitGroup
 	for _, m := range managers {

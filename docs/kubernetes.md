@@ -1949,9 +1949,11 @@ workflow role (`claim.Roles`: architect, planner, implementer, tester, reviewer,
    every role's lines and `kubectl logs <pod> -c roles | grep '^<role>: '` reads one role's. Each
    line is whole: the launcher's lines and each generation of a role write through writers of
    their own, and a generation's last line without a newline is written out as a line of its own
-   once the generation ends. A line the launcher writes for no role (a panic) has
+   once the generation ends. A line the launcher writes for no role (a panic, a failed reap) has
    no prefix, and when the container ends the daemon quotes those lines after each role's own in
-   that role's detail.
+   that role's detail. As the container's PID 1 the launcher reaps every orphan its PID namespace
+   adopts (what a `kubectl exec` leaves behind), never a role's own generation, whose exit its role
+   reads.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
 `runtime.kubernetes.issue_volume` (50Gi by default) and `storage_class`, labelled
