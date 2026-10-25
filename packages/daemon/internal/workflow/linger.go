@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -249,11 +250,26 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // lingerExpired is fenced on the root generation, and the durable hand-over record makes a late
 // daemon PATCH no-op when the root came back before its event arrives. Each hand-over keeps the
 // child's phase, gate, phase rows and pull request across a new root generation; promotion starts
-// the phase's role again in that phase. A child still admitted never started under its tree's
-// design, and one finished or parked has no run to carry on.
+// the phase's role again in that phase. A child finished or parked has no run to carry on.
+//
+// A child still admitted never started under its tree's design, so it is left where it is — with
+// one exception: one the mirror still shows waiting on an unfinished issue (blockers.Unfinished)
+// is handed over, so that a child whose blockers outlive its tree is not parked for good but comes
+// back as a root of its own once they close. A never-gated child of a finishing tree, which waits
+// on nothing, would instead take an admission slot for work its tree's design never opened. The
+// mirror is read once for the whole call, as every blocker judgement reads it (Engine.mirror):
+// startedRun is false at phase.Admitted, so the new root carries no run, which is what the
+// blocked-root rule reads when the child comes up for admission.
 func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
+	rows, err := e.mirror(ctx, tx)
+	if err != nil {
+		return err
+	}
 	for _, member := range members {
-		if member.Key == root.Key || member.Phase == phase.Admitted || record.OutOfWorkflow(member.Status) {
+		if member.Key == root.Key || record.OutOfWorkflow(member.Status) {
+			continue
+		}
+		if member.Phase == phase.Admitted && len(blockers.Unfinished(rows, member.Key)) == 0 {
 			continue
 		}
 		if err := e.handOver(ctx, tx, root, member); err != nil {

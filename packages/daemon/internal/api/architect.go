@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -40,9 +42,56 @@ type WaveReleaseRequest struct {
 	Issues  []string `json:"issues"`
 }
 
-// WaveReleaseResponse lists the issues whose synchronous Dispatch update was accepted.
+// WaveReleaseResponse answers release_children. A release is accepted whatever the children's
+// links say, so released is every issue the request named, unchanged: no child of a wave is lost,
+// and the architect is never asked to send the request again. started and held then say what the
+// release did with each of them, read back from the children's records once the request's writes
+// are in.
+//
+// started names the children whose first phase this request started, and held each child the
+// request did not start because it waits on an unfinished issue, with the issues it waits on. A
+// child the tree's closed design gate withholds is in released alone: the gate, not a blocker,
+// holds it, its phase starts when the gate opens, and calling it started would be a lie. Both
+// lists follow the request's own order.
 type WaveReleaseResponse struct {
-	Released []string `json:"released"`
+	Released []string    `json:"released"`
+	Started  []string    `json:"started"`
+	Held     []HeldChild `json:"held"`
+}
+
+// MarshalJSON keeps `released`, `started` and `held` arrays on the wire, empty rather than `null`:
+// the plugin parses this answer through a strict schema.
+func (wr WaveReleaseResponse) MarshalJSON() ([]byte, error) {
+	type wire WaveReleaseResponse
+	out := wire(wr)
+	if out.Released == nil {
+		out.Released = []string{}
+	}
+	if out.Started == nil {
+		out.Started = []string{}
+	}
+	if out.Held == nil {
+		out.Held = []HeldChild{}
+	}
+	return json.Marshal(out)
+}
+
+// HeldChild is one released child the daemon did not start, and the issues it waits on that are
+// not done — the keys of its Dispatch blocked-by links, including any the daemon has not yet
+// observed as an issue of its own.
+type HeldChild struct {
+	Issue     string   `json:"issue"`
+	BlockedBy []string `json:"blockedBy"`
+}
+
+// MarshalJSON keeps `blockedBy` an array on the wire, empty rather than `null`.
+func (h HeldChild) MarshalJSON() ([]byte, error) {
+	type wire HeldChild
+	out := wire(h)
+	if out.BlockedBy == nil {
+		out.BlockedBy = []string{}
+	}
+	return json.Marshal(out)
 }
 
 // PhaseBackwardRequest asks a phase worker to return its own issue to an earlier phase, or the
@@ -501,7 +550,56 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, WaveReleaseResponse{Released: req.Issues})
+	started, held, err := s.releaseOutcome(r.Context(), req.Issues)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read what the released children wait on")
+		return
+	}
+	writeJSON(w, http.StatusOK, WaveReleaseResponse{Released: req.Issues, Started: started, Held: held})
+}
+
+// releaseOutcome reads back what the release this request wrote did with each of its children,
+// once the children's writes and observations are in: a child no longer at phase.Admitted had its
+// first phase started by this request, and one still admitted that waits on an unfinished issue
+// was held by that wait. Both are read in one read-only transaction, the project's whole mirror
+// with one query (record.Store.DispatchIssues), as every blocker judgement reads it: a wave's
+// children share the issues they wait on, and the mirror is one row per issue of the project.
+//
+// A child still admitted that waits on nothing is in neither list: its tree's design gate is
+// closed, and the gate's opening starts it. A child with no record at all — one whose recording
+// this release could not complete — is in neither either, since nothing is known of it to report.
+func (s *server) releaseOutcome(ctx context.Context, issues []string) ([]string, []HeldChild, error) {
+	if s.pool == nil || s.records == nil {
+		return nil, nil, errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	mirrored, err := s.records.DispatchIssues(ctx, tx, s.project)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows := blockers.Rows(mirrored)
+	started, held := []string{}, []HeldChild{}
+	for _, issue := range issues {
+		recorded, err := s.records.Issue(ctx, tx, issue)
+		if err != nil {
+			return nil, nil, err
+		}
+		switch {
+		case recorded == nil:
+			continue
+		case recorded.Phase != phase.Admitted:
+			started = append(started, issue)
+		default:
+			if unfinished := blockers.Unfinished(rows, issue); len(unfinished) > 0 {
+				held = append(held, HeldChild{Issue: issue, BlockedBy: unfinished})
+			}
+		}
+	}
+	return started, held, tx.Commit(ctx)
 }
 
 // phaseBackward applies a backward move: a phase worker's on its own issue (the grant's), or the

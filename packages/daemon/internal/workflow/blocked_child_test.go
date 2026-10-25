@@ -191,6 +191,69 @@ func TestAnUnblockedChildWaitsForItsTreesGate(t *testing.T) {
 	assertOutboxKinds(t, pool, []string{})
 }
 
+// A child still waiting on an unfinished issue when its tree finishes is handed to Legion as a
+// root of its own, though it never started under its tree's design: its blockers outlive the
+// tree, and leaving it admitted inside a closed tree would park it for good. Its sibling, also
+// admitted but waiting on nothing, is left exactly where every admitted member was left before:
+// the tree's design gate, not a blocker, held it, and making a root of it would spend an
+// admission slot on work its tree's design never opened.
+func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
+	pool := migratedPool(t)
+	until := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-208", Project: "LEGION", Title: "a finished root", Phase: phase.Done, Generation: 4, Status: "done", Rank: "U", LingerUntil: &until})
+	seedAdmittedChild(t, pool, "LEGION-209")
+	seedAdmittedChild(t, pool, "LEGION-210")
+	seedMirror(t, pool, "LEGION-209", "todo", "LEGION-300")
+	seedMirror(t, pool, "LEGION-210", "todo", "LEGION-301")
+	seedMirror(t, pool, "LEGION-300", "in_progress")
+	seedMirror(t, pool, "LEGION-301", "done")
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "timer", "linger:LEGION-208:4",
+		intake.LingerExpired{Issue: "LEGION-208", Generation: 4}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact the linger's expiry: %v", err)
+	}
+
+	if got := handoverFences(t, pool); len(got) != 1 || got[0] != "LEGION-209" {
+		t.Fatalf("hand-over fences = %v, want the blocked child's alone", got)
+	}
+	// The hand-over's one Dispatch write puts the child todo under the fence of this linger, as
+	// the outbox's drop guard and intake.Handover read it.
+	var writes int
+	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209'
+		and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'handOver' = 'true'
+		and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '4'`).Scan(&writes); err != nil || writes != 1 {
+		t.Fatalf("the blocked child's hand-over writes = %d, %v; want one fenced on LEGION-208's linger 4", writes, err)
+	}
+	var others int
+	if err := pool.QueryRow(t.Context(),
+		`select count(*) from outbox where kind = 'dispatch_status' and issue <> 'LEGION-209'`).Scan(&others); err != nil || others != 0 {
+		t.Fatalf("status writes for another member = %d, %v; want none, the unblocked admitted child left as it was", others, err)
+	}
+}
+
+// handoverFences is every issue the linger fenced for hand-over, in key order.
+func handoverFences(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select issue from handovers order by issue")
+	if err != nil {
+		t.Fatalf("read the hand-over fences: %v", err)
+	}
+	defer rows.Close()
+	var issues []string
+	for rows.Next() {
+		var issue string
+		if err := rows.Scan(&issue); err != nil {
+			t.Fatalf("scan a hand-over fence: %v", err)
+		}
+		issues = append(issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the hand-over fences: %v", err)
+	}
+	return issues
+}
+
 func phaseOf(t *testing.T, pool *pgxpool.Pool, key string) phase.Phase {
 	t.Helper()
 	var got string
