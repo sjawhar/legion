@@ -2,44 +2,55 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T16:55:00Z",
-  "round": "the seventh implementing round, answering the tester's single failure at 6c9e78b02f9b: one sentence of the body claimed a universal where the truth is scoped. No code, no test, no behaviour moved.",
+  "completed": "2026-10-25T17:30:00Z",
+  "round": "the eighth implementing round, answering review round 2 at 8817b308db59 (code 6c9e78b02f9b): the JWKS amplification and the body's one missing clause",
   "proof": [
     {
-      "criterion": "The sentence the tester falsified is scoped to what it is true of, and the behaviour it describes is unchanged (the tester's failure; the architect's ruling: scope it, change no code, add no test).",
-      "surface": "The pull request body's rollout paragraph, read against the sequence the tester drove on real broker processes.",
-      "command": "the body, read against Store.ReserveSessions and Store.BindSession in packages/envoy/internal/broker/oauthstore/exchange.go, and against the tester's live sequence in .legion/INFRA-228/test.json",
-      "observed": "The universal is gone. In its place are two scoped statements, each matching one shape of the window: while both generations fix the same name, one of their two entries holds it and every other principal is refused it; and a name a rollout newly fixes -- one the old configuration fixed for nobody -- stays with whichever principal already held it under the ordinary rule, answered on every process including those whose configuration fixes it for someone else, until the new entry's first exchange. That second case is the one the tester produced: B holds the name under the ninety-day rule, the new process logs that it left the name with its holder, B is answered 200 on both processes, and only C's first exchange moves it.",
-      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "The phrase itself is gone from the body: 'at every moment the name is held' returns zero hits, as 'exactly two ways' and 'cannot take a name from each other' already did from the rounds before."
+      "criterion": "An unauthenticated caller cannot make the broker fetch its issuer's keys once per request (the reviewer's finding 1, Security[authz] and availability, reproduced as 12 forged requests causing 12 JWKS fetches).",
+      "surface": "The real api.Register with the real verifier, counting the verifier's calls rather than the statuses.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run 'TestAForgedAccountTokenFloodStopsReachingTheVerifier|TestAForgedTokenFloodIsLimitedByAddress' ./internal/broker/api/",
+      "observed": "PASS both, ok github.com/sjawhar/envoy/internal/broker/api 2.255s. A flood of tokens signed under a key the broker does not hold reaches the verifier the burst's worth of times and no more; the rest are refused 429 RATE_LIMITED with Retry-After in authenticate, before VerifyAccount and so before any fetch of the issuer's keys. Every route accountAuth authenticates spends one per-source-address bucket, the introspection bucket widened to the class, and introspect spends nothing further in its handler, so a listed caller meets one limit across the ten routes rather than two.",
+      "headSha": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+      "negativeControl": "TestOneAddressFloodingItsLimitLeavesOthersTheirRereads and the second half of the flood test: a valid token from another address is answered throughout the first address's flood, so the bucket refuses the flood rather than the class, which is the architect's first condition."
     },
     {
-      "criterion": "The same false universal is gone from its second place, the Threads ledger, where a reviewer reading the ledger rather than the bullet would have taken the wrong rule away.",
-      "surface": "The body's Threads section, the line recording the round-3 fix.",
-      "command": "the body's Threads line for PRRT_kwDORFy7ds6wBhTN",
-      "observed": "It said 'so no lapse hands it to another account, workflow or person'. It now says a token lapsing no longer hands the name to another account, workflow or person, that a claim gives way only after the ninety-day retention, and that the Change bullet is where every way a name moves is written -- so the ledger points at the one place that statement is kept rather than restating it.",
-      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "'no lapse hands it' returns zero hits in the body."
+      "criterion": "A caller whose token verifies is not locked out by the limit during normal churn, and the body says what the limit is and what a caller sees when it trips (the architect's second condition).",
+      "surface": "The limit's own sizing, against what the class carries, written in limits.go and in the pull request body.",
+      "command": "the DefaultAccountLimit comment in packages/envoy/internal/broker/api/limits.go, and the body's E2E paragraph for this round",
+      "observed": "A burst of 200 and fifty a second per broker process, shared by the nine routes Dispatch relays through and by introspection. A resource server asks about one token per request it serves with its own short cache in front, and Dispatch relays at the pace of the people reading its pages, a few requests per page or decision; neither meets it. A caller that does is answered 429 with Retry-After and retries. Behind a proxy the bucket is keyed on the caller's own address when BROKER_TRUSTED_PROXY_HEADER is set, and on the proxy's otherwise, where one flood drains it for every caller that proxy forwards -- stated in both places rather than left to be met.",
+      "headSha": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+      "negativeControl": "The same test file drives a listed caller's ordinary traffic through the class and it is never refused."
     },
     {
-      "criterion": "Nothing of the code or the tests moved this round.",
-      "surface": "The working copy.",
-      "command": "jj -R \"$LEGION_WORKSPACE\" status",
-      "observed": "No change at all: the code head is still 6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa, the head the tester read. A fifth two-process test pinning the newly-fixed-name window was written during this round and discarded on the architect's ruling -- subtest 4 already runs the behaviour, and the fix for prose is prose.",
-      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "The suites therefore stand as the previous round left them: TestAFixedSessionNameAcrossARollout green on four subtests, five runs of five, and the whole broker suite green but for this pod's SO_PEERPIDFD failures."
+      "criterion": "The body's rollout statement is true in the corner the tester found (the reviewer's finding 2, and the architect: a pull request body cannot be amended after the merge).",
+      "surface": "The body's rollout paragraph.",
+      "command": "the body's Change bullet, rollout paragraph, first statement",
+      "observed": "The clause is the reviewer's own: 'while both generations fix the same name, one of their two entries holds it and every other principal is refused it -- once either of their entries has exchanged since the name was re-pointed; until then it stays with its earlier holder, as in the next statement.' The corner it covers is an earlier re-point whose entry never exchanged, so a third principal still holds the name when a second re-point lands and both generations fix a name neither entry holds. Nothing else in the paragraph changed and no test was added: the architect ruled this the end of the text.",
+      "headSha": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+      "negativeControl": "The statement it qualifies is the one the previous round wrote to replace a universal; the clause narrows it rather than restoring a general claim, and the paragraph now states cases alone."
+    },
+    {
+      "criterion": "The change the earlier rounds proved still holds at this head.",
+      "surface": "The broker suites and the broker's documentation generator, on a real Postgres.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/... ./cmd/broker/... ; and the broker-refgen run",
+      "observed": "Every package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors; cmd/broker, which carries the live-binary and the two-process rollout tests, ok 106.197s. refgen exits 0, so the settings a reader is told about still match the ones the configuration reads.",
+      "headSha": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+      "negativeControl": "gofmt -l prints nothing and go vet ./... is clean at the same head."
     }
   ],
-  "filesChanged": [],
+  "filesChanged": [
+    "packages/envoy/internal/broker/api/server.go: authenticate spends the class's per-address bucket for authAccount before accountCaller; Deps.IntrospectLimit becomes Deps.AccountLimit, the bucket every accountAuth route shares.",
+    "packages/envoy/internal/broker/api/limits.go: DefaultIntrospectLimit becomes DefaultAccountLimit, with what it bounds, what an honest caller costs against it and what it denies a flood.",
+    "packages/envoy/internal/broker/api/handlers_introspect.go: introspect spends no bucket of its own, so a listed caller is held to one limit across the class.",
+    "packages/envoy/internal/broker/api/account_limit_test.go: the flood counted at the verifier, the second address answered throughout, and a listed caller's ordinary traffic unrefused."
+  ],
   "trickyParts": [
-    "The first correction I wrote reached for another universal -- 'a name can be held by a principal no running configuration fixes it for; it cannot be acquired by one' -- which is itself false, because a name whose ninety-day claim has run out is acquired by whoever asks next. It was replaced before the edit went up. The habit this slice keeps punishing is the sentence that generalises one true case; the cure is to write the cases."
+    "The reviewer's evidence is the right shape for this defect and the test follows it: a status assertion would pass against a broker that still fetched the issuer's keys on every refused request, because the status is 401 either way. What had to be counted is the work the broker does not do."
   ],
   "deviations": [],
   "openQuestions": [
-    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal.",
-    "The architect has called this the last body round on the slice: a seventh wrinkle in that paragraph goes to a child issue with its acceptance, so that the text stops moving and a reviewer can approve it."
+    "The buckets are per process, so a fleet of N broker pods allows N times the rate -- true of every bucket in this file already, stated in the comment, and reported to the architect, who was asked to weigh a shared store rather than have one appear. Not opened by this slice.",
+    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal."
   ],
-  "discoveredComplexity": [
-    "The architect records that the falsified sentence was its own, asked for in the round before to separate a strong binding from an untidy window, and that reaching for that one line is what produced the universal. Written here because the pattern is the lesson: five of this slice's corrections have been one sentence generalising one true case, and the only reliable cure found was to state the cases and let the reader draw the rule."
-  ]
+  "discoveredComplexity": []
 }
