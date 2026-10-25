@@ -242,7 +242,8 @@ func (k *Keys) read(ctx context.Context) ([]jose.JSONWebKey, error) {
 // passed over rather than refused, so a set that carries an encryption key beside the signing one
 // still resolves.
 func selectKey(set []jose.JSONWebKey, kid, alg string) (crypto.PublicKey, error) {
-	var usable []jose.JSONWebKey
+	var match jose.JSONWebKey
+	usable := 0
 	for _, key := range set {
 		if key.Use != "" && key.Use != "sig" {
 			continue
@@ -253,19 +254,22 @@ func selectKey(set []jose.JSONWebKey, kid, alg string) (crypto.PublicKey, error)
 		if kid != "" && key.KeyID != kid {
 			continue
 		}
-		usable = append(usable, key)
+		if usable == 0 {
+			match = key
+		}
+		usable++
 	}
 	switch {
-	case len(usable) == 1:
-		return usable[0].Key, nil
-	case len(usable) == 0 && kid == "":
+	case usable == 1:
+		return match.Key, nil
+	case usable == 0 && kid == "":
 		return nil, fmt.Errorf("%w: the token names no key id and the issuer publishes none for %s", ErrNoKey, algorithmName(alg))
-	case len(usable) == 0:
+	case usable == 0:
 		return nil, fmt.Errorf("%w: key id %s for %s", ErrNoKey, keyIDName(kid), algorithmName(alg))
 	case kid == "":
-		return nil, fmt.Errorf("%w: the token names no key id and the issuer publishes %d for %s", ErrAmbiguousKey, len(usable), algorithmName(alg))
+		return nil, fmt.Errorf("%w: the token names no key id and the issuer publishes %d for %s", ErrAmbiguousKey, usable, algorithmName(alg))
 	default:
-		return nil, fmt.Errorf("%w: the issuer publishes %d keys under key id %s", ErrAmbiguousKey, len(usable), keyIDName(kid))
+		return nil, fmt.Errorf("%w: the issuer publishes %d keys under key id %s", ErrAmbiguousKey, usable, keyIDName(kid))
 	}
 }
 

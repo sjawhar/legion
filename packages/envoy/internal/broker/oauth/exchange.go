@@ -21,8 +21,9 @@ import (
 
 // tokenTypeAccessToken is RFC 8693's own name for an access token: the only kind this provider's
 // exchange mints, the kind it asks for by default, and the kind a dev box session presents its
-// machine login's token as. The library spells it in a package its users cannot import.
-const tokenTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token" //nolint:gosec // a token type's name, not a token
+// machine login's token as. It is the name the client registration lists, so both read it from
+// the one place the broker and its callers share.
+const tokenTypeAccessToken = oauthwire.SubjectTokenTypeAccessToken
 
 // The form parameters of an exchange request the broker reads itself. The library reads the rest
 // (RFC 8693 Section 2.1); FormSession is the broker's own, because RFC 8693 has no parameter for

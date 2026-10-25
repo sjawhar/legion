@@ -15,11 +15,6 @@ import (
 // client may exchange a token issued to it. A plain *oauth2.DefaultClient answers none of those.
 var _ rfc8693.Client = (*oauth2.DefaultRegisteredClient)(nil)
 
-// tokenTypeAccessToken is RFC 8693's own name for an access token, the only kind of token this
-// provider's exchange mints and the kind a dev box session presents its machine login's token
-// as. The library spells it in a package its users cannot import.
-const tokenTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token" //nolint:gosec // a token type's name, not a token
-
 // actorTokenTypeNone is the one actor token type the exchange client is registered for, and it
 // is a name no token type is registered under, so every actor token a request carries is
 // refused. A registered client says which actor token types it may present by listing them, and
@@ -40,7 +35,7 @@ func (s *Store) GetClient(_ context.Context, id string) (oauth2.Client, error) {
 	case oauthwire.ClientID:
 		return machineClient(), nil
 	case oauthwire.ExchangeClientID:
-		return s.exchangeClient(), nil
+		return exchangeClient(), nil
 	}
 	return nil, oauth2.ErrNotFound
 }
@@ -67,29 +62,30 @@ func machineClient() *oauth2.DefaultRegisteredClient {
 }
 
 // exchangeClient is the client every exchanging caller presents: a pod, a workflow run, and a dev
-// box session. It is confidential, because the library refuses a public client at the
-// token-exchange grant, and authenticates with Store.ExchangeSecret, which the provider wiring
-// sets; until that is set it is a client no caller can authenticate as.
+// box session. It is registered confidential because the library refuses a public client the
+// token-exchange grant, but it presents no client credential at all: the provider's own
+// authentication strategy answers it for a credential-less exchange, and the subject token and
+// the DPoP proof are what the request is judged on. A secret here would be one more shared
+// secret in every pod, which is what this exchange exists to remove.
 //
 // It holds the token-exchange grant and no other, may present exactly the three kinds of subject
 // token this broker accepts, and may ask for an access token and nothing else: a caller that
 // asked for a JSON Web Token would be asking the broker to sign a claim set of its own, which it
 // does not do here. It permits no actor token — actorTokenTypeNone says how — so no caller may
 // exchange one identity's token while acting as another.
-func (s *Store) exchangeClient() *oauth2.DefaultRegisteredClient {
+func exchangeClient() *oauth2.DefaultRegisteredClient {
 	return &oauth2.DefaultRegisteredClient{
 		DefaultClient: &oauth2.DefaultClient{
-			ID:           oauthwire.ExchangeClientID,
-			ClientSecret: s.ExchangeSecret,
-			GrantTypes:   []string{string(oauth2.GrantTypeTokenExchange)},
-			Scopes:       []string{oauthwire.Scope},
+			ID:         oauthwire.ExchangeClientID,
+			GrantTypes: []string{string(oauth2.GrantTypeTokenExchange)},
+			Scopes:     []string{oauthwire.Scope},
 		},
 		TokenExchangeSubjectTokenTypes: []string{
 			oauthwire.SubjectTokenTypeKubernetes,
 			oauthwire.SubjectTokenTypeGitHub,
-			tokenTypeAccessToken,
+			oauthwire.SubjectTokenTypeAccessToken,
 		},
-		TokenExchangeRequestTokenTypes: []string{tokenTypeAccessToken},
+		TokenExchangeRequestTokenTypes: []string{oauthwire.SubjectTokenTypeAccessToken},
 		TokenExchangeActorTokenTypes:   []string{actorTokenTypeNone},
 	}
 }

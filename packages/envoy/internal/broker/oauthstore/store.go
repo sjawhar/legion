@@ -1,11 +1,10 @@
 // Package oauthstore is the Postgres storage behind the broker's OAuth 2.0 provider
 // (authelia.com/provider/oauth2), which runs a machine login as a device authorization grant
-// (RFC 8628) with DPoP-bound (RFC 9449), rotating refresh tokens, an RFC 8693 token exchange
-// minting Dispatch access tokens, and the RFC 7523 assertion grant the issuer that names a
-// signed-in person presents. It keeps the device codes, the access and refresh token sessions,
-// DPoP proof replay records and nonces, the provider's HMAC secret, which identity holds a
-// session name, and the exchange's and the assertion grant's replay records, in the tables
-// migrations 0016 and 0017 create.
+// (RFC 8628) with DPoP-bound (RFC 9449), rotating refresh tokens and an RFC 8693 token exchange
+// minting Dispatch access tokens. It keeps the device codes, the access and refresh token
+// sessions, DPoP proof replay records and nonces, the provider's HMAC secret, which identity
+// holds a session name, and the exchange's replay records, in the tables migrations 0016 and
+// 0017 create.
 //
 // A stored request is the JSON of its oauth2.Request fields plus its client's id; reading it back
 // re-hydrates the client with GetClient and the session into the kind the caller hands it, an
@@ -179,11 +178,6 @@ type Store struct {
 	// no policy of its own, so the provider wiring sets this to the decision the exchange makes;
 	// it must be set before the provider serves the token-exchange grant.
 	ExchangeSubject func(ctx context.Context, request oauth2.Requester, subjectToken map[string]any) (string, error)
-
-	// ExchangeSecret is the secret the exchange client authenticates with, which the provider
-	// wiring sets from the broker's configuration. The exchange client is confidential, so until
-	// it is set that client is one no caller can authenticate as.
-	ExchangeSecret oauth2.ClientSecret
 
 	// sweepMu serialises Sweep's refresh walk, which reads and advances sweepAt.
 	sweepMu sync.Mutex
