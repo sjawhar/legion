@@ -159,10 +159,15 @@ test("with no broker, a gap in the event feed asks the list again once, and a fo
     expect(getCredentialPending).toHaveBeenCalledTimes(1);
 
     const watch = watchEmptyState();
-    // Dispatch restarted: the socket closes (1012) and the page's next one opens at once.
+    // Dispatch restarted: the socket closes (1012), the page's next one opens at once, and once
+    // Dispatch starts the feed on it the page refreshes for the gap.
     act(() => sockets.latest().drop(1012));
     act(() => sockets.latest().open());
     expect(sockets.sockets).toHaveLength(2);
+    act(() => {
+      const socket = sockets.latest();
+      socket.receive({ type: "events_start", sub: socket.subscribed("events").sub, since: "0" });
+    });
     await waitFor(() => expect(getCredentialPending).toHaveBeenCalledTimes(2));
     // The gap's whole-cache refresh refetches the inbox list; the held answer is not asked a
     // third time, and nothing blinks while the second call is out.
