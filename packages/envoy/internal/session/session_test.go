@@ -77,7 +77,7 @@ func TestDeliver_ExactlyOnce(t *testing.T) {
 	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
-	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 
 	err := deliverer.Deliver(item, interest)
@@ -254,7 +254,7 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test payload")
 	item.SourceSession = "ses_sender_123"
 
-	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
+	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test"})
 	if err != nil {
 		t.Fatalf("delivery failed: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestDeliver_NoAgentField(t *testing.T) {
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
-	deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
+	deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test"})
 
 	// The prompt body must NOT contain an "agent" field — that would override the session's agent
 	if strings.Contains(string(receivedBody), `"agent"`) {
@@ -519,7 +519,7 @@ func TestDeliver_PromptAsyncFailure(t *testing.T) {
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
-	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
+	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test"})
 	if err == nil {
 		t.Fatal("expected error for 500 response, got nil")
 	}
@@ -548,7 +548,7 @@ func TestDeliver_KVRegistryUsed(t *testing.T) {
 		Sessions:     sessions,
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
-	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "test"}
 
 	err = deliverer.Deliver(item, interest)
 	if err != nil {
@@ -578,21 +578,26 @@ func TestDeliver_NilSessionsReturnsError(t *testing.T) {
 }
 
 // TestDeliver_SessionAddress pins the owner rule: the URL a delivery requests for a session
-// registered with each combination of owning listener, recorded host and host bridge. A listener
-// delivers only to a session it owns (MachineID empty or its own): through the bridge, else at the
-// recorded host, else at host.docker.internal. Another listener's session is that listener's to
-// deliver, so this one refuses it with ErrWrongMachine and requests nothing: every listener on the
-// bus reads each inbox message, and a second one that delivered would deliver it twice.
+// registered with each combination of stored subscription, owning listener, recorded host and host
+// bridge. The owner is the listener the stored subscription names (the interest's MachineID, the
+// one its topics are fanned out on), else the one the session registered through (the entry's
+// MachineID); a session neither names counts as this listener's. A listener delivers only to a
+// session it owns: through the bridge, else at the recorded host, else at host.docker.internal.
+// Another listener's session is that listener's to deliver, so this one refuses it with
+// ErrWrongMachine and requests nothing: every listener on the bus reads each inbox message, and a
+// second one that delivered would deliver it twice.
 func TestDeliver_SessionAddress(t *testing.T) {
 	sessions, deliverer := newKVDeliverer(t)
 	deliverer.MachineID = "local-machine"
 
 	tests := []struct {
-		name    string
-		bridge  string
-		entry   session.SessionEntry
-		want    string
-		wantErr error
+		name string
+		// interest is the stored subscription's MachineID; empty when none names an owner.
+		interest string
+		bridge   string
+		entry    session.SessionEntry
+		want     string
+		wantErr  error
 	}{
 		{
 			name:   "own machine with a bridge goes through the bridge, not the recorded host",
@@ -634,6 +639,27 @@ func TestDeliver_SessionAddress(t *testing.T) {
 			entry:   session.SessionEntry{MachineID: "remote-machine"},
 			wantErr: session.ErrWrongMachine,
 		},
+		{
+			// A session that re-registered through another listener keeps its stored subscription's
+			// MachineID, and only that listener matches its topics.
+			name:     "a session whose stored subscription names this machine is its own, though it registered through another",
+			interest: "local-machine",
+			entry:    session.SessionEntry{MachineID: "remote-machine", Host: "example-host-b"},
+			want:     "http://example-host-b:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:     "a session whose stored subscription names another machine is that machine's, though it registered through this one",
+			interest: "remote-machine",
+			entry:    session.SessionEntry{MachineID: "local-machine", Host: "example-host"},
+			wantErr:  session.ErrWrongMachine,
+		},
+		{
+			name:     "a session whose stored subscription names another machine is that machine's, though its entry names no listener",
+			interest: "remote-machine",
+			bridge:   "127.0.0.1",
+			entry:    session.SessionEntry{Host: "example-host"},
+			wantErr:  session.ErrWrongMachine,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -656,7 +682,7 @@ func TestDeliver_SessionAddress(t *testing.T) {
 
 			err := deliverer.Deliver(
 				newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
-				store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"},
+				store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: tt.interest},
 			)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {

@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,17 +45,19 @@ func TestAConsumerNotActiveReportIsAWarning(t *testing.T) {
 // reload's revocation of its subject, which names a sid and no queue group. A refusal of a publish,
 // of another subscription, of the same subject in another queue group or outside one, a revocation
 // of another subject, and one a connection the client has replaced reports late, leave it as it
-// is. The errors are built as nats.go builds the one it hands the async error callback for a
+// is. The server quotes each name with %q, so a queue group holding a double quote is still its
+// own. The errors are built as nats.go builds the one it hands the async error callback for a
 // server's -ERR (processErr).
 func TestOnlyTheServersRefusalOfTheCoreSubscriptionMarksItRefused(t *testing.T) {
 	violation := func(text string) error { return fmt.Errorf("%w: %s", nats.ErrPermissionViolation, text) }
 	own := violation(`Permissions Violation for Subscription to "notifications.>" using queue "live"`)
 	current := &nats.Conn{}
 	for _, tc := range []struct {
-		name string
-		conn *nats.Conn
-		err  error
-		want bool
+		name  string
+		queue string
+		conn  *nats.Conn
+		err   error
+		want  bool
 	}{
 		{name: "its own refusal", conn: current, err: own, want: true},
 		{name: "a publish refusal", conn: current, err: violation(`Permissions Violation for Publish to "notifications.>"`)},
@@ -64,15 +67,17 @@ func TestOnlyTheServersRefusalOfTheCoreSubscriptionMarksItRefused(t *testing.T) 
 		{name: "a reload's revocation", conn: current, err: violation(`Permissions Violation for Subscription to "notifications.>" (sid "3")`), want: true},
 		{name: "a reload's revocation of another subject", conn: current, err: violation(`Permissions Violation for Subscription to "notifications.role.>" (sid "3")`)},
 		{name: "a revocation from a replaced connection", conn: &nats.Conn{}, err: violation(`Permissions Violation for Subscription to "notifications.>" (sid "3")`)},
+		{name: "its own refusal of a queue group holding a double quote", queue: `li"ve`, conn: current, err: violation(fmt.Sprintf("Permissions Violation for Subscription to %q using queue %q", "notifications.>", `li"ve`)), want: true},
 		{name: "a replaced connection", conn: &nats.Conn{}, err: own},
 		{name: "not a permissions violation", conn: current, err: errors.New(own.Error())},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			queue := cmp.Or(tc.queue, "live")
 			client := &Client{Conn: current}
 			client.subscriptions[coreSubscription] = recoverableSubscription{
 				transport: coreSubscription,
 				subject:   "notifications.>",
-				queue:     "live",
+				queue:     queue,
 				handler:   func(*nats.Msg) {},
 			}
 			client.onAsyncError(tc.conn, tc.err)

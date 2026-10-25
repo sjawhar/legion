@@ -528,7 +528,8 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 // agentSubjectDelivery delivers directly to the session named by the topic
 // (notifications.agent.<session>), pushing over HTTP/WebSocket when the
 // session is live and falling back to whatever session.HandleAgentMessage
-// decides (e.g. queuing) otherwise.
+// decides (e.g. queuing) otherwise. A session another listener owns is that
+// listener's to deliver, so this one acknowledges the message silently.
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
@@ -561,6 +562,14 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
 	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, cfg.deliverer)
+	if result.OwnedElsewhere {
+		// Every listener on the bus reads each inbox message from its own durable, and the owner
+		// delivers it from its copy: a no_holder exception here would report a delivered message
+		// as undeliverable, once per listener that does not own the session.
+		cfg.logger.DeliveryLog(slog.LevelDebug, "listener agent session owned by another listener", sessionID, item.Topic, item.EventID, "owned_elsewhere")
+		message.finalize(false)
+		return
+	}
 	if result.Err != nil {
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,

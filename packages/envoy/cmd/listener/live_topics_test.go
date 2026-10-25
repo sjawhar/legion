@@ -524,3 +524,106 @@ func TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBu
 	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), inbox)
 	serving.noPrompt(t, 3*time.Second)
 }
+
+// A listener that does not own a session leaves each inbox message to it to the owner, which
+// takes the same message off its own durable and delivers it: the non-owner reports nothing. Before
+// the fix the non-owner read its refusal as a session missing everywhere and published a no_holder
+// exception on the inbox's exceptions lane for a message the owner had delivered, one for each
+// listener that does not own the session.
+func TestANonOwningListenerLeavesAnInboxMessageToTheOwnerSilently(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	owner := startListenerProcess(t, binary, uri, "silent-owner")
+	owner.waitHealthy(t)
+	other := startListenerProcess(t, binary, uri, "silent-other")
+	other.waitHealthy(t)
+
+	serving := startServingPort(t, "ses_silent_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, owner, serving, "127.0.0.1", "notifications.team."+id.New())
+	other.awaitSessionsListed(t, serving.sessionID)
+	exceptions := subscribeExceptions(t, uri)
+
+	inbox := newEnvelope("agent", contracts.AgentSubject(serving.sessionID), "a message its owner delivers")
+	inbox.SourceSession = "ses_sender_" + id.New()
+	publish(t, connectPublisher(t, uri), inbox)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), inbox)
+	serving.noPrompt(t, 3*time.Second)
+	if report, err := exceptions.NextMsg(time.Second); err == nil {
+		t.Fatalf("an exception was published for a delivered inbox message, on %s: %s", report.Subject, report.Data)
+	}
+}
+
+// A session that registered through one listener and then re-registered through another, same
+// session, port and host, keeps the first listener's MachineID on its stored subscription, so that
+// listener is the only one matching its topics. It is also the session's owner, and delivers a
+// stored topic to it once. Before the fix the owner was read from the session entry, which the
+// re-registration moved to the second listener: the first matched the topic and refused the
+// session, logging a failed delivery and retrying it until the durable gave up, while the second
+// matched nothing, so the session was never prompted.
+func TestARehomedSessionStillReceivesItsStoredTopicOnce(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	first := startListenerProcess(t, binary, uri, "rehome-first")
+	first.waitHealthy(t)
+	second := startListenerProcess(t, binary, uri, "rehome-second")
+	second.waitHealthy(t)
+
+	topic := "notifications.github.acme.repo" + id.New() + ".pr.1"
+	serving := startServingPort(t, "ses_rehome_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, first, serving, "127.0.0.1", topic)
+	registerServingSession(t, second, serving, "127.0.0.1", topic)
+	first.awaitSessionMachine(t, serving.sessionID, "rehome-second")
+
+	item := newEnvelope("github", topic, "pull request 1 was opened")
+	publish(t, connectPublisher(t, uri), item)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
+	serving.noPrompt(t, 3*time.Second)
+	for _, listener := range []*listenerProcess{first, second} {
+		if output := listener.Output.String(); strings.Contains(output, "listener delivery failed") {
+			t.Fatalf("the listener on port %d logged a failed delivery:\n%s", listener.port, output)
+		}
+	}
+}
+
+// subscribeExceptions subscribes a connection of the test's own to every exceptions lane, core
+// NATS and stored alike, and flushes so the server holds the subscription when it returns.
+func subscribeExceptions(t *testing.T, uri string) *natsgo.Subscription {
+	t.Helper()
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	exceptions, err := conn.SubscribeSync(bus.ExceptionTopicPrefix + ">")
+	if err != nil {
+		t.Fatalf("subscribe to the exceptions lanes: %v", err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the exceptions subscription: %v", err)
+	}
+	return exceptions
+}
+
+// awaitSessionMachine waits up to 10 s for listener's GET /v1/sessions to list sessionID as
+// registered through machineID, so a delivery through this listener reads that session entry.
+func (p *listenerProcess) awaitSessionMachine(t *testing.T, sessionID, machineID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, body := callListener(t, p.port, http.MethodGet, "/v1/sessions", "")
+		var listed []struct {
+			SessionID string `json:"session_id"`
+			MachineID string `json:"machine_id"`
+		}
+		if status == http.StatusOK && json.Unmarshal([]byte(body), &listed) == nil {
+			for _, row := range listed {
+				if row.SessionID == sessionID && row.MachineID == machineID {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener on port %d does not list %s as registered through %s within 10s: %d %s", p.port, sessionID, machineID, status, body)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

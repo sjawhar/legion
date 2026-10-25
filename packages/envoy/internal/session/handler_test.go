@@ -23,6 +23,7 @@ func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 
 	port := mockPort(mock.URL)
 	sessions, deliverer := newKVDeliverer(t)
+	deliverer.MachineID = "test-machine"
 	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
@@ -102,26 +103,19 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 	}
 }
 
-// TestHandleAgentMessage_WrongMachine tests that when the interest exists but
-// for a different machine, the handler falls through to registry lookup (since
-// interest.MachineID != current machineID). The session is found on the current
-// machine and delivery succeeds.
-func TestHandleAgentMessage_WrongMachine(t *testing.T) {
-	var deliveryCount atomic.Int32
-
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		deliveryCount.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer mock.Close()
-
-	port := mockPort(mock.URL)
+// TestHandleAgentMessage_StoredInterestOnAnotherMachine tests that a session whose stored
+// subscription names another listener is that listener's, though its session entry names none:
+// the handler reports it owned elsewhere, requests nothing and does not NAK, since the listener
+// its topics are fanned out on delivers the message from its own durable.
+func TestHandleAgentMessage_StoredInterestOnAnotherMachine(t *testing.T) {
+	var requests []string
 	sessions, deliverer := newKVDeliverer(t)
-	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
+	deliverer.MachineID = "test-machine"
+	deliverer.HTTPClient = reachableClient(&requests)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: 4096, Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
 
-	// Interest exists but for a different machine
 	interest := &store.Interest{
 		SessionID: "ses_target",
 		Dir:       "/test",
@@ -133,13 +127,11 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 		"ses_target", "test-machine", interest, &deliverer,
 	)
 
-	// Interest is for different machine, so handler falls through to registry lookup.
-	// Registry finds session on current machine, delivery succeeds.
-	if !result.Delivered {
-		t.Fatalf("expected delivery via registry lookup, got Delivered=%v, NAK=%v", result.Delivered, result.ShouldNAK)
+	if !result.OwnedElsewhere || result.Delivered || result.ShouldNAK || result.Err != nil {
+		t.Fatalf("result = %+v, want owned elsewhere with no delivery, NAK or error", result)
 	}
-	if count := deliveryCount.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery via registry lookup, got %d", count)
+	if len(requests) != 0 {
+		t.Fatalf("requested %q, want no request", requests)
 	}
 }
 
@@ -152,10 +144,11 @@ func reachableClient(requests *[]string) *http.Client {
 	})}
 }
 
-// TestHandleAgentMessage_WrongMachineKVAcks tests that when the KV session registry says a session
-// is another listener's (machine-B), the registry path neither delivers nor NAKs, and requests
-// nothing even though the session's port answers: the session is its owner's to deliver, and every
-// listener on the bus reads each inbox message, so a second delivery would arrive twice.
+// TestHandleAgentMessage_WrongMachineKVAcks tests that with no stored subscription, when the KV
+// session registry says a session is another listener's (machine-B), the registry path reports it
+// owned elsewhere, neither delivers nor NAKs, and requests nothing even though the session's port
+// answers: the session is its owner's to deliver, and every listener on the bus reads each inbox
+// message, so a second delivery would arrive twice.
 func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	var requests []string
 	sessions, deliverer := newKVDeliverer(t)
@@ -171,31 +164,29 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 		"ses_target", "machine-A", nil, &deliverer,
 	)
 
-	if result.ShouldNAK {
-		t.Fatal("expected ACK (not NAK) for another listener's session")
-	}
-	if result.Delivered {
-		t.Fatal("expected no delivery (session is machine-B's)")
+	if !result.OwnedElsewhere || result.Delivered || result.ShouldNAK || result.Err != nil {
+		t.Fatalf("result = %+v, want owned elsewhere with no delivery, NAK or error", result)
 	}
 	if len(requests) != 0 {
 		t.Fatalf("requested %q, want no request", requests)
 	}
 }
 
-// TestHandleAgentMessage_InterestPathWrongMachineKVAcks tests that when the interest path matches
-// this machine but the KV session registry says the session moved to another listener
-// (machine-B), the handler neither delivers nor NAKs and requests nothing: the session entry names
-// its owner, which delivers the message from its own durable.
-func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
+// TestHandleAgentMessage_RehomedSessionStaysWithItsStoredInterest tests that a session whose
+// stored subscription names this listener (machine-A) is delivered by it after the session
+// re-registered through another listener (machine-B): the stored MachineID survives the
+// re-registration and is the one machine-A matches the session's topics on, so both paths agree
+// machine-A owns it. Delivery follows machine-A's own address rule, here the recorded host.
+func TestHandleAgentMessage_RehomedSessionStaysWithItsStoredInterest(t *testing.T) {
 	var requests []string
 	sessions, deliverer := newKVDeliverer(t)
 	deliverer.MachineID = "machine-A"
+	deliverer.HostBridge = ""
 	deliverer.HTTPClient = reachableClient(&requests)
 	if err := sessions.Put("ses_target", session.SessionEntry{Port: 4096, MachineID: "machine-B", Host: "example-host-b", Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
 
-	// Interest says machine-A (stale interest), but KV says machine-B
 	interest := &store.Interest{
 		SessionID: "ses_target",
 		Dir:       "/test",
@@ -207,13 +198,10 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 		"ses_target", "machine-A", interest, &deliverer,
 	)
 
-	if result.ShouldNAK {
-		t.Fatalf("expected ACK (not NAK) for a session KV says moved to machine-B, got NAK=%v, Delivered=%v", result.ShouldNAK, result.Delivered)
+	if !result.Delivered || result.OwnedElsewhere || result.ShouldNAK || result.Err != nil {
+		t.Fatalf("result = %+v, want delivered", result)
 	}
-	if result.Delivered {
-		t.Fatal("expected no delivery (KV says session moved to machine-B)")
-	}
-	if len(requests) != 0 {
-		t.Fatalf("requested %q, want no request", requests)
+	if want := "http://example-host-b:4096/session/ses_target/prompt_async"; len(requests) != 1 || requests[0] != want {
+		t.Fatalf("requested %q, want exactly [%q]", requests, want)
 	}
 }

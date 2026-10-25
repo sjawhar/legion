@@ -19,12 +19,12 @@ const SessionWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
   // The session's real machine, as the client reported it (machineID()); machine_id stays the
-  // registering listener's own machine, which says which listener fans a topic out to the session
-  // (store.Registry.Match). Only the listener on machine_id delivers to a serve-port session, at
-  // this host unless it has a host bridge; any other listener leaves the session to it
-  // (session.go's ErrWrongMachine). Optional here only for a listener predating the field — the
-  // live listener always fills it in, falling back to machine_id itself
-  // (session.SessionEntry.HostOrMachine).
+  // listener it last registered through. The session's owner is the listener its stored
+  // subscription names (the one store.Registry.Match fans its topics out on), else the one on
+  // machine_id; only the owner delivers to a serve-port session, at this host unless it has a
+  // host bridge, and any other listener leaves inbox messages to it silently (session.go's
+  // ErrWrongMachine). Optional here only for a listener predating the field — the live listener
+  // always fills it in, falling back to machine_id itself (session.SessionEntry.HostOrMachine).
   host: z.string().optional(),
   dir: z.string(),
   port: z.number().int(),
@@ -315,10 +315,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
             // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
             // re-subscribes on each tick). The listener stores it separately from the registering
-            // listener's own machine_id and, unless it has a host bridge, reaches a serve-port
-            // session it registered at it; only that listener delivers to the session, and any
-            // other listener leaves it to that one. With a port, a value that is not a host name
-            // or IP address is refused with 400 (expected: ["host"]).
+            // listener's own machine_id, and the session's owner reaches a serve-port session at
+            // it unless that listener has a host bridge. The owner is the listener the session's
+            // stored subscription names, else the one it registered through; only the owner
+            // delivers to the session, and any other listener leaves inbox messages to it
+            // silently. With a port, a value that is not a host name or IP address is refused
+            // with 400 (expected: ["host"]).
             host: machineID(),
           })
         )

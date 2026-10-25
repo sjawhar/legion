@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -446,19 +447,17 @@ func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 	return connOK && subOK
 }
 
-// subscriptionRefusal and subscriptionRefusalQueue read the subject, and the queue group when there
-// is one, of the server's refusal of a subscription it was sent (`Permissions Violation for
-// Subscription to "<subject>" using queue "<queue>"`), as nats.go reads them to record the refusal
-// on its subscription (permissionsRe and permissionsQueueRe, nats.go v1.50.0 nats.go:3795-3833).
-// subscriptionRefusalSid reads the sid of the other form of refusal, the one a server sends when a
-// configuration reload revokes a subscription it had accepted (`Permissions Violation for
-// Subscription to "<subject>" (sid "<sid>")`, nats-server v2.10.29 client.go:5300), which names no
-// queue group whether the subscription had one or not.
-var (
-	subscriptionRefusal      = regexp.MustCompile(`Subscription to "(\S+)"`)
-	subscriptionRefusalQueue = regexp.MustCompile(`using queue "(\S+)"`)
-	subscriptionRefusalSid   = regexp.MustCompile(`\(sid "(\S+)"\)`)
-)
+// subscriptionRefusal reads the server's refusal of a subscription: the subject, the queue group
+// when there is one, and the sid when the refusal is a configuration reload's revocation of a
+// subscription it had accepted. A refusal of a subscription the client sent reads `Permissions
+// Violation for Subscription to "<subject>" using queue "<queue>"` (nats-server v2.10.29
+// client.go:4959-4964); a revocation reads `Permissions Violation for Subscription to "<subject>"
+// (sid "<sid>")` (client.go:5300) and names no queue group whether the subscription had one or not.
+// The server writes each name with %q, so each is matched as a whole Go-quoted string, escapes
+// included, and unquoted before it is compared: a name holding a double quote or a backslash
+// reaches the text escaped. nats.go's own reading (permissionsRe and permissionsQueueRe, nats.go
+// v1.50.0 nats.go:3795-3833) keeps the escapes, so it compares unequal to such a name.
+var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*")(?: using queue ("(?:[^"\\]|\\.)*"))?(?: \(sid ("(?:[^"\\]|\\.)*")\))?`)
 
 // onAsyncError is wired as the connection's async error callback, after the error is logged. A
 // server's refusal of the client's core subscription marks it refused for CoreSubOK. Any other
@@ -480,16 +479,21 @@ func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 	if !errors.Is(err, nats.ErrPermissionViolation) {
 		return
 	}
-	text := err.Error()
-	subject := subscriptionRefusal.FindStringSubmatch(text)
-	if subject == nil {
+	match := subscriptionRefusal.FindStringSubmatch(err.Error())
+	if match == nil {
+		return
+	}
+	subject, err := strconv.Unquote(match[1])
+	if err != nil {
 		return
 	}
 	queue := ""
-	if match := subscriptionRefusalQueue.FindStringSubmatch(text); match != nil {
-		queue = match[1]
+	if match[2] != "" {
+		if queue, err = strconv.Unquote(match[2]); err != nil {
+			return
+		}
 	}
-	revoked := queue == "" && subscriptionRefusalSid.MatchString(text)
+	revoked := match[2] == "" && match[3] != ""
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if nc != c.Conn {
@@ -498,7 +502,7 @@ func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
 	core := &c.subscriptions[coreSubscription]
-	if core.handler != nil && core.subject == subject[1] && (revoked || core.queue == queue) {
+	if core.handler != nil && core.subject == subject && (revoked || core.queue == queue) {
 		core.refused = true
 	}
 }
