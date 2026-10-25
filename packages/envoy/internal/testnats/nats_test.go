@@ -539,7 +539,9 @@ var dockerDriver = regexp.MustCompile(
 // container runtime, and a test that needs one cannot run where they do. This pins the two ways
 // to get one — an import of testcontainers, and a hand-driven docker — against the packages
 // allowed to have it. internal/smoke's containers are behind the smoke build tag and the rig's
-// own behind natslive, neither of which an untagged go list or this walk sees.
+// own behind natslive, so an untagged go list never sees their imports. The walk does not go by
+// tag: it reads every .go file, those included, and passes them because none drives docker by
+// hand.
 func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
 	t.Run("imports", func(t *testing.T) {
 		for _, finding := range containerImporters(t) {

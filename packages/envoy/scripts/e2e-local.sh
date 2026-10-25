@@ -78,6 +78,7 @@ readonly nats_log_file="${out_dir}/nats.log"
 readonly listener_binary="${out_dir}/listener"
 readonly nats_binary="${out_dir}/natsd"
 readonly nats_store_dir="${out_dir}/nats-store"
+readonly lock_file="${out_dir}/run.lock"
 readonly session_ready_fifo="${out_dir}/session-ready.fifo"
 readonly subscriber_ready_fifo="${out_dir}/subscriber-ready.fifo"
 
@@ -99,16 +100,27 @@ cleanup() {
   rm -rf "$session_ready_fifo" "$subscriber_ready_fifo" "$nats_store_dir"
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
 
-for command in bun curl go jq openssl; do
+for command in bun curl flock go jq openssl; do
   command -v "$command" >/dev/null || {
     printf 'ERR: required command is unavailable: %s\n' "$command" >&2
     exit 3
   }
 done
 
+# out/e2e belongs to one run at a time. Everything below removes what is in it — the evidence, the
+# logs, the binaries and the JetStream store — so this run claims it first, and a second run of this
+# script in the same checkout is refused before it touches anything a running first run is using.
+# The lock is held by this shell, and the servers it starts, for as long as they live, and needs no
+# cleanup of its own; a directory left by a run that is gone holds no lock and is cleaned as usual.
 mkdir -p "$out_dir"
+exec {lock_fd}>"$lock_file"
+flock -n "$lock_fd" || {
+  printf 'ERR: another run of e2e-local.sh is using %s; this run removed nothing.\n' "$out_dir" >&2
+  exit 3
+}
+trap cleanup EXIT INT TERM
+
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
   "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \

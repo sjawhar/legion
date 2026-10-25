@@ -64,7 +64,8 @@ Run the reusable local acceptance driver from the repository root:
 packages/envoy/scripts/e2e-local.sh
 ```
 
-It builds `cmd/listener`, starts a throwaway `nats:2.10-alpine` container, and
+It builds `cmd/listener` and a throwaway NATS server of its own
+(`internal/testnats/cmd/natsd`), so it needs no container runtime, starts both, and
 submits signed public GitHub fixtures plus a three-paragraph direct agent
 message. The driver asserts the one-warning response for a never-seen GitHub
 repository, rejects an unheld role publish before proving the fake session can
@@ -72,8 +73,8 @@ claim and receive that role, validates settled pull-request checks, lifecycle
 and comment topics, PR-less workflow and Actions-job behavior, obsolete-topic absence, and
 both renderers' direct-message summary/body contract.
 
-Docker downloads it from `mirror.gcr.io/library/nats:2.10-alpine`, Google's
-Docker Hub mirror, on the first run when it is not already cached.
+The NATS server is a process of this checkout's own build, stopped on exit with
+the listener and the two fake clients.
 
 Evidence remains in `packages/envoy/out/e2e/` after the run:
 
@@ -84,9 +85,7 @@ Evidence remains in `packages/envoy/out/e2e/` after the run:
 - `rendered-go.txt` is the equivalent Go `Deliverer.Text` output.
 
 Set `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` when the default local
-ports are occupied, and `E2E_NATS_CONTAINER` when another run holds the
-`envoy-e2e-nats` container name. The driver removes only the container it
-started. CI runs it as the `envoy-e2e-local` job of
+ports are occupied. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/envoy-and-contracts.yaml`.
 
 ## Contract source of truth
