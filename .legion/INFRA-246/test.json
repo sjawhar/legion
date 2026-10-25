@@ -2,79 +2,72 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T10:05:00Z",
-  "round": "testing round 5, over review round 3's changes (code head 0a3dc8ad4937dc332d17f03158dc12c367149dc3)",
+  "completed": "2026-10-25T11:05:00Z",
+  "round": "testing round 6, over the revert of round 5's hand-back skip (code head fabca81c255be2d6cd75335f98a8b0848326c987)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Three things changed and each was driven here. The strict renewal rule was broken at the exact tie the reviewer named, the previous round's own check was run against that same tree to show it accepted the tie, and both remedies the new failure prints were applied and shown to pass the rule that printed them. The seventh site's fix was mutation-checked in both directions. Both live arms were re-run at this head, since the plugin runtime changed again. The implementer's account held in every case.",
+    "how": "This round is a revert, one salvaged case and one header sentence, and each was checked as that. The revert was verified as a revert rather than read from a hash: `jj diff --from d6884d572684 --to cb9ef49b53f1 --stat packages/pi-envoy/extensions/envoy.ts` reports 0 files changed, so the plugin's product code is byte-identical to the head whose fence audit the reviewer completed, and round 2's fence comment sits below the restore loop again (envoy.ts:2303-2305). The salvaged case was mutation-checked in the ordering the implementer names, and separately shown not to depend on the behaviour the revert removed. The header sentence was compared with the fixture whose numbers it now quotes. Both live arms were re-run, since the product code moved even though it moved by reverting.",
     "rounds": {
       "1": "verified at 7045a3a4 (worst accepted gap 200.0 s at the old 100 s interval).",
       "2": "verified at 3355028f, verdict fail on the required `test` check.",
       "3": "verified at e80f1d5d (rule 4 drift-proven, the notice first rendered in a pane).",
-      "4": "verified at 9d878270 (merge fingerprint residue read line by line, the invariant test reproduced both ways)."
+      "4": "verified at 9d878270 (merge fingerprint residue read line by line; the invariant test reproduced both ways).",
+      "5": "verified at 4fca4b9c (the tie broken on both scripts; both printed remedies applied and shown to pass)."
     }
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The renewal rule now rejects the exact tie, where the rule it replaces accepted it: a sum equal to the record lifetime fails as surely as one past it.",
-      "surface": "The script the required lint job runs, in the real tree, and the previous round's own copy of that script (jj file show -r 40a7ea16) over the same tree, so the two verdicts are comparable.",
-      "command": "cd \"$LEGION_WORKSPACE\" && .github/scripts/check-heartbeat-margin.sh, with packages/envoy-client/src/transport.ts:6 DEFAULT_TIMEOUT_MS set to 14_875 (call budget 2 x 14875 + 250 = 30000 ms, so 3 x 90000 + 30000 = 300000 ms, exactly the lifetime)",
-      "observed": "The new check exits 1: `3 refresh intervals of 90000 ms … plus one listener call's 30000 ms … are 300000 ms, equal to the session record lifetime of 300000 ms …, and the sum must fall strictly short of it: equal is refused as surely as past, because either way the third refresh does not complete before the record expires`, then `::error::1 problem(s)`. The round-4 copy of the same script, run over that identical tree, exits 0 and prints its success line - so the tie is exactly what this round closes, measured rather than reasoned. The constant was restored and `jj status` reported no changes.",
-      "headSha": "4fca4b9c956fe3d232da12aed67bb1ef3780ea8a",
-      "negativeControl": "The clean tree: the same new check exits 0 at 3 x 90000 + 10250 = 280250 ms against 300000 ms, so the rule refuses the tie without refusing the tree it ships with."
+      "criterion": "The round-5 skip is reverted, not patched: the plugin's product code is the code the reviewer's fence audit was completed over, and the failed hand-back is restored unconditionally again.",
+      "surface": "The workspace's own history, compared commit to commit, and the file read at the restore loop.",
+      "command": "cd \"$LEGION_WORKSPACE\" && jj diff --from d6884d572684ebef8ecaf412b38c19a90fb2a94a --to cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9 --stat packages/pi-envoy/extensions/envoy.ts",
+      "observed": "`0 files changed, 0 insertions(+), 0 deletions(-)` - byte-identical. Read at the site, settleEndedHolds' restore loop (envoy.ts:2299-2302) carries no condition, and round 2's fence comment and its `if (!live()) return false;` are back below it at :2303-2305. Against my own last verified head the plugin loses exactly those five lines (`jj diff --from f1c346924e6a --to cb9ef49b53f1 --stat` reports envoy.ts -5).",
+      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
+      "negativeControl": "The same comparison after each mutation below: `jj diff --from d6884d572684 --to @ --stat packages/pi-envoy/extensions/envoy.ts` reports 0 files changed again, so every mutation this round made was undone byte-for-byte rather than approximately."
     },
     {
-      "criterion": "The guard's own advice is now sound: each remedy the failure prints, applied, produces a tree that passes the rule that printed it - which the advice it replaces did not.",
-      "surface": "The same script in the real tree, with each printed remedy applied across every site the message names and then restored.",
-      "command": "cd \"$LEGION_WORKSPACE\" && .github/scripts/check-heartbeat-margin.sh after applying `Lower DEFAULT_HEARTBEAT_MS to at most 89000 ms` and, separately, `raise the registry's default ttl to at least 301000 ms`",
-      "observed": "At the tie the failure prints both remedies. Remedy one applied - DEFAULT_HEARTBEAT_MS 89_000 with the daemon's Heartbeat and pluginHeartbeat at 89 * time.Second as the message says - exits 0 (3 x 89000 + 30000 = 297000 ms). Remedy two applied instead - the registry's ttl at 301 * time.Second with listenerSessionTTL beside it - exits 0 (300000 ms strictly inside 301000 ms). Both prescribed values are whole seconds, so each is typable in the three Go sites the check parses as whole seconds or minutes (89 * time.Second, 301 * time.Second). The old advice was not sound: on a tree failing with that same 30000 ms call budget, the round-4 check prints `Lower DEFAULT_HEARTBEAT_MS to at most 90000 ms`, and 90000 is precisely the tie - its own successor rule refuses the tree its own remedy prescribes. Every edit was reverted and `jj status` reported no changes.",
-      "headSha": "4fca4b9c956fe3d232da12aed67bb1ef3780ea8a",
-      "negativeControl": "The old check's prescription run under the old check passes and under the new one fails, which is the before-and-after of this fix in one pair of runs."
+      "criterion": "The salvaged case pins round 2's fix - a failed hand-back is restored for a later pass - and does not quietly depend on the behaviour the revert removed.",
+      "surface": "The plugin's own suite, against a mutated working tree in two different directions, each restored afterwards.",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a settle abandoned mid-hand-back restores the hold whose hand-back failed, for a later pass to hand back\", first with the restore loop moved below `if (!live()) return false;` (the pre-round-2 ordering), then with round 5's `if (topic === claimedRoleTopic) continue;` put back at the top of the loop",
+      "observed": "Pre-round-2 ordering: 1 fail - the case measures round 2's fix rather than restating it. Round 5's skip reinstated: 1 pass - so the case does not depend on the reverted behaviour in either direction, which is what makes it safe to keep after the revert. At the head as it ships, both hand-back cases pass (2 tests, 0 fail), and the tree was restored byte-for-byte after each mutation.",
+      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
+      "negativeControl": "The first mutation is the control for the case's subject, the second for its independence: one makes it red by undoing the fix it pins, the other leaves it green while changing the code the revert removed."
     },
     {
-      "criterion": "The two-interval rule's deletion left nothing dangling, and the paragraph that explains why the pass deadline is not in the formula survived as documentation.",
-      "surface": "The check, its suite and the smoke script, read in the tree.",
-      "command": "grep -rn 'worst_case|worst case' .github/scripts/check-heartbeat-margin.sh .github/scripts/check-heartbeat-margin.test.sh packages/pi-envoy/scripts/smoke-registration-stall.sh ; sed -n '20,35p' .github/scripts/check-heartbeat-margin.sh",
-      "observed": "No match anywhere: the term, its failure text, its assertions and its success-line clause are gone together. The header reads `Four things must hold, and this check fails unless all four do`, the rules renumber 1-4, and the paragraph under rule 1 survives in full - the backstop posts the refresh at the first tick where a pass is still running and the last accepted registration is a whole interval old, `whatever the deadline is`, so the gap a stalled pass opens is at most two intervals and one listener call, which the three-interval sum already covers, and `MIN_PASS_DEADLINE_MS only floors how long one pass may run, and raising it must not be refused by this check`.",
-      "headSha": "4fca4b9c956fe3d232da12aed67bb1ef3780ea8a",
-      "negativeControl": "The suite that pinned the deleted rule is CI's lane and green at this head (Tests run 40181461530, job test), so the deletion did not leave an assertion pinning a term that no longer exists."
+      "criterion": "The margin check's header sentence says what the arithmetic says, and the numbers it quotes are the tie fixture's own.",
+      "surface": "The check's header and the suite's tie fixture, read in the tree, with the check run from the repository root as CI runs it.",
+      "command": "cd \"$LEGION_WORKSPACE\" && jj diff --from f1c346924e6a --to cb9ef49b53f1 --git .github/scripts/check-heartbeat-margin.sh ; grep -n 'fixture tie' .github/scripts/check-heartbeat-margin.test.sh ; .github/scripts/check-heartbeat-margin.sh",
+      "observed": "The header now reads `at equality the third refresh's budgeted completion reaches the instant the record expires, leaving no scheduling margin. With a 40 000 ms interval, a 60 000 ms call budget and a 180 000 ms lifetime, the third refresh is dispatched at 120 000 ms and its budget runs out at 180 000 ms`. The suite's tie fixture is `fixture tie 40_000 12_000 29_800` with the shared default lifetime: a 40 000 ms interval, a call budget of 2 x 29 800 + 400 = 60 000 ms and a 180 000 ms lifetime, summing to 180 000 ms - the same three numbers, and the assertion at :168 quotes `are 180000 ms, equal to the session record lifetime of 180000 ms`. The check itself still exits 0 on the shipping tree (280250 ms strictly inside 300000 ms).",
+      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
+      "negativeControl": "Round 5's control stands and was not weakened by the wording change: the tie is still refused, since only the header comment moved - `jj diff --git` over that file shows six lines, all inside the comment block, and the comparison, the failure text and the remedies are untouched."
     },
     {
-      "criterion": "The seventh site is closed: a failed hand-back is restored only where a newer claim has not settled it, and the holds a newer claim did not touch are still restored rather than leaked.",
-      "surface": "The plugin's own suite, run case by case against a mutated working tree: the guard disabled, then the whole restore disabled, each time restored afterwards.",
-      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a settle abandoned mid-hand-back restores the failed holds a newer claim did not settle, and only those\", with envoy.ts:2304 forced to `if (false) continue;` and then the restore body skipped entirely",
-      "observed": "Both directions fail, as the implementer reports. Guard disabled (`if (false) continue`): 1 fail - the hold of the role the process now holds is restored, which is the redundant soft claim I traced in round 4. Restore disabled (`if (true) continue`): 1 fail - the holds a newer claim never touched are leaked, which is what round 2's fix exists to prevent. Restored: both hand-back cases pass (2 tests, 0 fail), and `jj status` reports no changes. The condition is `topic === claimedRoleTopic`, and the fence stays below the loop where round 2 put it.",
-      "headSha": "4fca4b9c956fe3d232da12aed67bb1ef3780ea8a",
-      "negativeControl": "The two mutations are the controls: each disables one half of the new line and the case goes red on that half's own symptom."
-    },
-    {
-      "criterion": "The acceptance the issue rests on still holds at this head, which changed the plugin runtime again.",
+      "criterion": "The acceptance the issue rests on still holds at this head, whose plugin product code moved by reverting.",
       "surface": "Real headless `omp --mode rpc --no-ui` panes of this checkout's plugin against the production Envoy listener, the same two arms as every round.",
       "command": "cd \"$LEGION_WORKSPACE\" && packages/pi-envoy/scripts/smoke-registration-stall.sh --arm stall ; packages/pi-envoy/scripts/smoke-registration-stall.sh --arm recover",
-      "observed": "SMOKE stall PASS: 01a1727a-cd7c-733a-8063-1a23257996d2 stayed listed 365 s after registration 3 wedged, last_seen 1792922106094 -> 1792922556137, seven registrations, exactly one stall line; measured at the listener the accepted-registration gaps were 180.041, 90.033, 89.983 and 89.986 s, so the worst gap during a stall is 180.0 s against the 300 s lifetime. SMOKE recover PASS: 01a1727a-cd5e-72ad-815c-c36550f0a7c1 deleted while its process ran and re-registering itself 88 s later, within one 90 s interval.",
-      "headSha": "4fca4b9c956fe3d232da12aed67bb1ef3780ea8a",
-      "negativeControl": "Both controls stand from round 4 and measure code this round does not touch: `--arm stall --control --base-rev c88a3a194c79` PASS (the base plugin posted nothing after the wedge and its record was gone 213 s later, never returning, watched to 395 s) and `--arm recover --control` PASS (a SIGKILLed pane's deleted record stayed gone the whole 135 s). This round's diff touches neither the base revision the stall control materialises nor the listener the recover control measures."
+      "observed": "SMOKE stall PASS: 01a172b0-5c36-7465-9047-8ddeed72225c stayed listed 365 s after registration 3 wedged, last_seen 1792925560893 -> 1792925995804, seven registrations, exactly one stall line; measured at the listener the accepted-registration gaps were 165.004, 89.914, 90.083 and 89.910 s, so the worst gap during the stall is 165.0 s against the 300 s lifetime. SMOKE recover PASS: 01a172b0-5c9a-7153-b575-7d55f0c0bd8a deleted while its process ran and re-registering itself 88 s later, inside one 90 s interval.",
+      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
+      "negativeControl": "Both controls stand from round 4 and measure code no round since has touched: `--arm stall --control --base-rev c88a3a194c79` PASS (the base plugin posted nothing after the wedge and its record was gone 213 s later, never returning, watched to 395 s) and `--arm recover --control` PASS (a SIGKILLed pane's deleted record stayed gone the whole 135 s)."
     },
     {
-      "criterion": "The pull request's head keeps every check the base branch requires green.",
-      "surface": "GitHub Actions on the code head, read rather than re-run.",
-      "command": "gh run list --commit 0a3dc8ad4937dc332d17f03158dc12c367149dc3 ; gh run view 40181461530",
-      "observed": "Tests run 40181461530: lint, typecheck and test all success. PR Title run 40181515837 success, Docs run 40181461484 success, Worker Image run 40181461500 success. Legion Envoy and Contracts run 40181461491 still queued at the time of reading, cited as queued and not waited for; it is not among the four checks main's ruleset requires. The pull request reads MERGEABLE.",
-      "headSha": "4fca4b9c956fe3d232da12aed67bb1ef3780ea8a",
-      "negativeControl": "The same `test` job is the one that caught round 2's schedule drift and went red there, so a green here is a verdict the lane is capable of withholding."
+      "criterion": "The pull request's head keeps every check the base branch requires green, and the one red lane is inherited rather than this branch's.",
+      "surface": "GitHub Actions on the code head and on main, read rather than re-run, with the repository's own ruleset read for the required set.",
+      "command": "gh run list --commit fabca81c255be2d6cd75335f98a8b0848326c987 ; gh run view 40185418035 ; gh api repos/sjawhar/legion/rules/branches/main ; gh api 'repos/sjawhar/legion/contents/skills/legion-architect/SKILL.md?ref=main' --jq .size",
+      "observed": "Tests run 40185418035: lint, typecheck and test all success. Docs run 40185418016 and Worker Image run 40185417996 success; PR Title runs 40185459489, 40185459944, 40185461479 and 40185461838 success. The pull request reads MERGEABLE. `Legion Envoy and Contracts` run 40185418002 carries one failing job, `pi-legion`, step `Test pi-legion`, and it is inherited: main's own copy of skills/legion-architect/SKILL.md is 51256 bytes against the 51200-byte (50 KiB) spill threshold packages/pi-shared/test/skills-guard.ts checks, this branch's copy is 50986 bytes, and a pull request stages main's copy in its merge commit, so no branch clears it; main's own run 40181781309 carries the same failing job. The required set is lint, typecheck, test and pr-title alone, so it blocks no merge. dispatch://INFRA-376 is the work that moves the architect skill's wake-routing table out and is in test and review now. Cited as inherited and tracked, checked rather than taken on trust.",
+      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
+      "negativeControl": "The same `test` job is the one that went red at 872bfd6f in round 2, so a green there is a verdict this lane withholds when the branch is wrong; and the red lane's cause was located in main's file rather than assumed - the two byte counts, 51256 on main against 50986 here, are what distinguishes inherited from ours."
     }
   ],
   "observations": [
-    "The declined negative maximum is reachable only as the architect says: when the call budget alone reaches the lifetime, `max_heartbeat` goes negative, and I reached it only by setting DEFAULT_TIMEOUT_MS past 145 s, a tree already failing for a far larger reason. The verdict there is still correct, and the advice is absurd rather than subtly wrong, so nobody is misled by it. Recorded, not raised.",
-    "`registerSession`'s unfenced stamp (envoy.ts:1622-1623) stays as the architect ruled in round 4, and the body carries why: the stamp is honest, and its only effect is one extra registration posted outside the queues.",
+    "The test file's delta this round is a removal plus an addition, not a removal only: the case round 5 added was deleted with the skip, and the salvaged case `a settle abandoned mid-hand-back restores the hold whose hand-back failed, for a later pass to hand back` was added in its place. The implementer published that to the reviewer with its reasoning before this round completed, so it is disclosed rather than a surprise.",
+    "The site the revert leaves open is recorded against the extraction ask with both wrong discriminators named - the topic, which round 5 used and which `claimedRoleTopic` also carries from the loop's own unconfirmed adoption, and the session id, which would restore exactly the case a skip exists for. Nothing here asks for a seventh hand-written guard.",
     "What was left behind: two smoke panes in fresh /tmp scratch directories, no role claimed and no message sent; the only listener writes were the recover arm's single DELETE and one cleanup DELETE. GET /v1/sessions filtered to those directories returns zero rows.",
-    "Static lanes were read, not re-run: lint, typecheck and the unit and check suites are cited from the CI line at the code head. The four mutation runs above are the check of a specific claim about a specific case, each with the tree restored afterwards."
+    "Static lanes were read, not re-run: lint, typecheck and the unit and check suites are cited from the CI line at the code head. The three mutation runs above are the check of a specific claim about a specific case, each with the tree restored byte-for-byte afterwards."
   ],
   "ciRead": {
-    "codeHead": "0a3dc8ad4937dc332d17f03158dc12c367149dc3",
+    "codeHead": "fabca81c255be2d6cd75335f98a8b0848326c987",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "all four required checks success at the code head (Tests run 40181461530; PR Title run 40181515837). Docs and Worker Image success; Legion Envoy and Contracts queued at the time of reading. The pull request reads MERGEABLE."
+    "verdict": "all four required checks success at the code head (Tests run 40185418035; PR Title run 40185461838). Docs and Worker Image success. Legion Envoy and Contracts run 40185418002 has one failing job, pi-legion, inherited from main's oversized skills/legion-architect/SKILL.md (51256 bytes against the 51200-byte guard; this branch's copy is 50986), not in the required set, tracked at dispatch://INFRA-376. The pull request reads MERGEABLE."
   }
 }
