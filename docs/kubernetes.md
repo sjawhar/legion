@@ -2806,14 +2806,14 @@ gate commands itself rather than trusting the answers recorded here:
 - *Executed from a role container on 2026-10-24, for dispatch://INFRA-71*: the sequence's Job half
   (87 s to Ready on a cold machine, 10 s on a warm one), which is where the two waits come from:
   the single `wait` this section published before exited 1 at once with `error: no matching
-  resources found`, because the Job's pod does not exist the instant the apply returns. And, *not
-  run again since*: the credential-less gate, with the in-cluster environment removed; one
-  deliberate breakage of each **enforced** rule of the Job manifest above, put through the
-  namespace's own admission server-side with nothing created, each refused naming the rule — the
-  reachability label has no breakage to record, since admission does not check it, which is the
-  whole of why that bullet is marked; and the reachability block, run as published against a
-  listener, against a port that refuses and then listens, and against an address whose packets
-  are dropped.
+  resources found`, because the Job's pod does not exist the instant the apply returns; and the
+  reachability block, run as published against a listener and against a port that refuses and
+  then listens. And, *not run again since*: the credential-less gate, with the in-cluster
+  environment removed; one deliberate breakage of each **enforced** rule of the Job manifest
+  above, put through the namespace's own admission server-side with nothing created, each refused
+  naming the rule — the reachability label has no breakage to record, since admission does not
+  check it, which is the whole of why that bullet is marked; and the reachability block against an
+  address whose packets are dropped.
 - *Refused as published, and corrected on 2026-10-25*: until dispatch://INFRA-234 the Service
   manifest above selected the Job's pods by `job-name`, and the namespace's admission refuses
   that, naming the rule that a Service there selects by `batch.kubernetes.io/controller-uid` at
