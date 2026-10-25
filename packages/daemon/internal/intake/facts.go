@@ -375,7 +375,7 @@ func (Push) isFact() {}
 
 // WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope: attempt Attempt of GitHub
 // Actions run RunID of the workflow file Path (GitHub's `workflow_run.path`, the run's top-level
-// `.github/workflows/` file) in Repo finished on HeadBranch at HeadSHA, whatever its conclusion.
+// `.github/workflows/` file) in Repo finished on HeadBranch, whatever its conclusion.
 // Envoy publishes none for a run of a pull request. The workflow compares it with the project's
 // deploy workflows (config.Project.Deploys) and queues a GitHub read of the run for each open
 // production check it may wake; the envelope is anyone's who holds an Envoy bearer, so nothing in
@@ -386,7 +386,6 @@ type WorkflowRunCompleted struct {
 	RunID      int64
 	Attempt    int
 	HeadBranch string
-	HeadSHA    string
 }
 
 func (WorkflowRunCompleted) isFact() {}

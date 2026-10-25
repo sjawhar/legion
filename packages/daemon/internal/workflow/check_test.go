@@ -809,7 +809,7 @@ func TestADeployRunQueuesACompareForEachOpenCheckOnItsBranch(t *testing.T) {
 	openRootCheck(t, rig, "LEGION-301", "acme/widgets", "main", 8)
 	openRootCheck(t, rig, "LEGION-302", "sjawhar/legion", "release", 9)
 
-	rig.apply("run", intake.WorkflowRunCompleted{Repo: "SJAWHAR/Legion", Path: ".github/workflows/envoy.yaml", RunID: 40203304600, Attempt: 2, HeadBranch: "main", HeadSHA: "d70268"})
+	rig.apply("run", intake.WorkflowRunCompleted{Repo: "SJAWHAR/Legion", Path: ".github/workflows/envoy.yaml", RunID: 40203304600, Attempt: 2, HeadBranch: "main"})
 	run := record.DeployRun{Run: 40203304600, Attempt: 2, Workflow: ".github/workflows/envoy.yaml", Step: "Apply", Branch: "main"}
 	for _, issue := range []string{"LEGION-209", "LEGION-300"} {
 		want := []record.CheckCompare{{Look: 1, Cause: "deploy run", Deploy: &run, OpenedAt: checkOpened}}

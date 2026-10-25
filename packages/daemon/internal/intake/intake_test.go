@@ -694,13 +694,12 @@ func TestDecodeWorkflowRunCompletedFromEnvoysGolden(t *testing.T) {
 		}
 		return decoded
 	}
-	want := WorkflowRunCompleted{Repo: "sjawhar/legion", Path: ".github/workflows/release.yaml", RunID: 40203304600, Attempt: 1,
-		HeadBranch: "main", HeadSHA: "d7026876b8c8cd3e34937e5dbc76d719b09a4549"}
+	want := WorkflowRunCompleted{Repo: "sjawhar/legion", Path: ".github/workflows/release.yaml", RunID: 40203304600, Attempt: 1, HeadBranch: "main"}
 	if got := decode(t, nil).Fact; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the golden's fact = %#v, want %#v", got, want)
 	}
 	if got := decode(t, map[string]any{"repo": "SJAWHAR/Legion", "run_attempt": "3"}).Fact; got != (WorkflowRunCompleted{Repo: "sjawhar/legion", Path: want.Path,
-		RunID: want.RunID, Attempt: 3, HeadBranch: "main", HeadSHA: want.HeadSHA}) {
+		RunID: want.RunID, Attempt: 3, HeadBranch: "main"}) {
 		t.Fatalf("a re-run attempt spelled in another case = %#v, want attempt 3 of the heard repository", got)
 	}
 	for _, tc := range []struct {

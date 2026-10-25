@@ -1350,15 +1350,9 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 		if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", check.Number), &pull); err != nil {
 			return fmt.Errorf("read the merge commit of pull request #%d for %s's production check: %w", check.Number, row.Issue, err)
 		}
-		if pull.MergeCommitSHA == "" {
-			return fmt.Errorf("pull request #%d of %s names no merge commit for %s's production check", check.Number, check.Repo, row.Issue)
-		}
-		if err := r.recordMergeCommit(ctx, row.Issue, pull.MergeCommitSHA); err != nil {
+		if err := r.adoptMergeCommit(ctx, row, check, pull.MergeCommitSHA); err != nil {
 			return err
 		}
-		check.MergeSHA = pull.MergeCommitSHA
-		r.log.Info("outbox check compare recorded the merge commit its check opened without", "row", row.ID, "issue", row.Issue,
-			"pullRequest", check.Number, "mergeCommit", check.MergeSHA)
 	}
 	var compare struct {
 		Status string `json:"status"`
@@ -1407,7 +1401,7 @@ type deployJob struct {
 
 // checkDeployRun is checkCompare for a deploy run (record.CheckCompare.Deploy): whether the run
 // attempt deployed after the check's pull request merged. The pull request is read for its
-// merged_at, the cutoff, and its merge commit, recorded when the check has none (recordMergeCommit)
+// merged_at, the cutoff, and its merge commit, recorded when the check has none (adoptMergeCommit)
 // as a build compare records it. The run attempt is read from GitHub rather than trusted from the
 // envelope the row was queued from, which anyone holding an Envoy bearer can publish: a run of
 // another workflow file, branch or head repository, or one a pull request triggered (whose head is
@@ -1440,15 +1434,9 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 		return fmt.Errorf("pull request #%d of %s names no merge time for %s's production check", check.Number, check.Repo, row.Issue)
 	}
 	if check.MergeSHA == "" {
-		if pull.MergeCommitSHA == "" {
-			return fmt.Errorf("pull request #%d of %s names no merge commit for %s's production check", check.Number, check.Repo, row.Issue)
-		}
-		if err := r.recordMergeCommit(ctx, row.Issue, pull.MergeCommitSHA); err != nil {
+		if err := r.adoptMergeCommit(ctx, row, check, pull.MergeCommitSHA); err != nil {
 			return err
 		}
-		check.MergeSHA = pull.MergeCommitSHA
-		r.log.Info("outbox check compare recorded the merge commit its check opened without", "row", row.ID, "issue", row.Issue,
-			"pullRequest", check.Number, "mergeCommit", check.MergeSHA)
 	}
 	merged := *pull.MergedAt
 	attempt := fmt.Sprintf("/actions/runs/%d/attempts/%d", deploy.Run, deploy.Attempt)
@@ -1558,6 +1546,22 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 			"run", deploy.Run, "attempt", deploy.Attempt, "job", d.job.ID, "jobName", d.job.Name, "url", run.HTMLURL, "detail", detail,
 			"cause", payload.Cause, "look", payload.Look)
 	}
+	return nil
+}
+
+// adoptMergeCommit records merge, the merge commit GitHub names for the pull request of a check
+// that opened without one (recordMergeCommit), and sets it on check; a pull request GitHub names no
+// merge commit for is an answer to read again later.
+func (r *outbox) adoptMergeCommit(ctx context.Context, row record.OutboxRow, check *record.ProductionCheck, merge string) error {
+	if merge == "" {
+		return fmt.Errorf("pull request #%d of %s names no merge commit for %s's production check", check.Number, check.Repo, row.Issue)
+	}
+	if err := r.recordMergeCommit(ctx, row.Issue, merge); err != nil {
+		return err
+	}
+	check.MergeSHA = merge
+	r.log.Info("outbox check compare recorded the merge commit its check opened without", "row", row.ID, "issue", row.Issue,
+		"pullRequest", check.Number, "mergeCommit", check.MergeSHA)
 	return nil
 }
 

@@ -511,8 +511,7 @@ func decodeWorkflowRun(repository ghrepo.Repository, raw map[string]json.RawMess
 	if path == "" || branch == "" {
 		return nil
 	}
-	sha, _ := rawString(raw, "head_sha")
-	return WorkflowRunCompleted{Repo: repository.String(), Path: path, RunID: runID, Attempt: int(attempt), HeadBranch: branch, HeadSHA: sha}
+	return WorkflowRunCompleted{Repo: repository.String(), Path: path, RunID: runID, Attempt: int(attempt), HeadBranch: branch}
 }
 
 func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {
@@ -591,7 +590,7 @@ func rawNumber(raw map[string]json.RawMessage, key string) (int, bool) {
 		integer = rawInt
 	} else {
 		var text string
-		if err := json.Unmarshal(value, &text); err != nil || !regexp.MustCompile(`^\d+$`).MatchString(text) {
+		if err := json.Unmarshal(value, &text); err != nil || !decimalDigits.MatchString(text) {
 			return 0, false
 		}
 		parsed, err := strconv.ParseInt(text, 10, 64)
@@ -623,7 +622,8 @@ func rawInt64Value(value json.RawMessage) (int64, bool) {
 }
 
 // decimalDigits is a number as Envoy writes GitHub's numeric fields into a payload: decimal digits
-// alone, with none of the sign or base prefix strconv would otherwise accept.
+// alone, with none of the sign or base prefix strconv would otherwise accept. rawNumber holds a
+// number written as a string to it, and rawPositiveDecimal every number it reads.
 var decimalDigits = regexp.MustCompile(`^[0-9]+$`)
 
 // rawPositiveDecimal reads a positive integer of at most bits bits written as a decimal string.
