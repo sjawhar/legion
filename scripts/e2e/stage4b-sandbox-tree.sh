@@ -2867,7 +2867,10 @@ if [ -z "$skip_controller" ]; then
   [ -f "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $key_file, which is not a regular file"
   [[ $(stat -L -c %a -- "$key_file") =~ ^[0-7]00$ ]] ||
     fail "LEGION_E2E_ANTHROPIC_KEY_FILE $key_file is readable by group or other; chmod 600 it"
-  [ -n "$(tr -d '[:space:]' <"$key_file")" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE $key_file holds no key"
+  key_bytes=$(tr -d '[:space:]' <"$key_file") ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE $key_file cannot be read"
+  [ -n "$key_bytes" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE $key_file holds no key"
+  unset key_bytes
 fi
 # The branch-built daemon links no release plugin pair (only a release workflow build does), so a
 # daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from

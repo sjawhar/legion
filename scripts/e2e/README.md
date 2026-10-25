@@ -153,7 +153,7 @@ docker of its own there.
 ## stage2-tmux-supervision.sh
 
 ```sh
-LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about 35 minutes on a loaded devbox
+LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in 35 to 50 minutes on a loaded devbox
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
@@ -2110,10 +2110,12 @@ scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --
 # → <key-dir>/anthropic-key
 ```
 
-`--key-file` names a file holding the plaintext Anthropic key alone (one line; a trailing newline
-is read past), refused unless it is a regular file only its owner can read (no group or other
-permission bit) — checked once, here, before any pane exists, never read beyond that check, so a
-key a caller rotates mid-run takes effect on the very next call with no restart.
+`--key-file` names a file holding the plaintext Anthropic key alone. Every whitespace character is
+dropped, so a trailing newline, a trailing space and a Windows line end all work. The file is
+refused unless it is a regular file only its owner can read (no group or other permission bit).
+Those permission bits are checked once, here, before any pane exists; the key itself is read fresh
+on every call, so a key a caller rotates mid-run takes effect on the very next call with no
+restart.
 
 `--dest` and `--key-dir` must be different directories (refused otherwise), and the caller gives
 them different lifetimes. `--dest` gets only the call record (`<dest>/anthropic-key.log`,

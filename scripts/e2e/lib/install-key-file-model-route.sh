@@ -10,8 +10,9 @@
 # --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh):
 # the profile's files go under <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
 #
-# --key-file names a file holding the plaintext Anthropic API key alone (one line; a trailing
-# newline is read past): refused unless it is a regular file only its owner can read (no group or
+# --key-file names a file holding the plaintext Anthropic API key alone, with every whitespace
+# character dropped (a trailing newline, a trailing space and a Windows line end all work):
+# refused unless it is a regular file only its owner can read (no group or
 # other permission bit). The preflight below reads it once, before any pane exists, to prove it is
 # readable; every later call reads it fresh again, so a key the caller rewrites in place (the same
 # path, new content) takes effect on the key command's very next call — re-pointing --key-file's
