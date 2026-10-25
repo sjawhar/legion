@@ -36,6 +36,10 @@ const (
 	// between them.
 	dispatchStrategyRecreate      = "Recreate"
 	dispatchStrategyRollingUpdate = "RollingUpdate"
+
+	// defaultAzureFederationAudience is the audience of the keyless form's projected token when
+	// azureFederationAudience is unset: the one Entra's federated credentials expect by default.
+	defaultAzureFederationAudience = "api://AzureADTokenExchange"
 )
 
 var (
@@ -104,6 +108,29 @@ type DispatchArgs struct {
 	// namespace: only the component's own tailnet front door, which Tailscale Serve on 443 proxies
 	// through, reaches the app.
 	AllowedNamespaces []string `pulumi:"allowedNamespaces,optional"`
+
+	// AzureEmbedEndpoint turns on meaning search through Azure AI Foundry: DISPATCH_EMBEDDER=azure
+	// and DISPATCH_AZURE_EMBED_ENDPOINT, the base URL the embeddings route is appended to (such as
+	// https://<resource>.services.ai.azure.com/models), which may be an Azure resource's output.
+	// AzureEmbedTokensPerMinute, the deployment's quota, comes with it, and AzureEmbedDeployment
+	// (DISPATCH_AZURE_EMBED_DEPLOYMENT, Dispatch's default when unset) may. Every other Azure input
+	// needs the endpoint.
+	AzureEmbedEndpoint        pulumi.StringInput `pulumi:"azureEmbedEndpoint,optional"`
+	AzureEmbedDeployment      pulumi.StringInput `pulumi:"azureEmbedDeployment,optional"`
+	AzureEmbedTokensPerMinute *int               `pulumi:"azureEmbedTokensPerMinute,optional"`
+
+	// The endpoint takes exactly one credential. AzureEmbedKeySecret is the key form: the Secret
+	// Manager secret's resource path (projects/<project>/secrets/<id>) holding the deployment's API
+	// key, mounted through the Secret Manager CSI driver as the file DISPATCH_AZURE_EMBED_KEY_FILE
+	// names, so the key never enters the component or its state. AzureTenantId and AzureClientId
+	// are the keyless form, set together (a managed identity's outputs): the pod's projected
+	// service-account token, for audience AzureFederationAudience (api://AzureADTokenExchange when
+	// unset), is the assertion Dispatch exchanges with Entra, through the federated credential the
+	// identity holds for this component's serviceAccountIssuer and serviceAccountSubject.
+	AzureEmbedKeySecret     pulumi.StringInput `pulumi:"azureEmbedKeySecret,optional"`
+	AzureTenantId           pulumi.StringInput `pulumi:"azureTenantId,optional"`
+	AzureClientId           pulumi.StringInput `pulumi:"azureClientId,optional"`
+	AzureFederationAudience *string            `pulumi:"azureFederationAudience,optional"`
 }
 
 // dispatchSeededInput names the first plain string input that holds an nkey seed. No component
@@ -152,6 +179,9 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 			return fmt.Sprintf("allowedNamespaces[%d]", i), true
 		}
 	}
+	if args.AzureFederationAudience != nil && bus.HoldsSeed(*args.AzureFederationAudience) {
+		return "azureFederationAudience", true
+	}
 	return "", false
 }
 
@@ -164,6 +194,12 @@ type Dispatch struct {
 	Kubeconfig       pulumi.StringOutput `pulumi:"kubeconfig"`
 	Principal        pulumi.StringOutput `pulumi:"principal"`
 	AgentToken       pulumi.StringOutput `pulumi:"agentToken" provider:"secret"`
+	// ServiceAccountIssuer and ServiceAccountSubject are the issuer and subject of the Dispatch
+	// pods' service-account tokens: the cluster's OIDC issuer, and the pods' Kubernetes service
+	// account. A federated credential trusting the pair (an Azure identity's, for the keyless
+	// form) admits exactly those pods.
+	ServiceAccountIssuer  pulumi.StringOutput `pulumi:"serviceAccountIssuer"`
+	ServiceAccountSubject pulumi.StringOutput `pulumi:"serviceAccountSubject"`
 }
 
 // dispatchSettings are the plain inputs, validated, with the defaults applied, and the texts built
@@ -181,6 +217,73 @@ type dispatchSettings struct {
 	replicas                                    int
 	strategy                                    dispatchStrategy
 	serveConfig                                 string
+	azure                                       dispatchAzure
+}
+
+// dispatchAzure is the Azure embedder's plain configuration, the zero value when
+// azureEmbedEndpoint is unset. When enabled, exactly one of key (azureEmbedKeySecret) and keyless
+// (azureTenantId with azureClientId) is set, and audience is the keyless form's token audience.
+type dispatchAzure struct {
+	enabled, key, keyless bool
+	tokensPerMinute       int
+	audience              string
+}
+
+// newDispatchAzure validates the Azure embedder's inputs: the endpoint turns it on and needs the
+// quota and exactly one credential form; no other Azure input is taken without the endpoint. The
+// Inputs are judged by being set alone, so a value unknown at preview passes as it will at update.
+func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
+	keyless := args.AzureTenantId != nil || args.AzureClientId != nil
+	if args.AzureEmbedEndpoint == nil {
+		for _, in := range []struct {
+			input string
+			set   bool
+		}{
+			{"azureEmbedDeployment", args.AzureEmbedDeployment != nil},
+			{"azureEmbedTokensPerMinute", args.AzureEmbedTokensPerMinute != nil},
+			{"azureEmbedKeySecret", args.AzureEmbedKeySecret != nil},
+			{"azureTenantId", args.AzureTenantId != nil},
+			{"azureClientId", args.AzureClientId != nil},
+			{"azureFederationAudience", args.AzureFederationAudience != nil},
+		} {
+			if in.set {
+				return dispatchAzure{}, fmt.Errorf("azureEmbedEndpoint is required when %s is set: every Azure input configures the Azure embedder, which the endpoint turns on", in.input)
+			}
+		}
+		return dispatchAzure{}, nil
+	}
+	if args.AzureEmbedTokensPerMinute == nil {
+		return dispatchAzure{}, errors.New("azureEmbedTokensPerMinute is required when azureEmbedEndpoint is set: the deployment's tokens-per-minute quota, which Dispatch paces its embedding by")
+	}
+	if *args.AzureEmbedTokensPerMinute <= 0 {
+		return dispatchAzure{}, fmt.Errorf("azureEmbedTokensPerMinute %d must be a positive integer", *args.AzureEmbedTokensPerMinute)
+	}
+	if args.AzureEmbedKeySecret != nil && keyless {
+		return dispatchAzure{}, errors.New("azureEmbedKeySecret is set with azureTenantId or azureClientId: the key and keyless credential forms are exclusive, so set exactly one")
+	}
+	if args.AzureTenantId != nil && args.AzureClientId == nil {
+		return dispatchAzure{}, errors.New("azureClientId is required when azureTenantId is set: the keyless form takes both")
+	}
+	if args.AzureClientId != nil && args.AzureTenantId == nil {
+		return dispatchAzure{}, errors.New("azureTenantId is required when azureClientId is set: the keyless form takes both")
+	}
+	if args.AzureFederationAudience != nil && !keyless {
+		return dispatchAzure{}, errors.New("azureFederationAudience is set without azureTenantId and azureClientId: it is the keyless form's token audience")
+	}
+	if args.AzureEmbedKeySecret == nil && !keyless {
+		return dispatchAzure{}, errors.New("azureEmbedEndpoint needs one credential: azureEmbedKeySecret, or azureTenantId with azureClientId")
+	}
+	azure := dispatchAzure{enabled: true, key: !keyless, keyless: keyless, tokensPerMinute: *args.AzureEmbedTokensPerMinute}
+	if keyless {
+		azure.audience = defaultAzureFederationAudience
+		if args.AzureFederationAudience != nil {
+			if *args.AzureFederationAudience == "" {
+				return dispatchAzure{}, errors.New("azureFederationAudience is empty; leave it unset for " + defaultAzureFederationAudience)
+			}
+			azure.audience = *args.AzureFederationAudience
+		}
+	}
+	return azure, nil
 }
 
 // dispatchRollingUpdate bounds a rolling update: how many of the wanted pods may be missing at
@@ -310,6 +413,10 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("appPrivateKeySecretKey %q must match %s", args.AppPrivateKeySecretKey, secretKeyRule)
 		}
 	}
+	azure, err := newDispatchAzure(args)
+	if err != nil {
+		return dispatchSettings{}, err
+	}
 
 	s := dispatchSettings{
 		hostname:           args.Hostname,
@@ -332,6 +439,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.appID = args.AppId
 	s.appKeySecretName = args.AppPrivateKeySecretName
 	s.appKeySecretKey = args.AppPrivateKeySecretKey
+	s.azure = azure
 	if args.DatabaseVersion != nil {
 		if *args.DatabaseVersion == "" {
 			return dispatchSettings{}, errors.New("databaseVersion is empty; leave it unset for " + defaultDispatchDatabaseVersion)
@@ -429,5 +537,9 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	comp.Principal = cloud.principal
 	comp.AgentToken = cloud.agentToken.Result
 	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
+	comp.ServiceAccountIssuer = cloud.issuer
+	// Every Dispatch pod runs as ServiceAccount <hostname> in the component's namespace, the
+	// account newDispatchKubernetes registers, and Kubernetes names a token's subject after it.
+	comp.ServiceAccountSubject = pulumi.String("system:serviceaccount:" + s.namespace + ":" + s.hostname).ToStringOutput()
 	return comp, nil
 }

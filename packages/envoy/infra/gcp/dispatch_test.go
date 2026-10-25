@@ -65,6 +65,37 @@ func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
 	return args
 }
 
+const (
+	azureEmbedEndpoint  = "https://example-resource.services.ai.azure.com/models"
+	azureEmbedKeySecret = "projects/example-project/secrets/example-azure-embed-key"
+	azureTenantID       = "example-azure-tenant-id"
+	azureClientID       = "example-azure-client-id"
+	azureIssuer         = "https://container.googleapis.com/v1/projects/example-project/locations/us-central1/clusters/example-dispatch"
+)
+
+// setAzureEndpoint sets the Azure embedder's endpoint and quota, which come together, and no
+// credential.
+func setAzureEndpoint(a *gcp.DispatchArgs) {
+	a.AzureEmbedEndpoint = pulumi.String(azureEmbedEndpoint)
+	a.AzureEmbedTokensPerMinute = pulumi.IntRef(300000)
+}
+
+// setAzureKey sets the Azure embedder with the key form of credential, the Secret Manager path of
+// the key, and no deployment, which Dispatch then defaults.
+func setAzureKey(a *gcp.DispatchArgs) {
+	setAzureEndpoint(a)
+	a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
+}
+
+// setAzureFederation sets the Azure embedder with the keyless form of credential, a deployment
+// named, and the default audience.
+func setAzureFederation(a *gcp.DispatchArgs) {
+	setAzureEndpoint(a)
+	a.AzureEmbedDeployment = pulumi.String("example-embed-deployment")
+	a.AzureTenantId = pulumi.String(azureTenantID)
+	a.AzureClientId = pulumi.String(azureClientID)
+}
+
 func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
 	return runDispatchNamed(t, "example-dispatch", args, providers)
 }
@@ -189,6 +220,39 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
 		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
+		{name: "an Azure endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
+			setAzureKey(a)
+			a.AzureEmbedTokensPerMinute = nil
+		}, err: []string{"azureEmbedTokensPerMinute is required when azureEmbedEndpoint is set"}},
+		{name: "a zero Azure quota", edit: func(a *gcp.DispatchArgs) { setAzureKey(a); a.AzureEmbedTokensPerMinute = pulumi.IntRef(0) }, err: []string{"azureEmbedTokensPerMinute 0", "positive integer"}},
+		{name: "a negative Azure quota", edit: func(a *gcp.DispatchArgs) { setAzureKey(a); a.AzureEmbedTokensPerMinute = pulumi.IntRef(-1) }, err: []string{"azureEmbedTokensPerMinute -1", "positive integer"}},
+		{name: "an Azure deployment without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedDeployment = pulumi.String("example-embed-deployment") }, err: []string{"azureEmbedEndpoint is required when azureEmbedDeployment is set"}},
+		{name: "an Azure quota without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedTokensPerMinute = pulumi.IntRef(300000) }, err: []string{"azureEmbedEndpoint is required when azureEmbedTokensPerMinute is set"}},
+		{name: "an Azure key without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret) }, err: []string{"azureEmbedEndpoint is required when azureEmbedKeySecret is set"}},
+		{name: "an Azure tenant without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureTenantId = pulumi.String(azureTenantID) }, err: []string{"azureEmbedEndpoint is required when azureTenantId is set"}},
+		{name: "an Azure client without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureClientId = pulumi.String(azureClientID) }, err: []string{"azureEmbedEndpoint is required when azureClientId is set"}},
+		{name: "an Azure audience without the endpoint", edit: func(a *gcp.DispatchArgs) { a.AzureFederationAudience = pulumi.StringRef("api://example-audience") }, err: []string{"azureEmbedEndpoint is required when azureFederationAudience is set"}},
+		{name: "both Azure credential forms", edit: func(a *gcp.DispatchArgs) {
+			setAzureFederation(a)
+			a.AzureEmbedKeySecret = pulumi.String(azureEmbedKeySecret)
+		}, err: []string{"azureEmbedKeySecret is set with azureTenantId or azureClientId", "exactly one"}},
+		{name: "an Azure endpoint without a credential", edit: setAzureEndpoint, err: []string{"azureEmbedEndpoint needs one credential: azureEmbedKeySecret, or azureTenantId with azureClientId"}},
+		{name: "an Azure tenant without its client", edit: func(a *gcp.DispatchArgs) {
+			setAzureEndpoint(a)
+			a.AzureTenantId = pulumi.String(azureTenantID)
+		}, err: []string{"azureClientId is required when azureTenantId is set"}},
+		{name: "an Azure client without its tenant", edit: func(a *gcp.DispatchArgs) {
+			setAzureEndpoint(a)
+			a.AzureClientId = pulumi.String(azureClientID)
+		}, err: []string{"azureTenantId is required when azureClientId is set"}},
+		{name: "an Azure audience with the key form", edit: func(a *gcp.DispatchArgs) {
+			setAzureKey(a)
+			a.AzureFederationAudience = pulumi.StringRef("api://example-audience")
+		}, err: []string{"azureFederationAudience is set without azureTenantId and azureClientId"}},
+		{name: "an empty Azure audience", edit: func(a *gcp.DispatchArgs) {
+			setAzureFederation(a)
+			a.AzureFederationAudience = pulumi.StringRef("")
+		}, err: []string{"azureFederationAudience is empty", "api://AzureADTokenExchange"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -229,7 +293,8 @@ func TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering(t *testing.T) {
 // Every plain string input of the component has a row; the seed is found as bus.HoldsSeed finds
 // it: any type, either case, whole, inside a longer value, or split. tailnetAuthKey,
 // signInClientSecret and natsSeedSecret are Inputs, checked once they resolve
-// (TestConstructRefusesASeedInADispatchInput), and natsUrl once it resolves too
+// (TestConstructRefusesASeedInADispatchInput), as are the Azure Inputs
+// (TestConstructRefusesASeedInAnAzureInput), and natsUrl once it resolves too
 // (TestDispatchRefusesABadNatsURLOnceItResolves).
 func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 	seed, _ := testnats.User(t)
@@ -259,6 +324,10 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed as the app ID", "appId", func(a *gcp.DispatchArgs) { a.AppId = seed }},
 		{"a seed as the app private key secret name", "appPrivateKeySecretName", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretName = lower }},
 		{"a seed as the app private key secret key", "appPrivateKeySecretKey", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretKey = seed }},
+		{"a seed in the Azure federation audience", "azureFederationAudience", func(a *gcp.DispatchArgs) {
+			setAzureFederation(a)
+			a.AzureFederationAudience = pulumi.StringRef("api://" + lower)
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := dispatchArgs()
@@ -1099,4 +1168,147 @@ func TestDispatchBrokerAndAppLeaveTheOtherWorkloadsUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+}
+
+// A refused Azure configuration is refused by the resolver, before the component registers, so
+// nothing beyond the test's providers exists.
+func TestDispatchRefusesAnAzureMisconfigurationBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	setAzureEndpoint(args)
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: azureEmbedEndpoint needs one credential")
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+}
+
+// Unset, the Azure inputs leave no trace: no key SecretProviderClass and no accessor beyond the
+// seed's; TestDispatchPodMatchesGolden pins the pod template byte-identical to before they existed.
+func TestDispatchRegistersNoAzureResourceUnset(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, r := range m.Registrations() {
+		require.NotContains(t, r.Name, "azure")
+	}
+}
+
+// azureKeyAccessorURN is the key form's accessor, which the app's Deployment waits for.
+const azureKeyAccessorURN = "urn:pulumi:s::p::" + dispatchType + "$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-azure-embed-key-accessor"
+
+// The key form adds exactly one per-secret accessor for the pod's principal, on the key's secret
+// alone, and the app's Deployment waits for it; the keyless form adds none. The key itself is never
+// an input: no Secret the component writes gains a key.
+func TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm(t *testing.T) {
+	args := dispatchArgs()
+	setAzureKey(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	var members []string
+	for _, r := range registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember") {
+		members = append(members, r.Name)
+	}
+	require.ElementsMatch(t, []string{"example-dispatch-nats-seed-accessor", "example-dispatch-azure-embed-key-accessor"}, members)
+	inputs := m.Named(t, "gcp:secretmanager/secretIamMember:SecretIamMember", "example-dispatch-azure-embed-key-accessor").Inputs.Mappable()
+	require.Equal(t, azureEmbedKeySecret, inputs["secretId"])
+	require.Equal(t, "roles/secretmanager.secretAccessor", inputs["role"])
+	require.Equal(t, "principal://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/example-project.svc.id.goog/subject/ns/dispatch/sa/example-dispatch", inputs["member"])
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies(), azureKeyAccessorURN)
+	for _, other := range []string{"example-dispatch-listener", "example-dispatch-tailnet"} {
+		require.NotContains(t, m.Named(t, "kubernetes:apps/v1:Deployment", other).RPC.GetDependencies(), azureKeyAccessorURN,
+			"%s mounts no Azure key", other)
+	}
+	require.ElementsMatch(t, []string{
+		"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY", "DISPATCH_SIGNIN_CLIENT_SECRET",
+	}, secretDataKeys(dispatchSecretData(t, m)))
+
+	args = dispatchArgs()
+	setAzureFederation(args)
+	m, err = runDispatch(t, args, true)
+	require.NoError(t, err)
+	require.Len(t, registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember"), 1, "only the NATS seed's accessor exists")
+}
+
+// The key's SecretProviderClass is its own: provider gke, the secret's path with /versions/latest,
+// written to the file key, which the pod mounts at /var/run/secrets/azure-embed. The keyless form
+// registers none.
+func TestDispatchRegistersTheAzureKeySecretProviderClassOnlyWithTheKeyForm(t *testing.T) {
+	args := dispatchArgs()
+	setAzureKey(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	class := m.Named(t, "kubernetes:secrets-store.csi.x-k8s.io/v1:SecretProviderClass", "example-dispatch-azure-embed-key").Inputs.Mappable()
+	require.Equal(t, "example-dispatch-azure-embed-key", class["metadata"].(map[string]any)["name"])
+	spec := class["spec"].(map[string]any)
+	require.Equal(t, "gke", spec["provider"])
+	require.Equal(t, "- resourceName: "+azureEmbedKeySecret+"/versions/latest\n  path: key\n", spec["parameters"].(map[string]any)["secrets"])
+
+	args = dispatchArgs()
+	setAzureFederation(args)
+	m, err = runDispatch(t, args, true)
+	require.NoError(t, err)
+	for _, r := range m.Registrations() {
+		require.NotEqual(t, "example-dispatch-azure-embed-key", r.Name)
+	}
+}
+
+// The key form: the pod template gains exactly DISPATCH_EMBEDDER, the endpoint, the quota and
+// DISPATCH_AZURE_EMBED_KEY_FILE, with the key's own CSI volume mounted into envoy-dispatch alone;
+// no deployment is named, so Dispatch defaults it.
+func TestDispatchPodWithAzureKeyMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setAzureKey(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-key.golden")
+}
+
+// The keyless form: the pod template gains DISPATCH_EMBEDDER, the endpoint, the quota, the
+// deployment, the tenant and client, and DISPATCH_AZURE_FEDERATED_TOKEN_FILE naming a projected
+// service-account token for api://AzureADTokenExchange, an hour long, mounted into envoy-dispatch
+// alone.
+func TestDispatchPodWithAzureFederationMatchesGolden(t *testing.T) {
+	args := dispatchArgs()
+	setAzureFederation(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-azure-federation.golden")
+}
+
+// azureFederationVolume is the keyless form's projected volume in the app's pod template.
+func azureFederationVolume(t *testing.T, template map[string]any) map[string]any {
+	t.Helper()
+	for _, item := range template["spec"].(map[string]any)["volumes"].([]any) {
+		if volume := item.(map[string]any); volume["name"] == "azure-federation" {
+			return volume
+		}
+	}
+	t.Fatal("no azure-federation volume")
+	return nil
+}
+
+// azureFederationAudience gives the projected token its audience, for a federated credential that
+// expects another than Entra's default.
+func TestDispatchProjectsTheTokenForTheGivenAudience(t *testing.T) {
+	args := dispatchArgs()
+	setAzureFederation(args)
+	args.AzureFederationAudience = pulumi.StringRef("api://example-audience")
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	volume := azureFederationVolume(t, deploymentPodTemplate(t, m, "example-dispatch"))
+	require.Equal(t, map[string]any{"sources": []any{map[string]any{"serviceAccountToken": map[string]any{
+		"audience": "api://example-audience", "expirationSeconds": 3600.0, "path": "token",
+	}}}}, volume["projected"])
+}
+
+// Either form reaches the app's envoy-dispatch container alone: the listener's and the front
+// door's pods are exactly as without it.
+func TestDispatchAzureLeavesTheOtherWorkloadsUnchanged(t *testing.T) {
+	for name, set := range map[string]func(*gcp.DispatchArgs){"key": setAzureKey, "federation": setAzureFederation} {
+		t.Run(name, func(t *testing.T) {
+			args := dispatchArgs()
+			set(args)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+		})
+	}
 }

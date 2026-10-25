@@ -147,7 +147,22 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	for _, input := range []string{"appClientId", "appId", "appPrivateKeySecretName", "appPrivateKeySecretKey"} {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 	}
+	// The Azure embedder's inputs are references and identifiers, never the key: the key form
+	// takes a Secret Manager path, the keyless form a tenant and a client id.
+	for _, input := range []string{
+		"azureEmbedEndpoint", "azureEmbedDeployment", "azureEmbedTokensPerMinute", "azureEmbedKeySecret",
+		"azureTenantId", "azureClientId", "azureFederationAudience",
+	} {
+		require.Contains(t, dispatch.InputProperties, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
+	require.NotContains(t, dispatch.InputProperties, "azureEmbedKey")
 	require.True(t, dispatch.Properties["agentToken"].Secret)
+	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
+		require.Equal(t, "string", dispatch.Properties[output].Type, output)
+		require.False(t, dispatch.Properties[output].Secret, output)
+	}
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
