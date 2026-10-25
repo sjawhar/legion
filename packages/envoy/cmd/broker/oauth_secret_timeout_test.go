@@ -16,20 +16,24 @@ import (
 // margin — that the slower of two contending calls is comfortably inside the bound — and the
 // measurements go in the log, where a reader can see the figure the bound was chosen against.
 //
-// The contention is the real one. A cold two-pod boot runs oauthstore.Store.Secret on both pods
-// at the same moment, and the insert ... on conflict do nothing on the one-row
-// oauth_provider_secret table makes one of them wait on the other's row lock; that is the only
-// contention this call ever meets, and the whole reason it has a bound of its own. Two
-// goroutines released together against a migrated schema of this test's own reproduce it, driving
-// the production store rather than a statement of the test's making.
+// The contention is the real one. Two callers running oauthstore.Store.Secret at the same moment
+// - a cold two-pod boot is when that happens in production - meet each other on the insert ...
+// on conflict do nothing against the one-row oauth_provider_secret table, where one waits on the
+// other's row lock; that is the only contention this call ever meets, and the whole reason it has
+// a bound of its own. What the fixture below builds is those two callers and not two pods: one
+// oauthStore over one pool, two goroutines released together against a migrated schema of this
+// test's own, driving the production store rather than a statement of the test's making. Two
+// pools would add connection setup and no contention the lock does not already give.
 //
 // The expectation is single-digit milliseconds of contention against a ten-second bound
 // (oauthSecretTimeout's own comment carries that measured range). What this row measures is
-// larger and mostly not the contention: each goroutine's first call also opens its pooled
-// connection, so it reads 14.7 ms and 6.3 ms in this sandbox where the contention alone, with
-// both connections already open, is 0.7-1.6 ms. Either figure is three orders of magnitude
-// inside the bound, and the larger one is the honest thing to compare against, since a cold
-// boot pays the connection too. So a quarter of the bound is a margin no scheduling hiccup
+// larger and mostly not the contention: it reads 14.7 ms and 6.3 ms in this sandbox where the
+// contention alone, with every connection already open, is 0.7-1.6 ms. storetest.Open pings the
+// pool before it returns, so one warmed connection exists before the goroutines start and at
+// most one of them opens a second; the rest of the difference is the pool and the scheduler
+// under a cold run, not the row lock. Either figure is three orders of magnitude inside the
+// bound, and the larger one is the honest thing to compare against, since a cold boot pays
+// whatever this run pays. So a quarter of the bound is a margin no scheduling hiccup
 // or loaded runner closes: this row goes red when the margin collapses by two orders of
 // magnitude, and for nothing else.
 func TestOAuthProviderSecretUnderATwoPodBootIsFarInsideItsTimeout(t *testing.T) {

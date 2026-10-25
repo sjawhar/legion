@@ -307,17 +307,40 @@ tags; run the retag again, and store no value until it exits 0. A release that f
 retagged while it reads the store releases nothing and ends that grant.
 
 Exit 0 is the answer of the one broker process that served the reread, not of every process. That
-process tells the others over Postgres, and they reread within seconds, but three things leave one
-behind: a failed notification, which that process logs as `broker: the other pods were not told to
-reread a secret` and which does not change its own 200; a process whose listener is redialing,
-which logs `a Postgres listener has no connection; redialing` and catches nothing up when it
-reconnects; and a process still booting, which reads the namespace again once it is listening but
-would not see a retag served in the gap if that catch-up read failed. A process left behind serves
-the secret as stored for up to five minutes, until its own reload, and a grant of it there
-releases the stored value raw. So, before you store an App key or a Google login: read the broker's
-log for those lines since the retag, and if any names your secret, or if you cannot read the log,
-wait five minutes after the retag's exit 0 before `secret set`. Waiting costs nothing; storing
-early can hand the raw key to an agent through a process that still serves the secret as stored.
+process tells the others over Postgres and they reread within seconds, so exit 0 is the usual case
+and the one below is the exception. Five log lines say a process may be behind, and only two of
+them name the secret:
+
+| Log line | Names a secret? | What it means |
+| --- | --- | --- |
+| `broker: the other pods were not told to reread a secret secret=… error=…` | **yes**, `secret` | The answering process's own `NOTIFY` failed, so no peer was told at all. Its 200 is unchanged. |
+| `broker: a notification's reread of a secret did not run secret=… sender=… error=…` | **yes**, `secret` and the peer that sent it | A peer was told and its reread failed. This is the strongest evidence available: a named process behind on a named secret. |
+| `broker: a Postgres listener has no connection; redialing channels=… error=… attempt=… wait_ms=…` | no | That process is outside the fan-out **for every name** while it redials, and catches nothing up when it reconnects. |
+| `broker: serving without the boot's catch-up policy load … error=…` | no | A booting process could not take its catch-up read, so a retag served while it was starting may not be in force there. |
+| `broker: binding before the reread listener has had an answer waited=…` | no | A booting process bound without its `LISTEN`, so notifications sent in that gap reached it not at all. |
+
+A process left behind serves the secret as stored, and a grant of it there releases the stored
+value raw. So, before you store an App key or a Google login:
+
+- Read the broker's log since the retag. **If any of those five lines appears, do not store yet** —
+  not only one naming your secret. Three of the five carry no secret at all, so a process that
+  logged one may be behind on yours and nothing in the line will say so.
+- The remedy is to run the retag again and require another exit 0 with none of those lines after
+  it. A reread reads that one secret directly (`DescribeSecret`, `GetSecret`) rather than through
+  a listing, and the retag exits 1 unless the kind it reads back is the one it wrote, so exit 0
+  says that process has the new tags — which is the strongest statement the broker makes about a
+  name. On Secrets Manager that read answers a write at once; on Secret Manager a single read is
+  eventually consistent like the listing, which is why a retag there can need running more than
+  once.
+- If you cannot read the log, wait at least five minutes after exit 0. That is the pod's own
+  reload interval, and the wait is **the right action rather than a guarantee**: the reload is
+  another listing read, and a store's listing lags a write by up to five minutes on Secrets
+  Manager and up to six hours on Secret Manager, so on Secret Manager five minutes is not a bound
+  at all. `dispatch://INFRA-375` tracks that
+  lag and the two ways to close it.
+
+Waiting costs nothing; storing early can hand the raw key to an agent through a process that still
+serves the secret as stored.
 
 A retag checks the tags it read. On GCP it writes against that read, so a retag another person
 wrote in between refuses it, with `another write changed the secret after this retag read it`,

@@ -126,13 +126,18 @@ func main() {
 			drainNow <- struct{}{}
 			return
 		}
-		// A second signal with nothing serving yet. Some of the boot runs on a context no
-		// signal cancels, and all of it runs with no health endpoint answering, so an operator
-		// who has asked twice is owed an exit rather than a process that runs on to bind a
-		// socket and drain a server that never served. The lines logged above this one say how
-		// far the boot had got; the status is non-zero because this is a boot that did not
-		// finish, not a clean stop.
-		slog.Error("broker: a second signal arrived while the broker was still starting up, so it is stopping without a drain: it has served nothing")
+		// A second signal read before serveStarted had closed. Some of the boot runs on a
+		// context no signal cancels, and all of it runs with no health endpoint answering, so
+		// an operator who has asked twice is owed an exit rather than a process that runs on to
+		// bind a socket and drain a server that never served. The lines logged above this one
+		// say how far the boot had got; the status is non-zero because this is a boot that did
+		// not finish, not a clean stop.
+		//
+		// The line says what the check established and not what the exit finds: main may close
+		// serveStarted and start srv.Serve in the two statements between the two, so "had not
+		// begun serving when the second signal was read" is true where "has served nothing"
+		// would be a claim about an instant this goroutine never observes.
+		slog.Error("broker: a second signal arrived while the broker was still starting up, so it is stopping without a drain: it had not begun serving when that signal was read")
 		os.Exit(1)
 	}()
 
@@ -242,7 +247,8 @@ func main() {
 	// leave the one pod the load balancer is still choosing with neither the fan-out nor the
 	// reload to narrow the tags it serves. One thing about boot changes with it: the first load
 	// no longer ends early on a signal that arrives while it is running, so a pod signalled
-	// mid-boot finishes that load before it drains. NewCurrent's own contract is untouched — its
+	// mid-boot finishes that load and then returns without draining at all, there being nothing
+	// bound to drain (the return below). NewCurrent's own contract is untouched — its
 	// loop logs no failed-load line once its context has ended, which is now the end of the
 	// shutdown rather than the signal, so the line a deployment alarms on still counts only loads
 	// that failed while the broker was meant to be serving.
@@ -262,8 +268,10 @@ func main() {
 	// serving and so does not end early, which is deliberate, but a process signalled before it
 	// has bound anything has no caller to answer and no in-flight request to finish: returning
 	// here is the whole of such a process's shutdown. Binding a socket and then running a drain
-	// and a shutdown budget for a server that never served would hold the pod open for over a
-	// minute and serve nobody.
+	// and a shutdown budget for a server that never served would hold the pod open for the whole
+	// drain and serve nobody - the shutdown budget itself is a maximum rather than a wait, since
+	// srv.Shutdown with nothing in flight returns at once, so what is saved here is the drain,
+	// and what is avoided is a pod in an EndpointSlice that answers no caller.
 	if ctx.Err() != nil {
 		slog.Info("broker: signalled while starting up, before it had bound anything", "stage", "the first policy load")
 		return
@@ -332,7 +340,10 @@ func main() {
 		// anchors), so a reread that lands first is not undone by this load's listing. What this
 		// load reads is the store's listing, as every whole-namespace load does, so a store whose
 		// listing lags a write by up to its ListLag (Store.ListLag) can still show it the tags
-		// from before the retag.
+		// from before the retag. That exposure is the store's rather than this ordering's - the
+		// alternative shapes of this fix all share it, since a retag committed before any
+		// subscription is only ever visible through a listing - and it is tracked, with the two
+		// ways to close it and their costs, at dispatch://INFRA-375.
 		//
 		// It costs one extra namespace read per boot, and nothing after: the whole listing - on
 		// Secrets Manager its ListSecrets pages and at most one KMS alias lookup, on Secret
@@ -544,11 +555,20 @@ func main() {
 // again is sent it too, and taking it off here is what leaves the next one to mean "now". Nothing
 // else reads again, so no other reader can take either signal first.
 //
-// One ambiguity remains: a second signal taken just as serveStarted closes is answered by
-// whichever side of the close the look lands on. Both answers stop the process. Found open,
-// srv.Serve has not started, since main closes serveStarted first, so the exit drops no request;
-// found closed, a server exists or is one statement from existing, and the drain is the right
-// owner for it - it ends at once on the hand-over and runs srv.Shutdown.
+// What this establishes is the state at the look and not at what the caller does next: found
+// open, the exit two statements later runs while main may already have closed serveStarted and
+// started srv.Serve, so what is true of that exit is that the broker had not begun serving when
+// the second signal was read. The ERROR line says that and no more. Nothing orders the two, and
+// nothing should: this window is between a function returning and the next two statements, where
+// the defect it replaces was a choice between two ready cases measured at 39 of 100 on a signal
+// pair the kernel cannot merge - orders of magnitude apart, and the exit is what the operator
+// asked for twice. A lock or a second check here would be a fix to a window that does not need
+// one.
+//
+// Either answer stops the process. Found open, srv.Serve has not started at the look, since main
+// closes serveStarted first, so no request was ever accepted to drop; found closed, a server
+// exists or is one statement from existing, and the drain is the right owner for it - it ends at
+// once on the hand-over and runs srv.Shutdown.
 func secondSignalFindsServing(again <-chan os.Signal, serveStarted <-chan struct{}) bool {
 	<-again
 	<-again
