@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
@@ -88,6 +89,13 @@ func main() {
 		signIn = "rds-iam"
 	}
 	slog.Info("database sign-in", "method", signIn)
+	// Whether a person can sign in to the approval page, logged once at boot. Its client secret is
+	// never logged.
+	if cfg.SignIn == nil {
+		slog.Info("approval sign-in off: BROKER_SIGNIN_* unset; no person can approve a secret request")
+	} else {
+		slog.Info("approval sign-in on", "issuer", cfg.SignIn.Issuer, "client_id", cfg.SignIn.ClientID)
+	}
 	// The AWS config, loaded once when anything needs it: an IAM-form BROKER_DATABASE_URL, whose
 	// connections sign in with RDS IAM tokens minted from it (so it is loaded before the database
 	// is opened), and the Secrets Manager and KMS clients of the AWS store, unless the fake
@@ -218,6 +226,13 @@ func main() {
 		PendingTTL: machineLoginPendingTTL, CredentialLifetime: credentialLifetime,
 		OAuth: provider, Replay: enr.Replay,
 	}
+	// The approval page signs a person in with the broker's own client and returns them to
+	// BROKER_PUBLIC_URL as resolved above; with sign-in off its routes answer 503.
+	page, err := approval.New(approval.Config{
+		SignIn: cfg.SignIn, PublicURL: cfg.PublicURL, MachineLoginURL: cfg.MachineLoginURL,
+		Store: st, Machine: reqMachine,
+	})
+	fatal(err)
 
 	var waker func(context.Context, string, string, string)
 	if cfg.EnvoyURL != "" {
@@ -252,7 +267,7 @@ func main() {
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,
 		SecretsKMSKey:      cfg.SecretsKMSKey,
-		TrustedProxyHeader: cfg.TrustedProxyHeader})
+		TrustedProxyHeader: cfg.TrustedProxyHeader, Approval: page})
 	srv := &http.Server{
 		Handler:           withRequestDeadline(mux, requestDeadline),
 		ReadHeaderTimeout: 10 * time.Second,

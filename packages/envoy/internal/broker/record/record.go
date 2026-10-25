@@ -40,6 +40,7 @@ var (
 	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)*$`)
 	servicePattern  = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 	slotPattern     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	idPattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ValidSlot reports whether slot may name a pod enrollment's slot: one of several independent
@@ -53,6 +54,12 @@ func ValidSlot(slot string) bool {
 // at most 64, the form a machine login's launcher_credential detail names its service in.
 func ValidService(service string) bool {
 	return servicePattern.MatchString(service)
+}
+
+// ValidID reports whether id has a credential-request record id's form, the lowercase-hex SHA-256
+// Body.ID answers, so a caller can refuse anything else before it reads the database with it.
+func ValidID(id string) bool {
+	return idPattern.MatchString(id)
 }
 
 // CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a

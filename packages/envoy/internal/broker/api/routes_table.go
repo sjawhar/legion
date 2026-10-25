@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 )
 
@@ -14,6 +15,7 @@ const (
 	authProof
 	authRenewProof
 	authAccount
+	authSignIn
 )
 
 // caller is who server.authenticate proved a request came from. Which field is set follows from
@@ -24,6 +26,9 @@ type caller struct {
 	// account is the name BROKER_API_ACCOUNTS gives the service whose ServiceAccount token
 	// authenticated the request, so a handler that acts can log which caller acted.
 	account string
+	// signIn is the broker sign-in session a request to the approval page carries, the zero
+	// approval.Session when it carries none that is live.
+	signIn approval.Session
 }
 
 // routeHandler is a handler together with the authentication its signature needs. Only the
@@ -74,6 +79,18 @@ func renewAuth(h func(*server, http.ResponseWriter, *http.Request, string)) rout
 func accountAuth(h func(*server, http.ResponseWriter, *http.Request, string)) routeHandler {
 	return routeHandler{auth: authAccount, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
 		h(s, w, r, who.account)
+	}}
+}
+
+// signInAuth is a route of the broker's own approval page, for a person in a browser signed in to
+// the broker itself (OpenID Connect with the broker's own client, BROKER_SIGNIN_*). The handler is
+// given the session the request's __Host-broker-session cookie names, or the zero session when it
+// names none that is live, since what that means is the route's to answer: the page starts a
+// sign-in, a decision is refused. While sign-in is off every such route answers 503 naming the
+// settings that turn it on. Mounted only when the broker builds its approval page.
+func signInAuth(h func(*approval.Page, http.ResponseWriter, *http.Request, approval.Session)) routeHandler {
+	return routeHandler{auth: authSignIn, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
+		h(s.deps.Approval, w, r, who.signIn)
 	}}
 }
 
@@ -182,6 +199,31 @@ func routes() []apiRoute {
 		// and rate-limited both per source address and over every caller at once, since each reread holds
 		// the policy's writer lock while it reads; a reread only moves the broker toward AWS's own truth.
 		{http.MethodPost, "/v1/secrets/{name}/reread", public((*server).rereadSecret)},
+		// A person's approval page for one credential-request record, an HTML page on the broker's
+		// own origin: the record's secret names, the enrollment the broker verified asked, the
+		// session the request claims when it differs, the reason, the lifetime, the times, the
+		// approver and the state, then every other pending secret request the person may decide,
+		// with Approve and Deny for each the person may decide and one "Approve all N shown". A
+		// machine login's record links Dispatch's machine-login page instead. With no live session,
+		// or with ?switch=1, it redirects to the sign-in provider, with the record's approver as
+		// login_hint, and returns here.
+		{http.MethodGet, "/approve/{record}", signInAuth((*approval.Page).ServeRecord)},
+		// Decide records an approval page printed, as the signed-in person: a form from the
+		// broker's own origin only, carrying the page's token, which binds it to the session and to
+		// exactly the records the page printed with a button, for an hour. Each record is decided
+		// on its own, and the answer is a 303 back to the page, which says what became of each.
+		{http.MethodPost, "/approve", signInAuth((*approval.Page).ServeDecide)},
+		// Finish a sign-in to the approval page, the provider's redirect back with a code, checked
+		// against the sign-in this browser started (its __Host-broker-signin cookie, used once):
+		// state, PKCE, the ID token and the Workspace domain. It makes a new session, ending the one
+		// the browser held, and answers a 303 to the record's page the sign-in started from.
+		{http.MethodGet, "/signin/callback", signInAuth((*approval.Page).ServeCallback)},
+		// Sign out of the approval page, from the broker's own origin only: the session ends and
+		// its cookie is cleared, and the answer links back to the record.
+		{http.MethodPost, "/signin/logout", signInAuth((*approval.Page).ServeLogout)},
+		// The approval page's one stylesheet, embedded in the broker; served while sign-in is off
+		// too, since the page saying so links it.
+		{http.MethodGet, "/approve/assets/approve.css", public((*server).approvalStylesheet)},
 		// Report whether the broker can reach its database.
 		{http.MethodGet, "/healthz", public((*server).healthz)},
 	}

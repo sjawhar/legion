@@ -1,0 +1,78 @@
+{{define "token"}}
+{{- range .Printed}}<input type="hidden" name="printed" value="{{.}}">{{end -}}
+<input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="expires" value="{{.Expires}}">
+{{- end}}
+
+{{define "record.html"}}{{template "head" .}}
+{{- if .Outcomes}}
+<section class="outcomes">
+<h2>What happened</h2>
+<ul>
+{{- range .Outcomes}}
+<li>{{.}}</li>
+{{- end}}
+</ul>
+</section>
+{{- end}}
+{{- range $i, $r := .Records}}
+{{- if eq $i 1}}
+<h2 class="others">Other requests waiting for you</h2>
+{{- end}}
+<article class="record" id="record-{{$r.ID}}">
+<h2>{{if $r.MachineLogin}}Machine login for {{end}}{{range $j, $name := $r.Identifiers}}{{if $j}}, {{end}}<code>{{$name}}</code>{{end}}</h2>
+<dl>
+<dt>{{if $r.MachineLogin}}Host{{else}}Secrets{{end}}</dt>
+<dd>{{range $j, $name := $r.Identifiers}}{{if $j}}, {{end}}<code>{{$name}}</code>{{end}}</dd>
+{{- with $r.Enrollment}}
+<dt>Requested by (verified by the broker)</dt>
+<dd>a {{.Kind}} enrollment, operator {{if .Operator}}<strong>{{.Operator}}</strong>{{else}}none{{end}}, runtime <code>{{.RuntimeID}}</code>{{if .Slot}}, slot <code>{{.Slot}}</code>{{end}}</dd>
+{{- end}}
+{{- if $r.EnrollmentSession}}
+<dt>Session (as the enrollment stated it)</dt>
+<dd><code>{{$r.EnrollmentSession}}</code></dd>
+{{- end}}
+{{- if $r.RequestSession}}
+<dt>Session the request names (its own unsigned claim, not verified)</dt>
+<dd><code>{{$r.RequestSession}}</code></dd>
+{{- end}}
+{{- if not $r.MachineLogin}}
+<dt>Reason</dt>
+<dd>{{if $r.Reason}}{{$r.Reason}}{{else}}none given{{end}}</dd>
+{{- end}}
+<dt>Lasts once approved</dt>
+<dd>{{$r.Lifetime}}</dd>
+<dt>Requested</dt>
+<dd>{{$r.RequestedAt}}</dd>
+<dt>Expires</dt>
+<dd>{{$r.ExpiresAt}}</dd>
+<dt>Approver</dt>
+<dd>{{$r.Approver}}</dd>
+<dt>State</dt>
+<dd class="state">{{$r.State}}{{if $r.DecidedBy}} by {{$r.DecidedBy}}{{end}}{{if $r.DecidedAt}} at {{$r.DecidedAt}}{{end}}{{if $r.Detail}} ({{$r.Detail}}){{end}}</dd>
+</dl>
+{{- if $r.MachineLogin}}
+<p class="note">A machine login is approved by typing the code its machine shows on Dispatch's machine-login page: <a href="{{$.MachineLoginURL}}">{{$.MachineLoginURL}}</a></p>
+{{- else if $r.Buttons}}
+<form method="post" action="/approve" class="decide">
+{{template "token" $.Form}}
+<input type="hidden" name="record" value="{{$r.ID}}">
+<button type="submit" name="decision" value="approve">Approve</button>
+<button type="submit" name="decision" value="deny" class="deny">Deny</button>
+</form>
+{{- else if and $r.Pending (not $r.MayDecide)}}
+<p class="note">Only {{$r.Approver}} may decide this request, and you are signed in as {{$.Login}}. <a href="/approve/{{$r.ID}}?switch=1">Sign in as someone else</a></p>
+{{- end}}
+</article>
+{{- end}}
+{{- with .ApproveAll}}
+<form method="post" action="/approve" class="all">
+{{template "token" $.Form}}
+{{- range .}}<input type="hidden" name="record" value="{{.}}">{{end}}
+<input type="hidden" name="decision" value="approve">
+<button type="submit">Approve all {{len .}} shown</button>
+</form>
+{{- end}}
+{{- if .Unshown}}
+<p class="note">{{.Unshown}} more pending requests are not shown here; they appear once these are decided.</p>
+{{- end}}
+{{template "foot" .}}{{end}}

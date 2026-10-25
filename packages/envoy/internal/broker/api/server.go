@@ -10,12 +10,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
@@ -84,6 +84,10 @@ type Deps struct {
 	DeviceLogin func(ctx context.Context, form url.Values, userCode string) error
 	// TokenHooks are the broker's steps around each token the provider issues.
 	TokenHooks oauth.TokenHooks
+	// Approval is the broker's own approval page and its sign-in (internal/broker/approval),
+	// built from BROKER_SIGNIN_*, off when those are unset. Its routes, every one under /approve
+	// and /signin/, are mounted only when it is set.
+	Approval *approval.Page
 }
 
 type server struct {
@@ -136,6 +140,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
 			continue
 		}
+		if deps.Approval == nil && (strings.HasPrefix(route.Pattern, approvalRoutes) || strings.HasPrefix(route.Pattern, signInRoutes)) {
+			continue
+		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
 			who, ok := s.authenticate(w, r, route.Handler.auth)
 			if !ok {
@@ -149,6 +156,13 @@ func Register(mux *http.ServeMux, deps Deps) {
 // oauthRoutes prefixes the routes the OAuth provider serves, which Register mounts only with one.
 const oauthRoutes = "/v1/oauth/"
 
+// approvalRoutes and signInRoutes prefix the approval page's routes, which Register mounts only
+// with the page.
+const (
+	approvalRoutes = "/approve"
+	signInRoutes   = "/signin/"
+)
+
 // authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad
 // credential.
@@ -158,6 +172,9 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		return caller{}, true
 	case authAccount:
 		return s.accountCaller(w, r)
+	case authSignIn:
+		session, ok := s.deps.Approval.Authenticate(w, r)
+		return caller{signIn: session}, ok
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
@@ -296,16 +313,12 @@ func pathUUID(w http.ResponseWriter, r *http.Request, name, code, what string) (
 	return id, true
 }
 
-// recordIDPattern matches a credential-request record id: content-addressed lowercase-hex
-// SHA-256, never a UUID (record.Body.ID).
-var recordIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
 // pathRecordID reads the {name} path segment as a credential-request record id, or refuses it
-// with 400 code: record ids are lowercase-hex sha256 hashes, so pathUUID's check would wrongly
-// reject every valid one.
+// with 400 code: record ids are lowercase-hex sha256 hashes (record.ValidID), so pathUUID's check
+// would wrongly reject every valid one.
 func pathRecordID(w http.ResponseWriter, r *http.Request, name, code string) (string, bool) {
 	id := r.PathValue(name)
-	if !recordIDPattern.MatchString(id) {
+	if !record.ValidID(id) {
 		writeError(w, http.StatusBadRequest, code, "record ids are lowercase-hex sha256 hashes")
 		return "", false
 	}
@@ -370,6 +383,12 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+}
+
+// approvalStylesheet serves the approval page's stylesheet (approval.ServeStylesheet), with no
+// credential and while sign-in is off too, since the page saying so links it.
+func (s *server) approvalStylesheet(w http.ResponseWriter, r *http.Request) {
+	approval.ServeStylesheet(w, r)
 }
 
 // strPtr is nil for "" and &s otherwise, for an optional wire field that is null rather than "".
