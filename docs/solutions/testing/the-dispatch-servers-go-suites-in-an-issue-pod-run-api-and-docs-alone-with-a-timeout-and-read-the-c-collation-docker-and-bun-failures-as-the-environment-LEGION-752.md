@@ -48,6 +48,16 @@ Extends docs/solutions/testing/go-test-in-a-worker-pod-leaves-gowork-to-go-work-
   and a Postgres with the right collation; cite its run in the PR body's `CI` line for everything
   the pod cannot run.
 
+  **Superseded 2026-10-23 (dispatch://INFRA-83):** only the clause that cites the `envoy-go` run in
+  the PR body's `CI` line is gone: the body carries no `CI:` line
+  (`skills/legion-worker/references/pr-body.md`), and no role records a check result for a later
+  step to trust — the tester and the reviewer each read CI on GitHub at the head they are judging
+  and record none of it (the reviewer's own four GitHub reads are in
+  `skills/legion-worker/references/merge-gate.md`), where `envoy-go`'s run is the read that covers
+  what the pod cannot run. Name in the handoff which packages the pod could not run, as the
+  collation bullet above already has you do. The rest of this finding stands: the `-timeout`
+  budgets, running the touched packages alone, and the pod failures to expect.
+
 ## Evidence (LEGION-752, sjawhar/legion#1957)
 
 The change was one file in `internal/dispatch/docs` and its tests. The plan's last command,
