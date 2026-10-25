@@ -164,8 +164,8 @@ func TestRedOnlyByWorkflowsNamesARedNoRequiredCheckMakes(t *testing.T) {
 
 // A READY stands until the head's own CI turns red: a red the head's own settlement and run bring
 // withdraws it, a head a .legion/-only push reached included, while a red carried to it from the
-// head before it, which READY found green on GitHub since, does not; nor does any red on a pull
-// request that is no longer open.
+// head before it, which stood before the READY and says nothing new about the submitted head, does
+// not; nor does any red on a pull request that is no longer open.
 func TestRedWithdrawsReadyOnlyOnTheHeadsOwnRed(t *testing.T) {
 	handoff := []record.ClassifiedPush{{SHA: "ready", Before: "code", HandoffOnly: true}}
 	for _, tc := range []struct {

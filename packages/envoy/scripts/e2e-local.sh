@@ -2,14 +2,13 @@
 # shellcheck disable=SC2016,SC2317 # Bun code uses literal template syntax; cleanup is trap-invoked
 # e2e-local.sh — Runs the local Envoy webhook, delivery, and renderer acceptance path.
 #
-# Starts a throwaway NATS server and listener, then leaves evidence in out/e2e/.
+# Builds and starts a NATS server of its own (internal/testnats/cmd/natsd) and the
+# listener, then leaves evidence in out/e2e/.
 # The listener needs ENVOY_HOST_BRIDGE=127.0.0.1 because it runs on this host and
 # delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
 # bounded acceptance run responsive while retaining the production settle logic.
 #
 # Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
-# Optional NATS container name: E2E_NATS_CONTAINER (envoy-e2e-nats).
-# Optional nats-server binary: E2E_NATS_SERVER (the one on PATH), used when Docker is absent.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -55,13 +54,7 @@ readonly out_dir
 nats_port="${E2E_NATS_PORT:-14222}"
 listener_port="${E2E_PORT:-19020}"
 session_port="${E2E_SESSION_PORT:-19021}"
-nats_container="${E2E_NATS_CONTAINER:-envoy-e2e-nats}"
-readonly nats_port listener_port session_port nats_container
-# The image the Docker backend runs. .github/workflows/envoy-and-contracts.yaml reads this
-# declaration with sed to pull the image before the run, so it has to stay one assignment at
-# column 0: inline it back into the docker run below and that step finds nothing and fails.
-nats_image="mirror.gcr.io/library/nats:2.10-alpine"
-readonly nats_image
+readonly nats_port listener_port session_port
 listener_url="http://127.0.0.1:${listener_port}"
 readonly listener_url
 nats_url="nats://127.0.0.1:${nats_port}"
@@ -89,7 +82,11 @@ readonly held_role_response_file="${out_dir}/held-role-response.json"
 readonly listener_log_file="${out_dir}/listener.log"
 readonly session_log_file="${out_dir}/session.log"
 readonly subscriber_log_file="${out_dir}/subscriber.log"
+readonly nats_log_file="${out_dir}/nats.log"
 readonly listener_binary="${out_dir}/listener"
+readonly nats_binary="${out_dir}/natsd"
+readonly nats_store_dir="${out_dir}/nats-store"
+readonly lock_file="${out_dir}/run.lock"
 readonly session_ready_fifo="${out_dir}/session-ready.fifo"
 readonly subscriber_ready_fifo="${out_dir}/subscriber-ready.fifo"
 readonly absent_session_response_file="${out_dir}/absent-session-response.json"
@@ -97,113 +94,82 @@ readonly bus_down_response_file="${out_dir}/bus-down-send-response.json"
 readonly bus_down_headers_file="${out_dir}/bus-down-send-headers.txt"
 readonly bus_down_result_file="${out_dir}/bus-down-send-result.txt"
 readonly bus_down_client_file="${out_dir}/bus-down-client-error.json"
-readonly nats_log_file="${out_dir}/nats.log"
-readonly nats_store_dir="${out_dir}/nats-store"
 
 listener_pid=""
 session_pid=""
 subscriber_pid=""
 nats_pid=""
-nats_started=0
 
+# cleanup stops what this run started and exits with rc, the status the trap that ran it passes:
+# the script's own for EXIT, and the conventional 128 plus the signal's number for INT and TERM, so
+# a run that was interrupted never reports success: inside a signal's trap, $? is the status of the
+# last command that finished, usually 0, not the signal's.
 cleanup() {
-  local rc=$?
+  local rc=$1
   trap - EXIT INT TERM
   set +e
-  for pid in "$subscriber_pid" "$session_pid" "$listener_pid"; do
+  for pid in "$subscriber_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
-  rm -f "$session_ready_fifo" "$subscriber_ready_fifo"
-  # stop_nats guards on nats_started itself; the guard is repeated here because this trap is armed
-  # before that function is defined, and a run that exits on a missing command must not die in its
-  # own cleanup.
-  if [[ "$nats_started" -eq 1 ]]; then
-    stop_nats
-  fi
+  rm -rf "$session_ready_fifo" "$subscriber_ready_fifo" "$nats_store_dir"
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
 
-for command in bun curl go jq openssl; do
+for command in bun curl flock go jq openssl; do
   command -v "$command" >/dev/null || {
     printf 'ERR: required command is unavailable: %s\n' "$command" >&2
     exit 3
   }
 done
 
-# Which backend gives this run its NATS. Docker is the first choice and behaves exactly as it
-# always has: the same image, the same single container this script owns, and the same refusal to
-# touch a container that is already there. The nats-server fallback exists because a Legion worker
-# pod has no container runtime at all -- no docker, no podman, no socket to reach one -- so a
-# container is not something the script can fall back to there, and without the fallback this
-# acceptance run cannot be executed where this repository's agents actually run.
-# dispatch://INFRA-250 removes the fallback by starting nats-server in process.
-nats_backend=docker
-nats_server_bin="${E2E_NATS_SERVER:-}"
-if ! command -v docker >/dev/null; then
-  nats_backend=process
-  if [[ -z "$nats_server_bin" ]]; then
-    nats_server_bin="$(command -v nats-server || true)"
-  fi
-  if [[ -z "$nats_server_bin" ]]; then
-    printf 'ERR: required command is unavailable: docker (runs the throwaway NATS container) or nats-server (runs the same NATS as a child process; name one with E2E_NATS_SERVER)\n' >&2
-    exit 3
-  fi
-fi
-readonly nats_backend nats_server_bin
+# out/e2e belongs to one run at a time. Everything below removes what is in it — the evidence, the
+# logs, the binaries and the JetStream store — so this run claims it first, and a second run of this
+# script in the same checkout is refused before it touches anything a running first run is using.
+# The lock is held by this shell, and the servers it starts, for as long as they live, and needs no
+# cleanup of its own; a directory left by a run that is gone holds no lock and is cleaned as usual.
+# After a SIGKILL of this script, which runs no cleanup, the natsd and listener it started inherit
+# the lock's descriptor and outlive it, so a later run is refused until they are gone, as it would
+# be anyway: they still hold the NATS port.
 
-if [[ "$nats_backend" == docker ]] && docker container inspect "$nats_container" >/dev/null 2>&1; then
-  printf 'ERR: %s already exists; leave it untouched and set E2E_NATS_CONTAINER to a free name.\n' "$nats_container" >&2
+mkdir -p "$out_dir"
+exec {lock_fd}>"$lock_file"
+flock -n "$lock_fd" || {
+  printf 'ERR: another run of e2e-local.sh is using %s; this run removed nothing.\n' "$out_dir" >&2
   exit 3
-fi
-
-# wait_for_nats makes both backends ready in one way: the port answers, whoever opened it. Docker
-# returns from `run -d` before the server inside has bound, and nats-server returns from the fork
-# the same way, so neither start is proof on its own.
-wait_for_nats() {
-  local deadline=$((SECONDS + 30))
-  while ((SECONDS < deadline)); do
-    if (exec 3<>"/dev/tcp/127.0.0.1/${nats_port}") 2>/dev/null; then
-      return 0
-    fi
-    sleep 0.25
-  done
-  printf 'ERR: NATS did not accept connections on 127.0.0.1:%s within 30 seconds.\n' "$nats_port" >&2
-  if [[ "$nats_backend" == process ]] && [[ -s "$nats_log_file" ]]; then
-    cat "$nats_log_file" >&2
-  fi
-  return 1
 }
+trap 'cleanup "$?"' EXIT
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
-start_nats() {
-  if [[ "$nats_backend" == docker ]]; then
-    printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
-    docker run --name "$nats_container" -d -p "${nats_port}:4222" "$nats_image" -js >/dev/null
-    nats_started=1
-  else
-    printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_server_bin" "$nats_port"
-    "$nats_server_bin" -js -a 127.0.0.1 -p "$nats_port" -sd "$nats_store_dir" >"$nats_log_file" 2>&1 &
-    nats_pid=$!
-    nats_started=1
-  fi
-  wait_for_nats
-}
+rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
+  "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+  "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
+  "$registry_session_response_file" "$registry_missing_response_file" \
+  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
+  "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
+rm -rf "$nats_store_dir"
+: >"$envelopes_file"
+: >"$session_prompts_file"
+mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
-# stop_nats ends this run's NATS whichever backend started it, and is the one way it is ended: the
-# cleanup trap and the bus-down step below both call it, so a half-stopped rig is not expressible.
+printf 'building listener and NATS server\n'
+(
+  cd "$envoy_dir"
+  go build -o "$listener_binary" ./cmd/listener
+  go build -o "$nats_binary" ./internal/testnats/cmd/natsd
+)
+
+printf 'starting NATS: 127.0.0.1:%s\n' "$nats_port"
+"$nats_binary" -p "$nats_port" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
+nats_pid=$!
+
+# stop_nats ends this run's NATS, and is the one way it is ended: the bus-down step below calls it,
+# and the cleanup trap kills the same pid, which is a no-op once this has run. The in-process
+# server (internal/testnats/cmd/natsd) is this script's own child, so a signal is the whole of it.
 stop_nats() {
-  if [[ "$nats_started" -ne 1 ]]; then
-    return 0
-  fi
-  nats_started=0
-  if [[ "$nats_backend" == docker ]]; then
-    docker stop "$nats_container" >/dev/null 2>&1 || true
-    docker rm "$nats_container" >/dev/null 2>&1 || true
-    return 0
-  fi
   if [[ -n "$nats_pid" ]] && kill -0 "$nats_pid" 2>/dev/null; then
     kill "$nats_pid" 2>/dev/null || true
     wait "$nats_pid" 2>/dev/null || true
@@ -211,24 +177,38 @@ stop_nats() {
   nats_pid=""
 }
 
-mkdir -p "$out_dir"
-rm -rf "$nats_store_dir"
-rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
-  "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
-  "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
-  "$registry_session_response_file" "$registry_missing_response_file" \
-  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
-: >"$envelopes_file"
-: >"$session_prompts_file"
-mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
+# wait_for_nats returns once the server this script started is answering, and fails otherwise. It
+# must never pass on another server: something already holding the port — a run left behind, or a
+# second run of this script — greets a connection exactly as ours would, while ours exits with
+# "address already in use". So the greeting is read only after our own server's log says it is
+# ready, and the wait ends the moment our own process is gone.
+wait_for_nats() {
+  local deadline=$((SECONDS + 30))
+  local banner
+  while ((SECONDS < deadline)); do
+    if ! kill -0 "$nats_pid" 2>/dev/null; then
+      printf 'ERR: the NATS server this script started ended before it was ready.\n' >&2
+      cat "$nats_log_file" >&2
+      return 1
+    fi
+    if grep -q 'Server is ready' "$nats_log_file"; then
+      # A NATS server greets every connection it accepts with its INFO line; curl's telnet
+      # scheme reads that greeting, then waits out its own --max-time, so only the text proves
+      # the port answers.
+      banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${nats_port}" </dev/null 2>/dev/null || true)"
+      if [[ "$banner" == 'INFO '* ]]; then
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  printf 'ERR: NATS did not accept connections on 127.0.0.1:%s within 30 seconds.\n' "$nats_port" >&2
+  cat "$nats_log_file" >&2
+  return 1
+}
 
-start_nats
-
-printf 'building listener\n'
-(
-  cd "$envoy_dir"
-  go build -o "$listener_binary" ./cmd/listener
-)
+printf 'waiting for NATS\n'
+wait_for_nats
 
 printf 'starting listener: %s\n' "$listener_url"
 PORT="$listener_port" \

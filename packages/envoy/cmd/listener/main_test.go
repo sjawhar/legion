@@ -4546,7 +4546,7 @@ func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Durati
 	<-done
 }
 
-// setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
+// setupTestNATS starts a NATS server dedicated to this test, which ends with it.
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
 	_, uri := testnats.Start(t)
