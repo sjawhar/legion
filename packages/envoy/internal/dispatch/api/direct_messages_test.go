@@ -35,7 +35,7 @@ func directConversationFrom(t *testing.T, login string) (http.Handler, *store.St
 	listener := sessionListener(t, &live, &sent)
 	t.Cleanup(listener.Close)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	created := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Where is the dashboard?", "delivery": "aside",
 	}, login)
 	if created.Code != http.StatusCreated {
@@ -181,7 +181,7 @@ func TestReplyFollowUpIsTrueFalseOrAbsent(t *testing.T) {
 func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 	handler, root, reply, _ := directConversation(t)
 	first := decodeBody[model.Message](t, reply("On it."))
-	followUp := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	followUp := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Thanks.", "delivery": "aside", "in_reply_to": first.ID,
 	}, "alice")
 	if followUp.Code != http.StatusCreated {
@@ -305,7 +305,7 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 		t.Fatalf("after reading: %#v, want nothing unread, read through %s", got, first.CreatedAt)
 	}
 
-	followUp := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	followUp := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Thanks.", "delivery": "aside", "in_reply_to": first.ID,
 	}, "alice")
 	if followUp.Code != http.StatusCreated {
@@ -464,7 +464,7 @@ func TestAgentStateWriteAnnouncesItselfToTheViewersOtherDevices(t *testing.T) {
 func TestAgentConversationsListByLatestActivity(t *testing.T) {
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	assertRootCarriesDelivery(t, database, root.ID, "s1")
-	later := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	later := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "A newer question nobody has answered.", "delivery": "aside",
 	}, "alice")
 	if later.Code != http.StatusCreated {
@@ -790,11 +790,11 @@ func TestAConversationMovesOnActivityDeepInItsChain(t *testing.T) {
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	assertRootCarriesDelivery(t, database, root.ID, "s1")
 	first := decodeBody[model.Message](t, reply("On it."))
-	newer := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	newer := decodeBody[model.Message](t, postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "A newer question nobody has touched.", "delivery": "aside",
 	}, "alice"))
 	// A reply to the reply: the conversation's newest message is two levels down.
-	deep := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	deep := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "And here is the detail.", "delivery": "aside", "in_reply_to": first.ID,
 	}, "alice")
 	if deep.Code != http.StatusCreated {
@@ -904,7 +904,7 @@ func TestTheWindowsUnreadFlagIsReadAgainstTheMarkNotThePresenceOfAReply(t *testi
 	handler, _, readRoot, replyToRead, _ := directConversationFrom(t, "alice")
 	readReply := decodeBody[model.Message](t, replyToRead("Answered, and read."))
 
-	followed := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	followed := decodeBody[model.Message](t, postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "A question its session answered twice.", "delivery": "aside",
 	}, "alice"))
 	answer := func(body string, followUp bool) model.Message {
@@ -1041,7 +1041,7 @@ func TestTheUnreadFlagFollowsTheReadMark(t *testing.T) {
 func TestRepliesReadByIDMarkOnlyThoseReplies(t *testing.T) {
 	handler, _, older, reply, _ := directConversationFrom(t, "Alice")
 	olderAnswer := decodeBody[model.Message](t, reply("The older answer, never shown."))
-	shownRoot := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	shownRoot := decodeBody[model.Message](t, postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "The question the page shows.", "delivery": "aside",
 	}, "Alice"))
 	answerShown := func(body string) model.Message {
@@ -1242,7 +1242,7 @@ func TestAReadMarkDeletesTheRowsOfRepliesItPasses(t *testing.T) {
 	handler, database, _, reply, _ := directConversationFrom(t, "Alice")
 	otherSession := seedDirectAnswer(t, database, "alice", "s2")
 	putAgentState(t, handler, "Alice", "s2", map[string]any{"read_replies": []string{otherSession}})
-	bobsRoot := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	bobsRoot := decodeBody[model.Message](t, postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Bob's question.", "delivery": "aside",
 	}, "bob"))
 	otherLogin := decodeBody[model.Message](t, replyTo(t, handler, bobsRoot.ID, "Bob's answer."))

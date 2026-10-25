@@ -700,7 +700,7 @@ pass
 offline_body="LEGION-394 $run Send while the session is down: my label for it is CHARLIE$run. What is my label?"
 begin a-send-while-the-session-is-down-fails
 offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
-  -d "$(jq -nc --arg b "$offline_body" '{body: $b, delivery: "steer"}')")
+  -d "$(jq -nc --arg b "$offline_body" --arg k "$run" '{body: $b, delivery: "steer", idempotency_key: ("offline-" + $k)}')")
 offline_sent=$SECONDS
 offline_id=$(jq -r .id <<<"$offline")
 note "message $offline_id: $(jq -c '.deliveries[0] | {attempt, delivery, session_id, state, error}' <<<"$offline")"
@@ -749,7 +749,7 @@ begin a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card
 listener -X DELETE "http://127.0.0.1:$envoy_port/v1/sessions/$session_id" >/dev/null
 until_true 30 "the listener to drop the session" unlisted
 unlisted_send=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
-  -d "$(jq -nc --arg b "$unlisted_body" '{body: $b, delivery: "steer"}')")
+  -d "$(jq -nc --arg b "$unlisted_body" --arg k "$run" '{body: $b, delivery: "steer", idempotency_key: ("unlisted-" + $k)}')")
 unlisted_sent=$SECONDS
 unlisted_id=$(jq -r .id <<<"$unlisted_send")
 note "message $unlisted_id: $(jq -c '.deliveries[0] | {attempt, delivery, session_id, state, error}' <<<"$unlisted_send")"

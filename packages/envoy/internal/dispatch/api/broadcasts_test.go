@@ -320,7 +320,7 @@ func TestMessageReadsNameTheBroadcastThatSentThem(t *testing.T) {
 		"body": "Status?", "delivery": "steer", "session_ids": []string{"planner"},
 	}, "alice"))
 	broadcastMessage := awaitBroadcastDeliveries(t, handler, created.ID).Recipients[0].Message.ID
-	direct := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/planner/messages", map[string]any{
+	direct := postAgentMessage(t, handler, "planner", map[string]any{
 		"body": "Where is the dashboard?", "delivery": "steer",
 	}, "alice")
 	if direct.Code != http.StatusCreated {

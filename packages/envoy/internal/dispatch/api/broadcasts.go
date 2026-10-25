@@ -2,14 +2,11 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -47,21 +44,9 @@ import (
 // holding more than four of the shared pool's connections for one broadcast.
 const broadcastDeliveryWorkers = 4
 
-// maxBroadcastIdempotencyKey bounds the caller's key. The dashboard sends a UUID (36); the cap
-// keeps a runaway key out of the index. broadcastKeyPattern keeps a key printable wherever it is
-// echoed - a refusal, a log line, a psql session - and out of it whitespace and control
-// characters; the pattern makes a key ASCII, so its length is its byte length.
-const maxBroadcastIdempotencyKey = 128
-
-var broadcastKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
-
 // errBroadcastKeyHeld is writeBroadcast's answer when the key row already exists: another request
 // of this human's committed the same key first, and the caller answers with its broadcast.
 var errBroadcastKeyHeld = errors.New("broadcast idempotency key already held")
-
-// broadcastKey is what a send's idempotency key is judged by: the human it belongs to, the key,
-// and the digest of the request it was first used for.
-type broadcastKey struct{ login, key, digest string }
 
 // broadcast is what a send's recipients share: who sent it, the body they were all sent, the
 // mode it was sent in, and when.
@@ -223,16 +208,10 @@ func validateBroadcastInput(body, delivery, key string, sessionIDs []string) ([]
 	// The rule comes first, since it is the answer for every keyless caller; the second sentence is
 	// for a page loaded before the field shipped, whose failed row is the only copy of the message
 	// and which a reload drops, so it says what to do, in order.
-	if key == "" {
-		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT",
-			"idempotency_key is required, one per send. On a page loaded before it was required: press Restore draft and copy the message, then reload the page and send it again")
-	}
-	if !broadcastKeyPattern.MatchString(key) {
-		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT",
-			"idempotency_key may use only letters, digits, '.', '_', ':' and '-'")
-	}
-	if len(key) > maxBroadcastIdempotencyKey {
-		return nil, capExceededError("idempotency_key", len(key), maxBroadcastIdempotencyKey)
+	if err := validateIdempotencyKey(key, "BROADCAST_INPUT",
+		"idempotency_key is required, one per send. On a page loaded before it was required: press Restore draft and copy the message, then reload the page and send it again",
+	); err != nil {
+		return nil, err
 	}
 	seen := make(map[string]struct{}, len(sessionIDs))
 	requested := make([]string, 0, len(sessionIDs))
@@ -259,22 +238,15 @@ func validateBroadcastInput(body, delivery, key string, sessionIDs []string) ([]
 	return requested, nil
 }
 
-// newBroadcastKey is what a send's key is judged by: the sender's canonical login, the key, and a
-// fingerprint of what the send asked for - the body, the mode and the requested sessions in order,
-// after validateBroadcastInput trimmed and de-duplicated them - so a repeat of a key can be told
-// from a reuse of it.
-func newBroadcastKey(actor model.Actor, key, body, delivery string, requested []string) broadcastKey {
-	encoded, err := json.Marshal(struct {
+// newBroadcastKey is what a send's key is judged by (newIdempotencyKey): what the send asked for is
+// the body, the mode and the requested sessions in order, after validateBroadcastInput trimmed and
+// de-duplicated them.
+func newBroadcastKey(actor model.Actor, key, body, delivery string, requested []string) idempotencyKey {
+	return newIdempotencyKey(actor, key, struct {
 		Body       string   `json:"body"`
 		Delivery   string   `json:"delivery"`
 		SessionIDs []string `json:"session_ids"`
 	}{body, delivery, requested})
-	if err != nil {
-		// A struct of strings always encodes.
-		panic(err)
-	}
-	sum := sha256.Sum256(encoded)
-	return broadcastKey{login: model.CanonicalLogin(actor.ID), key: key, digest: hex.EncodeToString(sum[:])}
 }
 
 // answerHeldBroadcastKey answers a send whose key this human has already used, and reports
@@ -286,7 +258,7 @@ func newBroadcastKey(actor model.Actor, key, body, delivery string, requested []
 // death before delivery comes back pending, for the broadcast view's same-mode retry to resume
 // (deliverBroadcast's comment), so a 200 says the broadcast exists, not that delivery is under
 // way.
-func (s *server) answerHeldBroadcastKey(ctx context.Context, w http.ResponseWriter, key broadcastKey, requested []string) bool {
+func (s *server) answerHeldBroadcastKey(ctx context.Context, w http.ResponseWriter, key idempotencyKey, requested []string) bool {
 	var broadcastID, digest string
 	err := s.deps.Store.Pool.QueryRow(ctx, `
 		select broadcast_id::text, request_digest from broadcast_idempotency_keys
@@ -385,7 +357,7 @@ func excludedSummary(excluded []broadcastExclusion) string {
 func (s *server) writeBroadcast(
 	ctx context.Context,
 	actor model.Actor,
-	key broadcastKey,
+	key idempotencyKey,
 	body, delivery string,
 	recipients []broadcastTarget,
 ) (broadcastRead, []model.Event, error) {

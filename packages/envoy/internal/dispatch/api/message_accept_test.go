@@ -360,7 +360,7 @@ func TestAcceptRefusesASendDispatchCouldNotDeliver(t *testing.T) {
 	listener := sessionListener(t, &live, &sent)
 	t.Cleanup(listener.Close)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	created := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Restart the deploy.", "delivery": "steer",
 	}, "alice")
 	if created.Code != http.StatusCreated {
@@ -440,7 +440,7 @@ func TestAcceptRefusesAMessageThatIsNotAPersonsDirectMessageToTheSession(t *test
 			name: "a person's reply in a broadcast's thread",
 			message: func(t *testing.T) (http.Handler, *store.Store, string) {
 				handler, database, copyID := broadcastCopy(t)
-				reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/planner/messages", map[string]any{
+				reply := postAgentMessage(t, handler, "planner", map[string]any{
 					"body": "And the logs?", "delivery": "steer", "in_reply_to": copyID,
 				}, "alice")
 				if reply.Code != http.StatusCreated {
@@ -634,7 +634,7 @@ func TestAcceptDuringTheSendLeavesTheSettleItsReceipt(t *testing.T) {
 	var database *store.Store
 	handler, database = newTargetedMessageHandler(t, listener.URL)
 
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	created := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Take this as typed.", "delivery": "steer",
 	}, "alice")
 	if created.Code != http.StatusCreated {
@@ -696,7 +696,7 @@ func TestEveryPathThatOpensAnAttemptRecordsWhoAskedForIt(t *testing.T) {
 			t.Fatalf("bearer retry: status=%d body=%s", retry.Code, retry.Body.String())
 		}
 		assertRequester(t, database, root.ID, 3, session)
-		reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		reply := postAgentMessage(t, handler, "s1", map[string]any{
 			"body": "And the logs?", "delivery": "aside", "in_reply_to": root.ID,
 		}, "bob")
 		if reply.Code != http.StatusCreated {

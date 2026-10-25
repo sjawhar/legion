@@ -330,9 +330,11 @@ func (s *server) recordPendingMessageDelivery(
 	pending := pendingMessageDelivery{resolved: resolved}
 	if resumeAttempt > 0 {
 		// A bound sender takes its own attempt or nothing. The row must still be pending, still
-		// in the mode this send resolved for, still pointed at the session the resolution was
-		// taken for, and free (nobody else inside the claim lease) - anything else means this
-		// send is not the one that owes the frame.
+		// in the mode this send resolved for, still pointed at the recipient the resolution was
+		// taken for - the session it names, or the message's target for an attempt stranded
+		// before anything was resolved, as the unbound resume below reads it - and free (nobody
+		// else inside the claim lease) - anything else means this send is not the one that owes
+		// the frame.
 		var bound model.MessageDelivery
 		var free bool
 		err = tx.QueryRow(ctx, `
@@ -342,20 +344,26 @@ func (s *server) recordPendingMessageDelivery(
 			for update
 		`, message.ID, resumeAttempt).Scan(&bound.Attempt, &bound.Delivery, &bound.SessionID, &free)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return pendingMessageDelivery{}, errAttemptNotPending
+			return s.openFirstMessageDeliveryAttempt(ctx, tx, message, target, actor, resolved, replyThread, resumeAttempt)
 		}
 		if err != nil {
 			return pendingMessageDelivery{}, err
 		}
-		if !free || bound.Delivery != resolved.Delivery || "session:"+bound.SessionID != resolved.Target {
+		recipient := target
+		if bound.SessionID != "" {
+			recipient = "session:" + bound.SessionID
+		}
+		if !free || bound.Delivery != resolved.Delivery || recipient != resolved.Target {
 			return pendingMessageDelivery{}, errAttemptNotPending
 		}
 		pending.attempt = bound.Attempt
 		if err := tx.QueryRow(ctx, `
-			update message_deliveries set claimed_at = now()
+			update message_deliveries
+			set session_id = coalesce(nullif(session_id, ''), $3), claimed_at = now()
 			where message_id = $1 and attempt = $2 and state = 'pending'
 			returning claimed_at, session_id
-		`, message.ID, pending.attempt).Scan(&pending.claimedAt, &pending.resolved.attemptSessionID); err != nil {
+		`, message.ID, pending.attempt, resolved.attemptSessionID,
+		).Scan(&pending.claimedAt, &pending.resolved.attemptSessionID); err != nil {
 			return pendingMessageDelivery{}, err
 		}
 		if err := finishPendingMessageDelivery(ctx, tx, s, message, replyThread, &pending); err != nil {
@@ -451,6 +459,48 @@ func (s *server) recordPendingMessageDelivery(
 	}
 	if superseded != nil {
 		s.publish(*superseded)
+	}
+	return pending, nil
+}
+
+// openFirstMessageDeliveryAttempt is a bound sender's claim when its attempt is not a pending row:
+// bound to the first attempt of a message that has none, it opens that attempt, and otherwise the
+// attempt was settled or superseded and it is errAttemptNotPending. Two senders bind to a message's
+// first attempt before it exists - the message's own send once it commits, and a repeat of a keyed
+// send that found the message committed with no attempt (sendHeldMessageOn) - and the message's
+// lock, which tx holds, makes whichever claims first open the attempt; the other then finds it
+// taken and sends nothing.
+func (s *server) openFirstMessageDeliveryAttempt(
+	ctx context.Context,
+	tx pgx.Tx,
+	message model.Message,
+	target string,
+	actor model.Actor,
+	resolved ResolvedMention,
+	replyThread *messageReplyThread,
+	resumeAttempt int,
+) (pendingMessageDelivery, error) {
+	if resumeAttempt != 1 {
+		return pendingMessageDelivery{}, errAttemptNotPending
+	}
+	var attempted bool
+	if err := tx.QueryRow(ctx,
+		`select exists (select 1 from message_deliveries where message_id = $1)`, message.ID,
+	).Scan(&attempted); err != nil {
+		return pendingMessageDelivery{}, err
+	}
+	if attempted {
+		return pendingMessageDelivery{}, errAttemptNotPending
+	}
+	if target != resolved.Target {
+		return pendingMessageDelivery{}, errStaleResolution
+	}
+	pending := pendingMessageDelivery{resolved: resolved}
+	if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, actor, resolved, &pending); err != nil {
+		return pendingMessageDelivery{}, err
+	}
+	if err := finishPendingMessageDelivery(ctx, tx, s, message, replyThread, &pending); err != nil {
+		return pendingMessageDelivery{}, err
 	}
 	return pending, nil
 }
@@ -605,7 +655,10 @@ var errAttemptNotPending = errors.New("delivery attempt is no longer pending")
 // answering errAttemptNotPending instead. A broadcast's workers send that way, because their
 // attempts exist before they start: a human who changes the mode from the agent card in the
 // meantime settles attempt 1 and sends their own, and a worker that then opened an attempt of
-// its own would put a second frame on the session's subject.
+// its own would put a second frame on the session's subject. Bound to attempt 1 of a message
+// that has no attempt yet, it opens that attempt (openFirstMessageDeliveryAttempt): a new
+// message's own send does, and so does a repeat of a keyed send that finds its message committed
+// with no attempt, and only the first of the two to claim sends.
 func (s *server) deliverMessageResuming(
 	ctx context.Context,
 	message model.Message,

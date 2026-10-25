@@ -60,7 +60,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issueKey := r.PathValue("key")
-	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor)
+	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -68,21 +68,25 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, withAdvice(message, advice))
 }
 
+// createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session,
+// named by its idempotency key (agent_message_keys.go).
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
 		return
 	}
 	var input struct {
-		Body      string  `json:"body"`
-		Delivery  string  `json:"delivery"`
-		InReplyTo *string `json:"in_reply_to"`
+		Body           string  `json:"body"`
+		Delivery       string  `json:"delivery"`
+		InReplyTo      *string `json:"in_reply_to"`
+		IdempotencyKey string  `json:"idempotency_key"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	target := "session:" + r.PathValue("session_id")
+	sessionID := r.PathValue("session_id")
+	target := "session:" + sessionID
 	messageInput := createMessageInput{
 		Body: input.Body, InReplyTo: input.InReplyTo, Target: &target, Delivery: &input.Delivery,
 	}
@@ -91,7 +95,25 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor)
+	if err := validateIdempotencyKey(input.IdempotencyKey, "MESSAGE_INPUT", agentMessageKeyRequired); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	key := newAgentMessageKey(actor, input.IdempotencyKey, sessionID, input.Body, delivery, input.InReplyTo)
+	// A key this person has already used answers its message before anything is written or the
+	// listener is read: a retry of a send that landed must not fail because the listener is down.
+	if s.answerHeldAgentMessageKey(r.Context(), w, key, delivery, actor) {
+		return
+	}
+	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor, &key)
+	if errors.Is(err, errAgentMessageKeyHeld) {
+		// Two requests with one key reached the write together; the other committed first, and
+		// this one's transaction rolled back - message, key and event with it.
+		if !s.answerHeldAgentMessageKey(r.Context(), w, key, delivery, actor) {
+			s.writeHandlerError(w, fmt.Errorf("message key %q was held and then not found", key.key))
+		}
+		return
+	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -99,12 +121,16 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, message)
 }
 
+// createStoredMessage writes one message, and key's row with it when the send carries one, in a
+// single transaction, then sends a targeted message's first attempt. A key another request of this
+// person's committed first is errAgentMessageKeyHeld, with nothing written.
 func (s *server) createStoredMessage(
 	ctx context.Context,
 	issueKey *string,
 	input createMessageInput,
 	delivery string,
 	actor model.Actor,
+	key *idempotencyKey,
 ) (model.Message, *writeAdvice, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -160,6 +186,14 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
+	// The key's row right after its message and before the event append, so a request racing this
+	// one under the same key waits on that row before it takes the events' global lock, which this
+	// transaction still needs to commit, and is refused the key once it does (insertAgentMessageKey).
+	if key != nil {
+		if err := insertAgentMessageKey(ctx, tx, *key, message.ID); err != nil {
+			return model.Message{}, nil, err
+		}
+	}
 	var referenceChanges model.ReferenceChanges
 	if message.IssueKey != nil {
 		referenceChanges, err = s.replaceReferences(ctx, tx, "message", message.ID, message.Body)
@@ -191,13 +225,41 @@ func (s *server) createStoredMessage(
 	}
 	s.publish(event)
 	if message.Target != nil {
-		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor, &thread)
-		if err != nil {
+		// The delivery runs on past the request: a page that gives up on a send, or retries it
+		// under its key, never cuts off a frame in flight or strands its attempt pending; only the
+		// server's own shutdown stops it.
+		sending, stop := s.detachedFromRequest(ctx)
+		defer stop()
+		// Bound to the message's first attempt: a repeat of a keyed send that found this message
+		// committed with no attempt yet may open it first (sendHeldMessageOn), and then this send
+		// sends nothing and answers with the attempt that repeat opened.
+		attempt, err := s.deliverMessageResuming(sending, message, delivery, input.Urgency, actor, &thread, 1)
+		switch {
+		case errors.Is(err, errAttemptNotPending):
+			deliveries, err := s.loadMessageDeliveries(sending, s.deps.Store.Pool, []string{message.ID})
+			if err != nil {
+				return model.Message{}, nil, err
+			}
+			message.Deliveries = deliveries[message.ID]
+		case err != nil:
 			return model.Message{}, nil, err
+		default:
+			message.Deliveries = []model.MessageDelivery{attempt}
 		}
-		message.Deliveries = []model.MessageDelivery{attempt}
 	}
 	return message, advice, nil
+}
+
+// detachedFromRequest is ctx with its values, the pool's tracking mark among them, and without its
+// cancellation, cancelled instead when the server's lifetime ends: work a request starts that must
+// not stop when its caller gives up, and must stop when the server shuts down.
+func (s *server) detachedFromRequest(ctx context.Context) (context.Context, context.CancelFunc) {
+	detached, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopWatching := context.AfterFunc(s.lifetime(), cancel)
+	return detached, func() {
+		stopWatching()
+		cancel()
+	}
 }
 
 func messageEvent(message model.Message, eventType string, actor model.Actor, payload any) model.Event {
