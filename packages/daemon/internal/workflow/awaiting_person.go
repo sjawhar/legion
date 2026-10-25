@@ -72,11 +72,12 @@ func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.D
 // resolution of a question on a tree Legion is not running goes to the controller
 // (relayParkedDecision).
 func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
-	if fact.Actor.Person() {
-		review := fact.Kind == "approval" && fact.State == "answered"
-		if err := e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, !review); err != nil {
-			return intake.Result{}, err
-		}
+	if !fact.Actor.Person() {
+		return intake.Result{}, nil
+	}
+	review := fact.Kind == "approval" && fact.State == "answered"
+	if err := e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, !review); err != nil {
+		return intake.Result{}, err
 	}
 	// An approval ask's answer arrives again as the document's review, which the gate relays.
 	if fact.Kind != "question" {

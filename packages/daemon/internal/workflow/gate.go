@@ -54,20 +54,20 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: version}
 	changesRequested := false
-	// Who reviewed, named on the notice the registration sends: no person under gates.design off,
-	// which opens the gate whatever Dispatch shows.
-	reviewer := fact.ReviewedBy.Name()
+	// Who reviewed, named on the notice the registration sends: the person whose review the
+	// registration carries, and no person under gates.design off, which opens the gate whatever
+	// Dispatch shows.
+	var reviewer string
 	switch {
 	case e.cfg.DesignGate == config.DesignGateOff:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, version)
-		reviewer = ""
 	case fact.ApprovedVersion >= version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion)
+		reviewer = fact.ReviewedBy.Name()
 	case fact.ChangesRequestedVersion >= version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateChangesRequested, fact.ChangesRequestedVersion)
+		reviewer = fact.ReviewedBy.Name()
 		changesRequested = true
-	default:
-		reviewer = ""
 	}
 	// A registration whose read predates a review the live event already told keeps that record:
 	// it rebuilds the gate from Dispatch, and the gate seed that follows re-reads the same review.
@@ -237,16 +237,17 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 	if err := e.store.PutGate(ctx, tx, updated); err != nil {
 		return err
 	}
+	reviewer := fact.Actor.Name()
 	if tell {
 		if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason,
-			Actor: fact.Actor.Name(), Ref: specRef(key)}); err != nil {
+			Actor: reviewer, Ref: specRef(key)}); err != nil {
 			return err
 		}
 	}
 	if !wasOpen && isOpen {
-		opened := record.Notice{Kind: "design-approved", Version: fact.Version, Actor: fact.Actor.Name(), Ref: specRef(key)}
+		opened := record.Notice{Kind: "design-approved", Version: fact.Version, Actor: reviewer, Ref: specRef(key)}
 		if carried {
-			opened = record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Actor: fact.Actor.Name(), Ref: specRef(fact.Key), Reason: fmt.Sprintf(
+			opened = record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Actor: reviewer, Ref: specRef(fact.Key), Reason: fmt.Sprintf(
 				"a human approved %s's spec document at version %d, which opens the gate %s carried; any READY it refused is released and any child waiting on it starts", fact.Key, fact.Version, key)}
 		}
 		if err := e.notice(ctx, tx, key, opened); err != nil {

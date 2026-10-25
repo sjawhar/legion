@@ -29,9 +29,12 @@ func (e *Engine) relayParkedDecision(ctx context.Context, tx pgx.Tx, key, ask st
 	if err != nil || issue == nil {
 		return err
 	}
-	root, err := e.store.Issue(ctx, tx, issue.Tree)
-	if err != nil || root == nil {
-		return err
+	// The ask's own issue is the root when the ask is on a tree root: one row, read once.
+	root := issue
+	if issue.Tree != key {
+		if root, err = e.store.Issue(ctx, tx, issue.Tree); err != nil || root == nil {
+			return err
+		}
 	}
 	waiting := false
 	if !root.Lingers() {
