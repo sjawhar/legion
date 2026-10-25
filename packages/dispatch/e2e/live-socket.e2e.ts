@@ -7,6 +7,7 @@ import {
   type WebSocketRoute,
 } from "@playwright/test";
 
+import type { LiveClientFrame, LiveServerFrame } from "../web/src/api/types";
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
   createComment,
@@ -47,41 +48,38 @@ function connect(route: WebSocketRoute): void {
   );
 }
 
-function watchLiveSockets(page: Page): {
+/** What a page's live sockets did: those open now, every one it opened, every frame it sent, and
+ *  the type of every frame it received, in order. */
+interface LiveSockets {
   readonly open: Set<BrowserWebSocket>;
-  readonly subscriptions: unknown[];
-} {
-  const open = new Set<BrowserWebSocket>();
-  const subscriptions: unknown[] = [];
-  page.on("websocket", (socket) => {
-    if (!isLiveSocket(socket)) return;
-    open.add(socket);
-    socket.on("close", () => open.delete(socket));
-    socket.on("framesent", (event) => {
-      const payload = typeof event.payload === "string" ? event.payload : event.payload.toString();
-      try {
-        subscriptions.push(JSON.parse(payload));
-      } catch {
-        // Only subscribe frames matter below. A malformed frame is the server's concern.
-      }
-    });
-  });
-  return { open, subscriptions };
+  readonly opened: BrowserWebSocket[];
+  readonly sent: LiveClientFrame[];
+  readonly received: LiveServerFrame["type"][];
 }
 
-function agentSubscriptions(subscriptions: readonly unknown[]): number {
-  return subscriptions.filter(
-    (frame) =>
-      typeof frame === "object" &&
-      frame !== null &&
-      "type" in frame &&
-      "view" in frame &&
-      frame.type === "subscribe" &&
-      typeof frame.view === "object" &&
-      frame.view !== null &&
-      "kind" in frame.view &&
-      frame.view.kind === "agent"
-  ).length;
+function watchLiveSockets(page: Page): LiveSockets {
+  const sockets: LiveSockets = { open: new Set(), opened: [], received: [], sent: [] };
+  page.on("websocket", (socket) => {
+    if (!isLiveSocket(socket)) return;
+    sockets.open.add(socket);
+    sockets.opened.push(socket);
+    socket.on("close", () => sockets.open.delete(socket));
+    // The page sends only the contract's client frames and Dispatch only its server frames, each
+    // one JSON object.
+    socket.on("framesent", ({ payload }) => {
+      sockets.sent.push(JSON.parse(String(payload)) as LiveClientFrame);
+    });
+    socket.on("framereceived", ({ payload }) => {
+      sockets.received.push((JSON.parse(String(payload)) as LiveServerFrame).type);
+    });
+  });
+  return sockets;
+}
+
+/** Waits until the page holds one open live socket and its event feed has started on it. */
+async function untilFeedStarts(sockets: LiveSockets): Promise<void> {
+  await expect.poll(() => sockets.open.size).toBe(1);
+  await expect.poll(() => sockets.received.includes("events_start")).toBe(true);
 }
 
 function replay(sessionID: string, extra: readonly object[] = []): object {
@@ -169,6 +167,15 @@ test("a tab holds one live socket for every live view", async ({ browser }) => {
     await navigateInApp(page, "/delivery?mode=list");
     await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
     await expect.poll(() => sockets.open.size).toBe(1);
+
+    // Each view rode the one socket the page opened at its first load: the event feed, the
+    // session's agent view and the delivery timeline.
+    const views = () =>
+      sockets.sent.flatMap((frame) => (frame.type === "subscribe" ? [frame.view] : []));
+    await expect.poll(views).toContainEqual({ kind: "events" });
+    await expect.poll(views).toContainEqual({ kind: "agent", session_id: agent.session_id });
+    await expect.poll(views).toContainEqual(expect.objectContaining({ kind: "timeline" }));
+    expect(sockets.opened).toHaveLength(1);
   } finally {
     await alice.close();
   }
@@ -189,6 +196,7 @@ test("no request to Dispatch stays open while the page idles", async ({ browser 
     const live = await alice.newPage();
     const delivery = await alice.newPage();
     const pending = [trackApiRequests(board), trackApiRequests(live), trackApiRequests(delivery)];
+    const sockets = [watchLiveSockets(board), watchLiveSockets(live), watchLiveSockets(delivery)];
 
     await board.goto("/projects/CORE");
     await board.getByRole("button", { name: "Board" }).click();
@@ -197,6 +205,9 @@ test("no request to Dispatch stays open while the page idles", async ({ browser 
     await expect(live.getByTestId("agent-thread")).toBeVisible();
     await delivery.goto("/delivery?mode=list");
     await expect(delivery.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
+    // Each page's live views ride its socket, so the idle below holds them open; a page whose
+    // socket had not opened would idle with nothing to hold.
+    for (const pageSockets of sockets) await untilFeedStarts(pageSockets);
     await Promise.all(pending.map(waitForReads));
 
     await board.waitForTimeout(40_000);
@@ -211,7 +222,10 @@ test("no request to Dispatch stays open while the page idles", async ({ browser 
   }
 });
 
-test("a rotation loses no event on a page that has seen none", async ({ browser }, testInfo) => {
+// The page rotates before it has seen any event, so its event feed resumes from the sign-in
+// check's head: the change committed while the next socket waits arrives on it, and the rotation
+// costs no request beyond what that change costs a page with no rotation (the control).
+test("a rotation loses no event and makes no extra request", async ({ browser }, testInfo) => {
   test.setTimeout(45_000);
   test.skip(testInfo.project.name !== "chromium", "the rotation proof runs once");
   await createProject({ key: "CORE", name: "Core" });
@@ -252,16 +266,7 @@ test("a rotation loses no event on a page that has seen none", async ({ browser 
     const issue = await createIssue({ project: "CORE", title: "Rotation target" });
     const page = await alice.newPage();
     const pending = trackApiRequests(page);
-    const frames: string[] = [];
-    page.on("websocket", (socket) => {
-      if (!isLiveSocket(socket)) return;
-      socket.on("framereceived", (event) => {
-        const payload =
-          typeof event.payload === "string" ? event.payload : event.payload.toString();
-        const frame = JSON.parse(payload) as { readonly type?: string };
-        frames.push(frame.type ?? "");
-      });
-    });
+    const sockets = watchLiveSockets(page);
     let holdReconnect = false;
     let held: WebSocketRoute | undefined;
     const reconnectReleased = Promise.withResolvers<void>();
@@ -282,10 +287,11 @@ test("a rotation loses no event on a page that has seen none", async ({ browser 
       "true"
     );
     await first;
-    await expect.poll(() => frames.includes("events_start")).toBe(true);
+    await expect.poll(() => sockets.received.includes("events_start")).toBe(true);
     await page.waitForTimeout(1_000);
     await waitForReads(pending);
 
+    expect(sockets.received).not.toContain("event");
     holdReconnect = true;
     await rotateLiveSockets();
     await expect.poll(() => held !== undefined).toBe(true);
@@ -301,7 +307,7 @@ test("a rotation loses no event on a page that has seen none", async ({ browser 
     });
     if (held === undefined) throw new Error("the reopened live socket was not held");
     reconnectReleased.resolve();
-    await expect.poll(() => frames).toContain("event");
+    await expect.poll(() => sockets.received).toContain("event");
     await expect(
       page.locator(`a[href="/issues/${issue.key}/comments/${comment.id}"]`)
     ).toBeVisible();
@@ -368,6 +374,7 @@ test("a first live socket opening without a change makes no API request", async 
   try {
     const page = await alice.newPage();
     const pending = trackApiRequests(page);
+    const sockets = watchLiveSockets(page);
     let held: WebSocketRoute | undefined;
     const firstSocketReleased = Promise.withResolvers<void>();
     await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
@@ -375,7 +382,6 @@ test("a first live socket opening without a change makes no API request", async 
       await firstSocketReleased.promise;
       connect(route);
     });
-    const opened = page.waitForEvent("websocket", isLiveSocket);
     const requestsAfterOpen: string[] = [];
     let countRequests = false;
     page.on("request", (request) => {
@@ -389,9 +395,10 @@ test("a first live socket opening without a change makes no API request", async 
     await expect.poll(() => held !== undefined).toBe(true);
     await waitForReads(pending);
     if (held === undefined) throw new Error("the first live socket was not held");
-    firstSocketReleased.resolve();
-    await opened;
     countRequests = true;
+    firstSocketReleased.resolve();
+    // The socket opened and the feed started on it, so the quiet below is the open's own.
+    await untilFeedStarts(sockets);
     await page.waitForTimeout(5_000);
     expect(requestsAfterOpen).toEqual([]);
   } finally {
@@ -437,7 +444,13 @@ test("an agent live view survives a rotation in place", async ({ browser }, test
     );
     await rotateLiveSockets();
     await expect.poll(() => sockets.open.size).toBe(1);
-    await expect.poll(() => agentSubscriptions(sockets.subscriptions)).toBe(2);
+    await expect
+      .poll(
+        () =>
+          sockets.sent.filter((frame) => frame.type === "subscribe" && frame.view.kind === "agent")
+            .length
+      )
+      .toBe(2);
 
     await publishAgentStreamFrame(agent.session_id, {
       kind: "message",
