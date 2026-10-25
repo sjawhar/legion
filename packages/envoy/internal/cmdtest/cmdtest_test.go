@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -84,11 +85,18 @@ func TestFreeTCPPortNeverBindsAPortWhileTheProcessItWentToBindsIt(t *testing.T) 
 			_ = listener.Close()
 		}
 	}()
+	// The binding goroutine stops at the test's end however it ends, a draw's t.Fatalf included:
+	// left running, it would go on binding the port through every later -count repetition.
+	var stopOnce sync.Once
+	halt := func() {
+		stopOnce.Do(func() { close(stop) })
+		<-stopped
+	}
+	t.Cleanup(halt)
 	for range 1000 {
 		freeTCPPortFrom(t, candidate)
 	}
-	close(stop)
-	<-stopped
+	halt()
 
 	t.Logf("the booting process bound port %d %d times while 1000 draws were offered it", booting, bound.Load())
 	if refused.Load() > 0 {
