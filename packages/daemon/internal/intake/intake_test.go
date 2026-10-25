@@ -646,6 +646,97 @@ func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 	}
 }
 
+// A completed workflow run, as Envoy's own normalizer writes it from a real sjawhar/legion
+// release.yaml push run on main (the workflow-run-completed golden), is a WorkflowRunCompleted of
+// the repository heard, its run id and attempt read from Envoy's decimal strings. Any other action,
+// another repository, a run id or attempt that is missing, not a positive decimal or not a string,
+// and a missing path or branch are no fact, and never poison: such a run can wake nothing.
+func TestDecodeWorkflowRunCompletedFromEnvoysGolden(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "workflow-run-completed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var golden struct {
+		Topic          string         `json:"topic"`
+		PayloadSummary string         `json:"payload_summary"`
+		Payload        map[string]any `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &golden); err != nil {
+		t.Fatalf("decode golden: %v", err)
+	}
+	decode := func(t *testing.T, set map[string]any, unset ...string) decodedMessage {
+		t.Helper()
+		payload := make(map[string]any, len(golden.Payload))
+		for key, value := range golden.Payload {
+			payload[key] = value
+		}
+		for key, value := range set {
+			payload[key] = value
+		}
+		for _, key := range unset {
+			delete(payload, key)
+		}
+		text, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		envelope, err := json.Marshal(map[string]any{
+			"event_id": "golden", "source": "github", "source_event_id": "golden", "topic": golden.Topic,
+			"dedupe_key": "golden", "issued_at": 1, "payload_summary": golden.PayloadSummary,
+			"payload": string(text), "trace_id": "golden",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := decodeMessage(golden.Topic, "GOLDEN", capturedRepositories, envelope)
+		if err != nil {
+			t.Fatalf("decode %s: %v, want no poison", golden.Topic, err)
+		}
+		return decoded
+	}
+	want := WorkflowRunCompleted{Repo: "sjawhar/legion", Path: ".github/workflows/release.yaml", RunID: 40203304600, Attempt: 1,
+		HeadBranch: "main", HeadSHA: "d7026876b8c8cd3e34937e5dbc76d719b09a4549"}
+	if got := decode(t, nil).Fact; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the golden's fact = %#v, want %#v", got, want)
+	}
+	if got := decode(t, map[string]any{"repo": "SJAWHAR/Legion", "run_attempt": "3"}).Fact; got != (WorkflowRunCompleted{Repo: "sjawhar/legion", Path: want.Path,
+		RunID: want.RunID, Attempt: 3, HeadBranch: "main", HeadSHA: want.HeadSHA}) {
+		t.Fatalf("a re-run attempt spelled in another case = %#v, want attempt 3 of the heard repository", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		set   map[string]any
+		unset []string
+	}{
+		{name: "requested", set: map[string]any{"action": "requested", "status": "queued", "conclusion": ""}},
+		{name: "in progress", set: map[string]any{"action": "in_progress", "status": "in_progress", "conclusion": ""}},
+		{name: "no action", unset: []string{"action"}},
+		{name: "another repository", set: map[string]any{"repo": "acme/widgets"}},
+		{name: "no run id", unset: []string{"run_id"}},
+		{name: "an empty run id", set: map[string]any{"run_id": ""}},
+		{name: "a run id that is not a number", set: map[string]any{"run_id": "run-40203304600"}},
+		{name: "a signed run id", set: map[string]any{"run_id": "+40203304600"}},
+		{name: "a zero run id", set: map[string]any{"run_id": "0"}},
+		{name: "a run id past int64", set: map[string]any{"run_id": "9223372036854775808"}},
+		{name: "a run id as a JSON number", set: map[string]any{"run_id": 40203304600}},
+		{name: "no attempt", unset: []string{"run_attempt"}},
+		{name: "an attempt that is not a number", set: map[string]any{"run_attempt": "first"}},
+		{name: "a negative attempt", set: map[string]any{"run_attempt": "-1"}},
+		{name: "a zero attempt", set: map[string]any{"run_attempt": "0"}},
+		{name: "an attempt as a JSON number", set: map[string]any{"run_attempt": 1}},
+		{name: "an empty path", set: map[string]any{"path": ""}},
+		{name: "no path", unset: []string{"path"}},
+		{name: "an empty branch", set: map[string]any{"head_branch": ""}},
+		{name: "no branch", unset: []string{"head_branch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if decoded := decode(t, tc.set, tc.unset...); decoded.Fact != nil {
+				t.Fatalf("fact = %#v, want none", decoded.Fact)
+			}
+		})
+	}
+}
+
 // A checks settlement names its pull request in its subject, where a dotted repository name is one
 // segment, a dot as `_`: the settlement decodes for the repository its payload names.
 func TestDecodeChecksForADottedRepository(t *testing.T) {

@@ -373,6 +373,24 @@ type Push struct {
 
 func (Push) isFact() {}
 
+// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope: attempt Attempt of GitHub
+// Actions run RunID of the workflow file Path (GitHub's `workflow_run.path`, the run's top-level
+// `.github/workflows/` file) in Repo finished on HeadBranch at HeadSHA, whatever its conclusion.
+// Envoy publishes none for a run of a pull request. The workflow compares it with the project's
+// deploy workflows (config.Project.Deploys) and queues a GitHub read of the run for each open
+// production check it may wake; the envelope is anyone's who holds an Envoy bearer, so nothing in
+// it is trusted beyond choosing what to read.
+type WorkflowRunCompleted struct {
+	Repo       string
+	Path       string
+	RunID      int64
+	Attempt    int
+	HeadBranch string
+	HeadSHA    string
+}
+
+func (WorkflowRunCompleted) isFact() {}
+
 // HandoffComplete is an API-originated phase-completion fact.
 type HandoffComplete struct {
 	Issue string
@@ -548,13 +566,15 @@ type ServerStarted struct {
 
 func (ServerStarted) isFact() {}
 
-// CheckWake is a build compare that found the merge of issue Issue's production check in the
-// build (the check_compare outbox row's GitHub read): Look is the look the compare was queued for,
-// Cause what asked for it (`daemon boot`, `dispatch start` or `dispatch build`) and Detail the
-// build's commit. OpenedAt is the check the executor read the merge from (its OpenedAt, the check
-// instance's identity): the workflow ignores a wake of a check a later merge has replaced, and a
-// zero OpenedAt names none. The workflow wakes the check by the one wake rule, or keeps the cause
-// for the next look while one is open.
+// CheckWake is a compare that found a reason to wake issue Issue's production check (the
+// check_compare outbox row's GitHub read): a build that carries the check's merge, or a deploy
+// workflow's job whose named step succeeded after the pull request merged. Look is the look the
+// compare was queued for, Cause what asked for it (`daemon boot`, `dispatch start`, `dispatch
+// build` or `deploy run`) and Detail the build's commit or the deploy run and its job. OpenedAt is
+// the check the executor read the merge from (its OpenedAt, the check instance's identity): the
+// workflow ignores a wake of a check a later merge has replaced, and a zero OpenedAt names none.
+// The workflow wakes the check by the one wake rule, or keeps the cause for the next look while
+// one is open.
 type CheckWake struct {
 	Issue    string
 	Look     int
