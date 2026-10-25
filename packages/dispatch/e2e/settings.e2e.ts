@@ -6,6 +6,7 @@ import {
   createProject,
   getIssue,
   listProjectDefaultAssignees,
+  putProjectDefaultAssignee,
   putRepoProject,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
@@ -377,6 +378,7 @@ test("a person sets, changes and clears a project's default assignee, and a proj
     // The sentence beside the control: an issue from an unmapped repository lands in the default
     // project, so a default set there catches all of them.
     await expect(page.getByText("no project mapping")).toBeVisible();
+    await expect(ops).toBeEnabled();
     await expect(ops).toHaveValue("");
 
     // Who has signed in is read only once the reader reaches for the control.
@@ -408,6 +410,7 @@ test("a person sets, changes and clears a project's default assignee, and a proj
     expect((await changed).ok()).toBe(true);
     await page.reload();
     await expect(core).toHaveValue("alice");
+    await expect(ops).toBeEnabled();
     await expect(ops).toHaveValue("");
 
     const cleared = page.waitForResponse(
@@ -422,6 +425,124 @@ test("a person sets, changes and clears a project's default assignee, and a proj
     const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
     expect(defaults.map((row) => row.project)).not.toContain("CORE");
     expect(defaults.map((row) => row.project)).not.toContain("OPS");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a default assignee picked while the last pick is saving waits its turn, and the last pick is the one kept", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
+  await createProject({ key: "CORE", name: "Core" });
+  // Creating OPS as bob makes him a person who has signed in, so he is an option in the control.
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    // The first PUT waits until the test lets it through, so the second pick lands while it is
+    // still on the wire. `wire` records each PUT as it reaches the network and the first's answer.
+    const held = Promise.withResolvers<void>();
+    const wire: string[] = [];
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const { assignee } = route.request().postDataJSON() as { assignee: string | null };
+      const first = wire.length === 0;
+      wire.push(`sent ${assignee}`);
+      if (!first) return route.fallback();
+      await held.promise;
+      const response = await route.fetch();
+      wire.push(`answered ${assignee}`);
+      return route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("");
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
+
+    // The pick shows at once, while its save is still held.
+    await core.selectOption("bob");
+    await expect(core).toHaveValue("bob");
+    await expect.poll(() => wire).toEqual(["sent bob"]);
+
+    await core.selectOption("alice");
+    await expect(core).toHaveValue("alice");
+    // One at a time: the second pick has not left the browser while the first is unanswered.
+    expect(wire).toEqual(["sent bob"]);
+
+    const second = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee" &&
+        response.request().postDataJSON()?.assignee === "alice"
+    );
+    held.resolve();
+    expect((await second).ok()).toBe(true);
+    expect(wire).toEqual(["sent bob", "answered bob", "sent alice"]);
+    await expect(core).toHaveValue("alice");
+
+    await page.reload();
+    await expect(core).toHaveValue("alice");
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => [row.project, row.assignee])).toEqual([["CORE", "alice"]]);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a default assignee the page has not read yet is never shown as Unassigned", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the read states");
+  await createProject({ key: "CORE", name: "Core" });
+  await putProjectDefaultAssignee("CORE", { assignee: "alice" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    // Each read of the defaults is answered as `read` says when it arrives: held until the test
+    // lets it go, refused, or passed through to the server.
+    let read: "hold" | "fail" | "pass" = "hold";
+    const held = Promise.withResolvers<void>();
+    await page.route("**/api/v1/settings/project-default-assignees", async (route) => {
+      if (read === "hold") {
+        await held.promise;
+        // The page this read was for may be gone by now.
+        return route.abort().catch(() => {});
+      }
+      if (read === "fail") {
+        return route.fulfill({ json: { code: "INTERNAL", error: "boom" }, status: 500 });
+      }
+      return route.fallback();
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeVisible();
+    // Not read yet: the control says so and takes no pick.
+    await expect(core).toBeDisabled();
+    await expect(core).not.toHaveValue("");
+    await expect(core).not.toHaveText(/Unassigned/);
+    await expect(core).toHaveText("Loading…");
+
+    read = "fail";
+    held.resolve();
+    await page.reload();
+    const loadError = page
+      .getByRole("alert")
+      .filter({ hasText: "Couldn't load the default assignees." });
+    await expect(loadError).toBeVisible();
+    await expect(core).toBeDisabled();
+    await expect(core).not.toHaveValue("");
+    await expect(core).toHaveText("Unavailable");
+
+    read = "pass";
+    await loadError.getByRole("button", { name: "Retry" }).click();
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("alice");
+    await expect(loadError).toHaveCount(0);
   } finally {
     await context.close();
   }
