@@ -2,13 +2,13 @@
 # shellcheck disable=SC2016,SC2317 # Bun code uses literal template syntax; cleanup is trap-invoked
 # e2e-local.sh — Runs the local Envoy webhook, delivery, and renderer acceptance path.
 #
-# Starts a throwaway NATS server and listener, then leaves evidence in out/e2e/.
+# Builds and starts a NATS server of its own (internal/testnats/cmd/natsd) and the
+# listener, then leaves evidence in out/e2e/.
 # The listener needs ENVOY_HOST_BRIDGE=127.0.0.1 because it runs on this host and
 # delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
 # bounded acceptance run responsive while retaining the production settle logic.
 #
 # Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
-# Optional NATS container name: E2E_NATS_CONTAINER (envoy-e2e-nats).
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -52,8 +52,7 @@ readonly out_dir
 nats_port="${E2E_NATS_PORT:-14222}"
 listener_port="${E2E_PORT:-19020}"
 session_port="${E2E_SESSION_PORT:-19021}"
-nats_container="${E2E_NATS_CONTAINER:-envoy-e2e-nats}"
-readonly nats_port listener_port session_port nats_container
+readonly nats_port listener_port session_port
 listener_url="http://127.0.0.1:${listener_port}"
 readonly listener_url
 nats_url="nats://127.0.0.1:${nats_port}"
@@ -75,63 +74,81 @@ readonly held_role_response_file="${out_dir}/held-role-response.json"
 readonly listener_log_file="${out_dir}/listener.log"
 readonly session_log_file="${out_dir}/session.log"
 readonly subscriber_log_file="${out_dir}/subscriber.log"
+readonly nats_log_file="${out_dir}/nats.log"
 readonly listener_binary="${out_dir}/listener"
+readonly nats_binary="${out_dir}/natsd"
+readonly nats_store_dir="${out_dir}/nats-store"
 readonly session_ready_fifo="${out_dir}/session-ready.fifo"
 readonly subscriber_ready_fifo="${out_dir}/subscriber-ready.fifo"
 
 listener_pid=""
 session_pid=""
 subscriber_pid=""
-nats_started=0
+nats_pid=""
 
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
-  for pid in "$subscriber_pid" "$session_pid" "$listener_pid"; do
+  for pid in "$subscriber_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
-  rm -f "$session_ready_fifo" "$subscriber_ready_fifo"
-  if [[ "$nats_started" -eq 1 ]]; then
-    docker stop "$nats_container" >/dev/null 2>&1 || true
-    docker rm "$nats_container" >/dev/null 2>&1 || true
-  fi
+  rm -rf "$session_ready_fifo" "$subscriber_ready_fifo" "$nats_store_dir"
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
 
-for command in bun curl docker go jq openssl; do
+for command in bun curl go jq openssl; do
   command -v "$command" >/dev/null || {
     printf 'ERR: required command is unavailable: %s\n' "$command" >&2
     exit 3
   }
 done
 
-if docker container inspect "$nats_container" >/dev/null 2>&1; then
-  printf 'ERR: %s already exists; leave it untouched and set E2E_NATS_CONTAINER to a free name.\n' "$nats_container" >&2
-  exit 3
-fi
-
 mkdir -p "$out_dir"
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
-  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
+  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
+  "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
+rm -rf "$nats_store_dir"
 : >"$envelopes_file"
 : >"$session_prompts_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
-printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
-docker run --name "$nats_container" -d -p "${nats_port}:4222" mirror.gcr.io/library/nats:2.10-alpine -js >/dev/null
-nats_started=1
-
-printf 'building listener\n'
+printf 'building listener and NATS server\n'
 (
   cd "$envoy_dir"
   go build -o "$listener_binary" ./cmd/listener
+  go build -o "$nats_binary" ./internal/testnats/cmd/natsd
 )
+
+printf 'starting NATS: 127.0.0.1:%s\n' "$nats_port"
+"$nats_binary" -p "$nats_port" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
+nats_pid=$!
+
+wait_for_nats() {
+  local deadline=$((SECONDS + 30))
+  local banner
+  while ((SECONDS < deadline)); do
+    # A NATS server greets every connection it accepts with its INFO line; curl's telnet
+    # scheme reads that greeting, then waits out its own --max-time, so only the text proves
+    # the server is up.
+    banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${nats_port}" </dev/null 2>/dev/null || true)"
+    if [[ "$banner" == 'INFO '* ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  printf 'ERR: NATS did not accept connections on 127.0.0.1:%s within 30 seconds.\n' "$nats_port" >&2
+  cat "$nats_log_file" >&2
+  return 1
+}
+
+printf 'waiting for NATS\n'
+wait_for_nats
 
 printf 'starting listener: %s\n' "$listener_url"
 PORT="$listener_port" \

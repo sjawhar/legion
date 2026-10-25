@@ -1176,8 +1176,6 @@ jobs:
     if: needs.changes.outputs.envoy_e2e_local == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      E2E_NATS_CONTAINER: envoy-e2e-nats-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1188,19 +1186,6 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache-dependency-path: packages/envoy/go.sum
-      # The same bounded retry .github/actions/pull-test-images gives test images: a registry
-      # connection reset during the script's own implicit pull would fail the run for a reason
-      # outside it.
-      - name: Pull the NATS image the script starts
-        run: |
-          nats_image=$(sed -n 's/^docker run .* \([^ ]*nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
-          [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
-          for attempt in 1 2 3; do
-            docker pull "$nats_image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
-          done
-        working-directory: packages/envoy
       - name: Local end-to-end acceptance
         run: bash scripts/e2e-local.sh
         working-directory: packages/envoy
