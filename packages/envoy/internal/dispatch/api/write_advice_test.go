@@ -573,6 +573,46 @@ func TestWriteAdviceLeavesWhoOwnsTheStatusUnaskedPastTriage(t *testing.T) {
 	}
 }
 
+// The walk is the last advice query and the only one whose failure the advice survives: every
+// issue is created in triage, so it runs for every session-authored `dispatch issue`, and
+// dropping the whole advice for it would drop the two queries already answered - and, on a
+// creation, the suggestions that creation computed and persisted before the advice ran
+// (issue_create.go). A failed walk costs its own field alone.
+func TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails(t *testing.T) {
+	handler, _ := newFailingAdviceHandler(t, "legion_managed_status", 0)
+	createAdviceProject(t, handler, "WALK")
+	spec := "# Walk failure\n"
+	issue := createAdviceIssue(t, handler, "WALK", "Failed label walk", &spec)
+	actor := adviceSessionActor("session-walk")
+
+	asked := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which transport?", "actor": actor,
+	})
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", asked.Code, asked.Body.String())
+	}
+	askID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, asked).ID
+
+	written := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "the walk is not the advice", "actor": actor,
+	})
+	advice := adviceFromResponse(t, written.Code, written.Body.String())
+	if advice.IssueStatus != "triage" {
+		t.Fatalf("advice issue_status = %q, want triage: %s", advice.IssueStatus, written.Body.String())
+	}
+	if advice.SessionWritesSinceHuman != 2 {
+		t.Fatalf("advice session_writes_since_human = %d, want 2: %s", advice.SessionWritesSinceHuman, written.Body.String())
+	}
+	if len(advice.YourOpenAsks) != 1 || advice.YourOpenAsks[0].ID != askID {
+		t.Fatalf("advice your_open_asks = %#v, want the open ask %q", advice.YourOpenAsks, askID)
+	}
+	if _, answered := rawAdviceFields(t, "a write whose walk failed", written.Body.String())["legion_managed_status"]; answered {
+		t.Fatalf("a failed walk must omit legion_managed_status rather than answer it: %s", written.Body.String())
+	}
+}
+
 // An edit's advice counts the ask blocks the edit added, as the server's parser reads the document
 // it wrote: an opener is a block inside a blockquote or a list item, or behind more than three
 // colons, and quoted in code it is text - in a fence at the top level, in a fence in a list item,

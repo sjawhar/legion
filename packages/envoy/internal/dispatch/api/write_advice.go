@@ -67,10 +67,13 @@ func (e *adviceQueryError) Unwrap() error {
 // asks - so writeAdvice calls this only for a session actor. The third, whether Legion owns the
 // issue's status, runs only on an issue whose status is triage: that is the only line the answer
 // decides, so an ordinary write on an ordinary issue gains no query at all. status is the
-// issue's status as the write committed it, the same value writeAdvice reports.
+// issue's status as the write committed it, the same value writeAdvice reports. route names the
+// caller for the one query whose failure is logged rather than returned
+// (legionManagedStatusAdvice).
 func (s *server) computeWriteAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
+	route string,
 	issueKey string,
 	actor model.Actor,
 	excludeAskID string,
@@ -118,16 +121,48 @@ func (s *server) computeWriteAdvice(
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
 	if status == model.IssueStatusTriage {
-		if err := s.runAdviceQueryHook(ctx, tx, "legion_managed_status"); err != nil {
-			return nil, &adviceQueryError{query: "legion_managed_status", err: err}
-		}
-		managed, err := legionManagedStatus(ctx, tx, issueKey)
-		if err != nil {
-			return nil, &adviceQueryError{query: "legion_managed_status", err: err}
-		}
-		advice.LegionManagedStatus = &managed
+		advice.LegionManagedStatus = s.legionManagedStatusAdvice(ctx, tx, route, issueKey)
 	}
 	return advice, nil
+}
+
+// legionManagedStatusAdvice answers whether Legion owns the issue's status for a write's advice,
+// or nil when the walk failed. It is the last step of computeWriteAdvice and the only one whose
+// failure is not fatal to the advice: the two before it are what a session asked for, while this
+// one decides a single line, and every issue is created in triage, so returning an
+// adviceQueryError here would put a third failure mode on the path that runs for every
+// session-authored `dispatch issue` - one that drops the suggestions that creation already
+// computed and persisted (issue_create.go) along with the rest of the advice. Nothing runs after
+// it, so the advice already assembled is complete without it.
+//
+// The walk takes a savepoint of its own inside the advice savepoint, because a failed statement
+// aborts the transaction it ran in: run directly on the advice savepoint, its failure would also
+// take the statement_timeout reset and the release that follow it (writeAdvice), and the advice
+// would be dropped anyway. The failure is logged once, in the shape every omitted advice query
+// takes. The 500 ms bound writeAdvice set still covers it: SET LOCAL holds across a savepoint
+// opened under it.
+func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route, issueKey string) *bool {
+	walk, err := tx.Begin(ctx)
+	if err != nil {
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	if err := s.runAdviceQueryHook(ctx, walk, "legion_managed_status"); err != nil {
+		_ = walk.Rollback(ctx)
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	managed, err := legionManagedStatus(ctx, walk, issueKey)
+	if err != nil {
+		_ = walk.Rollback(ctx)
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	if err := walk.Commit(ctx); err != nil {
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	return &managed
 }
 
 func (s *server) runAdviceQueryHook(ctx context.Context, tx pgx.Tx, query string) error {
@@ -171,7 +206,7 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "statement_timeout", err)
 		return nil
 	}
-	advice, err := s.computeWriteAdvice(ctx, adviceTx, issueKey, actor, excludeAskID, status)
+	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, excludeAskID, status)
 	if err != nil {
 		_ = adviceTx.Rollback(ctx)
 		query := "unknown"

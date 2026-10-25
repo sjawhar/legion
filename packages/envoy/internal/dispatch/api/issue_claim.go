@@ -335,19 +335,47 @@ type claimAnswer struct {
 // had otherwise succeeded. The savepoint is the same device writeAdvice uses to keep a write
 // whose advice query failed (write_advice.go), and the failure is logged once there too
 // (logAdviceError). It is never retried: the field is a hint, the claim is the write.
+//
+// A statement's failure is therefore never the claim's. A cancelled request and a lost
+// connection are not statement failures, and they used to be the claim's: a context cancelled
+// under the walk left the savepoint open and made the claim's COMMIT fail. So the walk runs on
+// a context no cancellation reaches (context.WithoutCancel), and what bounds it once
+// cancellation cannot is the 500 ms statement timeout below - the same bound, for the same
+// reason, as the one writeAdvice puts on this very predicate (write_advice.go). A connection
+// that dies under the walk still fails the claim, as it fails every other statement in it.
 func claimLegionManagedStatus(ctx context.Context, tx pgx.Tx, key string) *bool {
-	walk, err := tx.Begin(ctx)
+	// Detached from the caller's cancellation, so a client hang-up or a write deadline landing
+	// here cannot skip the savepoint's rollback and leave the claim's transaction holding an
+	// aborted savepoint that its COMMIT would then refuse.
+	walkCtx := context.WithoutCancel(ctx)
+	walk, err := tx.Begin(walkCtx)
 	if err != nil {
 		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
 		return nil
 	}
-	managed, err := legionManagedStatus(ctx, walk, key)
-	if err != nil {
-		_ = walk.Rollback(ctx)
+	// Healthy walks complete in single-digit milliseconds. Bound this one at 500 ms, as the
+	// advice path bounds the same predicate, so neither a future plan regression nor the
+	// detached context above can hold the issue row lock and a pool connection indefinitely.
+	if _, err := walk.Exec(walkCtx, "set local statement_timeout = '500ms'"); err != nil {
+		_ = walk.Rollback(walkCtx)
 		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
 		return nil
 	}
-	if err := walk.Commit(ctx); err != nil {
+	managed, err := legionManagedStatus(walkCtx, walk, key)
+	if err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	// SET LOCAL crosses a released savepoint, so restore the claim transaction's default before
+	// releasing this one, exactly as writeAdvice does. An error path rolls the savepoint back,
+	// which clears the setting.
+	if _, err := walk.Exec(walkCtx, "set local statement_timeout = default"); err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	if err := walk.Commit(walkCtx); err != nil {
 		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
 		return nil
 	}
@@ -385,7 +413,17 @@ func (s *server) claimWrite(
 	if err != nil {
 		return claimApplied{}, err
 	}
-	applied := claimApplied{issue: before}
+	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
+	// claim changed or not, and the same on either side of the write: one query, either way,
+	// under the issue's row lock this transaction already holds. It runs here, before the
+	// write, so that nothing at all sits between appendEvent and COMMIT. The row lock is not
+	// what makes the answer stable - it holds the issue's own row, not its ancestors' - so the
+	// chain is read as it stands, which is enough for a sentence of guidance. A statement that
+	// fails or times out costs the field alone: claimLegionManagedStatus runs it in a savepoint,
+	// on a context no cancellation reaches, bounded by its own statement timeout, and a claim is
+	// what stops two sessions working one issue.
+	managed := claimLegionManagedStatus(ctx, tx, key)
+	applied := claimApplied{issue: before, legionManagedStatus: managed}
 	if change.changed {
 		if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
 			return claimApplied{}, err
@@ -399,15 +437,8 @@ func (s *server) claimWrite(
 		if err != nil {
 			return claimApplied{}, err
 		}
-		applied = claimApplied{issue: after, event: event}
+		applied = claimApplied{issue: after, legionManagedStatus: managed, event: event}
 	}
-	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
-	// claim changed or not: one query, either way. The row lock this transaction holds is not
-	// what makes that answer stable - it holds the issue's own row, not its ancestors' - so the
-	// chain is read as it stands, which is enough for a sentence of guidance. Its failure is
-	// never the claim's: a claim is what stops two sessions working one issue, and the deferred
-	// rollback above would discard one that had otherwise succeeded for an advisory lookup.
-	applied.legionManagedStatus = claimLegionManagedStatus(ctx, tx, key)
 	if err := tx.Commit(ctx); err != nil {
 		return claimApplied{}, err
 	}

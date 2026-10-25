@@ -481,16 +481,19 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 // TestClaimSurvivesAFailingLegionLabelWalk: the walk that answers who owns the status runs inside
 // the claim's own transaction, so its failure once rolled back a claim that had otherwise
 // succeeded. A claim is what stops two sessions working one issue; the advisory answer is not.
-// The failure is forced by pointing legionManagedStatusSQL at a statement Postgres refuses: the
-// package's advice hook (newFailingAdviceHandler, write_advice_test.go) fires from
-// computeWriteAdvice alone and never reaches claimWrite, and a hook that exists only for this
-// test has no business in the claim path.
+// The failure is forced by pointing legionManagedStatusSQL at a statement Postgres refuses.
 func TestClaimSurvivesAFailingLegionLabelWalk(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one")
 	handler, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "triage")
 
+	// Swapping a package-level statement is safe only because no test in internal/dispatch/api
+	// calls t.Parallel, so no other test's walk can read the broken one before the cleanup puts
+	// it back; a test added here that does call t.Parallel breaks this one. The package's
+	// purpose-built seam, server.adviceQueryHook, is not used instead because it fires from
+	// computeWriteAdvice (write_advice.go) and never reaches claimWrite, and a hook that exists
+	// only for this test has no business in the claim path.
 	healthy := legionManagedStatusSQL
 	legionManagedStatusSQL = `select from no_such_relation_for_the_legion_walk`
 	t.Cleanup(func() { legionManagedStatusSQL = healthy })
@@ -519,6 +522,70 @@ func TestClaimSurvivesAFailingLegionLabelWalk(t *testing.T) {
 	if issue := decodeBody[claimedIssue](t, read); issue.Claim == nil || issue.Claim.Actor.ID != "session-one" {
 		t.Fatalf("the issue holds no claim after a failed walk: %s", read.Body.String())
 	}
+}
+
+// TestClaimSurvivesAHangingLegionLabelWalk: the walk used to run unbounded, on the request's own
+// context, between the claim's event and its COMMIT. A walk that hung there held the issue's row
+// lock for as long as it hung, and a cancellation landing in that window - a client hang-up, a
+// write deadline - stopped the savepoint's rollback, failed the COMMIT and discarded a claim that
+// had otherwise succeeded. Two changes close both: the walk now runs before any of the claim's
+// writes, so nothing at all sits between appendEvent and COMMIT, and it runs detached from the
+// request (context.WithoutCancel) inside a savepoint bounded at 500 ms, as the advice path bounds
+// the same predicate (issue_claim.go, write_advice.go).
+//
+// The statement below stands in for a walk that hangs, as the test above stands in for one
+// Postgres refuses, under the same package-level swap and the same no-t.Parallel constraint. It
+// sleeps ten times the bound, so what ends it is the bound; nothing in this test races a Go
+// timer against the database, and nothing asserts on elapsed time.
+func TestClaimSurvivesAHangingLegionLabelWalk(t *testing.T) {
+	live := &liveRegistry{}
+	live.set("session-one")
+	handler, _ := claimHandler(t, live)
+	key := claimIssueKey(t, handler, "triage")
+
+	healthy := legionManagedStatusSQL
+	legionManagedStatusSQL = `select count(*) > 0 from (select pg_sleep(5)) slow where $1 <> ''`
+	t.Cleanup(func() { legionManagedStatusSQL = healthy })
+
+	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-one", "Implementer"),
+	})
+	if claimed.Code != http.StatusOK {
+		t.Fatalf("claim under a hanging walk: status=%d body=%s", claimed.Code, claimed.Body.String())
+	}
+	if answer := decodeBody[claimedIssue](t, claimed); answer.Claim == nil || answer.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the hanging walk cost the claim: %s", claimed.Body.String())
+	}
+	if _, answered := rawClaimFields(t, claimed)["legion_managed_status"]; answered {
+		t.Fatalf("a timed-out walk must omit legion_managed_status rather than answer it: %s", claimed.Body.String())
+	}
+	// The claim is the issue's, not the response's, and the row the walk held is free: this read
+	// and the release that follows are served rather than blocked behind it.
+	read := bearerRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the issue back: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if issue := decodeBody[claimedIssue](t, read); issue.Claim == nil || issue.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the issue holds no claim after a hanging walk: %s", read.Body.String())
+	}
+	legionManagedStatusSQL = healthy
+	released := bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-one", "Implementer"),
+	})
+	if released.Code != http.StatusOK {
+		t.Fatalf("release after a hanging walk: status=%d body=%s", released.Code, released.Body.String())
+	}
+}
+
+// rawClaimFields reads a claim answer as raw JSON, so a test can tell a field the answer omitted
+// from one that came back false.
+func rawClaimFields(t *testing.T, response *httptest.ResponseRecorder) map[string]json.RawMessage {
+	t.Helper()
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode claim answer: %v body=%s", err, response.Body.String())
+	}
+	return body
 }
 
 // releasedHolder is the session named by the newest issue.released event: the contract makes
