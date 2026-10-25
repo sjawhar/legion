@@ -953,6 +953,10 @@ cmd_judge_omp() {
   [ -f "$key_file" ] || fail "judge-omp: the key command names '$key_file', which is not a file"
   local extra=() word
   for word in ${SKILL_SCENARIOS_JUDGE_ENV:-}; do extra+=(-e "$word"); done
+  # Pulled here, quietly, so a first run's pull progress never lands in the judge's out.txt, and a
+  # failed pull names itself.
+  docker image inspect "$judge_image" >/dev/null 2>&1 || docker pull --quiet "$judge_image" >/dev/null ||
+    fail "judge-omp: docker could not pull $judge_image"
   docker run --rm --init --user "$(id -u):$(id -g)" --read-only \
     --tmpfs /tmp:exec,mode=1777 --tmpfs "$h:exec,uid=$(id -u),gid=$(id -g)" \
     -v "$(dirname "$omp"):/opt/omp:ro" -v "$natives:/opt/natives:ro" -v "$agent:/opt/profile:ro" \
