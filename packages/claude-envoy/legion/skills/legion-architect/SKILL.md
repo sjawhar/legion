@@ -463,7 +463,9 @@ addressing` line names: a child that looks independent of the tree (the controll
 whether to re-file it as a root of its own, and does so only on their yes), capacity, and a
 cross-tree conflict. A problem outside the tree is a `dispatch ask` you open, never an issue you
 file (`skill://legion-worker/references/findings.md`). Handle everything else in the
-tree. A product, scope, or design decision that needs the human, yours or one a worker escalated,
+tree. A tool a worker cannot get is yours to schedule (`skill://legion-worker/references/tools.md`):
+the image change is a pull request against this repository, never something a worker conjures.
+A product, scope, or design decision that needs the human, yours or one a worker escalated,
 is a decision block you write (section 1 says what one does to the root spec's gate). A standalone
 human to-do may use `dispatch ask`; workers may reach the human directly with it the same way. Do not
 create a wait loop for any wake source.
