@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-180",
+  "completed": "2026-10-25T04:14:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
+  "headSha": "4ea17e805b03ee9e2fd34e1360b39ce113d9a165",
+  "proof": [
+    {
+      "criterion": "The symptom itself: an agent woken by a Slack message whose words are only in an attachment reads those words, in the summary and in the delivery.",
+      "surface": "A real nats-server v2.11.4, a real envoy-listener built from this head (go build ./cmd/listener), and a fake agent session subscribed to notifications.slack.> that receives Slack deliveries over prompt_async, which is the path Deliverer.Text writes. The rig posts a signed Slack bot_message to the listener's /webhook/slack address.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server bash packages/envoy/out/e2e/infra180-slack-wake-rig.sh",
+      "observed": "The wake the session received carried 'Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high' and the payload field \"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\". The same rig run against the parent commit's listener (the plan's 'What goes wrong today' measurement) gave 'Summary: slack bot message in C_RIG from datadog: ' and a payload with no text field at all.",
+      "headSha": "4ea17e805b03ee9e2fd34e1360b39ce113d9a165",
+      "negativeControl": "The same body posted with the signature v0=deadbeef was refused HTTP 401 and woke nobody: the rig reported 'unsigned post status (want 401) : 401' and 'wakes delivered: 1', the one wake being the signed post's."
+    },
+    {
+      "criterion": "Acceptance 1: Go tests in packages/envoy/internal/contracts cover the attachment-only, block-only, invented-block-kind, own-words-plus-attachment, nothing-to-deliver, edited, deleted, repeated-piece and 2,048-rune cases, each asserting the delivered text exactly, and fail at the commit before the change.",
+      "surface": "The contracts package's own test binary, driving SlackEnvelope end to end (summary and payload JSON) rather than the walk in isolation.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/contracts/ -count=1 -run 'TestSlack'",
+      "observed": "ok github.com/sjawhar/envoy/internal/contracts 0.373s, with all 18 TestSlackDeliveredText subtests passing and the pre-existing TestSlackSummary (8 subtests) and TestSlackPayload (5 subtests) unchanged and still passing.",
+      "headSha": "4ea17e805b03ee9e2fd34e1360b39ce113d9a165",
+      "negativeControl": "The same table run against the parent commit's normalize.go in a scratch copy of packages/envoy (jj file show -r 499564c1 packages/envoy/internal/contracts/normalize.go) fails 11 of its 18 cases: words_only_in_an_attachment, words_only_in_a_block, a_block_kind_the_test_invents, own_words_and_an_attachment, a_piece_that_extends_one_already_taken, an_edited_message, an_edited_message_whose_new_message_has_no_attachments, whitespace-only_own_words, 'shapes_that_carry_nothing:_a_loose_string_in_an_array', the_2,048-rune_cut and exactly_2,048_runes,_nothing_dropped."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/contracts/normalize.go — slackDeliveredText and slackTextWalk (the walk over attachments and blocks), slackEventSlice (one helper for the message/event list fallback, replacing slackFiles and the inline attachment_count fallback), and the delivered text computed once in SlackEnvelope and passed to slackSummary and slackPayload.",
+    "packages/envoy/internal/contracts/normalize_test.go — TestSlackDeliveredText, 18 cases, each asserting the summary and the payload's text exactly.",
+    "packages/envoy/internal/integration/webhook_redelivery_test.go — streamEnvelopes (the stream reader streamDedupeKeys now reads through) and TestSlackAttachmentWordsReachTheStream, a signed post to /webhook/slack asserted on the envelope the NATS stream holds.",
+    "packages/envoy/CHANGELOG.md — the Fixed entry for the change.",
+    "skills/legion-controller/references/slack-mentions.md — the text clause of 'What a mention carries', now true after the change.",
+    "packages/claude-envoy/legion/skills/legion-controller/references/slack-mentions.md — the committed plugin bundle's copy of that file, regenerated with bun run build so the required check-dist step stays green."
+  ],
+  "trickyParts": [
+    "A section block carries its words in a nested object (text: {type: mrkdwn, text: ...}), so the walk takes the strings under the seven display field names and then descends, in sorted key order, into every value of the object that is not a string. Without that second pass a block's words never reach the output.",
+    "Seeding the walk with the message's own text goes through the same take() as every other piece, so the rune count that decides the cut counts the own text too.",
+    "The committed claude-envoy plugin bundle mirrors skills/, and the required 'Check the committed bundle is fresh' CI step (bun run check-dist) fails if the skill file is edited without rebuilding it.",
+    "Three of the plan's test cases that it expected to fail before the change are guards instead, because the architect's containment rule made their expectation today's behaviour: a_repeated_piece, own_words_and_a_rich-text_block and a_contained_piece_shorter_than_the_words. Together with the plan's own three guards (the file-only message, the deleted message, and the two 'shapes that carry nothing' cases whose payload stays empty) that is the 7 of 18 cases that pass at the parent commit."
+  ],
+  "deviations": [
+    "The repeat check is containment, not whole equality: a piece is not taken when the text collected so far already contains it as a substring. This is the architect's decision of 2026-10-25T03:14:47Z (Envoy message 2283f04bcf184186ab5c6990da702222 to notifications.role.legion-infra-infra-180-implementer), which it gave as this round's authority, because a message composed in a Slack client carries a rich_text copy of its own words split per segment and whole equality would deliver 'Deploy failed <@U1>' followed by 'Deploy failed '. Everything else in the approved rule is unchanged. Two cases the architect named are in the table: a_contained_piece_shorter_than_the_words (own text 'deploy to web-1 failed' with an attachment value 'web-1' delivers the own text alone) and a_piece_that_extends_one_already_taken (fallback 'CPU high' then a block 'CPU high on host-a' delivers both lines).",
+    "The three departures the plan recorded stand as the architect accepted them: the order inside one object is Slack's display order (Go's decoded map keeps no key order), the guard cases cannot fail before the change, and T4 edits skills/legion-controller/references/slack-mentions.md as well as the changelog. The regenerated claude-envoy bundle copy of that skill file is the one file beyond T4's two, and it is generated rather than written.",
+    "Two of the six findings of the ce-simplify-code pass were applied, at head e587427d7f0c, giving the new head 4ea17e805b03: the walk collects the keys it will descend into before sorting them (a block leaf whose values are all strings now sorts and allocates nothing), and the collected rune count grows with the text instead of being recounted on every piece. Both are byte-identical in output; the repository's checks and the rig proof above were re-run on the applied head. The four skipped: the reuse reviewer's removal of the string filter (superseded by the efficiency fix, which keeps the filter and moves it before the sort), the quality reviewer's removal of the test table's wantNoText field (the flag names the asserted condition at each case, which is what a table test is for), its rename and move of the integration test (the plan names that test and that file), and its slackView struct (a wider refactor than this diff, and the plan settled the two signatures)."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Acceptance 2's lane cannot run on an issue pod: packages/envoy/internal/integration starts a real NATS server through testcontainers and this pod has neither Docker nor Podman. The test is compiled and type-checked here (go vet ./internal/integration/ and go test -run NoSuchTest ./internal/integration/ both clean) and runs in CI, in the envoy-go job of 'Legion Envoy and Contracts' (go test ./internal/integration/ -timeout 300s -count=1), run 40161054391 on this head. It is a regression lock, not the proof of the symptom, which the rig carries.",
+    "The rig is a throwaway at packages/envoy/out/e2e/infra180-slack-wake-rig.sh, an ignored path, so nothing of it is committed; its text is in the plan document (dispatch://INFRA-180/artifact/plan-md, 'The live rig'), and its prerequisites on a pod are go, bun, jq, openssl, curl and a nats-server binary from GOBIN=<dir> go install github.com/nats-io/nats-server/v2@v2.11.4."
+  ]
+}
