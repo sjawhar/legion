@@ -2,26 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T17:11:57Z",
-  "round": 10,
-  "headSha": "b882ed81da45",
-  "mergeState": "MERGEABLE (BLOCKED only on review) at e1574f8d80db, read first.",
-  "diffShape": "`git diff 3bd29e65fae1 b882ed81da45 -- packages/` changes three files. Every changed line is a comment, except one: the guard's func line, renamed TestNoPackageOutsideTestnatsNeedsAContainerRuntime → TestNoPackageOutsideTheRigsImportsOrDrivesAContainerRuntime. No statement, test case or subtest is added or removed.",
-  "authorship": "b882ed81da45 and 480e4e7a6249 are authored by legion-reviewer[bot] and committed by legion-implementer[bot]. b882ed81da45 carries 'Omp-Session: 01a17175-85f5-72df-8344-6164b647dc13', the implementer's session (the one that sends as 'Legion implementer · INFRA-250' on Envoy), so its content is the implementer's work. Only its author field is wrong, because the implementer split a working-copy commit the reviewer's pane had created. e1574f8d80db re-commits the handoff under the implementer's author. Nothing was rewritten.",
+  "completed": "2026-10-25T17:17:20Z",
+  "round": 11,
+  "headSha": "db7e7cc42766",
+  "mergeState": "MERGEABLE (BLOCKED only on review) at 82f9d7f990e5, read first.",
+  "diffShape": "`git diff 0c3b5c38a4e3 db7e7cc42766 -- packages/` changes two comments: stream_config_test.go +5/−2 and kvwatch_test.go +3/−2. Not one changed line outside a `//` comment. gofmt -d is empty on both files. Since b882ed81da45 these 2 files are the whole code delta.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Rename control, in a git archive of b882ed81da45. `go test ./internal/testnats/ -run '^TestNoPackageOutsideTheRigsImportsOrDrivesAContainerRuntime$' -v` runs the test and both subtests: imports PASS 2.92 s, docker PASS 1.08 s. The old name gives 'testing: warning: no tests to run … [no tests to run]'. `-list Container` lists only the new name. The old name appears nowhere in the tree outside .legion/. I checked each comment against the code; one is not true of it (failures)."
+    "how": "Both sentences read against nats-server v2.10.29 in the module cache. (1) stream_config_test.go:421-427 now names the race as the background removal of the account's streams directory, which nats-server schedules on every stream delete and which succeeds once that directory is empty. It also says the deleted stream's own directory is renamed aside and its renamed copy removed, which a recreate never meets. That matches stream.go:5288-5293, where on deleteFlag a goroutine runs `os.Remove(filepath.Join(accDir, streamsDir)); os.Remove(accDir)`, 'no op if not empty'. It also matches fileStore.Delete, filestore.go:8709 on: os.Rename of the stream's directory to '.'+name in the same streams directory, then os.RemoveAll of that copy in a goroutine of its own. (2) kvwatch_test.go:812-819 now says each delete 'leaves the directory empty — once the deleted stream's renamed copy … is gone — so the removal it schedules can succeed'. 'can succeed' carries the race: the renamed copy sits in that same streams directory until its own goroutine removes it, and until then the scheduled os.Remove fails. (3) Read together, the two comments describe one race in one way: the account's streams directory, removed by os.Remove only when empty, with the renamed copy as the reason it is not empty at once. The keeper keeps the directory non-empty, and round 7's fresh account per subtest gives the delete nothing to delete."
   },
-  "failed": 1,
-  "failures": [
+  "authorship": "db7e7cc42766 and 82f9d7f990e5: author legion-implementer[bot], committer legion-implementer[bot]. db7e7cc42766 carries the implementer's Omp-Session 01a17175-85f5-72df-8344-6164b647dc13. Clean. b882ed81da45 keeps its reviewer author, as recorded in round 10 and deliberately not rewritten.",
+  "retroNotes": "Change pqxrxpukqqws (commit de770a629b66) still holds the implementer's three docs/solutions notes: the completeness-claim note, the 'ask the thing itself' note, and the in-process rig note. It is off the bookmark and unpushed. Its author field is legion-reviewer[bot], from the working copy that held it, so the implementer's retro commit should take these files with `jj restore --from pqxrxpukqqws docs/solutions` in a commit of its own, not push this change as it is.",
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "Round 10's own bar: each corrected comment is true of the code, not merely less wrong.",
-      "evidence": "packages/envoy/internal/bus/stream_config_test.go:421-424 now ends 'its recreate of that name would race nats-server's removal of the deleted stream's directory'. In nats-server v2.10.29 that is not the race. On a delete, fileStore.Delete (filestore.go:8709) renames the stream's own directory to a dot-prefixed sibling ('.' + name, tsep) and removes that copy in a goroutine. A recreate of the same name makes streams/<name>, which that removal never touches. The removal a recreate can lose to is the other goroutine, which stream.go:5288-5293 starts on every stream delete: `os.Remove(filepath.Join(accDir, streamsDir)); os.Remove(accDir)` ('no op if not empty'). That removes the account's streams directory. It is the mechanism the keeper comment in kvwatch_test.go:812-818 describes correctly, and the one round 7's fix (a fresh account per subtest, so the delete finds nothing and empties nothing) defeats. So the two comments now describe one race two different ways, and stream_config's is false. Fix: '…race nats-server's background removal of the account's streams directory, which it schedules on every stream delete and which succeeds once that directory is empty'. A smaller precision point in the keeper comment, on the same lines: 'each delete below empties the directory, so the removal it schedules succeeds' holds only once the deleted stream's renamed copy is gone, and that copy is removed in its own goroutine. The scheduled os.Remove can still run first and fail, which is what makes it a race. 'leaves it empty, so the removal it schedules can succeed' would be exact. No red test: these are comments."
+      "criterion": "Round 10's finding, closed: every comment in this change is true of nats-server v2.10.29, and the two comments on the streams-directory race describe it one way.",
+      "surface": "The comments at db7e7cc42766, read against nats-server v2.10.29's source in the module cache (/legion/go/mod/github.com/nats-io/nats-server/v2@v2.10.29/server).",
+      "command": "git diff 0c3b5c38a4e3 db7e7cc42766 -- packages/ ; sed -n 5255,5300p server/stream.go ; sed -n 8709,8790p server/filestore.go",
+      "observed": "stream.go:5288-5293 starts, on every delete, a goroutine that removes the account's streams directory, and it is a no-op unless the directory is empty. filestore.go:8709 renames the stream's own directory to '.'+name and RemoveAlls it separately. The corrected stream_config sentence names the first as the race and the second as what a recreate never meets. The keeper sentence says the scheduled removal 'can succeed' once the renamed copy is gone. Both agree with the source and with each other.",
+      "headSha": "db7e7cc42766",
+      "negativeControl": "Round 10's text at b882ed81da45, 'would race nats-server's removal of the deleted stream's directory', contradicts filestore.go:8709's rename-aside and was failed on it. The keeper's earlier 'empties the directory, so the removal it schedules succeeds' omitted the renamed copy that can keep the directory non-empty."
     }
   ],
-  "checkedTrue": [
-    "Guard comment (nats_test.go:611-624): the guard reads ImportPath, Imports, TestImports and XTestImports from `go list -f` (nats_test.go:670) and allowlists internal/testnats, internal/testpg and internal/tests3 (:594-597). A package that imports an allowlisted rig passes the guard: cmd/listener/dispatch_resolution_test.go imports internal/testpg. tests3's one consumer is internal/dispatch/files/s3_server_test.go, which skips under DISPATCH_TEST_NO_CONTAINERS=1. The new name, '…OutsideTheRigsImportsOrDrivesAContainerRuntime', claims the same scope as the comment and no more.",
-    "Keeper comment (kvwatch_test.go:812-818): nats-server does schedule the account streams-directory removal on every delete (stream.go:5288-5293), and os.Remove is a no-op on a non-empty directory. The precision point above aside, it is true."
-  ],
-  "workspace": "The shared workspace's @ held three new, unpushed docs/solutions/ notes from the implementer's banked retro, in a commit authored by legion-reviewer[bot]. The phase rules forbid splitting it, so I wrote this handoff on `jj new @-`. Those notes are intact in change pqxrxpukqqws (commit de770a629b66). I told the implementer, with the command to restore them."
+  "observations": [
+    "CI at db7e7cc42766 had only PR Title (success) settled when I read it; Tests, Docs, Worker Image and Legion Envoy and Contracts were queued or pending. The change is comments only, so no lane's outcome depends on it."
+  ]
 }
