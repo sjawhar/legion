@@ -126,3 +126,32 @@ fi
   exit 1
 }
 printf 'PASS: refuses a second run in the same checkout, and the first finishes with its evidence\n'
+
+# A run stopped part-way never reports success: a caller that sends TERM (a CI cancel, a timeout)
+# sees 143, the run's own servers are gone, and out/e2e is free for the next run.
+: >"$first_output_file"
+bash "$driver" >"$first_output_file" 2>&1 &
+first_pid=$!
+deadline=$((SECONDS + 60))
+until grep -q '^waiting for listener health$' "$first_output_file"; do
+  if ! kill -0 "$first_pid" 2>/dev/null || ((SECONDS >= deadline)); then
+    cat "$first_output_file" >&2
+    printf 'FAIL: the run to be stopped never reached its listener-health wait\n' >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+kill -TERM "$first_pid"
+stopped_rc=0
+wait "$first_pid" || stopped_rc=$?
+first_pid=""
+if ((stopped_rc != 143)); then
+  cat "$first_output_file" >&2
+  printf 'FAIL: a run stopped with TERM exited %s, want 143\n' "$stopped_rc" >&2
+  exit 1
+fi
+flock -n "${evidence_dir}/run.lock" true || {
+  printf 'FAIL: a run stopped with TERM left %s locked\n' "$evidence_dir" >&2
+  exit 1
+}
+printf 'PASS: a run stopped with TERM exits 143 and frees out/e2e\n'
