@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
+  `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
+  and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+
 ### Fixed
 
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on

@@ -7,6 +7,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
+  `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
+  is refused while an issue beneath it is still in the workflow and a merged root's close waits
+  for the rest of its tree, so a root stands in `awaiting_merge` for days and an operator reads
+  the merge here rather than guessing at it. Always emitted, so a plugin built before it refuses
+  the state. Install this release with a `legion` built from the same commit.
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
