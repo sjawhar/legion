@@ -18,6 +18,7 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"cloud.google.com/go/cloudsqlconn"
 
@@ -44,6 +45,11 @@ type Config struct {
 	// NewDialer builds the upstream dialer. Nil builds the Cloud SQL connector's, dialing the
 	// instance's private IP with automatic IAM database authentication.
 	NewDialer func(ctx context.Context) (Dialer, error)
+	// ProofTimeout bounds Start's proof dial, the one upstream connection that proves the
+	// credential path before Start returns. It must be positive: an instance that never answers,
+	// an unreachable address or a peer that stalls its handshake, would otherwise hold Start for as
+	// long as its caller's context lives. The per-connection dials after Start are not bounded by it.
+	ProofTimeout time.Duration
 	// Log takes one line per event: the proxy's start, a connection the upstream refused, an
 	// accept loop that stopped on its own. Nil logs nothing.
 	Log io.Writer
@@ -78,15 +84,21 @@ type Proxy struct {
 // against a proxy that cannot reach the database.
 //
 // ctx bounds the start alone: a start whose ctx ends before the proof dial succeeds fails and
-// leaves nothing bound. Once Start returns, ctx no longer matters: the proxy serves until Close,
-// so its owner can keep it serving after ctx ends, as the launcher does through a child's stop
-// grace when the container is told to stop.
+// leaves nothing bound. The proof dial is bounded besides by cfg.ProofTimeout, so a start against
+// an instance that never answers fails within that bound however long ctx lives, with an error
+// naming the instance and the bound that wraps the dial's own (context.DeadlineExceeded). Once
+// Start returns, ctx no longer matters: the proxy serves until Close, so its owner can keep it
+// serving after ctx ends, as the launcher does through a child's stop grace when the container is
+// told to stop.
 func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 	if !filepath.IsAbs(cfg.Socket) {
 		return nil, fmt.Errorf("sessionproxy: Socket %q is not an absolute path", cfg.Socket)
 	}
 	if !ompsessions.ValidInstance(cfg.Instance) {
 		return nil, fmt.Errorf("sessionproxy: Instance %q is not a project:region:instance connection name", cfg.Instance)
+	}
+	if cfg.ProofTimeout <= 0 {
+		return nil, fmt.Errorf("sessionproxy: ProofTimeout %s is not positive", cfg.ProofTimeout)
 	}
 
 	// An address another process holds is never taken from it: net.Listen refuses a path that
@@ -109,11 +121,18 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 		_ = listener.Close()
 		return nil, fmt.Errorf("sessionproxy: build the dialer for %s: %w", cfg.Instance, err)
 	}
-	proof, err := dialer.Dial(ctx, cfg.Instance)
+	proofCtx, cancelProof := context.WithTimeout(ctx, cfg.ProofTimeout)
+	proof, err := dialer.Dial(proofCtx, cfg.Instance)
+	// proofCtx's own error is read before cancelProof, which would set it either way.
+	timedOut := errors.Is(proofCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	cancelProof()
 	if err != nil {
 		cancel()
 		_ = listener.Close()
 		_ = dialer.Close()
+		if timedOut {
+			return nil, fmt.Errorf("sessionproxy: dial %s: no answer within %s: %w", cfg.Instance, cfg.ProofTimeout, err)
+		}
 		return nil, fmt.Errorf("sessionproxy: dial %s: %w", cfg.Instance, err)
 	}
 	_ = proof.Close()

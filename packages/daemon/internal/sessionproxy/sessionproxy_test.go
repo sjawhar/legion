@@ -2,9 +2,11 @@ package sessionproxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +16,10 @@ import (
 
 // testInstance is a placeholder connection name: this repository names no real instance.
 const testInstance = "example-project:us-central1:example-instance"
+
+// testProofTimeout bounds the proof dial of a test whose upstream answers at once, so it only has
+// to be long enough never to end a dial a loaded machine is slow to complete.
+const testProofTimeout = 10 * time.Second
 
 // upstream is the database end of a test: a real local listener, so the bytes the proxy copies
 // really cross a connection and a test can read them.
@@ -125,9 +131,10 @@ func socketPath(t *testing.T) string {
 func startProxy(ctx context.Context, t *testing.T, up *upstream, dialer *fakeDialer, socket string) *Proxy {
 	t.Helper()
 	proxy, err := Start(ctx, Config{
-		Socket:    socket,
-		Instance:  testInstance,
-		NewDialer: dialer.build,
+		Socket:       socket,
+		Instance:     testInstance,
+		NewDialer:    dialer.build,
+		ProofTimeout: testProofTimeout,
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -208,15 +215,17 @@ func TestStartRefusesWhenTheProofDialFails(t *testing.T) {
 	socket := socketPath(t)
 
 	_, err := Start(context.Background(), Config{
-		Socket:    socket,
-		Instance:  testInstance,
-		NewDialer: dialer.build,
+		Socket:       socket,
+		Instance:     testInstance,
+		NewDialer:    dialer.build,
+		ProofTimeout: testProofTimeout,
 	})
 	if err == nil {
 		t.Fatal("Start accepted a dialer that cannot reach the instance")
 	}
-	if !strings.Contains(err.Error(), testInstance) {
-		t.Fatalf("the error does not name the instance: %v", err)
+	// A dial the instance refused keeps the dial's own words: it is no timeout.
+	if want := "sessionproxy: dial " + testInstance + ": the instance refused the login"; err.Error() != want {
+		t.Fatalf("Start = %v, want %q", err, want)
 	}
 	if got := dialer.closeCount(); got != 1 {
 		t.Fatalf("a refused Start closed the dialer %d times", got)
@@ -230,6 +239,138 @@ func TestStartRefusesWhenTheProofDialFails(t *testing.T) {
 	_ = listener.Close()
 }
 
+// silentUpstream is an instance that never answers: a real listener that accepts every connection
+// and never writes to it, holding each one open until the test ends.
+func silentUpstream(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen as the silent upstream: %v", err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return listener.Addr().String()
+}
+
+// stallingDialer stands in for the Cloud SQL connector dialing an instance that never answers: it
+// opens a real connection to a silent upstream and runs a real TLS handshake over it, which, like
+// the connector's own, ends only when its context does.
+type stallingDialer struct {
+	addr string
+
+	mu     sync.Mutex
+	closed int
+}
+
+func (s *stallingDialer) Dial(ctx context.Context, _ string) (net.Conn, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", s.addr)
+	if err != nil {
+		return nil, err
+	}
+	client := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, ServerName: "x"})
+	if err := client.HandshakeContext(ctx); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+func (s *stallingDialer) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed++
+	return nil
+}
+
+func (s *stallingDialer) closeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+func (s *stallingDialer) build(context.Context) (Dialer, error) { return s, nil }
+
+// A proof dial the instance never answers ends at ProofTimeout, however long the start's own
+// context lives: Start refuses with the instance and the bound named, the dial's deadline still
+// readable in the error, the socket path free and the dialer closed, as for a dial the instance
+// refused.
+func TestStartRefusesWhenTheProofDialGetsNoAnswerWithinItsBound(t *testing.T) {
+	dialer := &stallingDialer{addr: silentUpstream(t)}
+	socket := socketPath(t)
+
+	began := time.Now()
+	_, err := Start(context.Background(), Config{
+		Socket:       socket,
+		Instance:     testInstance,
+		NewDialer:    dialer.build,
+		ProofTimeout: 200 * time.Millisecond,
+	})
+	waited := time.Since(began)
+	if err == nil {
+		t.Fatal("Start served although its proof dial was never answered")
+	}
+	if waited >= 2*time.Second {
+		t.Fatalf("Start refused %s after it began, want within its 200ms proof bound", waited)
+	}
+	if want := "sessionproxy: dial " + testInstance + ": no answer within 200ms"; !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("Start = %v, want it to begin %q", err, want)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	if got := dialer.closeCount(); got != 1 {
+		t.Fatalf("a refused Start closed the dialer %d times", got)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("the socket path is still held after a refused Start: %v", err)
+	}
+	_ = listener.Close()
+}
+
+// A proof dial is never unbounded: a Start given no ProofTimeout is refused, naming the field,
+// before it binds or dials anything.
+func TestStartRefusesAnUnboundedProofDial(t *testing.T) {
+	up := newUpstream(t)
+	dialer := &fakeDialer{addr: up.listener.Addr().String()}
+	socket := socketPath(t)
+
+	_, err := Start(context.Background(), Config{
+		Socket:    socket,
+		Instance:  testInstance,
+		NewDialer: dialer.build,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ProofTimeout") {
+		t.Fatalf("Start = %v, want a refusal naming ProofTimeout", err)
+	}
+	if got := dialer.dials(); got != 0 {
+		t.Fatalf("a Start with no proof bound dialed the upstream %d times", got)
+	}
+	if _, err := os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a Start with no proof bound left something at the socket path: %v", err)
+	}
+}
+
 func TestStartRefusesWhenSomethingHoldsTheSocket(t *testing.T) {
 	up := newUpstream(t)
 	dialer := &fakeDialer{addr: up.listener.Addr().String()}
@@ -241,9 +382,10 @@ func TestStartRefusesWhenSomethingHoldsTheSocket(t *testing.T) {
 	defer held.Close()
 
 	_, err = Start(context.Background(), Config{
-		Socket:    socket,
-		Instance:  testInstance,
-		NewDialer: dialer.build,
+		Socket:       socket,
+		Instance:     testInstance,
+		NewDialer:    dialer.build,
+		ProofTimeout: testProofTimeout,
 	})
 	if err == nil {
 		t.Fatal("Start took an address another listener holds")
@@ -313,9 +455,10 @@ func TestEachConnectionDialsItsOwnUpstream(t *testing.T) {
 	socket := socketPath(t)
 
 	proxy, err := Start(context.Background(), Config{
-		Socket:    socket,
-		Instance:  testInstance,
-		NewDialer: dialer.build,
+		Socket:       socket,
+		Instance:     testInstance,
+		NewDialer:    dialer.build,
+		ProofTimeout: testProofTimeout,
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -469,9 +612,10 @@ func TestStartRefusesWhenItsContextHasEnded(t *testing.T) {
 	cancel()
 
 	_, err := Start(ctx, Config{
-		Socket:    socket,
-		Instance:  testInstance,
-		NewDialer: dialer.build,
+		Socket:       socket,
+		Instance:     testInstance,
+		NewDialer:    dialer.build,
+		ProofTimeout: testProofTimeout,
 	})
 	if err == nil {
 		t.Fatal("Start served although its context had ended")

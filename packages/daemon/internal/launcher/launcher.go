@@ -482,9 +482,11 @@ func writeCredential(path, content string) error {
 // through the pointer the child's environment carries instead. A failure leaves nothing bound and
 // names the generation; its caller removes the directory.
 //
-// ctx bounds the proxy's start alone, so a start still in progress when the container is told to
-// stop is abandoned. A started proxy ignores ctx: it serves until the generation's own end closes
-// it (wait), which lets it serve the child through its stop grace after ctx has ended.
+// ctx bounds the proxy's start, so a start still in progress when the container is told to stop is
+// abandoned, and its proof dial is bounded besides by proofTimeout, so an instance that never
+// answers is refused while the daemon still waits for the answer. A started proxy ignores ctx: it
+// serves until the generation's own end closes it (wait), which lets it serve the child through its
+// stop grace after ctx has ended.
 func (m *manager) startSession(ctx context.Context, generation uint64, dir string) (*sessionproxy.Proxy, string, error) {
 	if m.cfg.SessionDatabase == (ompsessions.Database{}) {
 		return nil, "", nil
@@ -494,13 +496,22 @@ func (m *manager) startSession(ctx context.Context, generation uint64, dir strin
 		return nil, "", fmt.Errorf("write the session database URL for generation %d: %v", generation, err)
 	}
 	proxy, err := sessionproxy.Start(ctx, sessionproxy.Config{
-		Socket: endpoint.Socket(), Instance: m.cfg.SessionDatabase.Instance, NewDialer: m.cfg.SessionDialer, Log: m.cfg.Stderr,
+		Socket: endpoint.Socket(), Instance: m.cfg.SessionDatabase.Instance, NewDialer: m.cfg.SessionDialer,
+		ProofTimeout: m.proofTimeout(), Log: m.cfg.Stderr,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("the session database proxy for generation %d: %v", generation, err)
 	}
 	return proxy, endpoint.ClientURL(), nil
 }
+
+// proofTimeout bounds a generation's proof dial (sessionproxy.Config.ProofTimeout) at half the stop
+// grace, which Run has made positive. The daemon's wait on a start ends at the launcher's connection
+// deadline plus its termination grace (runtime/sandbox's relaunch), and that grace is the
+// --stop-grace it hands the launcher (runtime/sandbox's manifest), so the daemon waits at least
+// StopGrace past the launcher's connection, however late it connected. Half of it bounds the
+// proof; the other half is left for the rest of the start and its answer.
+func (m *manager) proofTimeout() time.Duration { return m.cfg.StopGrace / 2 }
 
 // endSession ends a generation that will not run after all: its proxy stops and its directory goes,
 // so no child ever starts against a half-made generation and nothing of it is left bound or on
@@ -513,9 +524,12 @@ func endSession(proxy *sessionproxy.Proxy, dir string) {
 }
 
 // resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
-// a test shortens it. It sits well inside the daemon's wait on a launcher's start, its boot timeout
-// plus its stop grace (130 s by default: runtime/sandbox's relaunch), so a lookup that gives up
-// answers before the daemon stops waiting.
+// a test shortens it. A start's whole budget is the proof dial, at most proofTimeout (StopGrace/2),
+// then this lookup: 35 s at the daemon's defaults, inside its wait on the start, its boot timeout
+// plus its stop grace (120 s + 10 s: runtime/sandbox's relaunch), whenever the launcher is connected
+// as that wait begins, which is every relaunch into a running pod. Only a launcher that connects late
+// in a new pod's boot window has less: at least the grace remains, and the proof's half of it is
+// still inside.
 var resumeLookupTimeout = 30 * time.Second
 
 // resumeLookupBackoff is the wait before each retry of a session table lookup that could not reach

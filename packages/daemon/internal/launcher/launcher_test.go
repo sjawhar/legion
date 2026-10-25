@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/url"
@@ -187,6 +188,12 @@ func (g *rig) send(frame shimwire.Frame) {
 func (g *rig) answer(command shimwire.Frame) shimwire.Frame {
 	g.t.Helper()
 	g.send(command)
+	return g.reply()
+}
+
+// reply is the next answer the launcher sends, skipping state frames.
+func (g *rig) reply() shimwire.Frame {
+	g.t.Helper()
 	for {
 		frame := g.next()
 		if _, state := frame.(shimwire.LauncherState); !state {
@@ -585,19 +592,26 @@ var testDatabase = ompsessions.Database{Instance: testInstance, Name: "legion_se
 
 // sessionDialer stands in for the Cloud SQL connector: every connection is a fresh dial of addr,
 // which the test owns, and check is the credential work the connector does before each of them, so
-// a test can refuse one dial and allow the next.
+// a test can refuse one dial and allow the next. While stalling (stallAt), every dial reaches a
+// silent upstream instead and stalls in a real TLS handshake, which, like the connector's own, ends
+// only when the dial's context does.
 type sessionDialer struct {
 	addr  string
 	check func() error
 
-	mu    sync.Mutex
-	dials []string
+	mu     sync.Mutex
+	dials  []string
+	silent string
 }
 
 func (d *sessionDialer) Dial(ctx context.Context, instance string) (net.Conn, error) {
 	d.mu.Lock()
 	d.dials = append(d.dials, instance)
+	silent := d.silent
 	d.mu.Unlock()
+	if silent != "" {
+		return stalledDial(ctx, silent)
+	}
 	if d.check != nil {
 		if err := d.check(); err != nil {
 			return nil, err
@@ -607,11 +621,66 @@ func (d *sessionDialer) Dial(ctx context.Context, instance string) (net.Conn, er
 	return dialer.DialContext(ctx, "tcp", d.addr)
 }
 
+// stallAt makes every dial from now on stall against the silent upstream at addr; "" ends that.
+func (d *sessionDialer) stallAt(addr string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.silent = addr
+}
+
 func (d *sessionDialer) Close() error { return nil }
 
 // build is the Config.SessionDialer a test passes: every generation of its launcher dials through
 // this very fake.
 func (d *sessionDialer) build(context.Context) (sessionproxy.Dialer, error) { return d, nil }
+
+// stalledDial opens a real connection to addr, a silent upstream, and runs a real TLS handshake
+// over it, which nothing ever answers, so it ends only when ctx does.
+func stalledDial(ctx context.Context, addr string) (net.Conn, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	client := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, ServerName: "x"})
+	if err := client.HandshakeContext(ctx); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+// silentUpstream is an instance that never answers: a listener that accepts every connection and
+// never writes to it, holding each one open until the test ends.
+func silentUpstream(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return listener.Addr().String()
+}
 
 // idleUpstream is a listener that accepts a connection and closes it, which is all a proof dial
 // and a bound-socket check need: no Postgres speaks over it.
@@ -701,6 +770,62 @@ func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
 		_ = conn.Close()
 		t.Fatal("something is still listening at the refused generation's session socket")
 	}
+}
+
+// A generation whose session database never answers is refused while the daemon still waits: the
+// proof dial ends at half the launcher's stop grace, which the daemon's wait on a start always
+// outlasts, and the refusal names the generation, the instance and the bound, with nothing of the
+// generation left on disk or bound. The command loop is free again: the Stop the daemon sends after
+// a start it gave up on, already queued behind that start, is read and obeyed, and the next
+// generation, once the instance answers, starts and is served.
+func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	dialer.stallAt(silentUpstream(t))
+	const grace = 400 * time.Millisecond
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	began := time.Now()
+	g.send(g.childStart(1, marker, nil))
+	stop := shimwire.LauncherStop{ID: "stop-1", Generation: 1, GraceMs: 1000}
+	g.send(stop)
+	got, ok := g.reply().(shimwire.LauncherStartResult)
+	if waited := time.Since(began); waited >= grace {
+		t.Fatalf("the start was answered %s after it was sent, past the %s stop grace", waited, grace)
+	}
+	if !ok || got.OK || !strings.Contains(got.Error, "generation 1") || !strings.Contains(got.Error, testInstance) ||
+		!strings.Contains(got.Error, "no answer within 200ms") {
+		t.Fatalf("start result = %#v, want a refusal naming generation 1, %s and its 200ms bound", got, testInstance)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a generation whose session database never answered started its child")
+	}
+	dir := g.generationDir(1)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused generation's directory survived: %v", err)
+	}
+	if conn, err := net.Dial("unix", filepath.Join(dir, ompsessions.SocketName)); err == nil {
+		_ = conn.Close()
+		t.Fatal("something is still listening at the refused generation's session socket")
+	}
+	if stopped, ok := g.reply().(shimwire.LauncherStopResult); !ok || !stopped.OK || stopped.ID != stop.ID {
+		t.Fatalf("stop result = %#v, want the queued stop obeyed", stopped)
+	}
+
+	dialer.stallAt("")
+	next := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(2, next, nil)); !got.OK {
+		t.Fatalf("start of generation 2 = %#v", got)
+	}
+	if seen := publishedAll(t, next); seen.socket != "bound" {
+		t.Fatalf("generation 2's child found its session socket %s, want it already bound", seen.socket)
+	}
+	conn, err := net.Dial("unix", filepath.Join(g.generationDir(2), ompsessions.SocketName))
+	if err != nil {
+		t.Fatalf("dial generation 2's session socket: %v", err)
+	}
+	_ = conn.Close()
+	g.stop(2)
 }
 
 // A session database is held for exactly one generation and nothing between: while the generation
