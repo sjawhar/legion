@@ -1386,6 +1386,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Supervisor:         s.supervisor,
 		BootTokens:         s.tokens,
 		Project:            p.project,
+		DispatchProject:    cfg.Project,
 		OperatorToken:      p.operatorToken,
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,

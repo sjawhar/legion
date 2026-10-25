@@ -577,7 +577,10 @@ func (s *server) releaseOutcome(ctx context.Context, issues []string) ([]string,
 		return nil, nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	mirrored, err := s.records.DispatchIssues(ctx, tx, s.project)
+	// The mirror's rows are keyed by the Dispatch project key the issues are filed under, never
+	// by the claim project token: a read with the token finds nothing wherever the two differ,
+	// which in a deployment is always (Options.Project, Options.DispatchProject).
+	mirrored, err := s.records.DispatchIssues(ctx, tx, s.dispatchProject)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -35,16 +35,20 @@ func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 	t.Helper()
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues},
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	statuses := &statusRecorder{}
+	// The server is given both names of the one project, and they differ: the claims it reads are
+	// filed under the claim token, the issues and the mirror under the Dispatch key, and a route
+	// that confuses them reads an empty mirror here.
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-		Handlers: []intake.Handler{blockers.NewMirror(records, testProject), engine}, Dispatch: statuses,
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
+		OperatorToken: testOperatorToken,
+		Controller:    h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
+		Handlers: []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine}, Dispatch: statuses,
 	}).Handler
 	h.recordIssue(record.Issue{Key: releaseRoot, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: releaseRoot,
-		Project: testProject, Title: releaseRoot, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+		Project: testDispatchProject, Title: releaseRoot, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 	gate := record.DesignGate{Issue: releaseRoot, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 1}
 	if open {
 		approved := 1
@@ -78,7 +82,7 @@ func seedMirrorRow(t *testing.T, h *harness, key, status string) {
 	t.Helper()
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		return record.NewStore().PutDispatchIssue(context.Background(), tx,
-			record.DispatchIssueRow{Key: key, Project: testProject, Status: status, Seq: 1})
+			record.DispatchIssueRow{Key: key, Project: testDispatchProject, Status: status, Seq: 1})
 	}); err != nil {
 		t.Fatalf("seed the mirror row of %s: %v", key, err)
 	}
