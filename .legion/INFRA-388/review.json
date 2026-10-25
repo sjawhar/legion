@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-388",
+  "completed": "2026-10-25T18:23:46Z",
+  "round": 1,
+  "reviewedCodeHead": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title. CI head 19e78ffe (newest pull_request runs); lint, typecheck, test, pr-title all completed success there (Tests run 40219336654 success, PR Title run 40219396449 success); compare 19e78ffe...a70396cf touches only .legion/.",
+  "thermonuclear": "deep-review at 19e78ffe: CHANGES (one Important, Security[authz]: no completion gate on the deploy run). code-quality at 19e78ffe: one maintainability item (outbox_check_test.go 667->1028 lines, workflow/check_test.go 795->1007 lines), recorded as the Fast-follow cleanup.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/daemon/outbox.go",
+      "description": "Security[authz]: checkDeployRun re-reads the run attempt from GitHub and holds it to the workflow path, branch, head repository and event (outbox.go:1442-1474), but not to its status. The envelope is trusted for nothing (intake/facts.go WorkflowRunCompleted comment), and Envoy accepts a source=github publish from any bearer holder. A forged `completed` envelope for a real release/deploy run that is still in progress, after its Apply step succeeded, wakes the check before the run ends. It also consumes the per-job event ids (check-wake:<issue>:<check>:deploy run:<run>:<attempt>:<job>, outbox.go:1540) that ApplyFact deduplicates, so the genuine completion later adds no look. The look then may report pending against a run with no conclusion (agent-infra's check instructions read a run once it has a conclusion) and the check waits for another wake or its bound - the gap this issue closes. Fix: decode `status` from GET /actions/runs/{run}/attempts/{attempt} (the field is there: run 40184206819 attempt 1 reads `completed success`) and wake nothing, logged, unless it is `completed`, whatever the conclusion; a regression test with an in_progress attempt followed by the completed one of the same run, attempt and job."
+    }
+  ],
+  "fastFollow": "Move the deploy-specific tests and fixtures out of packages/daemon/internal/daemon/outbox_check_test.go (now 1028 lines) and packages/daemon/internal/workflow/check_test.go (now 1007 lines) into outbox_deploy_test.go and check_deploy_test.go; cleanup only, may ride the fix push.",
+  "verifiedFacts": {
+    "e2eImplementer": "present in PR body, links https://github.com/sjawhar/legion/pull/2203#issuecomment-6401192305, head 19e78ffe, negative control LIVEPROOF_NO_DEPLOY=1",
+    "e2eTester": "present in PR body, links https://github.com/sjawhar/legion/pull/2203#issuecomment-6401341415, head 19e78ffe, negative controls forged envelopes",
+    "threads": "0 threads on the pull request (gh api graphql, 2026-10-25)",
+    "contractCensus": "Not required: the PR adds an optional legion.yaml key whose refusals apply only to that key, an added settings field (legionSettings is z.looseObject), and a wake kind (CheckWakeView.kind is nonEmptyString, not an enum); no existing input is newly refused and no field is removed, renamed or made required."
+  }
+}
