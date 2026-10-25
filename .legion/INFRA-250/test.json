@@ -2,52 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T13:14:23Z",
-  "round": 6,
-  "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
-  "mergeState": "MERGEABLE (BLOCKED only on review) at 1cfb6995bc5b, read before any check.",
-  "scope": "Since round 5's head (175264c15066, full round, handoff cb81dabd7aac) the code change is packages/envoy/internal/testnats/nats.go (the gate's port band, relay.Close's comment) and one new test in nats_test.go. The only consumer of Gate is internal/bus/reconnect_err_test.go. A1-A5's round-5 proof stands for everything else; this round re-proves the gate and its band and runs internal/testnats and internal/bus whole.",
+  "completed": "2026-10-25T14:37:07Z",
+  "round": 7,
+  "headSha": "0d5a4bb4ea42b0efab7d4a775690c7624736a98f",
+  "mergeState": "CONFLICTING / DIRTY at edec49e289ab, read first. There is no CI here, and none can start: no pull_request workflow runs while GitHub shows the conflict. gh api 'repos/sjawhar/legion/actions/runs?head_sha=0d5a4bb4ea42b0efab7d4a775690c7624736a98f' returns total_count 0.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "This pod's /proc/sys/net/ipv4/ip_local_port_range is '16000 65535'. Three runs of 2000 :0 binds on 127.0.0.1 put 396, 409 and 378 ports in the old band 20000-29999 and 0, 0 and 0 in the new band 15000-15999, against the reviewer's 401 and the implementer's 432/0; the binds ranged 16002-65519. gatePorts on the real file gives 15000-15999, and 20 StartGate calls all picked a port in that band. The table TestTheGateBandLiesBelowTheEphemeralRangeItIsGiven fails when it is attacked: an expected band moved to 15500 fails it; code that puts the band at low-500 fails three cases, including 'gatePorts(\"16000\\t65535\\n\") = 15500-16499, which reaches the range starting at 16000'; and with the floor check removed, 'gatePorts = 1000 ports from 24, want a refusal'. Restored, it passes."
+    "how": "I verified the round's four changes in a git archive of 0d5a4bb4ea42; details are in roundContent. All of them hold, but nothing in CI has judged them, and envoy-go-race, the lane that settles the race, has no run at this head."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "roundContent": {
+    "accountsContract": "A throwaway test copied the overlap test's shape. It asked testnats.URL in the parent and then in subtests 'widen' and 'narrow'. The parent got account t1, widen t2 (and t2 again on a second call), narrow t3. Narrow saw 0 streams on entry even though widen had just created one. So each subtest has an account of its own, and the delete-then-create in narrow runs against an account with nothing in it. In this pod, without -race, TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn passes 30/30 and TestRewatchOntoARecreatedBucketRefillsTheCache passes 30/30. That says nothing about the -race configuration, which this pod cannot run (no C compiler, dispatch://INFRA-257).",
+    "sweep": "Pattern set 1, the server's answer: 'error creating store|creating store for stream|streamStoreFailed|streamCreateErrorCode' matches only internal/testnats (the retry and its own tests). Pattern set 2, the call shape: every test file with a DeleteStream/DeleteKeyValue (cmd/listener/main_test.go, internal/bus/kv_key_test.go, stream_config_test.go, internal/cistore/burst_test.go, internal/kvwatch/end_test.go, kvwatch_test.go, repair_test.go, internal/store/interest_markers_test.go, kv_test.go), with every create, add, ensure, open or recreate that follows in the same test. Every recreate of a deleted name goes through testnats.RecreateKeyValue, except the overlap test, where the delete now runs in a fresh account. The remaining hits are deletes with no recreate of that name in that test: cmd/listener main_test.go:4565 ends the interest watcher and its store.Open belongs to the next test; kv_test.go:2041 deletes the role bucket and its CreateKeyValue at 2069 is a different test; burst_test.go:940, end_test.go:227 and repair_test.go:186/221/264 delete without recreating; kv_key_test.go deletes only in t.Cleanup. Only internal/testnats/nats.go calls Delete outside a test file. There is no third site.",
+    "startGateLock": "TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange fails when StartGate takes a fixed 20000-20999 band: 'a gate took port 20220, want one of the 1000 ports below 16000, the first port of this machine's ephemeral range (/proc/sys/net/ipv4/ip_local_port_range holds \"16000 65535\\n\")'. Limit: a StartGate that ignores the file and always uses the fallback (gatePorts(\"\")) passes it in this pod, because gVisor's low bound, 16000, equals fallbackEphemeralLow. It fails only on a machine whose range starts elsewhere, such as CI's Ubuntu (32768). With no injection seam, by the architect's ruling, CI is where that mutation is caught.",
+    "bandTable": "Each break fails the table: expected gVisor band 15500 ('want 1000 from 15500'); code band at low-500 ('15500-16499, which reaches the range starting at 16000'); floor check removed ('want a refusal'); refusal message no longer naming the low bound ('does not name the range's first port, 1024'). Restored, internal/testnats passes whole (ok 9.9 s)."
+  },
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Review round 1 (important): a gate's port lies outside every :0 bind on the machine running the test, so no server restart or concurrent binary can take it while the gate is closed.",
-      "surface": "This gVisor Legion worker pod's kernel, and the rig's own gatePorts and StartGate.",
-      "command": "cat /proc/sys/net/ipv4/ip_local_port_range ; 3 x 2000 python3 socket.bind(('127.0.0.1', 0)) counting ports in 20000-29999 and 15000-15999 ; a throwaway test calling gatePorts on the real file and StartGate 20 times",
-      "observed": "Range '16000 65535'. Old band hit 396, 409 and 378 times in 2000; new band 0, 0, 0. gatePorts on the real range: 15000-15999. All 20 StartGate ports in 15000-15999.",
-      "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
-      "negativeControl": "The old band, 20000-29999, on the same kernel: about one in five :0 binds lands in it."
-    },
-    {
-      "criterion": "The band selection is pinned for every kernel's range, not only the runner's.",
-      "surface": "TestTheGateBandLiesBelowTheEphemeralRangeItIsGiven, mutated three ways.",
-      "command": "cd packages/envoy && go test ./internal/testnats/ -run TestTheGateBandLiesBelow -count=1, at the head and with each mutation",
-      "observed": "Passes at the head. Throwaway edge inputs: '2048 65535' and '3047 65535' are refused with a message naming the range; '3048 3048' gives 2048; an inverted range ('40000 30000'), 0, a high bound over 65535, a single field, three fields and a negative low all give the fallback band 15000-15999, below every range those machines could have.",
-      "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
-      "negativeControl": "The expected gVisor band changed to 15500: fails 'want 1000 from 15500'. Code band moved to low-500: fails 'gatePorts(\"16000\\t65535\\n\") = 15500-16499, which reaches the range starting at 16000'. Floor check removed: fails 'gatePorts = 1000 ports from 24, want a refusal'."
-    },
-    {
-      "criterion": "The gate's own property is not weakened: open relays, closed has nothing listening, reopened connects, and the reconnect test depends on it.",
-      "surface": "The ported Gate dialled directly at the head, and internal/bus's TestAFailedReconnectAttemptLogsOneWarnAMinute.",
-      "command": "a throwaway test dialling the gate after open, close, close, open, open ; go test ./internal/bus/ -run TestAFailedReconnectAttemptLogsOneWarnAMinute -count=3 ; go test ./internal/bus/ -count=1 ; go test ./internal/testnats/ -count=1",
-      "observed": "Open: accepted, read 'INFO'. Closed, and closed twice: dial refused. Reopened, and opened twice: accepted, 'INFO'. The reconnect test passes 3 of 3 (ok 54.9 s), internal/bus passes whole (ok 218.7 s) and internal/testnats passes (ok 9.6 s).",
-      "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
-      "negativeControl": "Gate.Close changed to drop its relay without closing the listener: TestAFailedReconnectAttemptLogsOneWarnAMinute fails 'timed out waiting for: 1 reconnect failures of reconnect-err-test-…' after 30.2 s."
+      "criterion": "The pull request is mergeable and CI judges its code head; in particular envoy-go-race at this head settles the stream-store race this round fixes.",
+      "evidence": "GitHub: CONFLICTING / DIRTY (gh pr view 2189 --json mergeable,mergeStateStatus at 14:34Z). No workflow run exists for 0d5a4bb4ea42, and none can start while the conflict stands. Cause: sjawhar/legion#2191 (INFRA-249) merged at 13:34:32Z as 523592465. It edits packages/envoy/scripts/e2e-local.sh, as forecast in round 1 (test.json at c6d89ddb45e1). `git merge-tree --write-tree 687c9e6f2b92 edec49e289ab` reports 'CONFLICT (content): Merge conflict in packages/envoy/scripts/e2e-local.sh', one hunk in the evidence-file rm -f list. main adds \"$registry_session_response_file\" \"$registry_missing_response_file\" to that list. This branch adds \"$nats_log_file\", \"$nats_binary\" and `rm -rf \"$nats_store_dir\"`. The resolution keeps both. After the merge, e2e-local.sh also runs #2191's registry checks against the in-process natsd, and the merge brings main's cmd/broker vet break (dispatch://INFRA-379) into envoy-go, so the next round re-drives the script and reads envoy-go-race at the merged head."
     }
   ],
-  "residualJudgement": {
-    "residual": "scripts/e2e/lib/free-port.sh picks from 20000 up to the ephemeral low bound, which on a default Linux (32768) covers the gate's band 31768-32767.",
-    "verdict": "agree it is right to record rather than build",
-    "why": "On this pod the script refuses before picking ('the ephemeral range starts at 16000, leaving no room above 20000'), because 16000 is not above 21000, so a worker pod never picks there. On a default Linux devbox, the gate's band is 1000 of the script's 12768 ports, about 7.8% of its picks. A collision needs a stage script and a go test using Gate running at once, and the pick landing on the gate's port in the seconds that gate is closed: ss sees the port free and the stage process binds it for its run. If that happens, Gate.Open fails the test with EADDRINUSE naming the address. It is loud and it never passes falsely. The one Gate test is TestAFailedReconnectAttemptLogsOneWarnAMinute, and the devbox proofs run one at a time. If it ever matters, the same fix fits there: free-port.sh can stop 1000 below the low bound."
-  },
   "observations": [
-    "CI at c9b95f0c760d: Docs success; Tests and Worker Image in progress; Legion Envoy and Contracts run 40195850135 queued, with only 'changes' done and dispatch-memory started, when this round ended. I did not see envoy-go or broker-multiprocess fail at this head, so I cite them as queued, not red.",
-    "main 95a937abce29 fails `go vet ./cmd/broker/`: 'cmd/broker/service_account_scope_test.go:50:3: too many arguments in call to startBroker … want (*testing.T, brokerOptions)'. At this head, `go vet ./cmd/broker/` exits 0. A pull request run builds the merge with current main, so it inherits the failure. That is dispatch://INFRA-379, not this change.",
-    "The table's refusal case checks that the error text contains the range as %q quotes it (1024\\t65535). It is a wording check on a message, harmless, but it would fail on a rephrase that still names the range.",
-    "Nothing locks StartGate's use of gatePorts. A StartGate that ignored the file would still pass every committed test except on the rare collision. That is wiring; the throwaway probe above is its proof."
+    "The PR body is about 46.5k characters; this round's line is kept short and the evidence lives here."
   ]
 }
