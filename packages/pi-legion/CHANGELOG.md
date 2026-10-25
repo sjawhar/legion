@@ -7,6 +7,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The `legion-controller` skill this plugin ships reorders a project's board with
+  `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
+  stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by
+  board rank alone, so board rank alone carries the weekly plan's order. The controller still sets
+  the coarse priority, as the signal people and filters read and as the order by which an agent
+  takes its own next issue, but it changes no admission; the reference used to have the controller
+  set priority and rank together so that "highest priority, then board rank" produced the plan's
+  order (INFRA-188).
 - The skill-scenario rig has an `askgate` scenario. It seeds an issue whose one
   comment is the person's and gives a plain session one of eight prompts, which
   `SKILL_SCENARIOS_ASKGATE_CASE` names: `facts`, `link` or `upload` for AskGate's review of the

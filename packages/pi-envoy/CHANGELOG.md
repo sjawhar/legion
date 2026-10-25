@@ -65,6 +65,14 @@
 - The `advisor-gate` entry gains `charterLatencyMs`, the charter call's own time on the clock
   `ruleLatencyMs` uses: the two calls run side by side, and the entry's `latencyMs` alone never
   said which of them the gate waited on.
+- The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
+  `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
+  `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
+  issues reference spelled out a hand-built `PATCH` carrying a `rank` body. Its reorder rule now
+  names the agent that keeps each project's order — in a Legion deployment the controller, at
+  `notifications.role.legion-<project>-controller` — in place of the retired `backlog-order`
+  address, and says to raise a wrong order on the issue itself where no Legion controller runs
+  (INFRA-188).
 
 ### Fixed
 
