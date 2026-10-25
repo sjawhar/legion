@@ -2,39 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T16:56:34Z",
-  "round": 3,
+  "completed": "2026-10-25T17:12:45Z",
+  "round": 4,
   "decision": "changes_requested",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "reviewedCodeHead": "355ffe8e9ae9",
-  "roundReason": "Implementing rounds 3 and 4 after the second retro send-back (closing comment's exceptions, recovery delete 'once stored', every sentence swept against evidence; then the tester's round-3 contradiction with the INFRA-232 bullet). Reviewed the whole diff from main at 748f7a30, with an adversarial sentence sweep by a reviewer subagent, each of its findings checked against the page.",
+  "reviewedCodeHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+  "roundReason": "Implementing round 5 answered the four findings of the review at 355ffe8e. All four fixes hold. An adversarial sentence sweep by a reviewer subagent, checked against the code and by a stub run, found that my round-3 finding (1b) was too narrow, plus one further minor wording error.",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:3131-3134",
-      "description": "Closing comment: (a) 'On the exits measured below, the trap above removed the workload' is false for the measured exits that ran no trap (the SIGKILL runs at 3296-3299 and the tool-timeout kills at 3192-3195 left the workload); (b) its 'It can miss it:' list omits a second stop signal sent to the group while the trap runs. cleanup() restores default dispositions (`trap - EXIT INT TERM HUP`, 3016), so that signal ends the clean-up mid-step with no failure line and no `sequence: exit` line. Measured 2026-10-25 with a stub of the same trap structure (sleep 3 standing in for the delete): two TERMs 0.5 s apart printed 'cleanup: start' and nothing after; the one-TERM control printed 'cleanup: delete done' and 'sequence: exit 143'. The deliberate-stop paragraph (3202-3212) should tell the reader the same: send one stop, and a run whose output has no `sequence: exit` line had its clean-up cut short and is recovered by the printed name, or the label."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:3220-3223",
-      "description": "The recovery paragraph's list of runs that left a Job without printing its name omits a label delete that failed (3020-3021: the trap prints `cleanup: the Job's delete failed`, the Job stays, no name was printed), which the closing comment names, and the second stop during the label-path trap. The list reads as complete; the two lists on the page disagree."
+      "file": "docs/kubernetes.md:3133-3134, 3210-3212, 3228-3229",
+      "description": "The page says only a *second* stop can cut the trap short. cleanup() is the EXIT trap and restores every signal's default as it starts (3016), whatever started it. So a single stop that reaches the sequence while a trap started by a failed step or the work's end is running also ends it part-way. The trap can run for a long time: the diagnostic reads, a 6-31 s foreground delete, and a Service wait of up to 60 s. 'Send one stop and let the trap finish' then implies that one stop is always safe. Measured 2026-10-25 with the same stub, its work ending in `false`: one `kill -TERM -- -<pid>` during the trap printed `cleanup: start` and nothing after; the no-stop control printed `cleanup: delete done` and `sequence: exit 1`. My round-3 finding asked only for the second stop, which was too narrow."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:3166-3171",
-      "description": "'In every run of that kind measured ... it had' classifies the label-path runs that found nothing as runs whose request had not left, which the sentence after it says the output cannot show. State it for the runs that found a Job, plus 'none of the twenty-six left a Job'."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:3306-3307",
-      "description": "'Nothing those runs printed shows when a stop landed relative to the create's request and answer' is false for the later runs, whose printed `workload:` line shows their stop came after the answer. Scope it to the runs that took the label path."
+      "file": "docs/kubernetes.md:3314-3315",
+      "description": "'For the runs that took the label path, nothing they printed shows when the stop landed relative to the create's request and answer' is too broad for the label-path runs that found nothing. The server answers a create only after storing it, and no Job of theirs was left, so their empty label delete shows the stop landed before the create's answer. What stays unknown for them is before the request left versus in flight; for the two that found a Job, in flight versus after the answer (as 3171-3172 already says). This wording was my own round-3 suggestion."
     }
   ],
-  "ci": "Code head 355ffe8e: Tests 40213118224 in progress when read; PR Title and Legion Envoy and Contracts success. Not waited for: a request for changes stands whatever CI says.",
-  "threads": "0 review threads before this review.",
-  "thermo": "Not run: docs-only diff.",
-  "commandChangeOption": "A command change (cleanup() ignoring INT/TERM/HUP instead of restoring defaults) would close the second-signal gap in the block itself, but the architect's ruling holds every non-comment line of the block. So the request asks for a prose fix; changing the command is the architect's call."
+  "fixesVerified": [
+    "3131-3135 closing comment: no-trap exits and the cut-short trap named, both with no `sequence: exit` line; failed step printed; late-stored create",
+    "3166-3172 trap paragraph: scoped to runs whose label delete found a Job; none of the twenty-six left a Job; the placement caveat limited to the 0.33 s and 0.35 s runs",
+    "3227-3231 recovery list: failed label delete and cut-short label-path trap added; each printed its label first (the label prints at 3010, before the create)",
+    "3210-3215 stop paragraph: the stub measurement quoted matches the reviewer's run"
+  ],
+  "ci": "Code head 241f4e1a: Tests 40214431002 queued, PR Title pending, Legion Envoy and Contracts success when read. Not waited for: a request for changes stands whatever CI says. main moved to 4792c8fa (#2183, no docs/kubernetes.md change); GitHub reports the PR MERGEABLE.",
+  "threads": "Four threads from the round-3 review; see the PR's thread replies.",
+  "thermo": "Not run: docs-only diff."
 }
