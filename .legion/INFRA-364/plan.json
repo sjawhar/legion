@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-364",
+  "completed": "2026-10-25T16:18:30Z",
+  "plan": "dispatch://INFRA-364/artifact/plan-md",
+  "summary": "One pull request. In packages/envoy/internal/dispatch/refs: replace resolveNodes' switch with a node-kind registry (nodeLoaders, kind -> loader; nodeKinds derived from it); resolveNodes skips a kind with no entry instead of failing; BacklinkCounts adds `from_kind = any(nodeKinds)` so a count counts the rows its list shows; Outgoing adds `e.to_kind = any(nodeKinds)` so the older artifacts/{id}/references route lists no unknown target. Tests first (refs_test.go, api/references_test.go, e2e/references.e2e.ts), run red at the test commit and green at the fix; docs in cmd/dispatch/README.md 'Reference graph', envoy AGENTS.md:1862, envoy CHANGELOG [Unreleased] Fixed.",
+  "tasks": [
+    "Task 0: rootless Postgres 17 + pgvector harness under /legion/harness (docs/solutions/testing INFRA-42, INFRA-43 recipes), 127.0.0.1:55432 trust auth so `bun run dispatch:local` works; DISPATCH_TEST_DATABASE_URL for Go tests; own ports and database per role.",
+    "Task 1 (commit test(dispatch): graph reads around a node kind this build does not know): refs_test.go TestGraphReadsSkipANodeKindThisBuildCannotAddress (in, out, unknown-only in project OPS, counts with and without excludeKinds); api/references_test.go TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress (?to=, ?from=, issue referenced_by_count == listed edges) and TestArtifactReferencesSkipANodeKindThisBuildCannotAddress (referenced_by and outgoing, known unresolved targets kept); e2e/references.e2e.ts 'an issue's backlinks skip an edge of a node kind this build does not know' (header Referenced by (2), panel lists the message, no 'Referenced by unavailable.'). Record each failure with -v.",
+    "Task 2 (commit fix(dispatch): a graph read skips an edge to a node kind it does not know): the registry, resolveNodes skip, BacklinkCounts and Outgoing filters, doc comments.",
+    "Task 3: README 'Reference graph', envoy AGENTS.md:1862, envoy CHANGELOG [Unreleased] Fixed; grep docs/site dispatch docs and skills/dispatch for a statement made false; check-private-names.sh passes.",
+    "Task 4: harness proofs C1-C5 at the head with negative controls at the test commit, simplify pass, push, open the PR from the template; the body says this must run in production before dispatch://INFRA-366 merges and that INFRA-366 adds a `block` entry to nodeLoaders. Locally run only the three Go tests and the one Playwright test; CI runs the lanes."
+  ],
+  "acceptance": [
+    {
+      "id": "C1",
+      "criterion": "GET /api/v1/references stays 200 and lists every known edge, both ?to= and ?from=, while graph_edges holds an edge whose other end is an unknown kind",
+      "surface": "Local Dispatch harness API, agent bearer e2e-token, a `future` row inserted via psql",
+      "command": "curl -sS -w '%{http_code}\\n' -H 'Authorization: Bearer e2e-token' \"$H/api/v1/references?to=dispatch://<KEY>\" | jq; same with ?from=dispatch://<KEY>/comment/<id>",
+      "negativeControl": "Server built at the test commit: 500 graph node kind \"future\" is not addressable"
+    },
+    {
+      "id": "C2",
+      "criterion": "referenced_by_count counts the rows its list shows",
+      "surface": "GET /api/v1/issues/<KEY> on the harness",
+      "command": "curl ... \"$H/api/v1/issues/<KEY>\" | jq .referenced_by_count equals C1's edges length and the fixture's known citers",
+      "negativeControl": "At the test commit the count on the same rows is one higher than the head's"
+    },
+    {
+      "id": "C3",
+      "criterion": "GET /api/v1/artifacts/{id}/references skips an unknown kind on both halves and keeps known unresolved targets",
+      "surface": "Harness API",
+      "command": "curl ... \"$H/api/v1/artifacts/<doc id>/references\" | jq",
+      "negativeControl": "At the test commit: 500; with only an outgoing future row, an outgoing entry of kind future"
+    },
+    {
+      "id": "C4",
+      "criterion": "An agent's dispatch read keeps Referenced by and Links",
+      "surface": "Real CLI against the harness",
+      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=\"$H\" DISPATCH_TOKEN=e2e-token bun packages/envoy-client/bin/dispatch.ts read --issue <KEY>",
+      "negativeControl": "At the test commit: Referenced by: followed by one unavailable row"
+    },
+    {
+      "id": "C5",
+      "criterion": "A person's issue page lists the citations with a matching count",
+      "surface": "Signed-in dashboard via Playwright (packages/dispatch/e2e)",
+      "command": "cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts references.e2e.ts -g 'skip an edge of a node kind'",
+      "negativeControl": "Same test at the test commit fails (Referenced by (3), Referenced by unavailable.); both runs quoted on the PR"
+    },
+    {
+      "id": "C6",
+      "criterion": "The change runs in production after a person deploys Dispatch (production check after the close)",
+      "surface": "Production Dispatch",
+      "command": "dispatch-production-check.sh --commit <merge sha> --page /issues/INFRA-364 --route /api/v1/references (fetched as the deployment instructions say), then read-only curl of $DISPATCH_URL/api/v1/references?to=dispatch://INFRA-364 with the pane's agent bearer via a header file, expecting 200 and the issue's known edges",
+      "negativeControl": "pending while the running build does not contain the merge; production holds no unknown-kind row before INFRA-366 deploys, so C6 proves the build and route, and the skip itself is first observed in production during INFRA-366's rollout (its spec says so)"
+    }
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: its pr-body.md (template, proof rules, simplify pass), tools.md (the harness on the issue volume) and default-branch-check.md references govern the implementation phase",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the PR head is final",
+      "dispatch: the production check writes its output on the issue"
+    ],
+    "test": [
+      "legion-worker: pr-body.md says the tester drives C1-C5 on the harness itself, tries to break them (a second unknown kind, an ask count with its replies_to exclusion, an unknown kind on the ?to= target side), and reads CI for static checks"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md and review-threads.md govern the review round and approval",
+      "thermonuclear-deep-review: correctness of the SQL filters (placeholder numbering, kept unresolved entries) and the registry",
+      "thermonuclear-code-quality: the registry refactor's structure and the single source of node kinds"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Counts (issue header, every ask read, replayed ask events via attachAskBacklinkCounts) count an unknown-kind row that the list omits; the tree plan accepted a count one high during the rollout.",
+        "answer": "BacklinkCounts filters from_kind to the registry's node kinds; refs-level test covers counts with and without excludeKinds; API test asserts issue referenced_by_count equals the listed edges; C2. Departure from the tree plan recorded in plan.md."
+      },
+      {
+        "finding": "Outgoing on GET /api/v1/artifacts/{id}/references lists an unknown target as {kind, to_id}, independently of resolveNodes.",
+        "answer": "Outgoing filters to_kind to the registry's node kinds; known non-artifact and dangling known artifact targets keep their unresolved entry; TestArtifactReferencesSkipANodeKindThisBuildCannotAddress and C3."
+      },
+      {
+        "finding": "Production holds no unknown-kind row, so a production curl cannot exercise the skip.",
+        "answer": "C6 is scoped to the build and route (production check script plus read-only curl); the skip is proven pre-merge by C1-C5 on the real server and database; INFRA-366's spec already says its rollout is where A12 is first observed in production. No production write."
+      },
+      {
+        "finding": "Tests must cover both directions, the unknown-only case and content, not just HTTP 200; dispatch read degrades a failed graph read silently; the PR2 driver block-graph.sh does not exist yet.",
+        "answer": "Go tests cover in, out, unknown-only (empty non-nil) and counts; API tests assert retained identities and absent unknown kinds; C4 requires the comment under Referenced by and no unavailable row; drivers are curl, the CLI and Playwright, all available now."
+      },
+      {
+        "finding": "The deployment instructions' browser rule applies: the issue page's panel and count change for a person.",
+        "answer": "Task 1 item 4 adds a Playwright row in e2e/references.e2e.ts against the real server with a psql-inserted row; run red at the test commit and green at the head (C5)."
+      },
+      {
+        "finding": "A node-kind registry changes the sibling's extension recipe (add case block to resolveNodes); an incomplete change would silently skip or uncount block edges; refs.Kinds/KnownKind are edge kinds.",
+        "answer": "One map is the only source for resolution, counts and Outgoing, documented as node kinds; refs.Kinds untouched; the PR body and the completion summary tell the architect that INFRA-366 adds a block entry to nodeLoaders and tests block listed and counted while future stays skipped."
+      },
+      {
+        "finding": "The pod has no Docker or Postgres; storetest skips without DISPATCH_TEST_DATABASE_URL, so a green run may be all skips.",
+        "answer": "Task 0 uses the documented rootless Postgres + pgvector recipe on the issue volume; Go runs use -v and must show PASS, not SKIP, for the three tests."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": []
+}
