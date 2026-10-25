@@ -3,6 +3,7 @@ import type { Message } from "../web/src/api/types";
 import {
   agentRow,
   BROADCAST_REFUSED,
+  broadcastSends,
   type FakeSession,
   getSentMessages,
   postedBroadcasts,
@@ -26,6 +27,7 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { holdFirstRequest } from "./editor";
+import { type KeyedWrite, keyedWrite } from "./keyed-writes";
 import { resetDatabase, setCreatedAt } from "./seed";
 import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
@@ -267,10 +269,9 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(composer).toHaveValue(`/btw ${sentBody}`);
     await composer.press("Control+Enter");
     const request = await sent;
-    expect(request.request().postDataJSON()).toEqual({
-      body: sentBody,
-      delivery: "btw",
-      idempotency_key: expect.any(String),
+    expect(keyedWrite(request.request())).toEqual({
+      input: { body: sentBody, delivery: "btw" },
+      key: expect.any(String),
     });
     const message = (await request.json()) as { id: string };
     expect(await getSentMessages()).toMatchObject([{ target_session: planner.session_id }]);
@@ -1339,13 +1340,19 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    // Each POST waits until the test lets it through, so each row's states can be read in turn
-    // and the second press lands while the first is still on the wire.
+    // Each send's first POST waits until the test lets it through, so each row's states can be
+    // read in turn and the second press lands while the first is still on the wire. A repeat under
+    // a key already let through goes straight on: the page asks again while Dispatch's answer
+    // shows a recipient still pending (`broadcastSends`).
     const held = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    const posted: unknown[] = [];
+    const posted: KeyedWrite<{ readonly body: string }>[] = [];
     await page.route("**/api/v1/broadcasts", async (route) => {
       if (route.request().method() !== "POST") return route.fallback();
-      const index = posted.push(route.request().postDataJSON()) - 1;
+      const send = keyedWrite<{ readonly body: string }>(route.request());
+      if (posted.some(({ key }) => key === send.key)) {
+        return route.fallback();
+      }
+      const index = posted.push(send) - 1;
       await held[index]?.promise;
       return route.fallback();
     });
@@ -1375,7 +1382,7 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await expect(row("Second.").getByRole("status")).toHaveText("Queued: to 2 agents");
     // One at a time: the second has not left the browser while the first is unanswered.
-    expect(posted).toMatchObject([{ body: "First." }]);
+    expect(posted).toMatchObject([{ input: { body: "First." } }]);
     // The reader switches to another tab while the first is on the wire. The second still goes
     // the moment the first is answered: a hidden tab holds nothing back. This sets the two inputs
     // TanStack's `focusManager` reads.
@@ -1388,7 +1395,9 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     held[0]?.resolve();
     await expect(row("First.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     await expect(row("Second.").getByRole("status")).toHaveText("Sending to 2 agents…");
-    await expect.poll(() => posted).toMatchObject([{ body: "First." }, { body: "Second." }]);
+    await expect
+      .poll(() => posted)
+      .toMatchObject([{ input: { body: "First." } }, { input: { body: "Second." } }]);
     // Nothing navigates while a send is still out.
     await expect(page).toHaveURL(/\/agents$/);
     await setVisibility("visible");
@@ -1418,7 +1427,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1457,10 +1466,12 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     expect(posted).toHaveLength(3);
     expect(posted[2]).toEqual(posted[0]);
     expect(posted[0]).toEqual({
-      body: "Refused first.",
-      delivery: "aside",
-      idempotency_key: expect.any(String),
-      session_ids: pair.map((session) => session.session_id),
+      input: {
+        body: "Refused first.",
+        delivery: "aside",
+        session_ids: pair.map((session) => session.session_id),
+      },
+      key: expect.any(String),
     });
   } finally {
     await alice.close();
@@ -1477,7 +1488,7 @@ test("a human-paced double click on one Retry sends that message once, and never
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1511,11 +1522,12 @@ test("a human-paced double click on one Retry sends that message once, and never
       row("Retried once.").getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
     await page.waitForTimeout(500);
-    expect(posted.map((request) => request.body)).toEqual([
+    expect(posted.map((request) => request.input.body)).toEqual([
       "Retried once.",
       "Never retried.",
       "Retried once.",
     ]);
+    await expect(sends.getByRole("listitem")).toHaveCount(2);
     await expect(sends.getByRole("listitem").last()).toContainText("Retried once.");
     await expect(row("Never retried.").getByRole("status")).toHaveText(
       /^Could not send to 2 agents: /

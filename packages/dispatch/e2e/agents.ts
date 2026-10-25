@@ -1,8 +1,9 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
-import type { CreateBroadcastInput } from "../web/src/api/types";
+import type { BroadcastCreated, CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { harnessPorts } from "./harness-ports";
+import { type KeyedWrite, keyedWrite, watchWrites } from "./keyed-writes";
 import { sessionIds } from "./session-ids";
 
 export interface FakeSession {
@@ -65,16 +66,37 @@ export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   >;
 }
 
-/** Every broadcast request the page posts from here on, in order, as the body it sent - a route
- *  that fulfils a request itself still lists it. */
-export function postedBroadcasts(page: Page): CreateBroadcastInput[] {
-  const posted: CreateBroadcastInput[] = [];
+/** Every broadcast request the page posts from here on, in order, as the body it sent and the
+ *  `Idempotency-Key` it sent it under - a route that fulfils a request itself still lists it. */
+export function postedBroadcasts(page: Page): KeyedWrite<CreateBroadcastInput>[] {
+  return watchWrites<CreateBroadcastInput>(page, "POST", "/api/v1/broadcasts");
+}
+
+/** Every broadcast the page sends from here on, in order: each press, Retry and Restore draft, as
+ *  the body and key it sent. A repeat is not a send of its own: Dispatch answers a broadcast
+ *  before it delivers, and while that answer still shows a recipient whose one attempt is pending,
+ *  the page asks again under the same key (`broadcast-queue.ts`), so the POSTs of one send
+ *  outnumber it. A POST under the key of an answer that left a recipient pending is that repeat,
+ *  and is not listed; `postedBroadcasts` lists every POST. */
+export function broadcastSends(page: Page): KeyedWrite<CreateBroadcastInput>[] {
+  const sends: KeyedWrite<CreateBroadcastInput>[] = [];
+  const owed = new Set<string | undefined>();
+  const isBroadcastPost = (request: { method(): string; url(): string }) =>
+    request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/broadcasts";
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-      posted.push(request.postDataJSON() as CreateBroadcastInput);
-    }
+    if (!isBroadcastPost(request)) return;
+    const send = keyedWrite<CreateBroadcastInput>(request);
+    if (!owed.delete(send.key)) sends.push(send);
   });
-  return posted;
+  page.on("response", async (response) => {
+    if (!isBroadcastPost(response.request()) || !response.ok()) return;
+    const created = (await response.json()) as BroadcastCreated;
+    const pending = created.recipients.some(
+      ({ message: { deliveries } }) => deliveries.length === 1 && deliveries[0]?.state === "pending"
+    );
+    if (pending) owed.add(response.request().headers()["idempotency-key"]);
+  });
+  return sends;
 }
 
 /** The reason `refuseBroadcasts` gives, which a refused row shows after `Could not send to N

@@ -3,9 +3,9 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   BROADCAST_REFUSED,
+  broadcastSends,
   type FakeSession,
   getSentMessages,
-  postedBroadcasts,
   refuseBroadcasts,
   setLiveSessions,
   setSessionLive,
@@ -316,7 +316,7 @@ test("a second identical send of one composition is answered the original broadc
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     await page
       .getByRole("region", { name: "Agents" })
@@ -333,9 +333,10 @@ test("a second identical send of one composition is answered the original broadc
     expect(posted).toHaveLength(1);
     const [request] = posted;
     if (request === undefined) throw new Error("the press sent nothing");
-    expect(request.idempotency_key).not.toBe("");
+    expect(request.key).toEqual(expect.any(String));
+    expect(request.input).not.toHaveProperty("idempotency_key");
 
-    const replay = await createBroadcast(request);
+    const replay = await createBroadcast(request.input, { idempotencyKey: request.key });
     expect(replay.id).toBe(first);
     expect((await listBroadcasts()).map((summary) => summary.id)).toEqual([first]);
     await expect
@@ -368,7 +369,7 @@ test("a session that leaves between a refused send and its restore is still in t
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     const refusal = await refuseBroadcasts(page);
     await page.goto("/agents");
     await page
@@ -385,7 +386,7 @@ test("a session that leaves between a refused send and its restore is still in t
     await expect(sends.getByRole("status")).toHaveText(
       `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
-    expect(posted[0]?.session_ids).toEqual([planner.session_id, observer.session_id]);
+    expect(posted[0]?.input.session_ids).toEqual([planner.session_id, observer.session_id]);
 
     await setSessionLive(observer.session_id, false);
     await expect(page.getByRole("checkbox", { name: "Select Observer for broadcast" })).toHaveCount(

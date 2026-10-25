@@ -261,15 +261,17 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
     // answer made.
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/u);
     expect(page.url().split("/").at(-1)).toBe((await answer.json()).id);
-    expect(posted).toHaveLength(2);
-    const [first, second] = posted;
+    // The lost answer's repeat, and any repeat after it while Dispatch's answer still shows a
+    // recipient pending, are the one request under the one key.
+    expect(posted.length).toBeGreaterThanOrEqual(2);
+    const [first, ...repeats] = posted;
     expect(first).toEqual({
       body: "Exactly once, everyone",
       delivery: "btw",
       idempotency_key: expect.any(String),
       session_ids: [plannerSession.session_id, reviewerSession.session_id],
     });
-    expect(second).toEqual(first);
+    for (const repeat of repeats) expect(repeat).toEqual(first);
     await expect
       .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
       .toEqual([plannerSession.session_id, reviewerSession.session_id].sort());
@@ -325,15 +327,15 @@ test("a broadcast held through a reload is resumed under its key, and each agent
     reloaded.resolve();
     await resumed;
     expect(prompts).toEqual(["beforeunload"]);
-    expect(posted).toHaveLength(2);
-    const [first, second] = posted;
+    expect(posted.length).toBeGreaterThanOrEqual(2);
+    const [first, ...repeats] = posted;
     expect(first).toEqual({
       body: "Kept through the reload",
       delivery: "btw",
       idempotency_key: expect.any(String),
       session_ids: [plannerSession.session_id, reviewerSession.session_id],
     });
-    expect(second).toEqual(first);
+    for (const repeat of repeats) expect(repeat).toEqual(first);
     await expect(
       page.getByRole("region", { name: "Sends" }).getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
