@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -52,9 +53,7 @@ func TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines(t *testing.T
 	if !errors.Is(err, bus.ErrRemoteNATS) {
 		t.Fatalf("connect owning the stream on %s = %v, want a %v", remote, err, bus.ErrRemoteNATS)
 	}
-	if !strings.Contains(err.Error(), remote) || !strings.Contains(err.Error(), bus.AllowRemoteEnvVar) {
-		t.Fatalf("refusal %q does not name both the server %s and the override %s", err, remote, bus.AllowRemoteEnvVar)
-	}
+	checkRefusal(t, err, remote)
 	if after := streamConfig(t, js); !slices.Equal(after.Subjects, before.Subjects) {
 		t.Fatalf("stream subjects = %v, want the deployed %v", after.Subjects, before.Subjects)
 	}
@@ -85,9 +84,7 @@ func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	if !errors.Is(err, bus.ErrRemoteNATS) {
 		t.Fatalf("dial %s = %v, want a %v", remote, err, bus.ErrRemoteNATS)
 	}
-	if !strings.Contains(err.Error(), remote) || !strings.Contains(err.Error(), bus.AllowRemoteEnvVar) {
-		t.Fatalf("refusal %q does not name both the server %s and the override %s", err, remote, bus.AllowRemoteEnvVar)
-	}
+	checkRefusal(t, err, remote)
 
 	conn, err := bus.Dial("relay", []string{uri}, os.LookupEnv)
 	if err != nil {
@@ -99,10 +96,10 @@ func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	}
 }
 
-// An agent's user envoy.json names production's bus, so a tool run from a checkout
-// reaches production unless something stops it. The refusal names the server and the override,
-// and it is read off the URL: nothing dials while the run has not said it means another machine's
-// NATS.
+// An agent's user envoy.json names production's bus, so a tool run from a checkout reaches
+// production unless something stops it. The refusal names the server, without its userinfo, and
+// the override, and it is read off the URL: nothing dials while the run has not said it means
+// another machine's NATS.
 func TestConnectRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	uri := testnats.URL(t)
 	remote := remoteLookingURL(t, uri)
@@ -114,12 +111,7 @@ func TestConnectRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	if !errors.Is(err, bus.ErrRemoteNATS) {
 		t.Fatalf("connect to %s = %v, want a %v", remote, err, bus.ErrRemoteNATS)
 	}
-	if !strings.Contains(err.Error(), remote) {
-		t.Fatalf("refusal %q does not name the server %s", err, remote)
-	}
-	if !strings.Contains(err.Error(), bus.AllowRemoteEnvVar) {
-		t.Fatalf("refusal %q does not name the override %s", err, bus.AllowRemoteEnvVar)
-	}
+	checkRefusal(t, err, remote)
 }
 
 // Reaching another machine's NATS is a run saying so, and is still no reason to write the stream
@@ -265,4 +257,46 @@ func remoteLookingURL(t *testing.T, uri string) string {
 	}
 	t.Skip("no non-loopback IPv4 address on this machine to reach the test server by")
 	return ""
+}
+
+// checkRefusal fails t unless err, a connect's refusal of remote, names the server and the
+// override and carries none of remote's credential. The refusal is logged, so it names the server
+// without its userinfo: nats.go authenticates with a URL's userinfo, a user name alone as a token
+// and user:password as a password, so either part is a secret.
+func checkRefusal(t *testing.T, err error, remote string) {
+	t.Helper()
+	parsed, parseErr := url.Parse(remote)
+	if parseErr != nil {
+		t.Fatalf("read the refused URL %q: %v", remote, parseErr)
+	}
+	userinfo := parsed.User
+	parsed.User = nil
+	server := parsed.String()
+	refusal := err.Error()
+	if !strings.Contains(refusal, server) || !strings.Contains(refusal, bus.AllowRemoteEnvVar) {
+		t.Errorf("refusal %q does not name both the server %s and the override %s", refusal, server, bus.AllowRemoteEnvVar)
+	}
+	if strings.Contains(refusal, "@") {
+		t.Errorf("refusal %q carries an @, which only a URL's userinfo puts there", refusal)
+	}
+	if userinfo == nil {
+		return
+	}
+	if strings.Contains(refusal, userinfo.String()) {
+		t.Errorf("refusal %q carries the userinfo of %s", refusal, remote)
+	}
+	password, _ := userinfo.Password()
+	for name, part := range map[string]string{"user name": userinfo.Username(), "password": password} {
+		if part == "" {
+			continue
+		}
+		// Each part as a whole token, not a substring: the test server's accounts are tN with the
+		// password tN, short enough to sit inside an unrelated word of the refusal. The edges are
+		// (^|\W) and (\W|$) rather than \b, which finds no boundary beside a part that starts or
+		// ends with a non-word character.
+		token := regexp.MustCompile(`(^|\W)` + regexp.QuoteMeta(part) + `(\W|$)`)
+		if token.MatchString(refusal) {
+			t.Errorf("refusal %q carries the %s %q of %s", refusal, name, part, remote)
+		}
+	}
 }

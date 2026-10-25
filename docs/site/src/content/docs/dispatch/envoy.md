@@ -77,7 +77,7 @@ no Slack token: the tool asks the [Secrets Broker](/legion/broker/) for the agen
 (`agent-secrets LEGION_SLACK_BOT_TOKEN --reason … --wait 0s -- <poster>`), which puts it in the
 environment of the one process that calls Slack's `chat.postMessage`, never the session's. Store
 the token in the broker's store with owner `legion-daemon` and tier `agent`, so the broker grants it
-at once to the pods the Legion daemon enrolls under the account `BROKER_SERVICES` binds to
+at once to the pods the Legion daemon enrolls under the accounts `BROKER_SERVICES` binds to
 `legion-daemon`, its controller's included, and to no one else; the app needs the
 `chat:write` bot scope and must be added to each channel it answers in. A request still waiting
 for approval, or denied, posts nothing, and the tool says which; Slack's own refusal comes back as
@@ -224,7 +224,7 @@ install it, what each component deploys and which settings it sets.
 | `200` `starting` | The listener is still binding its durable consumer. |
 | `200` `healthy` | Everything answers. The body includes the consumer's lag. |
 | `200` `degraded` | A passing key-value failure the listener is retrying. |
-| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, or the durable consumer is gone. |
+| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. |
 
 `/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
 subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling
