@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +41,8 @@ func newBroadcastListener(
 			}
 		}
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
+			writeSessionRecord(t, w, sessionsJSON, strings.TrimPrefix(r.URL.Path, "/v1/registry/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(sessionsJSON))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -63,6 +66,29 @@ func newBroadcastListener(
 	}))
 	t.Cleanup(server.Close)
 	return server, state
+}
+
+// writeSessionRecord answers GET /v1/registry/{session_id} from the rows a stub listener also
+// serves as its live list, so the two agree the way a real listener's do. A send resolves each
+// selected session through this route rather than through the list, so a stub that served only
+// the list would answer every recipient "no live session"; an id no row names is the listener's
+// own 404, the one absence a send may exclude for.
+func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessionID string) {
+	t.Helper()
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(sessionsJSON), &rows); err != nil {
+		t.Errorf("decode the stub listener's sessions: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	for _, row := range rows {
+		if row["session_id"] == sessionID {
+			_ = json.NewEncoder(w).Encode(row)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"error":"no live session ` + sessionID + `"}`))
 }
 
 func (l *broadcastListener) targets() []string {
@@ -398,6 +424,103 @@ func TestBroadcastWithNoReachableRecipientIsRefusedAndWritesNothing(t *testing.T
 	}
 }
 
+// INFRA-249. The live list is the listener's in-memory cache of the registry, and a session
+// working through a cache refill is missing from it. A send asks about each selected session
+// by id instead, so a selection the list has dropped entirely still reaches every session the
+// store holds a record for, with nothing excluded.
+func TestBroadcastReachesSessionsTheLiveListNoLongerHolds(t *testing.T) {
+	listener, sends := newBroadcastListener(t, broadcastSessions, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/sessions" {
+			return false
+		}
+		// The listener's cache holds nobody: every recipient is absent from the list, and
+		// present in the store.
+		_, _ = w.Write([]byte(`[]`))
+		return true
+	})
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+
+	response := postBroadcast(t, handler, map[string]any{
+		"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester"},
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create broadcast: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := decodeBody[broadcastResponse](t, response)
+	if got := sendTargets(created); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("recipients = %v, want both sessions the store holds", got)
+	}
+	if len(created.Excluded) != 0 {
+		t.Fatalf("excluded = %#v, want nothing excluded for a list that holds neither", created.Excluded)
+	}
+	awaitBroadcastDeliveries(t, handler, created.ID)
+	if got := sends.targets(); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("listener sends = %v, want one frame per recipient", got)
+	}
+}
+
+// INFRA-249. A per-session read the listener did not answer is not an absence: the send is
+// refused and nothing is written, not even the recipients whose reads answered. A broadcast
+// commits under its idempotency key, and a replay of that key is answered "excluded by the
+// original send" for every session the original missed, so a recipient dropped on a transient
+// failure would be unreachable under that key for good - and the key itself must stay free, so
+// the sender's retry is a fresh send rather than a replay of a broadcast that never happened.
+func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
+	var refusing atomic.Bool
+	refusing.Store(true)
+	listener, sends := newBroadcastListener(t, broadcastSessions, func(w http.ResponseWriter, r *http.Request) bool {
+		if !refusing.Load() || r.URL.Path != "/v1/registry/tester" {
+			return false
+		}
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"envoy: the message bus did not answer: no responders"}`))
+		return true
+	})
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+
+	send := func() *httptest.ResponseRecorder {
+		t.Helper()
+		return postBroadcast(t, handler, map[string]any{
+			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester"},
+			"idempotency_key": "one-read-did-not-answer",
+		}, "alice")
+	}
+
+	refused := send()
+	if refused.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(refused.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
+		t.Fatalf("a send whose recipient read did not answer: status=%d body=%s, want 503 ENVOY_UNAVAILABLE",
+			refused.Code, refused.Body.String())
+	}
+	if listed := broadcastCount(t, handler); listed != 0 {
+		t.Fatalf("the broadcast list holds %d broadcasts, want nothing written", listed)
+	}
+	if messages := countMessages(t, database); messages != 0 {
+		t.Fatalf("the database holds %d messages, want nothing written", messages)
+	}
+	if got := sends.targets(); len(got) != 0 {
+		t.Fatalf("listener sends = %v, want none", got)
+	}
+
+	// The key is still the sender's to use: the same send, once the listener answers again,
+	// is a broadcast rather than a replay of one that was never written.
+	refusing.Store(false)
+	retried := send()
+	if retried.Code != http.StatusCreated {
+		t.Fatalf("the same send once the listener answers: status=%d body=%s, want 201 under a free key",
+			retried.Code, retried.Body.String())
+	}
+	created := decodeBody[broadcastResponse](t, retried)
+	if got := sendTargets(created); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("the retry's recipients = %v, want both selected sessions", got)
+	}
+	if len(created.Excluded) != 0 {
+		t.Fatalf("the retry's exclusions = %#v, want the refused read to have left none behind", created.Excluded)
+	}
+	awaitBroadcastDeliveries(t, handler, created.ID)
+}
+
 // Broadcasting is human-only, like the one-session route it is built from, and so is reading
 // one back.
 func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
@@ -540,6 +663,8 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 	}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
+			writeSessionRecord(t, w, broadcastSessions, strings.TrimPrefix(r.URL.Path, "/v1/registry/"))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(broadcastSessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -620,10 +745,10 @@ func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 	listenerState.holding = true
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
 			listenerState.Lock()
 			// The create handler judges the selection before it starts any worker, so its own
-			// read is always the first one and is never held.
+			// read of the planner's record is always the first one and is never held.
 			first := !listenerState.seenCreate
 			listenerState.seenCreate = true
 			hold := listenerState.holding && !first
@@ -632,7 +757,7 @@ func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 				parked <- struct{}{}
 				<-release
 			}
-			_, _ = w.Write([]byte(broadcastSessions))
+			writeSessionRecord(t, w, broadcastSessions, strings.TrimPrefix(r.URL.Path, "/v1/registry/"))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				IdempotencyKey string `json:"idempotency_key"`

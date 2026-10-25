@@ -117,9 +117,10 @@ func (s *server) writeClaimError(w http.ResponseWriter, err error) {
 	s.writeHandlerError(w, err)
 }
 
-// liveSessions is a snapshot of the Envoy listener's live sessions, fetched with no
-// transaction open and no pooled connection held. `fetched` is false when the caller never
-// needed it, which is every claim of an issue nobody else holds.
+// liveSessions is what the listener answered about the claim's holder, read with no
+// transaction open and no pooled connection held. It holds at most that one holder's record,
+// because that is the only session the decision asks about. `fetched` is false when the
+// caller never needed it, which is every claim of an issue nobody else holds.
 type liveSessions struct {
 	fetched bool
 	byID    map[string]envoy.Session
@@ -130,28 +131,31 @@ type liveSessions struct {
 // cycle rather than deciding from a snapshot that does not describe the holder.
 var errHolderUnjudged = errors.New("claim holder was not covered by the liveness snapshot")
 
-// fetchLiveSessions asks the listener who is running. It must be called with nothing held: it
-// is a cross-service HTTP call of up to five seconds, and production runs four pool
-// connections, so a held connection or row lock across it stalls unrelated requests. An
-// unreachable or unconfigured listener is a 503, never "unknown, therefore free" — Dispatch
-// does not hand one session's work to another on a transport error.
+// fetchLiveSessions asks the listener about the holder's own session, by id, and returns a
+// snapshot that covers that holder alone: the one entry the decision reads, or none when the
+// session store holds no record of it. It must be called with nothing held: it is a
+// cross-service HTTP call of up to five seconds, and production runs four pool connections,
+// so a held connection or row lock across it stalls unrelated requests. An unreachable or
+// unconfigured listener is a 503, never "unknown, therefore free" — Dispatch does not hand
+// one session's work to another on a transport error. Only a session holder is ever asked
+// about: judgeHolder reaches this through errHolderUnjudged, which a holder of any other kind
+// never produces, so no read is made for a human's claim.
 func (s *server) fetchLiveSessions(ctx context.Context, holder model.IssueClaim) (liveSessions, error) {
 	if s.deps.Envoy == nil {
 		return liveSessions{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE",
 			"ENVOY_URL is not configured, so Dispatch cannot tell whether %s is still working", claimHolder(holder.Actor, ""))
 	}
-	sessions, err := s.deps.Envoy.Sessions(ctx)
+	session, err := s.deps.Envoy.Session(ctx, holder.Actor.ID)
+	if errors.Is(err, envoy.ErrNotFound) {
+		return liveSessions{fetched: true, byID: map[string]envoy.Session{}}, nil
+	}
 	if err != nil {
 		if errors.Is(err, envoy.ErrUnavailable) {
 			return liveSessions{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE", "%s", err.Error())
 		}
 		return liveSessions{}, err
 	}
-	byID := make(map[string]envoy.Session, len(sessions))
-	for _, session := range sessions {
-		byID[session.SessionID] = session
-	}
-	return liveSessions{fetched: true, byID: byID}, nil
+	return liveSessions{fetched: true, byID: map[string]envoy.Session{holder.Actor.ID: session}}, nil
 }
 
 // humanRule is how a route treats a human caller, the one difference between claiming and
@@ -183,8 +187,13 @@ type judgement struct {
 // listed", and let a live session's claim be taken without force.
 //
 // A human's claim has no session to end, so it is held until that human or another releases
-// it. A session's claim is held only while the listener still lists that session — the same
-// live list GET /api/v1/agents and the issue subscribers read.
+// it. A session's claim is held while the session store still holds that session's record,
+// read by id. The listener's live list is not that record: it is one process's in-memory
+// cache, and it cannot tell a cache that is still refilling from a session that has ended, so
+// a working session reads as absent from it for as long as the refill takes. Handing that
+// session's issue to someone else is not a mistake the next read undoes — two sessions then
+// work the same issue, and whatever the first wrote is already another's to overwrite — so
+// the holder's own record decides.
 func claimBlockedBy(
 	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement,
 ) error {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
@@ -46,6 +47,13 @@ import (
 // would both trip it and race on its flag. Four keeps a large send's wall time down without
 // holding more than four of the shared pool's connections for one broadcast.
 const broadcastDeliveryWorkers = 4
+
+// broadcastResolveConcurrency is how many per-session listener reads a send has in flight
+// while it resolves its recipients, and broadcastResolveTimeout is how long the whole
+// resolution may take. See resolveBroadcastSessions for why a send needs both.
+const broadcastResolveConcurrency = 8
+
+const broadcastResolveTimeout = 5 * time.Second
 
 // maxBroadcastIdempotencyKey bounds the caller's key. The dashboard sends a UUID (36); the cap
 // keeps a runaway key out of the index. broadcastKeyPattern keeps a key printable wherever it is
@@ -148,10 +156,22 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, "ENVOY_URL is not configured")
 		return
 	}
-	// One listener read decides every recipient, so a broadcast judges its whole selection
-	// against one view of the registry rather than a different one per session.
-	sessions, err := s.deps.Envoy.Sessions(r.Context())
+	// Each selected session is judged against the session store by its own id, one read each.
+	// The listener's live list is one process's in-memory cache of the registry, so a session
+	// that is working while that cache refills is simply absent from it, and judging a whole
+	// selection against that one view excluded such a session with "no live session" - a
+	// message the human composed for it, dropped because Dispatch asked the wrong question.
+	// A per-session read asks the store the question the exclusion claims to answer, and the
+	// selection is the sender's, not a set the list has to be scanned for, so there is nothing
+	// a single list read buys that is worth that.
+	sessions, err := s.resolveBroadcastSessions(r.Context(), requested)
 	if err != nil {
+		// Nothing is written when a read did not answer, not even the recipients that did:
+		// a broadcast commits under its idempotency key, and a replay of that key answers
+		// "excluded by the original send" for every requested session the original missed
+		// (replayedExclusions), so a transient refusal turned into a recipient's absence
+		// would be frozen into that key forever - the sender's retry would be told the
+		// session was left out on purpose, and no retry of theirs could ever reach it.
 		if errors.Is(err, dispatchenvoy.ErrUnavailable) {
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
 			return
@@ -336,16 +356,57 @@ func replayedExclusions(requested []string, recipients []broadcastRecipient) []b
 	return excluded
 }
 
-// resolveBroadcastTargets judges each selected session against one registry read: it is a
-// recipient when it is live and advertises the chosen mode, and otherwise carries the reason
-// it was left out.
-func resolveBroadcastTargets(
-	requested []string, delivery string, sessions []dispatchenvoy.Session,
-) []broadcastTarget {
-	live := make(map[string]dispatchenvoy.Session, len(sessions))
-	for _, session := range sessions {
-		live[session.SessionID] = session
+// resolveBroadcastSessions reads each selected session's own record from the session store,
+// through the listener's per-session route, and returns the ones it holds a record for; an id
+// the store has no record of is simply missing from the map, which is the one absence a send
+// is allowed to turn into an exclusion. Any other failure ends the whole resolution with that
+// error, because a read that did not answer says nothing about whether the session is working.
+//
+// The reads run broadcastResolveConcurrency at a time under one broadcastResolveTimeout taken
+// from the request's context, and those two together are what keep a send's resolution short:
+// one request may name contracts.MaxBroadcastRecipients sessions, so a hundred reads that each
+// wait out a five-second listener timeout, run one after another, would hold the request for
+// the better part of ten minutes. Bounded at eight in flight and cut off at five seconds
+// altogether, the resolution costs a send five seconds at worst, whatever the listener does.
+func (s *server) resolveBroadcastSessions(
+	ctx context.Context, requested []string,
+) (map[string]dispatchenvoy.Session, error) {
+	ctx, cancel := context.WithTimeout(ctx, broadcastResolveTimeout)
+	defer cancel()
+	var mu sync.Mutex
+	live := make(map[string]dispatchenvoy.Session, len(requested))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(broadcastResolveConcurrency)
+	for _, sessionID := range requested {
+		if groupCtx.Err() != nil {
+			break
+		}
+		group.Go(func() error {
+			session, err := s.deps.Envoy.Session(groupCtx, sessionID)
+			if errors.Is(err, dispatchenvoy.ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			live[sessionID] = session
+			return nil
+		})
 	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return live, nil
+}
+
+// resolveBroadcastTargets judges each selected session against the record the session store
+// holds for it: it is a recipient when the store holds its session and that session advertises
+// the chosen mode, and otherwise carries the reason it was left out.
+func resolveBroadcastTargets(
+	requested []string, delivery string, live map[string]dispatchenvoy.Session,
+) []broadcastTarget {
 	targets := make([]broadcastTarget, 0, len(requested))
 	for _, sessionID := range requested {
 		session, ok := live[sessionID]
