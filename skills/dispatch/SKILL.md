@@ -26,7 +26,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 ```
 
 - A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
-- In a Legion session, file no issue for a finding outside your issue. Send a clear defect to the controller, and ask about a decision (`skill://legion-worker/references/findings.md`).
+- In a Legion session, only the controller files an issue for a finding outside your issue. Send it a clear defect, and ask about a decision (`skill://legion-worker/references/findings.md`).
 - An ask stands alone: its view does not show the issue's comments.
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask again in a new block.

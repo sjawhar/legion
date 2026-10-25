@@ -7,15 +7,19 @@ the issues you file" section.
 
 ## File a clear defect
 
-A role sends a clear defect as a message on the controller topic: the defect, the issue it came
-from, where the fix belongs, the fix, and its evidence comment on the report issue. You file one
-you find yourself the same way.
+A role sends a clear defect as a message on the controller topic. The message holds its role
+token, the defect, the issue it came from, where the fix belongs, the fix, and its evidence
+comment on the report issue. That comment's first line is `Clear defect from <role>`. A message
+can carry the evidence itself when the report issue did not exist or was closed. Then create or
+reopen the report issue as the skill's "Daily report" says, and post that evidence with
+`dispatch comment`, first line `Clear defect from <role>`. A clear defect you find yourself gets
+the same comment, with `controller` as the role.
 
 1. Check that it is clear: the fix needs no choice a person must make, and it belongs in a
    repository your addressing line lists. Otherwise it is a finding that needs a decision: open an
    ask for it, as `findings.md` says.
 2. Search first, as `skill://dispatch-first` says. When an open issue already tracks it, comment
-   the evidence there, reply under the evidence comment with that issue's reference, and file
+   the evidence there, reply `Filed dispatch://<that KEY>` under the evidence comment, and file
    nothing.
 3. File it in the project the repository maps to:
 
@@ -27,17 +31,15 @@ you find yourself the same way.
    `dispatch://` reference, and ends with the line `Filed for Legion from <role> on <issue>:
    <evidence>`. `<role>` is the sending role's token, or `controller` for one you found.
    `<issue>` is the `dispatch://<KEY>` it came from. `<evidence>` is the evidence comment's
-   reference, or `envoy message` when the evidence came in the message. The issue opens in
-   `triage` with the label, so its triage wake brings it back to you (the skill's "New issue
-   triage").
+   reference. The issue opens in `triage` with the label, so its triage wake brings it back to
+   you (the skill's "New issue triage").
 4. Reply under the evidence comment, its first line exactly `Filed dispatch://<NEW KEY>`:
 
    ```text
    dispatch comment --issue <REPORT KEY> --reply-to '<comment id>' --body-file -
    ```
 
-   When the evidence came in the message, there is no comment to reply under: the `Filed for`
-   line and this session's own filing are the record.
+   That reply is the record a later session of yours reads at triage and at every start.
 
 ## Follow it
 
@@ -79,9 +81,10 @@ turns moot (an issue now tracks the problem, or the problem is gone) you close w
 
 ## Catch up at every start
 
-An answer that arrives while no controller runs never wakes you, a reference published then
-reaches nobody, and a new session follows none of the asks an earlier one followed. So at every
-start, catch up on the report issue (with none yet, there is nothing to catch up):
+An answer that arrives while no controller runs never wakes you, a reference or clear defect
+published then reaches nobody, and a new session follows none of the asks an earlier one
+followed. So at every start, catch up on the report issue (with none yet, there is nothing to
+catch up):
 
 1. Read it with `dispatch read`. Reopen it when its `Status:` is `done`, and assign it when its
    `Assignee:` says `unassigned` and a person is known, both as the skill's "Daily report" says.
@@ -90,6 +93,12 @@ start, catch up on the report issue (with none yet, there is nothing to catch up
 3. List the answered asks still waiting on you, which no `dispatch` command lists:
    `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
    Act on each as above, a triage ask as the skill's "New issue triage" says.
+4. List the clear defects nobody filed yet. Each is an evidence comment whose first line starts
+   `Clear defect from `, with no session reply under it that starts `Filed dispatch://` or `Not
+   filed:`:
+   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/comments" | jq -c '. as $all | [.[] | select(.reply_to == null and (.body | startswith("Clear defect from "))) | .id as $id | select([$all[] | select(.reply_to == $id and .author.kind == "session" and (.body | test("^(Filed dispatch://|Not filed:)")))] | length == 0) | {id, body}]'`.
+   File each as [File a clear defect](#file-a-clear-defect) says. When one is not clear, reply
+   `Not filed: <reason>` under it and open an ask for it instead.
 
 A read that fails, and an assignment Dispatch refuses, are handled as the skill's "Findings, and
 the issues you file" says.

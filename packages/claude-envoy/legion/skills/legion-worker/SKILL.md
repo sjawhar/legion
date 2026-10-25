@@ -215,15 +215,15 @@ calls carry a credential of their own, minted in-process; `gh` and `git` never s
 never `cat`, `echo`, copy, or `export` a token; a `task` subagent or background job inherits them.
 
 **Other credentials your pod may already carry.** Before reporting that a read is unreachable,
-check for them rather than assuming none exist: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`
-are set when the deployment enrolls pods with the agent-secrets broker (`docs/kubernetes.md`,
-"Operator configuration"), in which case `agent-secrets <SECRET> -- <command>` runs `<command>`
-with only the secrets this pod generation's grant allows — refuses closed, naming the secret, if
-the rule does not allow it. `AWS_CONFIG_FILE` is set when the deployment's `pod.volumes` carries a
-further projected token beyond the model route's own; read the file it names for what profiles it
-configures before assuming the AWS CLI has nothing to reach. Neither variable existing is a
-guarantee the read you need is covered — a refusal from either still means what it says — but
-neither should be assumed absent without checking.
+check for them: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR` are set when the deployment enrolls
+pods with the agent-secrets broker (`docs/kubernetes.md`, "Operator configuration"), and then
+`agent-secrets <SECRET> -- <command>` runs `<command>` with only the secrets this pod generation's
+grant allows, refusing one the rule does not allow and naming it. `AWS_CONFIG_FILE` is set when the
+deployment's `pod.volumes` carries a projected token beyond the model route's own: read the file it
+names for its profiles before assuming the AWS CLI has nothing to reach. Neither guarantees the read
+you need, and a refusal means what it says. Request a secret only to use it for your own issue's
+work. Never request one to find out whether it exists or resolves: a request for a secret your role
+does not hold reaches a person's Inbox.
 
 ## GitHub PR comment attribution
 

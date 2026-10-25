@@ -116,12 +116,21 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - A finding outside a role's own issue that is a defect with a clear fix goes to the controller
   over Envoy with its evidence, and the controller files it with the `legion` label (INFRA-140).
   A `dispatch ask` to a person is now only for a finding that needs a decision, with one
-  recommendation. The issue the controller files carries the line `Filed for Legion from <role> on
-  <issue>: <evidence>`, and the controller's triage admits a labelled root that carries it and that
-  the controller's own session filed. `legion-worker/references/findings.md` holds the two paths.
-  `legion-controller`, `legion-architect`, `legion-worker`, `legion-retro`, the production check's
-  `fail` in `merge-gate.md`, and the daemon's role prompts and production-check task say the same.
-  This reverses part of #2130: the owner had to approve every clear defect by hand.
+  recommendation. The role posts the evidence on the report issue as a comment whose first line is
+  `Clear defect from <role>`, and the controller replies `Filed dispatch://<KEY>` under it. The
+  issue it files carries the line `Filed for Legion from <role> on <issue>: <evidence>`, and the
+  controller's triage admits a labelled root that carries it and that one of its own sessions
+  filed. At every start the controller files each evidence comment no reply follows yet.
+  `legion-worker/references/findings.md` holds the two paths. `legion-controller`,
+  `legion-architect`, `legion-worker`, `legion-retro`, the production check's `fail` in
+  `merge-gate.md`, `dispatch`, `dispatch-first`, and the daemon's role prompts and production-check
+  task say the same. This reverses part of #2130: the owner had to approve every clear defect by
+  hand.
+- `legion-worker`: a role requests a secret from the agent-secrets broker only to use it for its
+  own issue's work, never to find out whether it exists or resolves, since a request for a secret
+  its role does not hold reaches a person's Inbox (INFRA-140). A planner read the rule to check
+  for credentials before reporting a read unreachable as leave to probe a key an e2e script named,
+  and the owner got an approval request for it.
 
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and

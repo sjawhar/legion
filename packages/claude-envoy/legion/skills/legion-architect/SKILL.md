@@ -396,7 +396,8 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    `retro`, so the implementer's retro removes it.
 5. the merge lands under the repository's rules and closes the issue (section 7). The implementer's
    production check follows the close, in its own session and on the pull request; you are asked
-   nothing for it, and a defect it finds is a `dispatch ask`, never an issue.
+   nothing for it. It files no issue for a defect it finds. A clear defect goes to the controller,
+   and one that needs a decision is a `dispatch ask`.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/` and the issue's `.legion/<issue>/`, or a
@@ -445,8 +446,8 @@ root's close writes `done`, frees the tree's admission slot, and lingers the tre
 is handed over (section 3), and the tree's close waits for a member's open check.
 
 Nothing of the check is yours: you post no sign-off after the merge and wait for no record. Its
-record lives on the pull request alone, since Dispatch refuses a write on a closed issue; a defect
-it finds is a `dispatch ask`, never an issue; and
+record lives on the pull request alone, since Dispatch refuses a write on a closed issue. A clear
+defect it finds goes to the controller, and any other is a `dispatch ask`. And
 `read_record` shows a closed issue's open check (`check`: the pull request, the merge commit, the
 looks, what woke the last one and when the next is due). A parent waits in `accepting` until
 every child is `done` (section 3): accepted earlier it would merge before its children, the state

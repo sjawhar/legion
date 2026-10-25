@@ -311,9 +311,10 @@ deployment instructions say (the merge commit published to your deploy role, wit
 awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
 the implementer drove the change in production through a user's own access path and wrote the
 pull request's `Production:` line, naming the merge commit and what woke the look; `pending`,
-when production does not carry the merge yet; or `fail`, a defect, which the implementer asks you
-about in a Dispatch ask on Legion's daily report issue, naming the issue, the pull request, the
-merge commit, what it drove and what failed, so you decide whether it needs an issue.
+when production does not carry the merge yet; or `fail`, a defect, naming the issue, the pull
+request, the merge commit, what it drove and what failed. A defect with a clear fix goes to the
+controller, which files it for Legion. One that needs a decision is a Dispatch ask on Legion's
+daily report issue, so you decide whether it needs an issue.
 The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
 
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its

@@ -46,10 +46,12 @@ These issues are filed:
 ## Send a clear defect to the controller
 
 Post the evidence first as a `dispatch comment` on the report issue ([Where it goes](#where-it-goes)
-says which), which prints `Posted comment <id>`. Then send the controller one message with
+says which), its first line exactly `Clear defect from <your role token>`. It prints
+`Posted comment <id>`. Then send the controller one message with
 `envoy_publish` to the controller topic your `Legion addressing` line names, with
 `expects_reply: none`. It holds:
 
+- your role token, from your `Legion addressing` line
 - the defect, as its reader recognises it, and the issue it came from (`dispatch://<KEY>`)
 - where the fix belongs: the repository and the component
 - the fix
