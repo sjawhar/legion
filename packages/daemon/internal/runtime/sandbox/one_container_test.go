@@ -470,13 +470,16 @@ func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 	}
 	for _, path := range []string{
 		"/tmp", "/var/tmp", "/run/lock", "/var/lock", "/dev/shm", "/run", "/dev", "/var/run/legion/roles", "/var/run/legion/roles/tester", "/var/run/legion/roles/.homes",
-		"/var/run/lock", "/run/shm", "/var/run/shm", "/var/run",
+		"/var/run/lock", "/run/shm", "/var/run/shm", "/var/run", "/run/legion/roles", "/run/legion/roles/tester/gh", "/run/legion/home",
 	} {
 		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ""); err == nil {
 			t.Errorf("a mount at %s passed, want it refused", path)
 		}
 	}
-	for _, path := range []string{"/tmp/cache", "/var/tmp/cache", "/run/lock/operator", "/dev/shm/operator", "/home/legion/.cache/operator"} {
+	for _, path := range []string{
+		"/tmp/cache", "/var/tmp/cache", "/run/lock/operator", "/var/lock/operator", "/dev/shm/operator", "/run/shm/operator", "/home/legion/.cache/operator",
+		"/run/operator", "/var/run/operator",
+	} {
 		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ""); err != nil {
 			t.Errorf("a mount at %s was refused: %v; role-init carries it back", path, err)
 		}

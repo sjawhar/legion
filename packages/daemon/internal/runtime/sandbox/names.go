@@ -3,6 +3,7 @@ package sandbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -162,6 +163,55 @@ const (
 // above one.
 func imageOwnedPaths() []string {
 	return []string{"/opt/legion", "/opt/omp", ompProfileDir + "/plugins", ompAgentDir + "/agent.db", ompAgentDir + "/models.db"}
+}
+
+// imageLinks are the worker image's links to directories, link to target, read from the image built
+// at sha-92cb9728a212 (its Debian base's: the merged /usr, /var/run to /run, /var/lock to
+// /run/lock, /run/shm to /dev/shm). It is the one place that names them. A path spelled through one
+// is the path the link targets, so the kubelet mounts an operator's /run/legion/roles where Legion
+// mounts /var/run/legion/roles, and a mount above a link (/var holds /var/run) hides every path
+// spelled through it. CheckPod compares a mount with every spelling of a path it guards
+// (pathSpellings).
+var imageLinks = map[string]string{
+	"/bin": "/usr/bin", "/lib": "/usr/lib", "/lib64": "/usr/lib64", "/sbin": "/usr/sbin",
+	"/run/shm": "/dev/shm", "/var/lock": "/run/lock", "/var/run": "/run", "/var/spool/mail": "/var/mail",
+}
+
+// resolveImageLinks is p with every link of imageLinks it is spelled through replaced by its target.
+func resolveImageLinks(p string) string {
+	for resolved := false; !resolved; {
+		resolved = true
+		for link, target := range imageLinks {
+			if p == link || strings.HasPrefix(p, link+"/") {
+				p, resolved = target+p[len(link):], false
+			}
+		}
+	}
+	return p
+}
+
+// pathSpellings are p and every other path the worker image's links (imageLinks) make the same
+// path, in a fixed order: p, the path it resolves to, then the other spellings link by link.
+// /run/lock is also /var/lock and /var/run/lock.
+func pathSpellings(p string) []string {
+	links := slices.Sorted(maps.Keys(imageLinks))
+	spellings := []string{p}
+	for pending := []string{resolveImageLinks(p)}; len(pending) > 0; {
+		s := pending[0]
+		pending = pending[1:]
+		if !slices.Contains(spellings, s) {
+			spellings = append(spellings, s)
+		}
+		for _, link := range links {
+			target := imageLinks[link]
+			if s == target || strings.HasPrefix(s, target+"/") {
+				if alias := link + s[len(target):]; !slices.Contains(spellings, alias) && !slices.Contains(pending, alias) {
+					pending = append(pending, alias)
+				}
+			}
+		}
+	}
+	return spellings
 }
 
 // The keys of a claim's Secret that the runtime fills itself: the boot token and the provisioning

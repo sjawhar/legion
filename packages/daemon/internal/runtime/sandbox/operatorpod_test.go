@@ -38,6 +38,10 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		}
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
 	}
+	throughLinks := func(path, owned, spelled, against string) string {
+		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + " (spelled " + spelled + " against " + against +
+			", through the worker image's directory links), which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
+	}
 	overlapsStateHome := func(path string) string {
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps /home/legion/.local/state, which Legion reserves in the image's home directory: a mount may be neither at, under, nor above Legion's reserved state home"
 	}
@@ -118,6 +122,18 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: overlaps("/var/run/legion/home", "/var/run/legion/home", false)},
 		{name: "a mount under where an issue pod holds the home's volumes", pod: mountAt("/var/run/legion/home/operator"),
 			want: overlaps("/var/run/legion/home/operator", "/var/run/legion/home", false)},
+		// The image's /var/run is a link to /run, so the kubelet mounts these where Legion mounts
+		// its own: each is refused, naming Legion's path and the spelling it reached.
+		{name: "a mount at the roles directory spelled through /run", pod: mountAt("/run/legion/roles"),
+			want: throughLinks("/run/legion/roles", "/var/run/legion/roles", "/run/legion/roles", "/run/legion/roles")},
+		{name: "a mount under the home's volumes spelled through /run", pod: mountAt("/run/legion/home/operator"),
+			want: throughLinks("/run/legion/home/operator", "/var/run/legion/home", "/run/legion/home/operator", "/run/legion/home")},
+		{name: "a mount under a role's private directory spelled through /run", pod: mountAt("/run/legion/roles/implementer/private"),
+			want: throughLinks("/run/legion/roles/implementer/private", "/var/run/legion/roles", "/run/legion/roles/implementer/private", "/run/legion/roles")},
+		{name: "a mount above Legion's paths spelled through /run", pod: mountAt("/run/legion"),
+			want: throughLinks("/run/legion", "/var/run/legion/agent-secrets", "/run/legion", "/run/legion/agent-secrets")},
+		{name: "a mount at the image's git spelled through /bin", pod: mountAt("/bin/git"),
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /bin/git overlaps /usr/bin/git (spelled /bin/git against /bin/git, through the worker image's directory links), which the worker image owns: a mount may be neither at, under, nor above one of the image's"},
 		{name: "a mount under a path the image owns", pod: mountAt("/opt/omp/bin"), want: overlaps("/opt/omp/bin", "/opt/omp", true)},
 		{name: "a mount over a database the image owns", pod: mountAt("/home/legion/.omp/profiles/legion/agent/agent.db"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent/agent.db", "/home/legion/.omp/profiles/legion/agent/agent.db", true)},

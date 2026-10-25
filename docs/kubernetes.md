@@ -2000,8 +2000,14 @@ or `/dev/shm`, or at or above the image's other spellings of them (`/var/run/loc
 A mount under `/tmp` and the like is allowed, and role-init carries it back. A mount at, under or
 above `/var/run/legion/roles` or `/var/run/legion/home` is refused as any other path Legion mounts
 is: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
-Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`. A mount
-under `/home/legion` is allowed, and reaches the role at its own path.
+Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`. Every one
+of these rules, and the check of the paths Legion mounts and the image owns, compares a mount
+through the worker image's links to directories (`/var/run` to `/run`, `/var/lock` to
+`/run/lock`, `/run/shm` to `/dev/shm`, and the merged `/bin`, `/sbin`, `/lib` and `/lib64`), since
+the kubelet mounts a path spelled through one where the link points: `/run/legion/roles` is
+refused as `/var/run/legion/roles` is, with the refusal naming the spelling it reached, and
+`/run/operator` is allowed as `/var/run/operator` is. A mount under `/home/legion` is allowed, and
+reaches the role at its own path.
 
 What a role writes without being told where is not on the node's disk: the issue's temporary
 directory, its cache and data homes and bun's install cache are one set on the issue's volume,

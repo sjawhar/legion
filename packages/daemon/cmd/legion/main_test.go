@@ -886,6 +886,12 @@ func TestStartCheckConfigRefusesWhatTheSandboxRuntimeRefuses(t *testing.T) {
 `, func(string) string {
 			return "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/launcher overlaps /var/run/legion/launcher, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
 		}},
+		{"an operator mount reaching Legion's roles directory through the image's /var/run link", `    pod:
+      volumes: [{name: creds, secret: {name: legion-creds}}]
+      volume_mounts: [{volume: creds, mount_path: /run/legion/roles/implementer/private}]
+`, func(string) string {
+			return "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /run/legion/roles/implementer/private overlaps /var/run/legion/roles (spelled /run/legion/roles/implementer/private against /run/legion/roles, through the worker image's directory links), which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
+		}},
 		{"a kubeconfig that cannot be read", "    kubeconfig: ./kubeconfig\n", func(dir string) string {
 			return "legion start: read runtime.kubernetes.kubeconfig " + filepath.Join(dir, "kubeconfig") + ": "
 		}},

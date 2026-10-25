@@ -156,11 +156,11 @@ func legionMountPaths() []string {
 // (`legion launcher role-init`): its temporary directories, binds of its directories under
 // RoleHomesDir, and small private memory filesystems. role-init carries back a mount it finds under
 // one of them, so an operator's mount may be under one, but one at or above one would be covered in
-// every role's namespace. role-init resolves each before it covers it, so the worker image's links
-// to them are named too, a mount spelled through one landing on what it covers: /var/run/lock to
-// /run/lock, /run/shm and /var/run/shm to /dev/shm (the image's /var/run is a link to /run and its
-// /var/lock a link to /run/lock, read from the image built at sha-92cb9728a212).
-var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/run/shm", "/tmp", "/var/lock", "/var/run/lock", "/var/run/shm", "/var/tmp"}
+// every role's namespace. role-init resolves each before it covers it, so a mount spelled through
+// one of the worker image's links to them (imageLinks: /var/lock and /var/run/lock to /run/lock,
+// /run/shm and /var/run/shm to /dev/shm) lands on what it covers, which CheckPod compares through
+// those links.
+var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/tmp", "/var/tmp"}
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
