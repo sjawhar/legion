@@ -54,13 +54,24 @@ export const MESSAGE_REFUSED: Refusal = {
   status: 400,
 };
 
+/** A pattern naming the route of a message to one session, whose sends retry a 5xx or a 429. */
+const AGENT_MESSAGES = /\/api\/v1\/agents\/[^/]+\/messages$/;
+
 /** Holds every `POST` to `pattern` until the returned call, then refuses it with `refusal`: by
- *  default as a server that is down, 503 with a reason the composer shows. */
+ *  default as a server that is down, 503 with a reason the composer shows. A send to one session
+ *  tries a 5xx or a 429 again under its key rather than taking it as a refusal, so a row that would
+ *  refuse that route with one is refused here, naming `MESSAGE_REFUSED`, rather than left waiting
+ *  on a send that never gives up. */
 export async function refusePosts(
   page: Page,
   pattern: string,
   refusal: Refusal = SERVER_DOWN
 ): Promise<() => void> {
+  if (AGENT_MESSAGES.test(pattern) && (refusal.status >= 500 || refusal.status === 429)) {
+    throw new Error(
+      `refusePosts: a ${refusal.status} to ${pattern} is no refusal - a send to one session tries it again under its key; refuse it with MESSAGE_REFUSED`
+    );
+  }
   const { promise: held, resolve: refuse } = Promise.withResolvers<void>();
   await page.route(pattern, async (route) => {
     if (route.request().method() !== "POST") return route.fallback();

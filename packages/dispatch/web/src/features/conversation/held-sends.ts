@@ -47,8 +47,17 @@ export interface HeldSend {
    *  reader wrote over it before the composer unmounted. */
   readonly draft: HeldDraft;
   readonly status: "late" | "refused" | "sending";
-  /** The server's refusal, once it has refused. */
+  /** The server's refusal, once it has refused; `SendStoppedError` once the reader stopped it. */
   readonly refusal: Error | undefined;
+  /** Whether the reader pressed Stop trying (`stop`) and the attempt in flight is still out. */
+  readonly stopping: boolean;
+}
+
+/** Whether `held` is a late send to one session, the one kind of send the reader may stop: it is
+ *  being tried again under its key until Dispatch decides it, which a lasting outage can hold off
+ *  for good. */
+export function stoppable(held: HeldSend | undefined): boolean {
+  return held?.status === "late" && held.request.owner.kind === "session" && !held.stopping;
 }
 
 /** What became of a held send: it landed, the server refused it, or the reader dropped its
@@ -108,6 +117,8 @@ export class HeldSends {
   >();
   readonly #listeners = new Set<() => void>();
   readonly #outcomes = new Set<(outcome: HeldSendOutcome) => void>();
+  /** What stops each keyed send still out, by its name's hash (`stop`). */
+  readonly #stops = new Map<string, AbortController>();
 
   constructor(client: QueryClient) {
     this.#client = client;
@@ -155,24 +166,29 @@ export class HeldSends {
   send(mutationKey: MutationKey, request: SentRequest): boolean {
     const id = hashKey(mutationKey);
     if (this.sendingNow(mutationKey)) return false;
+    const stop = new AbortController();
+    this.#stops.set(id, stop);
     this.#set(id, {
       draft: { ask: request.ask, draft: request.draft },
       mutationKey,
       refusal: undefined,
       request,
       status: "sending",
+      stopping: false,
     });
     const landed = () => {
+      this.#stops.delete(id);
       const held = this.#entries.get(id);
       this.#set(id, undefined);
       refreshAfter(this.#client, request);
       if (held !== undefined) this.#emit({ kind: "landed", send: held });
     };
     const refused = (error: Error) => {
-      const held = this.#update(id, { refusal: error, status: "refused" });
+      this.#stops.delete(id);
+      const held = this.#update(id, { refusal: error, status: "refused", stopping: false });
       if (held !== undefined) this.#emit({ kind: "refused", send: held });
     };
-    this.#run(mutationKey, () => sendWithinDeadline(request), {
+    this.#run(mutationKey, () => sendWithinDeadline(request, stop.signal), {
       onError: (error) => {
         // Past its deadline the request is not refused: it goes on under `pastDeadlineKey`,
         // started before the first mutation settles, so a hold on the name never drops between
@@ -189,6 +205,18 @@ export class HeldSends {
       },
       onSuccess: landed,
     });
+    return true;
+  }
+
+  /** Stops trying the late send to one session under `mutationKey` (Stop trying): no attempt is
+   *  made after the one in flight, whose answer is still the send's, and the send is then refused
+   *  with `SendStoppedError`, which a Retry sends again under the same key. Says whether it
+   *  stopped one. */
+  stop(mutationKey: MutationKey): boolean {
+    const id = hashKey(mutationKey);
+    if (!stoppable(this.#entries.get(id))) return false;
+    this.#stops.get(id)?.abort();
+    this.#update(id, { stopping: true });
     return true;
   }
 

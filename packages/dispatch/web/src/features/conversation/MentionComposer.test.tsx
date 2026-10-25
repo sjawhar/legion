@@ -1822,6 +1822,87 @@ test("a send to one session past its deadline says it keeps trying, and lands on
   }
 });
 
+/** Moves the fake clock `ms` on and lets every promise the move released run. */
+async function tick(ms: number): Promise<void> {
+  await act(async () => {
+    jest.advanceTimersByTime(ms);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+  });
+}
+
+/** A send that keeps failing, from its press to its 30 s deadline: five attempts, at 0, 1, 3, 7
+ *  and 15 s. */
+async function failToTheDeadline(): Promise<void> {
+  for (const wait of [1_000, 2_000, 4_000, 8_000]) await tick(wait);
+  expect(screen.queryByRole("button", { name: "Stop trying" })).toBeNull();
+  await tick(15_000);
+}
+
+const stoppedText =
+  "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once.";
+
+// A lasting outage would hold a message to one session, its draft and its Send, for good. Once it
+// is late the composer offers Stop trying: no attempt follows, the draft comes back with what a
+// Retry does - send it again under the same key, so it is delivered at most once - and Discard
+// drops it.
+test("a send kept failing shows Stop trying once late, which stops it for Retry or Discard", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  jest.useFakeTimers();
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await failToTheDeadline();
+    expect(screen.getByText(stillTrying)).toBeTruthy();
+    expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(screen.getByText(stoppedText)).toBeTruthy();
+    expect(screen.queryByText(stillTrying)).toBeNull();
+    expect(field.value).toBe("Status please");
+    expect(holdControls().disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Discard draft" })).toBeTruthy();
+    await tick(30 * 60_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+    // Retry: the same message, under the same key.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    expect(createAgentMessage).toHaveBeenCalledTimes(6);
+    expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);
+
+    // Still down: stopped again, and this time dropped.
+    await failToTheDeadline();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    const tried = createAgentMessage.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    expect(field.value).toBe("");
+    expect(screen.queryByText(stoppedText)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await tick(30 * 60_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(tried);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
 // A closed owner takes no send. Its composer stays mounted for a send it still has out and for
 // that send's refusal - Send refused, Discard draft in place of Retry - and shows nothing else.
 test("a closed composer shows only a send of its own still out, then its refusal with Discard", async () => {

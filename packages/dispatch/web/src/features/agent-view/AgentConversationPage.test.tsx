@@ -26,12 +26,13 @@ import {
 import { ApiError, api } from "../../api/client";
 import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
-import { KEYED_SEND_ATTEMPT_MS } from "../conversation/send-request";
+import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS } from "../conversation/send-request";
 import { Sidebar } from "../sidebar/Sidebar";
 import { AgentConversationPage } from "./AgentConversationPage";
 
-/** What each attempt of the live view's send is held to, beside the message it carries. */
-const keyedAttempt = expect.objectContaining({ deadlineMs: KEYED_SEND_ATTEMPT_MS });
+/** What each attempt of the live view's send is held to, beside the message it carries: its own
+ *  deadline, and nothing that would cut it short once it is out. */
+const keyedAttempt = { deadlineMs: KEYED_SEND_ATTEMPT_MS };
 
 const SESSION = "01a0e090-4848-7473-acc5-fc96e6a646d3";
 
@@ -531,12 +532,15 @@ test("the live view's send retries under one key", async () => {
   expect(later[2]).not.toBe(first);
 });
 
-// A send's retries are the view's: leaving the live view lets them go, and nothing tries again
-// for a view no longer on screen.
-test("leaving the live view stops its send's retries", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
-    new TypeError("Failed to fetch")
-  );
+// A send's retries are the view's: leaving the live view stops them between attempts. The
+// attempt out when the reader leaves may already have reached Dispatch, so it is let finish, and
+// nothing tries again for a view no longer on screen.
+test("leaving the live view stops its send's retries, letting the attempt out finish", async () => {
+  const inFlight = Promise.withResolvers<Message>();
+  const createAgentMessage = spyOn(api, "createAgentMessage")
+    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockReturnValueOnce(inFlight.promise)
+    .mockRejectedValue(new TypeError("Failed to fetch"));
   spies.push(createAgentMessage);
   renderLiveView({
     agentState: {},
@@ -550,17 +554,156 @@ test("leaving the live view stops its send's retries", async () => {
 
   await onFakeClock(async () => {
     await sendFromLiveView("try the other branch");
-    await act(async () => {
-      jest.advanceTimersByTime(1_000);
-    });
+    await tick(1_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(2);
+    expect(createAgentMessage.mock.calls[1]?.[2]).toEqual(keyedAttempt);
 
     cleanup();
-    await act(async () => {
-      jest.advanceTimersByTime(10 * 60_000);
-    });
+    inFlight.reject(new TypeError("Failed to fetch"));
+    await tick(10 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(2);
   });
+});
+
+/** Moves the fake clock `ms` on and lets every promise the move released run. */
+async function tick(ms: number): Promise<void> {
+  await act(async () => {
+    jest.advanceTimersByTime(ms);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+  });
+}
+
+/** The live view's Send. */
+function sendButton(): HTMLElement {
+  return within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" });
+}
+
+const stillTrying =
+  "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.";
+
+/** The live view for SESSION, its mode settled on Send. */
+async function renderSendingView(): Promise<void> {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  const mode = (await screen.findByRole("combobox", {
+    name: "Delivery mode",
+  })) as HTMLSelectElement;
+  await waitFor(() => expect(mode.value).toBe("steer"));
+}
+
+// A pressed message is held on screen until Dispatch confirms it. Send waits for it, saying why,
+// so the reader drafts the next message rather than sending a second one beside it - which would
+// carry a key of its own and reach the session twice - and past the send's deadline it says the
+// message is still being tried.
+test("the live view holds a pressed message until Dispatch confirms it, and Send waits for it", async () => {
+  const answer = Promise.withResolvers<Message>();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(answer.promise);
+  spies.push(createAgentMessage);
+  await renderSendingView();
+
+  await onFakeClock(async () => {
+    await sendFromLiveView("try the other branch");
+    const held = screen.getByTestId("agent-send-held");
+    expect(within(held).getByText("Your message: “try the other branch”")).toBeTruthy();
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
+    expect(sendButton().getAttribute("aria-disabled")).toBe("true");
+    expect(sendButton().getAttribute("title")).toBe(
+      "Dispatch has not confirmed your last message yet."
+    );
+
+    // The next message can be written, and a press sends nothing beside the first.
+    const input = screen.getByPlaceholderText(/delivered as Send/) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "and this" } });
+    fireEvent.click(sendButton());
+    fireEvent.keyDown(input, { key: "Enter" });
+    await tick(0);
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+    expect(input.value).toContain("and this");
+
+    await tick(SEND_DEADLINE_MS);
+    expect(within(held).getByRole("status").textContent).toBe(stillTrying);
+    expect(within(held).getByRole("button", { name: "Stop trying" })).toBeTruthy();
+
+    await act(async () => {
+      answer.resolve(message("sent", "try the other branch"));
+    });
+    await tick(0);
+  });
+  expect(screen.queryByTestId("agent-send-held")).toBeNull();
+  expect(sendButton().getAttribute("aria-disabled")).toBeNull();
+});
+
+// Dispatch's own refusal ends the send: the message stays on screen with the reason, Retry sends
+// it again under the key it was pressed with, and Discard drops it.
+test("a message Dispatch refuses offers Retry under its key, and Discard", async () => {
+  const refused = new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused it" });
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refused);
+  spies.push(createAgentMessage);
+  await renderSendingView();
+
+  await sendFromLiveView("try the other branch");
+  const error = await screen.findByTestId("agent-send-error");
+  expect(error.textContent).toBe("Could not send: Dispatch refused it");
+  expect(sendButton().getAttribute("title")).toBe(
+    "Retry or discard the message Dispatch did not take first."
+  );
+
+  const held = screen.getByTestId("agent-send-held");
+  fireEvent.click(within(held).getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+  const [first, retried] = createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key);
+  expect(retried).toBe(first);
+
+  await screen.findByTestId("agent-send-error");
+  fireEvent.click(
+    within(screen.getByTestId("agent-send-held")).getByRole("button", { name: "Discard" })
+  );
+  expect(screen.queryByTestId("agent-send-held")).toBeNull();
+  expect(sendButton().getAttribute("aria-disabled")).toBeNull();
+  expect(createAgentMessage).toHaveBeenCalledTimes(2);
+});
+
+// A lasting outage would hold the message for good. Once it is late, Stop trying ends it after the
+// attempt out: nothing more is sent, the message stays with what a Retry does, and a Retry goes
+// under the same key, so it is delivered at most once.
+test("Stop trying ends a late live view send, and its Retry goes under the same key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  spies.push(createAgentMessage);
+  await renderSendingView();
+
+  await onFakeClock(async () => {
+    await sendFromLiveView("try the other branch");
+    for (const wait of [1_000, 2_000, 4_000, 8_000]) await tick(wait);
+    expect(screen.queryByRole("button", { name: "Stop trying" })).toBeNull();
+    await tick(15_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(screen.getByTestId("agent-send-error").textContent).toBe(
+      "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
+    );
+    await tick(30 * 60_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+    createAgentMessage.mockResolvedValueOnce(message("sent", "try the other branch"));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+  });
+  expect(createAgentMessage).toHaveBeenCalledTimes(6);
+  expect(
+    new Set(createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
+  ).toBe(1);
+  expect(screen.queryByTestId("agent-send-held")).toBeNull();
 });
 
 // A Claude Code session whose Envoy channel Claude Code did not load advertises no mode: the

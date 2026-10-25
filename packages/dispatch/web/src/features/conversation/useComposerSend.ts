@@ -22,6 +22,8 @@ export interface ComposerSend {
   readonly sendingNow: () => boolean;
   /** Drops a refusal, its draft with it. */
   readonly discard: () => void;
+  /** Stops trying a late send to one session (Stop trying; `HeldSends.stop`). */
+  readonly stop: () => void;
   /** Keeps what the reader wrote over a refusal, for the composer that mounts next. */
   readonly keep: (draft: HeldDraft) => void;
 }
@@ -72,5 +74,6 @@ export function useComposerSend(
     },
     sending: held !== undefined && held.status !== "refused",
     sendingNow: () => store.sendingNow(key),
+    stop: () => store.stop(key),
   };
 }

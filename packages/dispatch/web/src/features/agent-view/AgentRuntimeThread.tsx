@@ -44,6 +44,7 @@ export function AgentRuntimeThread({
   placeholder,
   replayCount,
   resetKey,
+  sendRefusal,
   sessionId,
   stored,
   viewer,
@@ -61,6 +62,8 @@ export function AgentRuntimeThread({
    *  (`useAgentStream`'s `replays`). */
   replayCount: number;
   resetKey: string;
+  /** Why the composer's Send cannot be pressed now, or null while it can (`AgentThread`). */
+  sendRefusal: string | null;
   sessionId: string;
   stored: readonly MessageRead[];
   /** The signed-in human's login: their own messages read as theirs, every other one names its
@@ -160,6 +163,7 @@ export function AgentRuntimeThread({
         placeholder={placeholder}
         replayCount={replayCount}
         resetKey={resetKey}
+        sendRefusal={sendRefusal}
         sessionId={sessionId}
       />
     </AssistantRuntimeProvider>

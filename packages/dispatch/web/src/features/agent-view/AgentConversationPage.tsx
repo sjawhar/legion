@@ -1,12 +1,12 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import { pillClassName } from "../../components/Pill";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
-import { newSendKey } from "../../lib/send-key";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -20,7 +20,7 @@ import {
 } from "../../theme/classes";
 import { useMarkRepliesRead } from "../agents/unread";
 import { MODE_LABELS } from "../conversation/delivery";
-import { sendKeyedAgentMessage } from "../conversation/send-request";
+import { KEYED_SEND_LATE_TEXT, SendStoppedError } from "../conversation/send-request";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
@@ -28,6 +28,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
 import { currentModel, sessionCommands } from "./conversation";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
+import { useLiveSend } from "./useLiveSend";
 
 /** What the live dot says about the relay, and how it reads to a screen reader. */
 const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
@@ -90,7 +91,6 @@ export function AgentConversationPage(): ReactNode {
   const listed = sessionCommands(conversation);
   const commands =
     mode === "btw" || listed === undefined || listed.length === 0 ? undefined : listed;
-  const [sendError, setSendError] = useState<string | null>(null);
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
   // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
   // stream carries tagged with this message's id, and the thread shows it once; one the stream
@@ -113,16 +113,14 @@ export function AgentConversationPage(): ReactNode {
 
   // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
   // read-only and this adds no write path of its own. The session confirms a Send or Aside with
-  // Dispatch before it takes one as its user's own turn. A send is tried until Dispatch decides
-  // it, and its retries are this view's: leaving the view - for another session or another page -
-  // stops them, and a view that is gone has nobody to tell how they ended.
-  const sends = useRef<AbortController | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `sessionId` is the trigger: each session's view stops its own sends
-  useEffect(() => {
-    const current = new AbortController();
-    sends.current = current;
-    return () => current.abort();
-  }, [sessionId]);
+  // Dispatch before it takes one as its user's own turn. A press is held, on screen, until
+  // Dispatch decides it, and Send waits for it (`useLiveSend`).
+  const live = useLiveSend(sessionId, () => {
+    setOwnSendCount((previous) => previous + 1);
+    void queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
+  });
+  const sendNow = useRef(live.send);
+  sendNow.current = live.send;
   const onNew = useCallback(
     async (message: { content: readonly { type: string; text?: string }[] }) => {
       const body = message.content
@@ -130,21 +128,17 @@ export function AgentConversationPage(): ReactNode {
         .map((part) => part.text ?? "")
         .join("\n")
         .trim();
-      if (body === "") return;
-      setSendError(null);
-      const stop = sends.current?.signal;
-      try {
-        // One key per press: however many of its attempts reach Dispatch, it is one message.
-        await sendKeyedAgentMessage(sessionId, { body, delivery: mode }, newSendKey(), stop);
-        setOwnSendCount((previous) => previous + 1);
-        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
-      } catch (error) {
-        if (stop?.aborted === true) return;
-        setSendError(error instanceof Error ? error.message : "could not reach the session");
-      }
+      if (body !== "") sendNow.current(body, mode);
     },
-    [mode, queryClient, sessionId]
+    [mode]
   );
+  const held = live.held;
+  const sendRefusal =
+    held === undefined
+      ? null
+      : held.status === "refused"
+        ? "Retry or discard the message Dispatch did not take first."
+        : "Dispatch has not confirmed your last message yet.";
   const presence = STATUS[status];
 
   // The shell hands this route the viewport below its header as a flex column; the page takes
@@ -216,10 +210,45 @@ export function AgentConversationPage(): ReactNode {
           A Claude Code session takes messages only when it was started with its Envoy channel.
         </p>
       ) : null}
-      {sendError === null ? null : (
-        <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-send-error">
-          Could not send: {sendError}
-        </p>
+      {held === undefined ? null : (
+        <div className="mt-2 space-y-1" data-testid="agent-send-held">
+          <p className={`line-clamp-2 break-words text-sm ${textPrimaryOnCanvas}`}>
+            Your message: “{held.body}”
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            {held.status === "refused" ? (
+              <>
+                <p className={`text-sm ${dangerText}`} data-testid="agent-send-error">
+                  {held.refusal instanceof SendStoppedError
+                    ? held.refusal.message
+                    : `Could not send: ${held.refusal?.message ?? "could not reach the session"}`}
+                </p>
+                <RefusableButton look="secondary-compact" onPress={live.retry} refusal={null}>
+                  Retry
+                </RefusableButton>
+                <RefusableButton look="secondary-compact" onPress={live.discard} refusal={null}>
+                  Discard
+                </RefusableButton>
+              </>
+            ) : (
+              <>
+                <p className={`text-sm ${textMutedOnCanvas}`} role="status">
+                  {held.status === "late" ? KEYED_SEND_LATE_TEXT : "Sending…"}
+                </p>
+                {held.status === "late" ? (
+                  <RefusableButton
+                    busy={held.stopping ? "Stopping…" : undefined}
+                    look="secondary-compact"
+                    onPress={live.stop}
+                    refusal={null}
+                  >
+                    Stop trying
+                  </RefusableButton>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
       )}
       {/* Everything that reads a frame lives inside this boundary, in `AgentRuntimeThread`:
           assistant-ui converts every message while the runtime is built, so a message it
@@ -238,6 +267,7 @@ export function AgentConversationPage(): ReactNode {
           placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`}
           replayCount={replays}
           resetKey={sessionId}
+          sendRefusal={sendRefusal}
           sessionId={sessionId}
           stored={stored.data ?? []}
           viewer={viewer?.kind === "user" ? viewer.login : undefined}

@@ -143,6 +143,11 @@ export class SendDeadlineError extends Error {
  *  made again under the same key. */
 export const KEYED_SEND_ATTEMPT_MS = 15_000;
 
+/** What a keyed send to a session says once it is past `SEND_DEADLINE_MS`: still the server's, as
+ *  any late send is, and still being tried under its key, which Dispatch takes once. */
+export const KEYED_SEND_LATE_TEXT =
+  "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.";
+
 /** The wait before a keyed send's first retry, doubling after each failed attempt up to
  *  `KEYED_SEND_MAX_BACKOFF_MS`. */
 const KEYED_SEND_FIRST_BACKOFF_MS = 1_000;
@@ -192,19 +197,32 @@ export function sendKeyFor(
     : newSendKey();
 }
 
-/** Waits `ms`, or rejects with `signal`'s reason once it aborts. */
-function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  const { promise, reject, resolve } = Promise.withResolvers<void>();
+/** Waits `ms`, and says whether it waited the whole of it: `false` once `signal` aborts, at once. */
+function pause(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted === true) return Promise.resolve(false);
+  const { promise, resolve } = Promise.withResolvers<boolean>();
   const stop = () => {
     clearTimeout(timer);
-    reject(signal?.reason);
+    resolve(false);
   };
   const timer = setTimeout(() => {
     signal?.removeEventListener("abort", stop);
-    resolve();
+    resolve(true);
   }, ms);
   signal?.addEventListener("abort", stop, { once: true });
   return promise;
+}
+
+/** A keyed send to a session that stopped trying before Dispatch confirmed it: the reader pressed
+ *  Stop trying, or left what held the send. Not Dispatch's refusal: the message may have reached
+ *  it, and a Retry under the same key is answered with that message rather than a second one. */
+export class SendStoppedError extends Error {
+  constructor() {
+    super(
+      "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
+    );
+    this.name = "SendStoppedError";
+  }
 }
 
 /**
@@ -212,8 +230,10 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
  * to `KEYED_SEND_ATTEMPT_MS`, and one that ends without Dispatch's verdict - the fetch failed, the
  * attempt timed out, a 5xx, a 429 - is made again under the same key after 1 s, 2 s, 4 s … never
  * more than 30 s apart, so however many of them reach Dispatch, it makes the message once. Resolves
- * with the message on Dispatch's 2xx; rejects with any other 4xx, its refusal. `signal` stops it,
- * the attempt out included, so no retry outlives what holds the send.
+ * with the message on Dispatch's 2xx; rejects with any other 4xx, its refusal. `signal` stops the
+ * trying between attempts - a wait ends at once, an attempt in flight is let finish, since it may
+ * already have reached Dispatch and its answer is still the send's - and the send then rejects
+ * with `SendStoppedError`.
  */
 export async function sendKeyedAgentMessage(
   sessionId: string,
@@ -225,23 +245,20 @@ export async function sendKeyedAgentMessage(
   let backoff = KEYED_SEND_FIRST_BACKOFF_MS;
   for (;;) {
     try {
-      return await api.createAgentMessage(sessionId, keyed, {
-        deadlineMs: KEYED_SEND_ATTEMPT_MS,
-        signal,
-      });
+      return await api.createAgentMessage(sessionId, keyed, { deadlineMs: KEYED_SEND_ATTEMPT_MS });
     } catch (error) {
-      const verdict = error instanceof ApiError && error.status !== 429 && error.status < 500;
-      if (verdict || signal?.aborted === true) throw error;
+      if (error instanceof ApiError && error.status !== 429 && error.status < 500) throw error;
     }
-    await pause(backoff, signal);
+    if (!(await pause(backoff, signal))) throw new SendStoppedError();
     backoff = Math.min(backoff * 2, KEYED_SEND_MAX_BACKOFF_MS);
   }
 }
 
 /** `sendRequest`, answered by the server, or rejected with a `SendDeadlineError` carrying the
- *  request's own answer once `SEND_DEADLINE_MS` passes without one. */
-export function sendWithinDeadline(sent: SentRequest): Promise<unknown> {
-  const answer = sendRequest(sent);
+ *  request's own answer once `SEND_DEADLINE_MS` passes without one. `stop` stops a keyed send's
+ *  trying (`sendKeyedAgentMessage`). */
+export function sendWithinDeadline(sent: SentRequest, stop?: AbortSignal): Promise<unknown> {
+  const answer = sendRequest(sent, stop);
   const { promise, reject, resolve } = Promise.withResolvers<unknown>();
   const deadline = setTimeout(() => reject(new SendDeadlineError(answer)), SEND_DEADLINE_MS);
   answer.then(resolve, reject).finally(() => clearTimeout(deadline));
@@ -250,8 +267,8 @@ export function sendWithinDeadline(sent: SentRequest): Promise<unknown> {
 
 /** Sends a `SentRequest`. It sits outside the composer, so no later render's props or state can
  *  reach the request it builds. A message to one session goes under the request's key, and is
- *  tried until Dispatch decides it (`sendKeyedAgentMessage`). */
-export async function sendRequest(sent: SentRequest): Promise<unknown> {
+ *  tried until Dispatch decides it or `stop` aborts (`sendKeyedAgentMessage`). */
+export async function sendRequest(sent: SentRequest, stop?: AbortSignal): Promise<unknown> {
   const { anchor, ask, draft, edit, kind, owner, plainDelivery, replyTo } = sent;
   const { body, mentions, replacement } = draft;
   if (edit !== undefined) return edit.save(edit.id, body.trim());
@@ -272,7 +289,7 @@ export async function sendRequest(sent: SentRequest): Promise<unknown> {
       : api.createArtifactAsk(owner.artifactId, input);
   }
   if (owner.kind === "session") {
-    return sendKeyedAgentMessage(owner.sessionId, agentMessage(sent), sent.sendKey);
+    return sendKeyedAgentMessage(owner.sessionId, agentMessage(sent), sent.sendKey, stop);
   }
   if (replyTo?.parentKind === "message") {
     if (owner.kind !== "issue") throw new Error("Legacy message replies belong to an issue.");

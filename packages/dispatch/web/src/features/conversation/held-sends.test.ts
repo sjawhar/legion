@@ -4,8 +4,8 @@ import { waitFor } from "@testing-library/react";
 
 import { ApiError, api, RequestTimeoutError } from "../../api/client";
 import type { Comment, Message } from "../../api/types";
-import { HeldSends } from "./held-sends";
-import { KEYED_SEND_ATTEMPT_MS, type SentRequest } from "./send-request";
+import { HeldSends, stoppable } from "./held-sends";
+import { KEYED_SEND_ATTEMPT_MS, SendStoppedError, type SentRequest } from "./send-request";
 
 const request: SentRequest = {
   anchor: undefined,
@@ -170,6 +170,104 @@ test("a 409 or 400 stops the retries and refuses", async () => {
         expect(store.discard(agentKey)).toBe(true);
       }
     });
+  } finally {
+    createAgentMessage.mockRestore();
+  }
+});
+
+/** Fails the send out under `agentKey` through 1 + 2 + 4 + 8 s of attempts and the 15 s after
+ *  them, to the send's 30 s deadline: five attempts made, the sixth 16 s away. */
+async function failUntilLate(): Promise<void> {
+  for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) {
+    jest.advanceTimersByTime(wait);
+    await settle();
+  }
+}
+
+// A lasting outage would hold a late send to one session for good. Stop trying ends it: no attempt
+// follows, the send is handed back refused with what a Retry does, and a Retry goes under the same
+// key, so Dispatch makes the message at most once. Until it is late there is nothing to stop.
+test("a late send to one session can be stopped, and Retry goes under its key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refusal);
+  const store = new HeldSends(new QueryClient({ defaultOptions: { mutations: { retry: false } } }));
+
+  try {
+    await onFakeClock(async () => {
+      store.send(agentKey, agentSend);
+      await settle();
+      expect(stoppable(store.get(agentKey))).toBe(false);
+      expect(store.stop(agentKey)).toBe(false);
+
+      await failUntilLate();
+      expect(store.get(agentKey)?.status).toBe("late");
+      expect(stoppable(store.get(agentKey))).toBe(true);
+      expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+      expect(store.stop(agentKey)).toBe(true);
+      await settle();
+      const stopped = store.get(agentKey);
+      expect(stopped?.status).toBe("refused");
+      expect(stopped?.refusal).toBeInstanceOf(SendStoppedError);
+      expect(stopped?.refusal?.message).toBe(
+        "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
+      );
+      jest.advanceTimersByTime(30 * 60_000);
+      await settle();
+      expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+      createAgentMessage.mockResolvedValueOnce(sentMessage);
+      expect(store.send(agentKey, stopped?.request ?? agentSend)).toBe(true);
+      await settle();
+      expect(store.get(agentKey)).toBeUndefined();
+    });
+    expect(createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).toEqual(
+      Array.from({ length: 6 }, () => "send-1")
+    );
+  } finally {
+    createAgentMessage.mockRestore();
+  }
+});
+
+// Stopping ends the trying between attempts, never the attempt in flight: that attempt may already
+// have reached Dispatch, so its answer is still the send's - a 2xx lands, a 5xx ends it stopped -
+// and no attempt is made after it.
+test("stopping lets the attempt in flight answer, and makes none after it", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage");
+
+  try {
+    for (const answer of ["lands", "fails"] as const) {
+      createAgentMessage.mockReset().mockRejectedValue(refusal);
+      const inFlight = Promise.withResolvers<Message>();
+      const store = new HeldSends(
+        new QueryClient({ defaultOptions: { mutations: { retry: false } } })
+      );
+      await onFakeClock(async () => {
+        store.send(agentKey, agentSend);
+        await settle();
+        await failUntilLate();
+        createAgentMessage.mockReturnValueOnce(inFlight.promise);
+        // The sixth attempt goes out 16 s on, and the reader stops while it is out.
+        jest.advanceTimersByTime(16_000);
+        await settle();
+        expect(createAgentMessage).toHaveBeenCalledTimes(6);
+        expect(createAgentMessage.mock.calls[5]?.[2]).toEqual({
+          deadlineMs: KEYED_SEND_ATTEMPT_MS,
+        });
+        expect(store.stop(agentKey)).toBe(true);
+        await settle();
+        expect(store.get(agentKey)).toMatchObject({ status: "late", stopping: true });
+        expect(store.stop(agentKey)).toBe(false);
+
+        if (answer === "lands") inFlight.resolve(sentMessage);
+        else inFlight.reject(refusal);
+        await settle();
+        if (answer === "lands") expect(store.get(agentKey)).toBeUndefined();
+        else expect(store.get(agentKey)?.refusal).toBeInstanceOf(SendStoppedError);
+        jest.advanceTimersByTime(30 * 60_000);
+        await settle();
+        expect(createAgentMessage).toHaveBeenCalledTimes(6);
+      });
+    }
   } finally {
     createAgentMessage.mockRestore();
   }

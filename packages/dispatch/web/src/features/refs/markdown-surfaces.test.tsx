@@ -133,6 +133,7 @@ function Transcript({ messages }: { messages: KeyedMessage[] }): ReactNode {
         placeholder="Message the session…"
         replayCount={0}
         resetKey="session-1"
+        sendRefusal={null}
         sessionId="session-1"
       />
     </AssistantRuntimeProvider>

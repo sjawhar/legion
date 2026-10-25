@@ -68,13 +68,16 @@ import type {
   ReplyTarget,
 } from "./composer-model";
 import { MODE_LABELS, plainDelivery } from "./delivery";
+import { stoppable } from "./held-sends";
 import { ReplyQuote } from "./ReplyQuote";
 import {
   DELIVERY_COMMANDS,
   type DeliveryPlan,
   deliveryPlan,
+  KEYED_SEND_LATE_TEXT,
   mentionText,
   SEND_DEADLINE_MS,
+  SendStoppedError,
   type SentRequest,
   sendKeyFor,
   survivingMentions,
@@ -1267,22 +1270,14 @@ export function MentionComposer({
         </>
       )}
       {uploadOwner === undefined ? null : <DraftUploadStatus upload={upload} />}
-      {/* Past its deadline a send is still the server's: no Retry, which would post it twice. A
-          message to one session is still being tried under its key, which Dispatch takes once. */}
-      {late ? (
-        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
-          {outgoing.held?.request.owner.kind === "session"
-            ? "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once."
-            : `Still sending — the server has not answered in ${SEND_DEADLINE_MS / 1000} seconds. The draft stays here until it does.`}
-        </p>
-      ) : null}
       {refusal === undefined ? null : (
         <div className="flex flex-wrap items-center gap-3">
           <QueryError
             message={
-              refusal instanceof ApiError &&
-              refusal.status === 409 &&
-              refusal.code === "ANCHOR_MISSING"
+              (refusal instanceof ApiError &&
+                refusal.status === 409 &&
+                refusal.code === "ANCHOR_MISSING") ||
+              refusal instanceof SendStoppedError
                 ? refusal.message
                 : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`
             }
@@ -1291,8 +1286,8 @@ export function MentionComposer({
             retrying={sending}
           />
           {/* A closed owner takes no Retry, so the refusal's own way out is to drop the draft it
-              handed back, once the reader has it. */}
-          {closed ? (
+              handed back, once the reader has it; a send the reader stopped offers both ways. */}
+          {closed || refusal instanceof SendStoppedError ? (
             <button
               className={`text-sm font-medium underline ${dangerText}`}
               onClick={discard}
@@ -1322,20 +1317,43 @@ export function MentionComposer({
   // itself only for a send of its own that is out or that send's refusal; otherwise it renders
   // nothing, its frame with it.
   if (dormant) return null;
+  // Past its deadline a send is still the server's: no Retry, which would post it twice. A message
+  // to one session is still being tried under its key, so it says so and offers Stop trying, which
+  // sits outside the held fieldset, the one control a send that is out leaves the reader.
+  const lateStatus = late ? (
+    <div className="flex flex-wrap items-center gap-3">
+      <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
+        {outgoing.held?.request.owner.kind === "session"
+          ? KEYED_SEND_LATE_TEXT
+          : `Still sending — the server has not answered in ${SEND_DEADLINE_MS / 1000} seconds. The draft stays here until it does.`}
+      </p>
+      {stoppable(outgoing.held) || outgoing.held?.stopping === true ? (
+        <RefusableButton
+          busy={outgoing.held?.stopping === true ? "Stopping…" : undefined}
+          look="secondary-compact"
+          onPress={outgoing.stop}
+          refusal={null}
+        >
+          Stop trying
+        </RefusableButton>
+      ) : null}
+    </div>
+  ) : null;
   const form = (
     <form
       aria-label="Comment composer"
       className={
         compact
-          ? ""
+          ? "space-y-2"
           : docked
-            ? `${autocompleteOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`
-            : `rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`
+            ? `${autocompleteOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 space-y-2 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`
+            : `space-y-3 rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`
       }
       onSubmit={submit}
       ref={formRef}
     >
       {composerControls}
+      {lateStatus}
     </form>
   );
   return frame === undefined ? (

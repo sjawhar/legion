@@ -15,6 +15,7 @@ import type { AgentStreamCommand } from "@legion/contracts";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { ChevronIcon } from "../../components/DisclosureToggle";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
@@ -354,6 +355,7 @@ export function AgentThread({
   placeholder,
   replayCount,
   resetKey,
+  sendRefusal,
   sessionId,
 }: {
   /** The slash commands the composer completes; none is offered while this is undefined or
@@ -369,6 +371,9 @@ export function AgentThread({
   /** Bumped once per rebuild of the whole transcript from the session's replay. */
   replayCount: number;
   resetKey: string;
+  /** Why Send cannot be pressed now - the viewer's last message is still out, or waits on Retry
+   *  or Discard - or null while it can. */
+  sendRefusal: string | null;
   /** The session being read: moving to another one lands at its live end. */
   sessionId: string;
 }): ReactNode {
@@ -446,16 +451,25 @@ export function AgentThread({
           {commands === undefined || commands.length === 0 ? null : (
             <SlashCommands commands={commands} />
           )}
+          {/* While a message is held, Enter writes a new line and Send says why it waits, so the
+              next message can be drafted and nothing sends a second one beside the first. */}
           <ComposerPrimitive.Input
             className={`min-h-11 flex-1 rounded-lg px-3 py-2 text-sm ${inputClasses(false)}`}
             placeholder={placeholder}
             rows={1}
+            submitMode={sendRefusal === null ? "enter" : "none"}
           />
-          <ComposerPrimitive.Send
-            className={`min-h-11 rounded-lg px-4 text-sm font-medium ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-          >
-            Send
-          </ComposerPrimitive.Send>
+          {sendRefusal === null ? (
+            <ComposerPrimitive.Send
+              className={`min-h-11 rounded-lg px-4 text-sm font-medium ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+            >
+              Send
+            </ComposerPrimitive.Send>
+          ) : (
+            <RefusableButton className="min-h-11" refusal={sendRefusal}>
+              Send
+            </RefusableButton>
+          )}
         </ComposerPrimitive.Root>
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </ThreadPrimitive.Root>

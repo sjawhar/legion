@@ -138,12 +138,10 @@ export class RequestTimeoutError extends Error {
   }
 }
 
-/** How a caller bounds one request: `deadlineMs`, how long Dispatch may take to answer it, its
- *  body included (`null` for no limit; left out, a GET has `REQUEST_DEADLINE_MS` and every other
- *  method none), and `signal`, which aborts it as the caller's own abort, never as a timeout. */
+/** How a caller bounds one request: how long Dispatch may take to answer it, its body included
+ *  (`null` for no limit; left out, a GET has `REQUEST_DEADLINE_MS` and every other method none). */
 export interface RequestBounds {
   readonly deadlineMs?: number | null;
-  readonly signal?: AbortSignal;
 }
 
 // A 401 means "not signed in" and should never be retried or confused with a transient
@@ -376,7 +374,7 @@ export class DispatchApiClient {
     method: "PATCH" | "POST" | "PUT",
     path: string,
     body: unknown,
-    { deadlineMs, signal }: RequestBounds = {}
+    { deadlineMs }: RequestBounds = {}
   ): Promise<T> {
     return this.json<T>(
       path,
@@ -384,7 +382,6 @@ export class DispatchApiClient {
         body: JSON.stringify(body),
         headers: { "Content-Type": "application/json" },
         method,
-        signal,
       },
       deadlineMs
     );
@@ -657,7 +654,7 @@ export class DispatchApiClient {
   }
 
   /** A person's message to one session. `bounds` holds one attempt of a keyed send to its own
-   *  deadline and stops it with the send (`sendKeyedAgentMessage`). */
+   *  deadline (`sendKeyedAgentMessage`). */
   createAgentMessage(
     sessionID: string,
     input: CreateAgentMessageInput,
