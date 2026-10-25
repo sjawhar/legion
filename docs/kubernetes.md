@@ -2794,7 +2794,13 @@ spec:
 The name on the network is a Service, held to a cluster-internal address: no node port, no load
 balancer, no external address and no external name. It is admitted only while the Job it fronts
 owns it, so removing the Job removes it too and leaves nothing for a person to sweep — which is
-why its `ownerReferences` carries the Job's own uid, read back after the Job is created:
+why its `ownerReferences` carries the Job's own uid, read back after the Job is created. It
+selects its pods by that same uid and by nothing else: the namespace's admission requires a
+Service's selector to be exactly `batch.kubernetes.io/controller-uid` at the uid of the Job that
+owns it, because a rule checking a submission sees only the object submitted and cannot look a
+Job up, so a selector by name would let a Service owned by one Job front another's pods. A
+`job-name` selector, though the Job puts that label on its pods too, is refused at submission,
+naming that rule:
 
 ```yaml
 apiVersion: v1
@@ -2805,7 +2811,7 @@ metadata:
     - { apiVersion: batch/v1, kind: Job, name: <workload>, uid: <the Job's uid> }
 spec:
   type: ClusterIP                         # the only kind this namespace admits
-  selector: { job-name: <workload> }      # the label the Job puts on its own pods
+  selector: { batch.kubernetes.io/controller-uid: <the Job's uid> }   # its owner's pods, no one else's
   ports: [{ port: 5432, targetPort: 5432 }]
 ```
 
@@ -2819,7 +2825,7 @@ cd "${TMPDIR:-/tmp}"                                               # not the che
 workload="<issue key lowercased>-postgres-$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
 sed "s|<workload>|$workload|g" workload.yaml | kubectl apply -f -  # the Job, under this run's name
 uid=$(kubectl get job "$workload" -o jsonpath='{.metadata.uid}')   # what the Service must name
-sed -e "s|<workload>|$workload|g" -e "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -
+sed -e "s|<workload>|$workload|g" -e "s|<the Job's uid>|$uid|g" service.yaml | kubectl apply -f -
 kubectl wait --for=create pod -l job-name="$workload" --timeout=120s   # it does not exist yet
 kubectl wait --for=condition=Ready pod -l job-name="$workload" --timeout=300s
 ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
@@ -2840,7 +2846,7 @@ while True:
 PY
 kubectl logs -l job-name="$workload" --tail=5                      # and what it says it is doing
 kubectl delete job "$workload"                                     # takes its pod and its Service
-kubectl get jobs,pods                                              # nothing of it is left
+kubectl get jobs,pods,svc                                          # its Job and Service gone, its pod soon after
 ```
 
 That check is `python3`, which the image carries, because **the role container had no client for
@@ -2866,45 +2872,51 @@ Read the first as starting up and the second as the label.
 
 Speaking the protocol is a client library onto the issue's own disk, the way every other tool
 that works from the checkout arrives (below), run from the checkout against that same address —
-never a binary installed into the pod. The last line asks for Jobs and pods and not Services, and
-it runs: as published it exits 0 here. Add Services to it and it is refused — `kubectl get
-jobs,pods,svc` exits 1 with `services is forbidden: … cannot list resource "services"` — because
-this identity may no more list a Service than create one.
+never a binary installed into the pod. The last line asks for the Service as well as the Job and
+its pod, because the grant that admits a Service also lets this identity get, list and watch
+one, so the listing is what shows the Service went with its Job. The Service's endpoints are
+still out of reach (`kubectl auth can-i get endpoints` answers `no`, and so does the same
+question of `endpointslices`), which is why the bullet above compares the workload pod's labels
+rather than the Service's endpoints.
 
-**What of this has been run, and where.** This section is written partly from commands executed
-in the deployment it describes and partly from the declarations dispatch://INFRA-206 carries,
-and a reader is owed the boundary rather than a uniform voice:
+**What of this has been run, where, and when.** This section is written from commands executed in
+the deployment it describes, and that deployment's grants change under it: the apply of
+dispatch://INFRA-206's declarations on 2026-10-25 turned two of the gate's three answers from `no`
+to `yes`. So each bullet below carries the date of the run behind it, and a reader runs the three
+gate commands itself rather than trusting the answers recorded here:
 
-- *Executed from a role container here, at this change's head*: the three gate commands and the
-  whole grant matrix behind them (`create`/`delete jobs`, `list`/`get pods`, `pods/log` `yes`;
-  `patch`/`update jobs`, `get`/`list endpoints`, `get`/`list`/`create services`, `create pods`
-  `no`); the credential-less gate, with the in-cluster environment removed; the Job manifest
-  above through the namespace's own admission, server-side with nothing created, together with
-  one deliberate breakage of each **enforced** rule, each refused naming the rule — the
-  reachability label has no breakage to record, since admission does not check it, which is the
-  whole of why that bullet is marked; the reachability block, run as published against a
-  listener, against a port that refuses and then listens, and against an address whose packets
-  are dropped; and **the sequence's Job half for real** — applied and created, the uid read, the
-  pod waited for into existence and then to Ready (87 s on a cold machine, 10 s on a warm one),
-  its own log line read, the Job deleted and the last line showing nothing of it left. Those are
-  the lines as they now stand: the single `wait` this section published before exited 1 at once
-  with `error: no matching resources found`, because the Job's pod does not exist the instant
-  the apply returns, which is why there are two waits above.
-- *Submitted deliberately against the gate's own rule*, and said rather than left to be noticed:
-  two of this deployment's three gate answers are `no`, so a role following this section submits
-  nothing — the run above was made anyway, to measure the half that does not depend on a
-  Service. What made it safe is what a reader can check: a fifteen-minute deadline and a
-  five-minute cleanup window rather than the twelve and twenty-four hours admission allows, a
-  name of its own, a `kubectl delete job` by hand at the end, and `kubectl get jobs,pods`
-  showing nothing of it left. Read the bolded rule as what it says for the sequence as a whole;
-  this was a bounded measurement of one half of it, not an exception anyone inherits.
-- *Not executed*: the Service steps, and they are refused rather than untried — `kubectl apply`
-  of the Service ends `Forbidden` on the read of the live object, before any create is
-  attempted. So nothing has yet given a workload of this namespace a name on the network, which
-  is why the one step that depends on it — the reachability check against a workload reachable
-  **by its Service name** — is written from the declarations rather than from a run. Read that
-  pair as a design until a role has run it end to end and said so; everything above is a
-  transcript of the lines as published here.
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-234*: the three gate
+  commands, **all three answering `yes`**, and the grant matrix behind them
+  (`create`/`delete`/`get`/`list`/`watch jobs`, `get`/`list pods`, `get pods/log`, `delete pods`
+  and `create`/`get`/`list`/`watch`/`delete services` `yes`; `patch`/`update jobs`, `create pods`
+  and `get`/`list` of `endpoints` and of `endpointslices` `no`); and **the whole sequence for
+  real**, as published above under a fresh suffix — the Job applied and created, its uid read, the
+  Service applied exactly as published and created, the pod waited for into existence (at once)
+  and then to Ready (70 s), the workload pod's labels read and carrying both its Job's
+  `batch.kubernetes.io/controller-uid` and the reachability label, the reachability check
+  answering by the Service name about two seconds after the Ready wait returned — the same block
+  with one print per attempt added saw its first connection refused and the retry answer, the
+  listener opening a second or so after Ready, which is the starting-up case the paragraph under
+  the sequence describes — the Job's log ending `database system is ready to accept connections`,
+  `kubectl delete job` run, and the closing listing showing the Job and its Service gone at once
+  and its pod `Terminating`, then nothing of it twenty seconds later.
+- *Executed from a role container on 2026-10-24, for dispatch://INFRA-71*: the sequence's Job half
+  (87 s to Ready on a cold machine, 10 s on a warm one), which is where the two waits come from:
+  the single `wait` this section published before exited 1 at once with `error: no matching
+  resources found`, because the Job's pod does not exist the instant the apply returns; and the
+  reachability block, run as published against a listener and against a port that refuses and
+  then listens. And, *not run again since*: the credential-less gate, with the in-cluster
+  environment removed; one deliberate breakage of each **enforced** rule of the Job manifest
+  above, put through the namespace's own admission server-side with nothing created, each refused
+  naming the rule — the reachability label has no breakage to record, since admission does not
+  check it, which is the whole of why that bullet is marked; and the reachability block against an
+  address whose packets are dropped.
+- *Refused as published, and corrected on 2026-10-25*: until dispatch://INFRA-234 the Service
+  manifest above selected the Job's pods by `job-name`, and the namespace's admission refuses
+  that, naming the rule that a Service there selects by `batch.kubernetes.io/controller-uid` at
+  its owning Job's uid and by nothing else. Both forms were put through
+  `kubectl create --dry-run=server` with nothing created: the old one refused, the one above
+  admitted.
 
 What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
 which belongs to another namespace and to one node at a time, and a role may not run a command
