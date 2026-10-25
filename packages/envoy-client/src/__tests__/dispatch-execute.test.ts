@@ -2895,6 +2895,11 @@ describe("executeDispatchTool", () => {
     // ordinary update must carry no rank key at all.
     await run({ status: "testing" });
     expect(bodies.at(-1)).not.toHaveProperty("rank");
+    // An empty neighbour is a field like any other on purpose: the tool sends it so the server
+    // answers `rank neighbor must name another issue`. A falsy or trimming guard in the executor
+    // would drop the key instead and turn that refusal into a silent no-move.
+    await run({ before: "" });
+    expect(bodies.at(-1)).toEqual(expect.objectContaining({ rank: { before: "" } }));
   });
 
   // A Dispatch server from before the repository fields that took the write anyway answers

@@ -398,8 +398,8 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue_update",
     example: {
       issue: "DSP-1",
-      status: "done",
-      reason: "Shipped in owner/repo#7; verified on the production dashboard.",
+      priority: 1,
+      before: "DSP-2",
     },
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
