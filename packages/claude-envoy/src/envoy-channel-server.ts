@@ -83,6 +83,7 @@ import {
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
+  UnparseableRoleRecordError,
   writePersistedRole,
 } from "./session-identity"
 import {
@@ -647,10 +648,33 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * handoff whose registration failed leaves it for the next heartbeat.
    */
   let roleTransferFrom: string | undefined
+  /** Whether a failure to take back the queued role has been reported since the last success. */
+  let roleTransferFailureReported = false
+  /**
+   * Best-effort, unlike `syncRegisteredInterests` behind it on the heartbeat. A failed transfer
+   * keeps its own retry, `roleTransferFrom`, which clears only once `restoreRole` resolves; a
+   * throw would add nothing to that and would end the tick before the interests reconciliation,
+   * on every tick for as long as the failure lasts — a resumed session would never adopt its
+   * subscriptions and a registry-side unsubscribe that failed would never be cleared. The
+   * session works without its role meanwhile; it does not work without its interests, whose read
+   * has no queue of its own and needs the failed tick, its report and its retry.
+   */
   const transferRole = async (): Promise<void> => {
-    if (roleTransferFrom === undefined) return
-    await restoreRole(roleTransferFrom)
-    roleTransferFrom = undefined
+    const from = roleTransferFrom
+    if (from === undefined) return
+    try {
+      await restoreRole(from)
+      roleTransferFrom = undefined
+      roleTransferFailureReported = false
+    } catch (error) {
+      // Said once per failure run: every heartbeat retries it.
+      if (!roleTransferFailureReported) {
+        roleTransferFailureReported = true
+        process.stderr.write(
+          `envoy-channel: could not take back the role held by ${from} (${messageFor(error)}); retrying every heartbeat\n`,
+        )
+      }
+    }
   }
 
   /**
@@ -842,18 +866,25 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // already happened, so a throw here takes down a channel the registry is advertising and
     // leaves the Agents page a row that never beats again.
     //
-    // A soft `setRole` that failed is queued as a transfer from this session's own id, so the
-    // heartbeat's `transferRole` runs `restoreRole` again on its next tick; `transferRole` clears
-    // the queue only once that resolves, so a failure that repeats stays queued for the tick
-    // after it. A role file that cannot be parsed - truncated, hand-edited, written by a later
-    // format - is not queued: no later read of the same bytes succeeds, and a transfer that threw
-    // on every tick would end each one before its interests reconciliation. That costs this
-    // session its role and nothing more.
+    // A failure is queued as a transfer from this session's own id, so the heartbeat's
+    // `transferRole` runs `restoreRole` again on every tick until it resolves. That covers every
+    // failure but one: a listener answer that is not JSON or misses the schema, an unreadable
+    // role file, any transient error. The one is a role file whose bytes cannot be parsed, which
+    // only `readPersistedRole` can tell apart: no later read of the same bytes succeeds, so it is
+    // not queued, and it costs this session its role and nothing more.
     await restoreRole().catch((error: unknown) => {
-      const unparseable = error instanceof SyntaxError || error instanceof z.ZodError
-      if (!unparseable) roleTransferFrom = identity.id
+      if (error instanceof UnparseableRoleRecordError) {
+        process.stderr.write(
+          `envoy-channel: ${messageFor(error)}; the session starts without a role\n`,
+        )
+        return
+      }
+      roleTransferFrom = identity.id
+      // This is the first failure of the run `transferRole` reports, so it says nothing more
+      // until the retry has succeeded once.
+      roleTransferFailureReported = true
       process.stderr.write(
-        `envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error)}); ${unparseable ? "the session starts without one" : "the next heartbeat retries"}\n`,
+        `envoy-channel: could not restore the role (${messageFor(error)}); the next heartbeat retries\n`,
       )
     })
   })

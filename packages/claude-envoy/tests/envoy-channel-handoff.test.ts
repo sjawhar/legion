@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
@@ -691,6 +691,128 @@ test("a record already past the sweep's age survives a startup whose claim was r
       session_id: "ses_claude",
       role: "reviewer",
     })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a listener answer that is not JSON at startup still starts the session, and a later heartbeat takes the role back", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // The first claim's answer is a proxy's HTML 502, parsed as the real client parses every
+  // answer; every later claim lands.
+  let holder = ""
+  let claims = 0
+  const client = recordingClient([], {
+    setRole: async (input) => {
+      claims += 1
+      if (claims === 1) return JSON.parse("<html><body>502 Bad Gateway</body></html>")
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+  )
+
+  try {
+    expect(holder).toBe("")
+    await waitFor(async () => holder === "ses_claude", "a heartbeat taking the role back")
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a role file whose bytes are not JSON starts the session without the role, and says so naming the file", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  // Truncated mid-write by a full disk.
+  await writeFile(roleFile, '{"session_id":"ses_claude","ro')
+  let holder = ""
+  let registrations = 0
+  const client = recordingClient([], {
+    subscribe: async () => {
+      registrations += 1
+      return noInterest()
+    },
+    setRole: async (input) => {
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const written: string[] = []
+  const stderr = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    written.push(String(chunk))
+    return true
+  })
+
+  try {
+    const session = await startChannelSession(
+      sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+    )
+    try {
+      await waitFor(async () => registrations >= 6, "five heartbeats after startup")
+      expect(holder).toBe("")
+      expect(written.filter((line) => line.includes(roleFile))).toEqual([
+        expect.stringContaining("the session starts without a role"),
+      ])
+    } finally {
+      await session.shutdown()
+    }
+  } finally {
+    stderr.mockRestore()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a role file that cannot be read does not stop the heartbeat adopting the registered interests", async () => {
+  const stateDirectory = await scratchState()
+  // A directory where the record should be: unreadable for any user, root included.
+  await mkdir(roleStateFile(stateDirectory, "ses_claude"), { recursive: true })
+  const alreadyRegistered = "notifications.dispatch.issue.DSP-5"
+  const entry = new Set<string>([directSubject, alreadyRegistered])
+  let reads = 0
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      for (const topic of input.topics) entry.add(topic)
+      return noInterest()
+    },
+    unsubscribe: async (input) => {
+      for (const topic of input.topics) entry.delete(topic)
+    },
+    getInterest: async (sessionID) => {
+      reads++
+      // The listener is down for exactly the startup read, so only a heartbeat can adopt.
+      if (reads === 1) throw new Error("listener unavailable")
+      return { ...noInterest(), session_id: sessionID, topics: [...entry] }
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      client,
+      heartbeatMs: 20,
+    }),
+  )
+
+  try {
+    await waitFor(
+      async () => session.topics().includes(alreadyRegistered),
+      `the heartbeat adopting ${alreadyRegistered}`,
+    )
+    expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

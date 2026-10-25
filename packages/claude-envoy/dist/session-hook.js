@@ -19566,13 +19566,26 @@ var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
   return join4(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
+
+class UnparseableRoleRecordError extends Error {
+  name = "UnparseableRoleRecordError";
+  constructor(roleFile, cause) {
+    super(`the role record ${roleFile} cannot be parsed (${messageFor(cause)})`, { cause });
+  }
+}
 async function readPersistedRole(roleFile) {
+  let bytes;
   try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")));
+    bytes = await readFile(roleFile, "utf8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT"))
       return;
     throw error48;
+  }
+  try {
+    return PersistedRole.parse(JSON.parse(bytes));
+  } catch (error48) {
+    throw new UnparseableRoleRecordError(roleFile, error48);
   }
 }
 async function writePersistedRole(roleFile, state) {

@@ -47757,13 +47757,26 @@ var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
   return join5(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
+
+class UnparseableRoleRecordError extends Error {
+  name = "UnparseableRoleRecordError";
+  constructor(roleFile, cause) {
+    super(`the role record ${roleFile} cannot be parsed (${messageFor(cause)})`, { cause });
+  }
+}
 async function readPersistedRole(roleFile) {
+  let bytes;
   try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")));
+    bytes = await readFile(roleFile, "utf8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT"))
       return;
     throw error48;
+  }
+  try {
+    return PersistedRole.parse(JSON.parse(bytes));
+  } catch (error48) {
+    throw new UnparseableRoleRecordError(roleFile, error48);
   }
 }
 async function writePersistedRole(roleFile, state) {
@@ -48619,11 +48632,22 @@ async function startChannelSession(options) {
     fireRegained(role, "reclaimed");
   };
   let roleTransferFrom;
+  let roleTransferFailureReported = false;
   const transferRole = async () => {
-    if (roleTransferFrom === undefined)
+    const from = roleTransferFrom;
+    if (from === undefined)
       return;
-    await restoreRole(roleTransferFrom);
-    roleTransferFrom = undefined;
+    try {
+      await restoreRole(from);
+      roleTransferFrom = undefined;
+      roleTransferFailureReported = false;
+    } catch (error48) {
+      if (!roleTransferFailureReported) {
+        roleTransferFailureReported = true;
+        process.stderr.write(`envoy-channel: could not take back the role held by ${from} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
   };
   const adoptHandoff = async () => {
     if (handoffFile === undefined)
@@ -48729,10 +48753,14 @@ async function startChannelSession(options) {
   await serialized(async () => {
     await register();
     await restoreRole().catch((error48) => {
-      const unparseable = error48 instanceof SyntaxError || error48 instanceof exports_external.ZodError;
-      if (!unparseable)
-        roleTransferFrom = identity.id;
-      process.stderr.write(`envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error48)}); ${unparseable ? "the session starts without one" : "the next heartbeat retries"}
+      if (error48 instanceof UnparseableRoleRecordError) {
+        process.stderr.write(`envoy-channel: ${messageFor(error48)}; the session starts without a role
+`);
+        return;
+      }
+      roleTransferFrom = identity.id;
+      roleTransferFailureReported = true;
+      process.stderr.write(`envoy-channel: could not restore the role (${messageFor(error48)}); the next heartbeat retries
 `);
     });
   });

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { basename, join } from "node:path"
-import { hasErrnoCode } from "@legion/envoy-client/errors"
+import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { z } from "zod"
 import { pruneStateDirectory, writeAtomicStateFile, writtenLongAgo } from "./session-state"
 
@@ -57,15 +57,39 @@ export function roleStateFile(stateDirectory: string, sessionId: string): string
   return join(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`)
 }
 
-/** The role a session held, from its role file; undefined when it has none. */
+/**
+ * A role record whose bytes cannot be parsed — truncated, hand-edited, written by a later format.
+ * Thrown only by `readPersistedRole`, the one place that knows the bytes came from the file and
+ * not from a listener answering a claim: no later read of the same bytes succeeds, so unlike every
+ * other failure to restore a role it is not worth retrying.
+ */
+export class UnparseableRoleRecordError extends Error {
+  readonly name = "UnparseableRoleRecordError"
+
+  constructor(roleFile: string, cause: unknown) {
+    super(`the role record ${roleFile} cannot be parsed (${messageFor(cause)})`, { cause })
+  }
+}
+
+/**
+ * The role a session held, from its role file; undefined when it has none. Bytes that do not
+ * parse throw `UnparseableRoleRecordError`; every other failure to read them (`EACCES`, `EISDIR`,
+ * any I/O error) propagates unchanged.
+ */
 export async function readPersistedRole(
   roleFile: string,
 ): Promise<z.infer<typeof PersistedRole> | undefined> {
+  let bytes: string
   try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")))
+    bytes = await readFile(roleFile, "utf8")
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT")) return undefined
     throw error
+  }
+  try {
+    return PersistedRole.parse(JSON.parse(bytes))
+  } catch (error) {
+    throw new UnparseableRoleRecordError(roleFile, error)
   }
 }
 
