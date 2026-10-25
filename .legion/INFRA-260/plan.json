@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-260",
+  "completed": "2026-10-25T23:53:30Z",
+  "planDocument": "dispatch://INFRA-260/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: PR body, proof array, push and pull request rules (references/pr-body.md)",
+      "ce-simplify-code: the one simplify pass on the diff before completing the first implementing round"
+    ],
+    "test": [
+      "legion-worker: re-run the implementer's proof, add an independent E2E (tester) line and negative control; read CI for -race"
+    ],
+    "review": [
+      "legion-worker: review against the plan's decisions and merge-gate rules (references/merge-gate.md)"
+    ]
+  },
+  "summary": "Rewrite the two lock tests in packages/envoy/internal/dispatch/api/suggestions_test.go around one helper, suggestionsBehindLock: it sets srv.suggestionTimeout = lockedSuggestionAllowance (5 s) on a directServer, takes the ACCESS EXCLUSIVE lock in a held transaction, runs computeAndPersistSuggestions in a goroutine, polls pg_locks through the holder transaction for a backend blocked by it (failing at once if the answer arrives first), then receives the answer with no timer; each test asserts non-nil with Missing set. Add the zero-Deps sentence at register and name every setter in the suggestionTimeout comment (server.go), and a dated INFRA-260 note on the INFRA-56 knob solution doc's 'Still open' paragraph.",
+  "files": [
+    "packages/envoy/internal/dispatch/api/suggestions_test.go",
+    "packages/envoy/internal/dispatch/api/server.go",
+    "docs/solutions/testing/a-test-only-knob-widens-the-value-production-runs-pin-it-at-the-construction-a-deployment-reaches-INFRA-56.md"
+  ],
+  "decisions": [
+    "Allowance 5 s: bounds only time-to-lock (test 2's first statement is the locked one; test 1 runs one table-free numnode round trip first); 737 ms worst on record for a whole filing under load; sjawhar/legion#2158 ran asks-locked at 5 s 5 of 5. Costs ~+9 s per package run.",
+    "No timer on the answer and no deadline on the waiter poll (AC1 forbids a fixed elapsed bound): a regression waits behind the lock until go test -timeout panics, naming the test.",
+    "Waiter tied to the test's lock: select count(*) from pg_locks where not granted and pg_backend_pid() = any(pg_blocking_pids(pid)), queried through the holder transaction (storetest.WaitForLockWaiters' query); no SQL-text pin; checked only before the answer arrives.",
+    "Test 1 drops the answered-ask seeding (suggestions_test.go:266-274): with asks locked the fused search waits first and the decision lookup is unreachable (sjawhar/legion#2158).",
+    "Assert Missing set, never its text; no CHANGELOG/README change (nothing a user meets changes)."
+  ],
+  "acceptance": [
+    {
+      "criterion": "Neither test asserts elapsed wall-clock time against a fixed bound; each sets suggestionTimeout on its own server and asserts a non-nil result with Missing set, reached while its query waits behind the lock.",
+      "surface": "go test of internal/dispatch/api against a real PostgreSQL 17 + pgvector (storetest.Open) in the issue pod",
+      "check": "grep -nE 'time\\.(Since|Now|After|Until)|elapsed|writeSuggestionTimeout' internal/dispatch/api/suggestions_test.go prints nothing; go test ./internal/dispatch/api/ -run 'TestComputeAndPersistSuggestionsRespectsDeadline' -count=5 -v -timeout 10m -> 10 PASS, 0 FAIL, 0 SKIP",
+      "negativeControls": [
+        "allowance time.Nanosecond -> both fail with the helper's 'answered ... before its query waited behind the lock'",
+        "computeSuggestions given ctx instead of bounded -> test 1 alone with -timeout 2m panics naming it",
+        "resolveSuggestionProject given ctx instead of bounded -> test 2 alone with -timeout 2m panics naming it"
+      ]
+    },
+    {
+      "criterion": "Both pass, reported as passed and not skipped, in each of three concurrent uncached copies of the package's suite run against the test Postgres on one machine.",
+      "surface": "three concurrent whole-package go test runs against one Postgres in the issue pod",
+      "check": "for i in 1 2 3; do go test -count=1 -timeout 240m -json ./internal/dispatch/api/ > \"$TMPDIR/infra260/copy$i.json\" 2> \"$TMPDIR/infra260/copy$i.err\" & done; wait; per copy, jq for the two tests' pass/fail/skip actions prints exactly the two names, each pass"
+    },
+    {
+      "criterion": "The comment at register says a zero-Deps call must stay cheap and must not dial.",
+      "surface": "server.go source and the pin test",
+      "check": "grep -n -B6 '^func register(' internal/dispatch/api/server.go shows 'zero Deps', 'cheap', 'must not dial'; go test -run TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound -count=1 -v -> PASS"
+    }
+  ],
+  "rig": "PostgreSQL 17 + pgvector rootless per docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md under $TMPDIR/infra260/pg, port 5434 (check it is free first), -c max_connections=600, template1 recreated under ICU per the INFRA-56 template1 note; DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable'. Record it in implement.json for the tester.",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "AC2's 'package's suite' is ambiguous (whole package vs -run subset); a whole-package copy took 851 s alone so three concurrent copies exceed go test's default 10 min; skip vs pass needs -v or -json.",
+        "answer": "Read as the whole internal/dispatch/api package; command uses -count=1 -timeout 240m -json, outputs under $TMPDIR/infra260/copyN.json, and a jq check per copy that prints both test names with pass and no skip."
+      },
+      {
+        "finding": "Whether a liveness guard counts as a forbidden fixed bound is open; with no timer a regression hangs until the package -timeout panic.",
+        "answer": "Decision 2: no timer on the answer or on the waiter poll, matching AC1 literally; a regression costs a -timeout panic naming the test. Recorded as a risk."
+      },
+      {
+        "finding": "lockWaiters counts any lock waiter in the database, not the call's query behind the test's lock.",
+        "answer": "Decision 3: count pg_locks waiters whose pg_blocking_pids include the holder transaction's backend, queried through the holder transaction; no SQL-text pattern."
+      },
+      {
+        "finding": "Test 1's comment claims the decision lookup is bounded; with asks locked the search blocks first, so the answered-ask seeding is dead and both comments/messages describe a stopwatch.",
+        "answer": "Decisions 5-7: test 1's comment says it proves the search under the allowance and that the decision lookup is unreachable under this lock; seeding dropped; failure messages name no duration."
+      },
+      {
+        "finding": "server.go suggestionTimeout comment names only newFailingAdviceHandler; the INFRA-56 solution doc calls these tests 'Still open'.",
+        "answer": "Decisions 9-10: name every setter; append a dated Note 2026-10-25 (INFRA-260) to that paragraph."
+      },
+      {
+        "finding": "The generous allowance is still a bound on time-to-lock and each test spends it in full; mutation controls are per test.",
+        "answer": "Decision 1 states 5 s, its margin over 737 ms on record and its ~+9 s cost; controls b and c each map to the one test they must break."
+      },
+      {
+        "finding": "The register sentence covers dialing but not dereferencing the nil Store, which newDeliveryHub would do.",
+        "answer": "Decision 8: the sentence also says it must not read the nil Store; it must contain 'zero Deps', 'cheap' and 'must not dial'."
+      },
+      {
+        "finding": "pgx may leave the backend queued after the client returns on a deadline.",
+        "answer": "Decision 3: the helper checks for a waiter only before the answer arrives and never waits for it to clear."
+      },
+      {
+        "finding": "Spec title says 'measured as too tight' while the body says the margin is inferred; nproc and compiler availability must be checked at run time.",
+        "answer": "The title is the spec owner's; it changes no work. The plan records -race as CI's (no C compiler in the pod, as INFRA-56 found) and has the implementer check the port and rig at run time."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [],
+  "risks": [
+    "A machine that cannot queue one statement within 5 s fails AC1 with the helper's message.",
+    "A regression in the bounded context costs a package -timeout panic, not a named failure.",
+    "AC2's three whole-package copies take tens of minutes and need max_connections raised."
+  ]
+}
