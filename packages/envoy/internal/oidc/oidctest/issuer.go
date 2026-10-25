@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -62,6 +63,7 @@ func NewKey(t TB, kid string) *Key {
 // Issuer serves a discovery document and a key set, both under the test's control.
 type Issuer struct {
 	server *httptest.Server
+	mux    *http.ServeMux
 
 	mu              sync.Mutex
 	issuerClaim     string
@@ -92,6 +94,9 @@ type codeFlow struct {
 	// spoil changes the claims of every ID token the token endpoint mints,
 	// after the issuer has filled them in (SpoilIDTokens).
 	spoil func(claims map[string]any)
+	// unqueued chooses the claims of an authorization request that finds
+	// none queued (SignInUnqueued); nil, such a request is refused.
+	unqueued func(query url.Values) (map[string]any, error)
 }
 
 // revocation is the state of the revocation endpoint: every token the client
@@ -128,17 +133,43 @@ type refreshGrant struct {
 // New starts an issuer serving no keys yet. The server is closed at cleanup.
 func New(t TB) *Issuer {
 	t.Helper()
-	issuer := &Issuer{}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", issuer.handleDiscovery)
-	mux.HandleFunc("/keys", issuer.handleKeys)
-	mux.HandleFunc("GET /authorize", issuer.handleAuthorize)
-	mux.HandleFunc("POST /token", issuer.handleToken)
-	mux.HandleFunc("POST /revoke", issuer.handleRevoke)
-	issuer.server = httptest.NewServer(mux)
+	return newIssuer(t, nil)
+}
+
+// NewOnListener is New serving on listener rather than on a random loopback
+// port, for cmd/dev-oidc-issuer, whose caller may fix the issuer's address.
+// The listener is closed with the server at cleanup.
+func NewOnListener(t TB, listener net.Listener) *Issuer {
+	t.Helper()
+	return newIssuer(t, listener)
+}
+
+// newIssuer starts the issuer on listener, or on a random loopback port when
+// listener is nil.
+func newIssuer(t TB, listener net.Listener) *Issuer {
+	t.Helper()
+	issuer := &Issuer{mux: http.NewServeMux()}
+	issuer.mux.HandleFunc("/.well-known/openid-configuration", issuer.handleDiscovery)
+	issuer.mux.HandleFunc("/keys", issuer.handleKeys)
+	issuer.mux.HandleFunc("GET /authorize", issuer.handleAuthorize)
+	issuer.mux.HandleFunc("POST /token", issuer.handleToken)
+	issuer.mux.HandleFunc("POST /revoke", issuer.handleRevoke)
+	if listener == nil {
+		issuer.server = httptest.NewServer(issuer.mux)
+	} else {
+		issuer.server = &httptest.Server{Listener: listener, Config: &http.Server{Handler: issuer.mux}}
+		issuer.server.Start()
+	}
 	t.Cleanup(issuer.server.Close)
 	issuer.issuerClaim = issuer.server.URL
 	return issuer
+}
+
+// Handle serves handler at pattern (an http.ServeMux pattern) beside the
+// issuer's own endpoints, for cmd/dev-oidc-issuer's control endpoints. A
+// pattern that conflicts with one already served panics, as ServeMux does.
+func (i *Issuer) Handle(pattern string, handler http.HandlerFunc) {
+	i.mux.HandleFunc(pattern, handler)
 }
 
 // URL is the issuer's base URL, which is also the `iss` it advertises and mints
@@ -294,6 +325,18 @@ func (i *Issuer) SignInAs(claims map[string]any) {
 	i.codeFlow.queued = append(i.codeFlow.queued, maps.Clone(claims))
 }
 
+// SignInUnqueued makes an authorization request that finds no sign-in queued
+// sign in with the claims choose returns for the request's query, as an
+// identity provider's own sign-in page chooses a person, from the request's
+// login_hint say, rather than refusing it. An error from choose refuses the
+// request 400 with its text; a nil choose refuses every such request again.
+// choose runs with the issuer locked, so it must not call the issuer.
+func (i *Issuer) SignInUnqueued(choose func(query url.Values) (map[string]any, error)) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.unqueued = choose
+}
+
 // UpdateGrants changes the claims every refresh token issued so far answers
 // with, as a pool does when a user's groups change.
 func (i *Issuer) UpdateGrants(change func(claims map[string]any)) {
@@ -409,11 +452,12 @@ func (i *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(document)
 }
 
-// handleAuthorize issues a code for the next queued sign-in and redirects to
-// the request's redirect_uri with it and the request's state. It records the
-// request's nonce, for the ID token, and its PKCE code_challenge, which only
-// the S256 method may carry: a challenge by any other method, plain included,
-// is a bad request, so a client that sends one never gets a code to exchange.
+// handleAuthorize issues a code for the next queued sign-in, or else the one
+// SignInUnqueued chooses, and redirects to the request's redirect_uri with it
+// and the request's state. It records the request's nonce, for the ID token,
+// and its PKCE code_challenge, which only the S256 method may carry: a
+// challenge by any other method, plain included, is a bad request, so a client
+// that sends one never gets a code to exchange.
 func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	i.mu.Lock()
@@ -429,12 +473,22 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	case query.Has("code_challenge") && (query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256"):
 		http.Error(w, "bad authorization request: code_challenge must be S256", http.StatusBadRequest)
 		return
-	case len(flow.queued) == 0:
+	case len(flow.queued) == 0 && flow.unqueued == nil:
 		http.Error(w, "no sign-in queued (SignInAs)", http.StatusBadRequest)
 		return
 	}
-	claims := flow.queued[0]
-	flow.queued = flow.queued[1:]
+	var claims map[string]any
+	if len(flow.queued) > 0 {
+		claims = flow.queued[0]
+		flow.queued = flow.queued[1:]
+	} else {
+		chosen, err := flow.unqueued(query)
+		if err != nil {
+			http.Error(w, "bad authorization request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		claims = maps.Clone(chosen)
+	}
 	code := randomValue()
 	flow.codes[code] = codeGrant{claims: claims, nonce: query.Get("nonce"), redirectURI: query.Get("redirect_uri"), challenge: query.Get("code_challenge")}
 	target, err := url.Parse(query.Get("redirect_uri"))
