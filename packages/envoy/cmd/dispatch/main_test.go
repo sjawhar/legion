@@ -564,6 +564,23 @@ func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	}
 }
 
+// /healthz says this build judges a write's Idempotency-Key (INFRA-258), which the agents' client
+// reads before it retries a write under its key: an earlier Dispatch ignores the header and would
+// run the retry again. It is the binary's fact, so a probe whose database is down reports it too.
+func TestHealthzReportsThatWritesTakeIdempotencyKeys(t *testing.T) {
+	for name, database := range map[string]*store.Store{"a database": storetest.Open(t), "no database": nil} {
+		response := httptest.NewRecorder()
+		dispatchHandler(http.NewServeMux(), database, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		if health["idempotency_keys"] != true {
+			t.Errorf("healthz with %s: idempotency_keys = %#v, want true", name, health["idempotency_keys"])
+		}
+	}
+}
+
 // highestMigrationFile is the number of the last up migration in the source tree, read the way
 // store.Migrate names versions: the digits before the first underscore.
 func highestMigrationFile(t *testing.T) int {

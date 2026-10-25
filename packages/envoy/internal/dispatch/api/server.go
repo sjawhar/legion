@@ -304,6 +304,9 @@ type queryer interface {
 // its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
+// Every POST and PATCH route takes an Idempotency-Key, and a repeat under one is answered from the
+// key rather than run again (keyedWrites, request_keys.go).
+//
 // With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
 // the first subscription and runs them until Lifetime ends, and mounts GET /ws/live beside the
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
@@ -360,8 +363,13 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
+	replays := s.keyedReplays()
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler)))
+		handler := route.Handler
+		if keyedMethod(route.Method) {
+			handler = s.keyedWrites(route.Method, route.Pattern, handler, replays[route.Method+" "+route.Pattern])
+		}
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, handler)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
@@ -638,6 +646,11 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 }
 
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
+	// A keyed write resolved its caller before its handler ran (keyedWrites); a bearer is verified
+	// once a request.
+	if caller, ok := r.Context().Value(resolvedCallerKey{}).(resolvedCaller); ok {
+		return caller.actor, caller.human, nil
+	}
 	if token, present := auth.BearerToken(r); present {
 		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")

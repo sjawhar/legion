@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -34,19 +35,19 @@ func broadcastCount(t *testing.T, handler http.Handler) int {
 	return len(decodeBody[[]json.RawMessage](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts", nil, "alice")))
 }
 
-// LEGION-446. A repeat of one send - the same human, key and request, as a double press, a
-// proxy's retry or the Sends strip's Retry makes it - is answered the broadcast the first
-// request made, so every recipient is handed the message once rather than twice.
+// LEGION-446, INFRA-258. A repeat of one send under its Idempotency-Key - a double press, a
+// proxy's retry or the Sends strip's Retry - is answered the broadcast the first request made,
+// with the first answer's exclusions, so every recipient is handed the message once rather than
+// twice.
 func TestBroadcastRepeatWithItsKeyAnswersTheOriginalAndDeliversOnce(t *testing.T) {
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	send := func() *httptest.ResponseRecorder {
 		t.Helper()
 		// The reviewer advertises aside alone, so a steer excludes it.
-		return postBroadcast(t, handler, map[string]any{
+		return postBroadcastKeyed(t, handler, map[string]any{
 			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester", "reviewer"},
-			"idempotency_key": "press-1",
-		}, "alice")
+		}, "alice", "press-1")
 	}
 
 	first := send()
@@ -63,19 +64,18 @@ func TestBroadcastRepeatWithItsKeyAnswersTheOriginalAndDeliversOnce(t *testing.T
 	}
 
 	repeat := send()
-	if repeat.Code != http.StatusOK {
-		t.Fatalf("repeat: status=%d body=%s, want 200 with the original broadcast", repeat.Code, repeat.Body.String())
+	if repeat.Code != http.StatusCreated || !replayed(repeat) {
+		t.Fatalf("repeat: status=%d body=%s, want the original broadcast replayed", repeat.Code, repeat.Body.String())
 	}
-	replayed := decodeBody[broadcastResponse](t, repeat)
-	if replayed.ID != original.ID {
-		t.Fatalf("the repeat answered broadcast %s, want the original %s", replayed.ID, original.ID)
+	again := decodeBody[broadcastResponse](t, repeat)
+	if again.ID != original.ID {
+		t.Fatalf("the repeat answered broadcast %s, want the original %s", again.ID, original.ID)
 	}
-	if got := sendTargets(replayed); !equalStrings(got, []string{"planner", "tester"}) {
+	if got := sendTargets(again); !equalStrings(got, []string{"planner", "tester"}) {
 		t.Fatalf("the repeat's recipients = %v", got)
 	}
-	if len(replayed.Excluded) != 1 || replayed.Excluded[0].SessionID != "reviewer" ||
-		replayed.Excluded[0].Reason != "excluded by the original send" {
-		t.Fatalf("the repeat's exclusions = %#v, want the reviewer the original left out", replayed.Excluded)
+	if len(again.Excluded) != 1 || again.Excluded[0] != original.Excluded[0] {
+		t.Fatalf("the repeat's exclusions = %#v, want the original's %#v", again.Excluded, original.Excluded)
 	}
 
 	if listed := broadcastCount(t, handler); listed != 1 {
@@ -103,9 +103,9 @@ func TestBroadcastRepeatIsAnsweredWhileTheListenerIsDown(t *testing.T) {
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	send := func(key string) *httptest.ResponseRecorder {
 		t.Helper()
-		return postBroadcast(t, handler, map[string]any{
-			"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": key,
-		}, "alice")
+		return postBroadcastKeyed(t, handler, map[string]any{
+			"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
+		}, "alice", key)
 	}
 
 	created := send("before-the-outage")
@@ -123,23 +123,23 @@ func TestBroadcastRepeatIsAnsweredWhileTheListenerIsDown(t *testing.T) {
 			fresh.Code, fresh.Body.String())
 	}
 	repeat := send("before-the-outage")
-	if repeat.Code != http.StatusOK {
-		t.Fatalf("a repeat while the listener is down: status=%d body=%s, want 200", repeat.Code, repeat.Body.String())
+	if repeat.Code != http.StatusCreated || !replayed(repeat) {
+		t.Fatalf("a repeat while the listener is down: status=%d body=%s, want the broadcast replayed", repeat.Code, repeat.Body.String())
 	}
 	if got := decodeBody[broadcastResponse](t, repeat).ID; got != original.ID {
 		t.Fatalf("the repeat answered broadcast %s, want the original %s", got, original.ID)
 	}
 }
 
-// A key names one request. Reused for a different one, it is refused and nothing is sent: the
-// key's broadcast says something else, so answering with it would tell the caller a message it
-// never sent had gone out.
+// A key names one request. Reused for a different one, it is refused 422 and nothing is sent:
+// the key's broadcast says something else, so answering with it would tell the caller a message
+// it never sent had gone out.
 func TestBroadcastKeyReusedForADifferentRequestIsRefused(t *testing.T) {
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
-	created := postBroadcast(t, handler, map[string]any{
-		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"}, "idempotency_key": "reused",
-	}, "alice")
+	created := postBroadcastKeyed(t, handler, map[string]any{
+		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"},
+	}, "alice", "reused")
 	if created.Code != http.StatusCreated {
 		t.Fatalf("send: status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -152,19 +152,11 @@ func TestBroadcastKeyReusedForADifferentRequestIsRefused(t *testing.T) {
 		"sessions reordered": {"body": "Status?", "delivery": "btw", "session_ids": []string{"tester", "planner"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			changed["idempotency_key"] = "reused"
-			response := postBroadcast(t, handler, changed, "alice")
-			if response.Code != http.StatusConflict {
-				t.Fatalf("status=%d body=%s, want 409", response.Code, response.Body.String())
-			}
-			refusal := decodeBody[struct {
-				Code        string `json:"code"`
-				Error       string `json:"error"`
-				BroadcastID string `json:"broadcast_id"`
-			}](t, response)
-			if refusal.Code != "BROADCAST_KEY_REUSED" || refusal.BroadcastID != original.ID ||
-				!strings.Contains(refusal.Error, "this request was not sent") {
-				t.Fatalf("refusal = %#v, want BROADCAST_KEY_REUSED naming %s and saying nothing was sent", refusal, original.ID)
+			response := postBroadcastKeyed(t, handler, changed, "alice", "reused")
+			code, text := refusalOf(t, response)
+			if response.Code != http.StatusUnprocessableEntity || code != contracts.IdempotencyKeyReused ||
+				!strings.Contains(text, "POST /api/v1/broadcasts") || !strings.Contains(text, "this request was not run") {
+				t.Fatalf("status=%d code=%s error=%q, want 422 %s naming the first send", response.Code, code, text, contracts.IdempotencyKeyReused)
 			}
 		})
 	}
@@ -187,9 +179,9 @@ func TestBroadcastKeysAreScopedToTheSender(t *testing.T) {
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	send := func(login string) *httptest.ResponseRecorder {
 		t.Helper()
-		return postBroadcast(t, handler, map[string]any{
-			"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "shared",
-		}, login)
+		return postBroadcastKeyed(t, handler, map[string]any{
+			"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
+		}, login, "shared")
 	}
 
 	alices := send("alice")
@@ -198,68 +190,66 @@ func TestBroadcastKeysAreScopedToTheSender(t *testing.T) {
 	}
 	original := decodeBody[broadcastResponse](t, alices).ID
 	bobs := send("bob")
-	if bobs.Code != http.StatusCreated {
+	if bobs.Code != http.StatusCreated || replayed(bobs) {
 		t.Fatalf("bob's send under alice's key: status=%d body=%s, want a broadcast of his own", bobs.Code, bobs.Body.String())
 	}
 	if got := decodeBody[broadcastResponse](t, bobs).ID; got == original {
 		t.Fatalf("bob's send answered alice's broadcast %s", original)
 	}
 	again := send("Alice")
-	if again.Code != http.StatusOK {
-		t.Fatalf("Alice's repeat: status=%d body=%s, want 200", again.Code, again.Body.String())
+	if !replayed(again) {
+		t.Fatalf("Alice's repeat: status=%d body=%s, want alice's broadcast replayed", again.Code, again.Body.String())
 	}
 	if got := decodeBody[broadcastResponse](t, again).ID; got != original {
 		t.Fatalf("Alice's repeat answered %s, want alice's broadcast %s", got, original)
 	}
 }
 
-// A retry racing its original: two requests carrying one key, both past the replay check before
-// either writes. The key's primary key makes the second wait for the first and roll back, so one
-// broadcast is written and each recipient is handed one frame.
+// A retry racing its original: the first holds the key while it reads the registry, so the
+// retry is told it is in flight and writes nothing; once the first has answered, a retry is its
+// answer. One broadcast is written and each recipient is handed one frame.
 func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
+	reading, release := make(chan struct{}), make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
 	var reads atomic.Int32
-	var both sync.WaitGroup
-	both.Add(2)
 	listener, sends := newBroadcastListener(t, broadcastSessions, func(_ http.ResponseWriter, r *http.Request) bool {
-		// Only the two creates meet here: each recipient's delivery reads the registry again
-		// after the 201 (envoy_resolve.go), and a third Done would drive the group negative.
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/sessions" && reads.Add(1) <= 2 {
-			both.Done()
-			both.Wait()
+		// The first create's registry read waits; each recipient's delivery reads the registry
+		// again after the 201 (envoy_resolve.go), and goes through.
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/sessions" && reads.Add(1) == 1 {
+			close(reading)
+			<-release
 		}
 		return false
 	})
+	// Registered after the listener's close, so it runs first and a failed test never leaves the
+	// held read blocking that close.
+	t.Cleanup(releaseOnce)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
+	send := func() *httptest.ResponseRecorder {
+		return postBroadcastKeyed(t, handler, map[string]any{
+			"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"},
+		}, "alice", "race")
+	}
 
-	responses := make(chan *httptest.ResponseRecorder, 2)
-	for range 2 {
-		go func() {
-			responses <- postBroadcast(t, handler, map[string]any{
-				"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"}, "idempotency_key": "race",
-			}, "alice")
-		}()
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answered <- send() }()
+	select {
+	case <-reading:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first send never read the registry")
 	}
-	var codes []int
-	ids := map[string]struct{}{}
-	for range 2 {
-		select {
-		case response := <-responses:
-			codes = append(codes, response.Code)
-			if response.Code == http.StatusOK || response.Code == http.StatusCreated {
-				ids[decodeBody[broadcastResponse](t, response).ID] = struct{}{}
-			} else {
-				t.Errorf("status=%d body=%s", response.Code, response.Body.String())
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("a concurrent send did not answer")
-		}
+	retry := send()
+	if code, _ := refusalOf(t, retry); retry.Code != http.StatusConflict || code != contracts.IdempotencyKeyInFlight {
+		t.Fatalf("a retry while the first runs: status=%d body=%s, want 409 %s", retry.Code, retry.Body.String(), contracts.IdempotencyKeyInFlight)
 	}
-	sort.Ints(codes)
-	if len(codes) != 2 || codes[0] != http.StatusOK || codes[1] != http.StatusCreated {
-		t.Fatalf("status codes = %v, want one 201 and one 200", codes)
+	releaseOnce()
+	first := awaitResponse(t, answered)
+	if first.Code != http.StatusCreated || replayed(first) {
+		t.Fatalf("the first send: status=%d body=%s", first.Code, first.Body.String())
 	}
-	if len(ids) != 1 {
-		t.Fatalf("the two answers name %d broadcasts, want one", len(ids))
+	id := decodeBody[broadcastResponse](t, first).ID
+	if later := send(); !replayed(later) || decodeBody[broadcastResponse](t, later).ID != id {
+		t.Fatalf("a retry once answered: status=%d body=%s, want broadcast %s replayed", later.Code, later.Body.String(), id)
 	}
 	if listed := broadcastCount(t, handler); listed != 1 {
 		t.Fatalf("the broadcast list holds %d broadcasts, want one", listed)
@@ -267,9 +257,7 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 	if messages := countMessages(t, database); messages != 2 {
 		t.Fatalf("the database holds %d messages, want one per recipient", messages)
 	}
-	for id := range ids {
-		awaitBroadcastDeliveries(t, handler, id)
-	}
+	awaitBroadcastDeliveries(t, handler, id)
 	if got := sends.targets(); !equalStrings(got, []string{"planner", "tester"}) {
 		t.Fatalf("listener sends = %v, want one frame per recipient", got)
 	}
@@ -277,10 +265,10 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 
 // A deploy, or a crash, can stop the process that answered a send while recipients of it are
 // still being delivered: their attempts stay pending under a claim nobody holds. Nothing else
-// resumes them - the broadcast's page only ever repeats the send under its key - so the repeat
-// puts every recipient the broadcast still owes on its way before it answers, as a repeat of a
-// single-session send does (sendHeldMessageOn). It hands no recipient a second frame: not the
-// one already delivered, and not the one a live sender is delivering right now.
+// resumes them - the broadcast's page only ever repeats the send - so the repeat puts every
+// recipient the broadcast still owes on its way before it answers, as a repeat of a single-session
+// send does (sendHeldMessageOn). It hands no recipient a second frame: not the one already
+// delivered, and not the one a live sender is delivering right now.
 func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.T) {
 	const body = "Status before the deploy?"
 	requested := []string{"planner", "tester", "reviewer", "archivist"}
@@ -290,18 +278,25 @@ func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.
 	actor := model.Actor{Kind: "user", ID: "alice"}
 	ctx := store.WithTransactionTracking(context.Background())
 
-	// The send as the stopped process left it: writeBroadcast commits the broadcast, its key
-	// and one pending, unclaimed attempt per recipient, and the delivery it answers runs behind
-	// the response - so this is the state of a send whose process never got that far.
+	// The send as the stopped process left it: writeBroadcast commits the broadcast and one
+	// pending, unclaimed attempt per recipient, the key holds the broadcast as its recovery point
+	// and the 201 the send answered, and the delivery it answers runs behind the response - so
+	// this is the state of a send whose process never got that far.
 	targets := make([]broadcastTarget, 0, len(requested))
 	for _, sessionID := range requested {
 		targets = append(targets, broadcastTarget{sessionID: sessionID, title: sessionID})
 	}
-	written, _, err := direct.writeBroadcast(ctx, actor,
-		newBroadcastKey(actor, "press-1", body, "btw", requested), body, "btw", targets)
+	written, _, err := direct.writeBroadcast(ctx, actor, body, "btw", targets, []broadcastExclusion{})
 	if err != nil {
 		t.Fatalf("write the broadcast whose process stopped mid-delivery: %v", err)
 	}
+	input := map[string]any{"body": body, "delivery": "btw", "session_ids": requested}
+	created := http.StatusCreated
+	holdRequestKey(t, database, heldKey{
+		login: "alice", key: "press-1", pattern: "/api/v1/broadcasts",
+		request: jsonRequest(t, http.MethodPost, "/api/v1/broadcasts", input, nil),
+		status:  &created, recovery: broadcastRecovery{BroadcastID: written.ID, Excluded: []broadcastExclusion{}},
+	})
 	recipient := func(sessionID string) model.Message {
 		t.Helper()
 		for _, sent := range written.Recipients {
@@ -330,19 +325,17 @@ func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.
 	claimed("archivist", "0 seconds")
 	// The reviewer's attempt was never claimed at all: the write opened it and nothing took it.
 
-	repeat := postBroadcast(t, handler, map[string]any{
-		"body": body, "delivery": "btw", "session_ids": requested, "idempotency_key": "press-1",
-	}, "alice")
-	if repeat.Code != http.StatusOK {
-		t.Fatalf("the repeat: status=%d body=%s, want 200 with the broadcast", repeat.Code, repeat.Body.String())
+	repeat := postBroadcastKeyed(t, handler, input, "alice", "press-1")
+	if repeat.Code != http.StatusCreated || !replayed(repeat) {
+		t.Fatalf("the repeat: status=%d body=%s, want the broadcast replayed", repeat.Code, repeat.Body.String())
 	}
-	replayed := decodeBody[broadcastResponse](t, repeat)
-	if replayed.ID != written.ID {
-		t.Fatalf("the repeat answered broadcast %s, want the original %s", replayed.ID, written.ID)
+	again := decodeBody[broadcastResponse](t, repeat)
+	if again.ID != written.ID {
+		t.Fatalf("the repeat answered broadcast %s, want the original %s", again.ID, written.ID)
 	}
 
 	settled := make([]string, 0, len(requested))
-	for _, sent := range replayed.Recipients {
+	for _, sent := range again.Recipients {
 		for _, attempt := range sent.Message.Deliveries {
 			settled = append(settled, fmt.Sprintf("%s %d %s", sent.SessionID, attempt.Attempt, attempt.State))
 		}

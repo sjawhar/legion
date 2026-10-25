@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -183,9 +182,9 @@ func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
 		{"retry message delivery: actor id", nulRequest{method: http.MethodPost, target: "/api/v1/messages/" + f.direct + "/deliveries", bearer: true, body: map[string]any{"delivery": "btw", "actor": session(nulText)}}, "actor.id"},
 		{"reply to message: body", nulRequest{method: http.MethodPost, target: "/api/v1/messages/" + f.direct + "/reply", bearer: true, body: map[string]any{"actor": session("s1"), "attempt": 1, "body": nulText}}, "body"},
 		{"reply to message: error", nulRequest{method: http.MethodPost, target: "/api/v1/messages/" + f.direct + "/reply", bearer: true, body: map[string]any{"actor": session("s1"), "attempt": 1, "error": nulText}}, "error"},
-		{"message a session: body", nulRequest{method: http.MethodPost, target: "/api/v1/agents/s1/messages", body: map[string]any{"body": nulText, "delivery": "btw", "idempotency_key": uuid.NewString()}}, "body"},
-		{"message a session: session id", nulRequest{method: http.MethodPost, target: "/api/v1/agents/" + nulPath + "/messages", body: map[string]any{"body": "hi", "delivery": "btw", "idempotency_key": uuid.NewString()}}, "path parameter session_id"},
-		{"broadcast: body", nulRequest{method: http.MethodPost, target: "/api/v1/broadcasts", body: map[string]any{"body": nulText, "delivery": "btw", "session_ids": []string{"s1"}, "idempotency_key": uuid.NewString()}}, "body"},
+		{"message a session: body", nulRequest{method: http.MethodPost, target: "/api/v1/agents/s1/messages", body: map[string]any{"body": nulText, "delivery": "btw"}}, "body"},
+		{"message a session: session id", nulRequest{method: http.MethodPost, target: "/api/v1/agents/" + nulPath + "/messages", body: map[string]any{"body": "hi", "delivery": "btw"}}, "path parameter session_id"},
+		{"broadcast: body", nulRequest{method: http.MethodPost, target: "/api/v1/broadcasts", body: map[string]any{"body": nulText, "delivery": "btw", "session_ids": []string{"s1"}}}, "body"},
 		{"agent state: session id", nulRequest{method: http.MethodPut, target: "/api/v1/me/agents/" + nulPath + "/state", body: map[string]any{"cleared_before": cutoff}}, "path parameter session_id"},
 
 		{"open ask: question", nulRequest{method: http.MethodPost, target: issue + "/asks", body: map[string]any{"question": nulText}}, "question"},

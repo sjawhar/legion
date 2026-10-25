@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -25,14 +26,20 @@ const agentSessions = `[
 	{"session_id":"s2","title":"reviewer","capabilities":["aside","btw","steer"],"last_seen":100}
 ]`
 
-// postAgentMessage sends one message to sessionID as login, minting an idempotency key when the
-// input names none: every send carries one, and most tests have no interest in which.
+// agentMessagePattern is the single-session send's route.
+const agentMessagePattern = "/api/v1/agents/{session_id}/messages"
+
+// postAgentMessage sends one message to sessionID as login under a key of its own, as the dashboard
+// sends every write; most tests have no interest in which.
 func postAgentMessage(t *testing.T, handler http.Handler, sessionID string, input map[string]any, login string) *httptest.ResponseRecorder {
 	t.Helper()
-	if _, ok := input["idempotency_key"]; !ok {
-		input["idempotency_key"] = uuid.NewString()
-	}
-	return dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/"+sessionID+"/messages", input, login)
+	return postAgentMessageKeyed(t, handler, sessionID, input, login, uuid.NewString())
+}
+
+// postAgentMessageKeyed sends one message to sessionID as login under key.
+func postAgentMessageKeyed(t *testing.T, handler http.Handler, sessionID string, input map[string]any, login, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	return keyedRequest(t, handler, http.MethodPost, "/api/v1/agents/"+sessionID+"/messages", input, login, key)
 }
 
 // messageAttempts reads every delivery attempt of messageID, oldest first, straight from its rows.
@@ -59,31 +66,31 @@ func messageAttempts(t *testing.T, database *store.Store, messageID string) []mo
 	return attempts
 }
 
-// commitKeyedMessage writes what alice's keyed send to s1 commits before its delivery starts: the
-// message and its key row, and nothing else, as a process that died between the commit and the
-// attempt leaves them.
-func commitKeyedMessage(t *testing.T, database *store.Store, key, body, delivery string) string {
+// commitKeyedMessage writes what alice's keyed send to s1 commits before its delivery starts - the
+// message, and its key holding the message as its recovery point - and nothing else, as a process
+// that died between the commit and the attempt leaves them: the key in flight, leased leasedAgo,
+// or finished with status when status is set.
+func commitKeyedMessage(t *testing.T, database *store.Store, key, body, delivery string, leasedAgo time.Duration, status *int) string {
 	t.Helper()
-	ctx := context.Background()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	author, err := json.Marshal(alice)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var id string
-	if err := database.Pool.QueryRow(ctx, `
+	if err := database.Pool.QueryRow(context.Background(), `
 		insert into messages (issue_key, author, body, target) values (null, $1, $2, 'session:s1')
 		returning id::text
 	`, author, body).Scan(&id); err != nil {
 		t.Fatalf("commit the message: %v", err)
 	}
-	held := newAgentMessageKey(alice, key, "s1", body, delivery, nil)
-	if _, err := database.Pool.Exec(ctx, `
-		insert into agent_message_idempotency_keys (login, idempotency_key, message_id, request_digest)
-		values ($1, $2, $3, $4)
-	`, held.login, held.key, id, held.digest); err != nil {
-		t.Fatalf("commit the message's key: %v", err)
-	}
+	holdRequestKey(t, database, heldKey{
+		login: "alice", key: key, pattern: agentMessagePattern,
+		request: jsonRequest(t, http.MethodPost, "/api/v1/agents/s1/messages",
+			map[string]any{"body": body, "delivery": delivery}, map[string]string{"session_id": "s1"}),
+		leasedAgo: leasedAgo, status: status,
+		recovery: agentMessageRecovery{MessageID: id, Delivery: delivery},
+	})
 	return id
 }
 
@@ -112,55 +119,35 @@ func keysOf(l *broadcastListener) []string {
 	return keys
 }
 
-// INFRA-258. A single-session send names itself with an idempotency key, so its retry can be told
-// from a second send. A send without one - a page loaded before the key was required, or any other
-// keyless caller - is refused, saying what that page's person does, and writes and sends nothing.
-func TestASingleSessionSendWithoutAKeyIsRefused(t *testing.T) {
+// INFRA-258. A single-session send without an Idempotency-Key is sent, as any write without one
+// is: it is only not replayed. The key is a header, so a body still naming one - a tab opened
+// before the cutover, which sends no header - is a member the route does not take, and writes and
+// sends nothing.
+func TestASingleSessionSendWithoutAKeyIsSent(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	before := databaseFingerprint(t, database)
 
-	keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
-		"body": "Status?", "delivery": "btw",
+	bodyKey := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Status?", "delivery": "btw", "idempotency_key": "press-1",
 	}, "alice")
-	refusal := decodeBody[struct {
-		Code  string `json:"code"`
-		Error string `json:"error"`
-	}](t, keyless)
-	if keyless.Code != http.StatusBadRequest || refusal.Code != "MESSAGE_INPUT" ||
-		!strings.Contains(refusal.Error, "idempotency_key is required") || !strings.Contains(refusal.Error, "reload the page") {
-		t.Fatalf("a keyless send = %d %#v, want 400 MESSAGE_INPUT saying the key is required and to reload the page", keyless.Code, refusal)
+	if code, text := refusalOf(t, bodyKey); bodyKey.Code != http.StatusBadRequest || code != "INVALID_JSON" ||
+		!strings.Contains(text, "idempotency_key") {
+		t.Fatalf("a body key = %d %s %q, want 400 INVALID_JSON naming idempotency_key", bodyKey.Code, code, text)
 	}
-
-	for name, test := range map[string]struct {
-		key, code, says string
-	}{
-		"a key with a space":        {"press 1", "MESSAGE_INPUT", "may use only letters"},
-		"a key with a slash":        {"press/1", "MESSAGE_INPUT", "may use only letters"},
-		"a key past 128 characters": {strings.Repeat("k", 129), "CAP_EXCEEDED", "128-character limit"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			response := postAgentMessage(t, handler, "s1", map[string]any{
-				"body": "Status?", "delivery": "btw", "idempotency_key": test.key,
-			}, "alice")
-			refusal := decodeBody[struct {
-				Code  string `json:"code"`
-				Error string `json:"error"`
-			}](t, response)
-			if response.Code != http.StatusBadRequest || refusal.Code != test.code || !strings.Contains(refusal.Error, test.says) {
-				t.Fatalf("status=%d refusal=%#v, want 400 %s saying %q", response.Code, refusal, test.code, test.says)
-			}
-		})
-	}
-	assertUnchanged(t, "a refused send", before, databaseFingerprint(t, database))
+	assertUnchanged(t, "a send with a body key", before, databaseFingerprint(t, database))
 	if got := sends.targets(); len(got) != 0 {
 		t.Fatalf("listener sends = %v, want none", got)
 	}
 
-	if longest := postAgentMessage(t, handler, "s1", map[string]any{
-		"body": "Status?", "delivery": "btw", "idempotency_key": strings.Repeat("k", 128),
-	}, "alice"); longest.Code != http.StatusCreated {
-		t.Fatalf("a 128-character key: status=%d body=%s, want 201", longest.Code, longest.Body.String())
+	keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Status?", "delivery": "btw",
+	}, "alice")
+	if keyless.Code != http.StatusCreated || replayed(keyless) {
+		t.Fatalf("a keyless send: status=%d body=%s, want 201", keyless.Code, keyless.Body.String())
+	}
+	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
+		t.Fatalf("listener sends = %v, want the keyless send's one", got)
 	}
 }
 
@@ -171,9 +158,9 @@ func TestARepeatedKeyAnswersTheMessageItMadeAndDeliversOnce(t *testing.T) {
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	send := func() *httptest.ResponseRecorder {
 		t.Helper()
-		return postAgentMessage(t, handler, "s1", map[string]any{
-			"body": "Where is the dashboard?", "delivery": "aside", "idempotency_key": "press-1",
-		}, "alice")
+		return postAgentMessageKeyed(t, handler, "s1", map[string]any{
+			"body": "Where is the dashboard?", "delivery": "aside",
+		}, "alice", "press-1")
 	}
 
 	first := send()
@@ -186,15 +173,15 @@ func TestARepeatedKeyAnswersTheMessageItMadeAndDeliversOnce(t *testing.T) {
 	}
 
 	repeat := send()
-	if repeat.Code != http.StatusOK {
-		t.Fatalf("repeat: status=%d body=%s, want 200 with the original message", repeat.Code, repeat.Body.String())
+	if repeat.Code != http.StatusCreated || !replayed(repeat) {
+		t.Fatalf("repeat: status=%d replayed=%v body=%s, want the original message replayed", repeat.Code, replayed(repeat), repeat.Body.String())
 	}
-	replayed := decodeBody[model.Message](t, repeat)
-	if replayed.ID != original.ID || replayed.Body != original.Body {
-		t.Fatalf("the repeat answered %#v, want the original %s", replayed, original.ID)
+	again := decodeBody[model.Message](t, repeat)
+	if again.ID != original.ID || again.Body != original.Body {
+		t.Fatalf("the repeat answered %#v, want the original %s", again, original.ID)
 	}
-	if len(replayed.Deliveries) != 1 || replayed.Deliveries[0].Attempt != 1 || replayed.Deliveries[0].State != "sent" {
-		t.Fatalf("the repeat's deliveries = %#v, want the original's one sent attempt", replayed.Deliveries)
+	if len(again.Deliveries) != 1 || again.Deliveries[0].Attempt != 1 || again.Deliveries[0].State != "sent" {
+		t.Fatalf("the repeat's deliveries = %#v, want the original's one sent attempt", again.Deliveries)
 	}
 	if messages := countMessages(t, database); messages != 1 {
 		t.Fatalf("the database holds %d messages, want the one send", messages)
@@ -207,9 +194,7 @@ func TestARepeatedKeyAnswersTheMessageItMadeAndDeliversOnce(t *testing.T) {
 // A deploy's signal cancels Dispatch's Lifetime before http.Server.Shutdown drains the requests in
 // flight, and Shutdown waits for each of them. A send the listener is still answering at that
 // signal therefore finishes inside the drain: its attempt settles sent, and the page's retry under
-// its key is answered 200 with that message and hands the session nothing more. A send cut off at
-// the signal left its attempt pending under a live claim, which that retry reads as a sender still
-// in flight: it answered 200 with nothing on its way, and the page stopped trying.
+// its key is answered with that message and hands the session nothing more.
 func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 	held := make(chan struct{})
 	release := make(chan struct{})
@@ -234,9 +219,7 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: lifetime})
 	const body = "Ship it once the checks are green."
 	send := func() *httptest.ResponseRecorder {
-		return postAgentMessage(t, handler, "s1", map[string]any{
-			"body": body, "delivery": "steer", "idempotency_key": "press-1",
-		}, "alice")
+		return postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": body, "delivery": "steer"}, "alice", "press-1")
 	}
 
 	answered := make(chan *httptest.ResponseRecorder, 1)
@@ -279,13 +262,13 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 	}
 
 	retry := send()
-	if retry.Code != http.StatusOK {
-		t.Fatalf("the retry under the key: status=%d body=%s, want 200 with the message", retry.Code, retry.Body.String())
+	if retry.Code != http.StatusCreated || !replayed(retry) {
+		t.Fatalf("the retry under the key: status=%d body=%s, want the message replayed", retry.Code, retry.Body.String())
 	}
-	replayed := decodeBody[model.Message](t, retry)
-	if replayed.ID != messageID || len(replayed.Deliveries) != 1 || replayed.Deliveries[0].Attempt != 1 ||
-		replayed.Deliveries[0].State != "sent" {
-		t.Fatalf("the retry answered %#v, want message %s with its one sent attempt", replayed, messageID)
+	again := decodeBody[model.Message](t, retry)
+	if again.ID != messageID || len(again.Deliveries) != 1 || again.Deliveries[0].Attempt != 1 ||
+		again.Deliveries[0].State != "sent" {
+		t.Fatalf("the retry answered %#v, want message %s with its one sent attempt", again, messageID)
 	}
 	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
 		t.Fatalf("listener sends = %v, want the one send and no second", got)
@@ -296,14 +279,13 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 }
 
 // A key names one request. Reused for a different one - another message, mode, session or reply -
-// it is refused naming the message that used it, and nothing is written or sent: that message says
-// something else, so answering with it would tell the caller a message it never sent had gone out.
+// it is refused 422 naming the send that used it, and nothing is written or sent: that message
+// says something else, so answering with it would tell the caller a message it never sent had
+// gone out.
 func TestAKeyReusedForAnotherMessageIsRefused(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
-	created := postAgentMessage(t, handler, "s1", map[string]any{
-		"body": "Status?", "delivery": "btw", "idempotency_key": "reused",
-	}, "alice")
+	created := postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Status?", "delivery": "btw"}, "alice", "reused")
 	if created.Code != http.StatusCreated {
 		t.Fatalf("send: status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -320,19 +302,11 @@ func TestAKeyReusedForAnotherMessageIsRefused(t *testing.T) {
 		"another reply":   {"s1", map[string]any{"body": "Status?", "delivery": "btw", "in_reply_to": original.ID}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			changed.input["idempotency_key"] = "reused"
-			response := postAgentMessage(t, handler, changed.session, changed.input, "alice")
-			if response.Code != http.StatusConflict {
-				t.Fatalf("status=%d body=%s, want 409", response.Code, response.Body.String())
-			}
-			refusal := decodeBody[struct {
-				Code      string `json:"code"`
-				Error     string `json:"error"`
-				MessageID string `json:"message_id"`
-			}](t, response)
-			if refusal.Code != "MESSAGE_KEY_REUSED" || refusal.MessageID != original.ID ||
-				!strings.Contains(refusal.Error, "this request was not sent") {
-				t.Fatalf("refusal = %#v, want MESSAGE_KEY_REUSED naming %s and saying nothing was sent", refusal, original.ID)
+			response := postAgentMessageKeyed(t, handler, changed.session, changed.input, "alice", "reused")
+			code, text := refusalOf(t, response)
+			if response.Code != http.StatusUnprocessableEntity || code != contracts.IdempotencyKeyReused ||
+				!strings.Contains(text, "POST /api/v1/agents/s1/messages") || !strings.Contains(text, "this request was not run") {
+				t.Fatalf("status=%d code=%s error=%q, want 422 %s naming the first send", response.Code, code, text, contracts.IdempotencyKeyReused)
 			}
 		})
 	}
@@ -342,22 +316,19 @@ func TestAKeyReusedForAnotherMessageIsRefused(t *testing.T) {
 	}
 }
 
-// A retry racing its original, sixteen times over: every request carrying one key is past the
-// replay check before any writes, so all of them reach the key's insert together. The key's
-// primary key makes each but one wait for the first and roll back, and the session is handed the
-// message once, whichever request opens its attempt.
-func TestTwoConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
+// A retry racing its original, sixteen times over, all held at the key's insert until the last of
+// them has arrived there: one makes the message and every other is told the first is in flight or,
+// once it has answered, given its answer. The session is handed the message once.
+func TestConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	ctx := context.Background()
-	// The table lock holds every request at its key's insert, past the replay check, until the
-	// last of them has arrived there.
 	holder, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the holder: %v", err)
 	}
 	defer holder.Rollback(ctx)
-	if _, err := holder.Exec(ctx, `lock table agent_message_idempotency_keys in share mode`); err != nil {
+	if _, err := holder.Exec(ctx, `lock table request_keys in share mode`); err != nil {
 		t.Fatalf("lock the key table: %v", err)
 	}
 
@@ -365,9 +336,7 @@ func TestTwoConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
 	responses := make(chan *httptest.ResponseRecorder, senders)
 	for range senders {
 		go func() {
-			responses <- postAgentMessage(t, handler, "s1", map[string]any{
-				"body": "Status?", "delivery": "btw", "idempotency_key": "race",
-			}, "alice")
+			responses <- postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Status?", "delivery": "btw"}, "alice", "race")
 		}()
 	}
 	// Sixteen connections, less the holder's: every request that got one waits at the insert, and
@@ -377,26 +346,30 @@ func TestTwoConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
 		t.Fatalf("release the key table: %v", err)
 	}
 
-	codes := map[int]int{}
+	fresh := 0
 	ids := map[string]struct{}{}
 	for range senders {
 		select {
 		case response := <-responses:
-			codes[response.Code]++
-			if response.Code == http.StatusOK || response.Code == http.StatusCreated {
+			switch {
+			case response.Code == http.StatusCreated:
+				if !replayed(response) {
+					fresh++
+				}
 				ids[decodeBody[model.Message](t, response).ID] = struct{}{}
-			} else {
+			case response.Code == http.StatusConflict:
+				if code, _ := refusalOf(t, response); code != contracts.IdempotencyKeyInFlight {
+					t.Errorf("409 %s, want %s", code, contracts.IdempotencyKeyInFlight)
+				}
+			default:
 				t.Errorf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		case <-time.After(20 * time.Second):
 			t.Fatal("a concurrent send did not answer")
 		}
 	}
-	if codes[http.StatusCreated] != 1 || codes[http.StatusOK] != senders-1 {
-		t.Fatalf("status codes = %v, want one 201 and %d 200s", codes, senders-1)
-	}
-	if len(ids) != 1 {
-		t.Fatalf("the answers name %d messages, want one", len(ids))
+	if fresh != 1 || len(ids) != 1 {
+		t.Fatalf("%d fresh answers naming %d messages, want one of each", fresh, len(ids))
 	}
 	if messages := countMessages(t, database); messages != 1 {
 		t.Fatalf("the database holds %d messages, want one", messages)
@@ -419,9 +392,7 @@ func TestAKeyIsHeldPerPerson(t *testing.T) {
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	send := func(login string) *httptest.ResponseRecorder {
 		t.Helper()
-		return postAgentMessage(t, handler, "s1", map[string]any{
-			"body": "Status?", "delivery": "btw", "idempotency_key": "shared",
-		}, login)
+		return postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Status?", "delivery": "btw"}, login, "shared")
 	}
 
 	alices := send("alice")
@@ -430,15 +401,15 @@ func TestAKeyIsHeldPerPerson(t *testing.T) {
 	}
 	original := decodeBody[model.Message](t, alices).ID
 	bobs := send("bob")
-	if bobs.Code != http.StatusCreated {
+	if bobs.Code != http.StatusCreated || replayed(bobs) {
 		t.Fatalf("bob's send under alice's key: status=%d body=%s, want a message of his own", bobs.Code, bobs.Body.String())
 	}
 	if got := decodeBody[model.Message](t, bobs).ID; got == original {
 		t.Fatalf("bob's send answered alice's message %s", original)
 	}
 	again := send("Alice")
-	if again.Code != http.StatusOK {
-		t.Fatalf("Alice's repeat: status=%d body=%s, want 200", again.Code, again.Body.String())
+	if !replayed(again) {
+		t.Fatalf("Alice's repeat: status=%d body=%s, want alice's message replayed", again.Code, again.Body.String())
 	}
 	if got := decodeBody[model.Message](t, again).ID; got != original {
 		t.Fatalf("Alice's repeat answered %s, want alice's message %s", got, original)
@@ -449,8 +420,8 @@ func TestAKeyIsHeldPerPerson(t *testing.T) {
 }
 
 // The page gives up on a send - a closed tab, its own deadline - after the message committed,
-// while the listener still holds the frame. The delivery runs on past the request: the attempt
-// settles sent, and the page's retry under the key is answered the message, sending nothing again.
+// while the listener still holds the frame. The delivery runs on past the request, the key keeps
+// its answer, and the page's retry under the key is answered the message, sending nothing again.
 func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
 	sending := make(chan struct{})
 	release := make(chan struct{})
@@ -464,7 +435,7 @@ func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
 	})
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 
-	input := map[string]any{"body": "Deploy now.", "delivery": "steer", "idempotency_key": "abort-1"}
+	input := map[string]any{"body": "Deploy now.", "delivery": "steer"}
 	data, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
@@ -474,6 +445,7 @@ func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
 	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/agents/s1/messages", bytes.NewReader(data))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Dispatch-User", "alice")
+	request.Header.Set(contracts.IdempotencyKeyHeader, "abort-1")
 	answered := make(chan struct{})
 	go func() {
 		defer close(answered)
@@ -501,9 +473,9 @@ func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
 		t.Fatalf("the cut-off send's attempts = %#v, want one attempt settled sent", attempts)
 	}
 
-	retry := postAgentMessage(t, handler, "s1", input, "alice")
-	if retry.Code != http.StatusOK {
-		t.Fatalf("the page's retry: status=%d body=%s, want 200", retry.Code, retry.Body.String())
+	retry := postAgentMessageKeyed(t, handler, "s1", input, "alice", "abort-1")
+	if retry.Code != http.StatusCreated || !replayed(retry) {
+		t.Fatalf("the page's retry: status=%d body=%s, want the message replayed", retry.Code, retry.Body.String())
 	}
 	if got := decodeBody[model.Message](t, retry); got.ID != id || len(got.Deliveries) != 1 || got.Deliveries[0].State != "sent" {
 		t.Fatalf("the retry answered %#v, want message %s with its one sent attempt", got, id)
@@ -513,25 +485,35 @@ func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
 	}
 }
 
-// A process that died between a send's commit and its first attempt leaves a message with no
-// attempt at all. The page's retry under the key starts that delivery, in the message's own mode,
-// and a later repeat finds it on its way and sends nothing more.
-func TestARetryOfAMessageWithNoAttemptDeliversIt(t *testing.T) {
+// A process that died between a send's commit and its answer leaves the message with no attempt
+// at all and its key in flight, holding the message as its recovery point. A retry inside the lease
+// is told the first is in flight and sends nothing; the first past it starts the delivery, in the
+// message's own mode, rather than making the message again, and a later repeat finds it on its way
+// and sends nothing more.
+func TestARetryOfAMessageCommittedWithoutAnAnswerDeliversIt(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
-	id := commitKeyedMessage(t, database, "undelivered", "Still there?", "aside")
-	retry := func() model.Message {
+	id := commitKeyedMessage(t, database, "undelivered", "Still there?", "aside", 0, nil)
+	retry := func() *httptest.ResponseRecorder {
 		t.Helper()
-		response := postAgentMessage(t, handler, "s1", map[string]any{
-			"body": "Still there?", "delivery": "aside", "idempotency_key": "undelivered",
-		}, "alice")
-		if response.Code != http.StatusOK {
-			t.Fatalf("retry: status=%d body=%s, want 200", response.Code, response.Body.String())
-		}
-		return decodeBody[model.Message](t, response)
+		return postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Still there?", "delivery": "aside"}, "alice", "undelivered")
 	}
 
-	got := retry()
+	if inFlight := retry(); inFlight.Code != http.StatusConflict {
+		t.Fatalf("a retry inside the lease: status=%d body=%s, want 409 %s", inFlight.Code, inFlight.Body.String(), contracts.IdempotencyKeyInFlight)
+	}
+	if got := sends.targets(); len(got) != 0 {
+		t.Fatalf("a retry inside the lease sent %v, want nothing", got)
+	}
+	if _, err := database.Pool.Exec(context.Background(),
+		`update request_keys set leased_at = now() - interval '2 minutes'`); err != nil {
+		t.Fatalf("lapse the lease: %v", err)
+	}
+	resumed := retry()
+	if resumed.Code != http.StatusCreated || !replayed(resumed) {
+		t.Fatalf("a retry past the lease: status=%d body=%s, want the message replayed", resumed.Code, resumed.Body.String())
+	}
+	got := decodeBody[model.Message](t, resumed)
 	if got.ID != id || len(got.Deliveries) != 1 || got.Deliveries[0].Attempt != 1 ||
 		got.Deliveries[0].State != "sent" || got.Deliveries[0].Delivery != "aside" || got.Deliveries[0].SessionID != "s1" {
 		t.Fatalf("the retry answered %#v, want message %s with attempt 1 sent to s1 as an aside", got, id)
@@ -539,20 +521,24 @@ func TestARetryOfAMessageWithNoAttemptDeliversIt(t *testing.T) {
 	if keys := keysOf(sends); !equalStrings(keys, []string{id + ":aside"}) {
 		t.Fatalf("listener sends = %v, want the message once, in its own mode", keys)
 	}
-	if again := retry(); len(again.Deliveries) != 1 {
+	if again := decodeBody[model.Message](t, retry()); len(again.Deliveries) != 1 {
 		t.Fatalf("a second retry's deliveries = %#v, want the one attempt", again.Deliveries)
+	}
+	if messages := countMessages(t, database); messages != 1 {
+		t.Fatalf("the database holds %d messages, want the one", messages)
 	}
 	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
 		t.Fatalf("listener sends = %v, want one frame", got)
 	}
 }
 
-// A sender that claimed a send's attempt and never came back leaves it pending. While its claim
-// is live it may still be sending, and a retry under the key leaves it to that sender; once the
-// claim has lapsed the retry resumes the attempt under its own number, and so its own idempotency
-// key, as a same-mode retry from the agent card does - an attempt stranded before anything was
-// resolved included, which takes the message's session.
+// A sender that claimed a send's attempt and never came back leaves it pending, though the send
+// itself was answered. While its claim is live it may still be sending, and a retry under the key
+// leaves it to that sender; once the claim has lapsed the retry resumes the attempt under its own
+// number, and so its own delivery key, as a same-mode retry from the agent card does - an attempt
+// stranded before anything was resolved included, which takes the message's session.
 func TestARetryOfAStrandedSendResumesItsAttempt(t *testing.T) {
+	created := http.StatusCreated
 	for name, pinned := range map[string]string{
 		"an attempt naming its session":        "s1",
 		"an attempt stranded before resolving": "",
@@ -560,15 +546,13 @@ func TestARetryOfAStrandedSendResumesItsAttempt(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			listener, sends := newBroadcastListener(t, agentSessions)
 			handler, database := newTargetedMessageHandler(t, listener.URL)
-			id := commitKeyedMessage(t, database, "stranded", "Status?", "steer")
+			id := commitKeyedMessage(t, database, "stranded", "Status?", "steer", 0, &created)
 			strandAttempt(t, database, id, "steer", pinned, 0)
 			retry := func() model.Message {
 				t.Helper()
-				response := postAgentMessage(t, handler, "s1", map[string]any{
-					"body": "Status?", "delivery": "steer", "idempotency_key": "stranded",
-				}, "alice")
-				if response.Code != http.StatusOK {
-					t.Fatalf("retry: status=%d body=%s, want 200", response.Code, response.Body.String())
+				response := postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Status?", "delivery": "steer"}, "alice", "stranded")
+				if response.Code != http.StatusCreated || !replayed(response) {
+					t.Fatalf("retry: status=%d body=%s, want the message replayed", response.Code, response.Body.String())
 				}
 				return decodeBody[model.Message](t, response)
 			}
@@ -614,19 +598,17 @@ func TestARetryIsAnsweredWhileTheListenerIsDown(t *testing.T) {
 		return true
 	})
 	handler, database := newTargetedMessageHandler(t, listener.URL)
-	input := func() map[string]any {
-		return map[string]any{"body": "Status?", "delivery": "btw", "idempotency_key": "before-the-outage"}
-	}
-	created := postAgentMessage(t, handler, "s1", input(), "alice")
+	input := map[string]any{"body": "Status?", "delivery": "btw"}
+	created := postAgentMessageKeyed(t, handler, "s1", input, "alice", "before-the-outage")
 	if created.Code != http.StatusCreated {
 		t.Fatalf("send: status=%d body=%s", created.Code, created.Body.String())
 	}
 	original := decodeBody[model.Message](t, created)
 
 	down.Store(true)
-	repeat := postAgentMessage(t, handler, "s1", input(), "alice")
-	if repeat.Code != http.StatusOK {
-		t.Fatalf("a repeat while the listener is down: status=%d body=%s, want 200", repeat.Code, repeat.Body.String())
+	repeat := postAgentMessageKeyed(t, handler, "s1", input, "alice", "before-the-outage")
+	if repeat.Code != http.StatusCreated || !replayed(repeat) {
+		t.Fatalf("a repeat while the listener is down: status=%d body=%s, want the message replayed", repeat.Code, repeat.Body.String())
 	}
 	if got := decodeBody[model.Message](t, repeat); got.ID != original.ID || len(got.Deliveries) != 1 || got.Deliveries[0].State != "sent" {
 		t.Fatalf("the repeat answered %#v, want message %s with its one sent attempt", got, original.ID)
@@ -635,12 +617,10 @@ func TestARetryIsAnsweredWhileTheListenerIsDown(t *testing.T) {
 		t.Fatalf("the repeat asked the listener %d times, want none", n)
 	}
 
-	id := commitKeyedMessage(t, database, "undelivered", "Still there?", "aside")
-	retry := postAgentMessage(t, handler, "s1", map[string]any{
-		"body": "Still there?", "delivery": "aside", "idempotency_key": "undelivered",
-	}, "alice")
-	if retry.Code != http.StatusOK {
-		t.Fatalf("a retry of an undelivered send while the listener is down: status=%d body=%s, want 200", retry.Code, retry.Body.String())
+	id := commitKeyedMessage(t, database, "undelivered", "Still there?", "aside", 2*time.Minute, nil)
+	retry := postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Still there?", "delivery": "aside"}, "alice", "undelivered")
+	if retry.Code != http.StatusCreated || !replayed(retry) {
+		t.Fatalf("a retry of an undelivered send while the listener is down: status=%d body=%s, want the message replayed", retry.Code, retry.Body.String())
 	}
 	got := decodeBody[model.Message](t, retry)
 	if got.ID != id || len(got.Deliveries) != 1 || got.Deliveries[0].State != "failed" ||
@@ -649,5 +629,77 @@ func TestARetryIsAnsweredWhileTheListenerIsDown(t *testing.T) {
 	}
 	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
 		t.Fatalf("listener sends = %v, want the original's one", got)
+	}
+}
+
+// A send whose key a repeat took over while it was slow commits nothing: its message and its
+// recovery point roll back together, and the repeat that holds the key makes the send instead.
+func TestASendThatLostItsKeyCommitsNothing(t *testing.T) {
+	listener, sends := newBroadcastListener(t, agentSessions)
+	_, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	holdRequestKey(t, database, heldKey{
+		login: "alice", key: "slow", pattern: agentMessagePattern,
+		request: jsonRequest(t, http.MethodPost, "/api/v1/agents/s1/messages",
+			map[string]any{"body": "Status?", "delivery": "btw"}, map[string]string{"session_id": "s1"}),
+	})
+	// The repeat past the lease took the key over: the slow holder still holds attempt 1.
+	if _, err := database.Pool.Exec(context.Background(), `update request_keys set attempt = 2`); err != nil {
+		t.Fatalf("take the key over: %v", err)
+	}
+	slow := context.WithValue(store.WithTransactionTracking(context.Background()), requestKeyClaimKey{},
+		requestKeyClaim{login: "alice", key: "slow", attempt: 1})
+	target := "session:s1"
+	delivery := "btw"
+	_, _, err := directServer(deps).createStoredMessage(slow, nil,
+		createMessageInput{Body: "Status?", Target: &target, Delivery: &delivery}, "btw",
+		model.Actor{Kind: "user", ID: "alice"}, true)
+	if err != errRequestKeyTakenOver {
+		t.Fatalf("the slow holder's write = %v, want %v", err, errRequestKeyTakenOver)
+	}
+	if messages := countMessages(t, database); messages != 0 {
+		t.Fatalf("the database holds %d messages, want none", messages)
+	}
+	if got := sends.targets(); len(got) != 0 {
+		t.Fatalf("listener sends = %v, want none", got)
+	}
+	var recovery *string
+	if err := database.Pool.QueryRow(context.Background(), `select recovery::text from request_keys`).Scan(&recovery); err != nil || recovery != nil {
+		t.Fatalf("the key's recovery point = %v (%v), want none", recovery, err)
+	}
+}
+
+// A send that committed its message and then failed - a 5xx, a panic - releases its key with its
+// recovery point kept, so the next attempt is answered from the message at once, not refused as in
+// flight and never made twice. A request that committed nothing has its key deleted instead.
+func TestAFailureAfterTheSendCommittedIsAnsweredFromItsMessage(t *testing.T) {
+	listener, sends := newBroadcastListener(t, agentSessions)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	id := commitKeyedMessage(t, database, "failed-after-commit", "Status?", "btw", 0, nil)
+	directServer(deps).releaseRequestKey(context.Background(), requestKeyClaim{login: "alice", key: "failed-after-commit", attempt: 1})
+	if rows := countRequestKeys(t, database); rows != 1 {
+		t.Fatalf("the release left %d key rows, want the one keeping its recovery point", rows)
+	}
+	retry := postAgentMessageKeyed(t, handler, "s1", map[string]any{"body": "Status?", "delivery": "btw"}, "alice", "failed-after-commit")
+	if retry.Code != http.StatusCreated || !replayed(retry) {
+		t.Fatalf("the next attempt: status=%d body=%s, want the message replayed", retry.Code, retry.Body.String())
+	}
+	if got := decodeBody[model.Message](t, retry); got.ID != id || len(got.Deliveries) != 1 || got.Deliveries[0].State != "sent" {
+		t.Fatalf("the next attempt answered %#v, want message %s sent once", got, id)
+	}
+	if messages := countMessages(t, database); messages != 1 {
+		t.Fatalf("the database holds %d messages, want the one", messages)
+	}
+	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
+		t.Fatalf("listener sends = %v, want one frame", got)
+	}
+
+	holdRequestKey(t, database, heldKey{
+		login: "alice", key: "failed-before-commit", pattern: agentMessagePattern,
+		request: jsonRequest(t, http.MethodPost, "/api/v1/agents/s1/messages",
+			map[string]any{"body": "Status?", "delivery": "btw"}, map[string]string{"session_id": "s1"}),
+	})
+	directServer(deps).releaseRequestKey(context.Background(), requestKeyClaim{login: "alice", key: "failed-before-commit", attempt: 1})
+	if rows := countRequestKeys(t, database); rows != 1 {
+		t.Fatalf("after releasing a key that committed nothing there are %d key rows, want only the first", rows)
 	}
 }

@@ -175,7 +175,7 @@ func TestAgentsListsCapabilitiesForBearerCallers(t *testing.T) {
 	}
 
 	response = bearerRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
-		"body": "hi", "delivery": "btw", "idempotency_key": "bearer-send",
+		"body": "hi", "delivery": "btw",
 		"actor": map[string]string{"kind": "session", "id": "s2"},
 	})
 	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {

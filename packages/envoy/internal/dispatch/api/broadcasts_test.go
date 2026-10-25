@@ -76,14 +76,17 @@ func (l *broadcastListener) targets() []string {
 	return targets
 }
 
-// postBroadcast sends one create as login, minting an idempotency key when the input names
-// none: every send carries one, and most tests have no interest in which.
+// postBroadcast sends one create as login under a key of its own, as the dashboard sends every
+// write; most tests have no interest in which.
 func postBroadcast(t *testing.T, handler http.Handler, input map[string]any, login string) *httptest.ResponseRecorder {
 	t.Helper()
-	if _, ok := input["idempotency_key"]; !ok {
-		input["idempotency_key"] = uuid.NewString()
-	}
-	return dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", input, login)
+	return postBroadcastKeyed(t, handler, input, login, uuid.NewString())
+}
+
+// postBroadcastKeyed sends one create as login under key.
+func postBroadcastKeyed(t *testing.T, handler http.Handler, input map[string]any, login, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	return keyedRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", input, login, key)
 }
 
 // broadcastResponse mirrors the create and read shapes the browser consumes.
@@ -415,7 +418,7 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	}{
 		"create": {http.MethodPost, "/api/v1/broadcasts", map[string]any{
 			"body": "From a session", "delivery": "btw", "session_ids": []string{"planner"},
-			"idempotency_key": "from-a-session", "actor": map[string]string{"kind": "session", "id": "tester"},
+			"actor": map[string]string{"kind": "session", "id": "tester"},
 		}},
 		"list": {http.MethodGet, "/api/v1/broadcasts", nil},
 		"read": {http.MethodGet, "/api/v1/broadcasts/" + created.ID, nil},
@@ -449,18 +452,6 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 			map[string]any{"body": strings.Repeat("x", contracts.DispatchBodyMax+1), "delivery": "btw", "session_ids": []string{"planner"}},
 			"CAP_EXCEEDED",
 		},
-		"key with a space": {
-			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "press 1"},
-			"BROADCAST_INPUT",
-		},
-		"key with a slash": {
-			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "a/b"},
-			"BROADCAST_INPUT",
-		},
-		"over the key cap": {
-			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": strings.Repeat("k", 129)},
-			"CAP_EXCEEDED",
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := postBroadcast(t, handler, input.body, "alice")
@@ -469,25 +460,22 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 			}
 		})
 	}
-	// A tab opened before send keys shipped posts none. Its failed row is the only copy of the
-	// message and a reload drops it, so the refusal it shows says what to do, in order.
-	t.Run("no key", func(t *testing.T) {
+	// The key is a header now (INFRA-258): a body still naming one, as a tab opened before the
+	// cutover sends it with no header, is a member the route does not take.
+	t.Run("a body key", func(t *testing.T) {
 		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
-			"body": "hi", "delivery": "btw", "session_ids": []string{"planner"},
+			"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "press-1",
 		}, "alice")
-		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"BROADCAST_INPUT"`) {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
-		for _, phrase := range []string{"Restore draft", "reload the page"} {
-			if !strings.Contains(response.Body.String(), phrase) {
-				t.Fatalf("the refusal %s does not say %q", response.Body.String(), phrase)
-			}
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_JSON"`) ||
+			!strings.Contains(response.Body.String(), "idempotency_key") {
+			t.Fatalf("status=%d body=%s, want 400 INVALID_JSON naming idempotency_key", response.Code, response.Body.String())
 		}
 	})
-	if accepted := postBroadcast(t, handler, map[string]any{
-		"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "A1._:-z",
-	}, "alice"); accepted.Code != http.StatusCreated {
-		t.Fatalf("a key using every allowed class: status=%d body=%s", accepted.Code, accepted.Body.String())
+	// A send without a key is sent, as any write without one is: it is only not replayed.
+	if keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+		"body": "hi", "delivery": "btw", "session_ids": []string{"planner"},
+	}, "alice"); keyless.Code != http.StatusCreated {
+		t.Fatalf("a keyless send: status=%d body=%s, want 201", keyless.Code, keyless.Body.String())
 	}
 
 	missing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts/5a660655-04ad-4ce0-8a9b-93dd03c412b7", nil, "alice")

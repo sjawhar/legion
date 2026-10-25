@@ -60,7 +60,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issueKey := r.PathValue("key")
-	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor, nil)
+	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor, false)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -68,25 +68,24 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, withAdvice(message, advice))
 }
 
-// createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session,
-// named by its idempotency key (agent_message_keys.go).
+// createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session.
+// A send under an Idempotency-Key commits its message as the key's recovery point, and a repeat is
+// answered from it (replayAgentMessage).
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
 		return
 	}
 	var input struct {
-		Body           string  `json:"body"`
-		Delivery       string  `json:"delivery"`
-		InReplyTo      *string `json:"in_reply_to"`
-		IdempotencyKey string  `json:"idempotency_key"`
+		Body      string  `json:"body"`
+		Delivery  string  `json:"delivery"`
+		InReplyTo *string `json:"in_reply_to"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	sessionID := r.PathValue("session_id")
-	target := "session:" + sessionID
+	target := "session:" + r.PathValue("session_id")
 	messageInput := createMessageInput{
 		Body: input.Body, InReplyTo: input.InReplyTo, Target: &target, Delivery: &input.Delivery,
 	}
@@ -95,25 +94,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := validateIdempotencyKey(input.IdempotencyKey, "MESSAGE_INPUT", agentMessageKeyRequired); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	key := newAgentMessageKey(actor, input.IdempotencyKey, sessionID, input.Body, delivery, input.InReplyTo)
-	// A key this person has already used answers its message before anything is written or the
-	// listener is read: a retry of a send that landed must not fail because the listener is down.
-	if s.answerHeldAgentMessageKey(r.Context(), w, key, delivery, actor) {
-		return
-	}
-	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor, &key)
-	if errors.Is(err, errAgentMessageKeyHeld) {
-		// Two requests with one key reached the write together; the other committed first, and
-		// this one's transaction rolled back - message, key and event with it.
-		if !s.answerHeldAgentMessageKey(r.Context(), w, key, delivery, actor) {
-			s.writeHandlerError(w, fmt.Errorf("message key %q was held and then not found", key.key))
-		}
-		return
-	}
+	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor, true)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -121,16 +102,106 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, message)
 }
 
-// createStoredMessage writes one message, and key's row with it when the send carries one, in a
-// single transaction, then sends a targeted message's first attempt. A key another request of this
-// person's committed first is errAgentMessageKeyHeld, with nothing written.
+// agentMessageRecovery is the recovery point a keyed single-session send commits with its message
+// (bindRequestKeyRecovery): the message, and the mode it was sent in.
+type agentMessageRecovery struct {
+	MessageID string `json:"message_id"`
+	Delivery  string `json:"delivery"`
+}
+
+// replayAgentMessage answers a repeat of a keyed single-session send whose message committed: the
+// message as GET /api/v1/agents/{session_id}/messages reads it, with its deliveries as they stand,
+// once sendHeldMessageOn has put it on its way, under the send's own 201. It is answered from the
+// database before the listener is read, so a repeat never fails because the listener is down.
+func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, recovery json.RawMessage) {
+	ctx := r.Context()
+	var point agentMessageRecovery
+	if err := json.Unmarshal(recovery, &point); err != nil {
+		s.writeHandlerError(w, fmt.Errorf("read a send's recovery point: %w", err))
+		return
+	}
+	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", point.MessageID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.sendHeldMessageOn(ctx, message, point.Delivery); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, []string{message.ID})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	message.Deliveries = deliveries[message.ID]
+	WriteJSON(w, http.StatusCreated, message)
+}
+
+// sendHeldMessageOn makes sure a keyed send's message is on its way before its repeat is answered,
+// in the mode it was sent in, as its author's send. A message with no attempt at all - its process
+// died between the commit and the attempt, or its own request is between them right now - gets its
+// first attempt; one whose only attempt is pending with a lapsed claim has it resumed under its
+// original number, as a same-mode retry from the agent card does. Either way the send is bound to
+// that attempt (deliverMessageResuming), so of two requests that both find it owed, one sends and
+// the other finds the attempt taken and sends nothing. A pending attempt whose claim is live is in
+// flight and left to its sender; an attempt that settled, and a message with more than one attempt,
+// which a person has already retried from the agent card, owe nothing. The send runs on past the
+// request, as the original's does, and a listener it cannot reach is recorded on the attempt, never
+// returned.
+func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, delivery string) error {
+	attempt, err := s.attemptOwed(ctx, message.ID)
+	if err != nil || attempt == 0 {
+		return err
+	}
+	sending := context.WithoutCancel(ctx)
+	if _, err := s.deliverMessageResuming(sending, message, delivery, nil, message.Author, nil, attempt); err != nil &&
+		!errors.Is(err, errAttemptNotPending) {
+		return err
+	}
+	return nil
+}
+
+// attemptOwed is the attempt sendHeldMessageOn sends, or 0 for none: the first of a message with no
+// attempt, or the only one when it is pending and its claim has lapsed, which Postgres judges
+// against the claimed_at it wrote (claimLapsed).
+func (s *server) attemptOwed(ctx context.Context, messageID string) (int, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select attempt, state = 'pending' and `+claimLapsed+`
+		from message_deliveries where message_id = $1 order by attempt
+	`, messageID)
+	if err != nil {
+		return 0, err
+	}
+	type attemptRow struct {
+		Attempt  int
+		Stranded bool
+	}
+	attempts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[attemptRow])
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case len(attempts) == 0:
+		return 1, nil
+	case len(attempts) == 1 && attempts[0].Stranded:
+		return attempts[0].Attempt, nil
+	default:
+		return 0, nil
+	}
+}
+
+// createStoredMessage writes one message in a single transaction, then sends a targeted message's
+// first attempt. recoverable commits the message as its keyed request's recovery point in that
+// transaction (bindRequestKeyRecovery), so a repeat under the key is answered with this message
+// however this request ends.
 func (s *server) createStoredMessage(
 	ctx context.Context,
 	issueKey *string,
 	input createMessageInput,
 	delivery string,
 	actor model.Actor,
-	key *idempotencyKey,
+	recoverable bool,
 ) (model.Message, *writeAdvice, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -186,11 +257,11 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
-	// The key's row right after its message and before the event append, so a request racing this
-	// one under the same key waits on that row before it takes the events' global lock, which this
-	// transaction still needs to commit, and is refused the key once it does (insertAgentMessageKey).
-	if key != nil {
-		if err := insertAgentMessageKey(ctx, tx, *key, message.ID); err != nil {
+	// The recovery point right after its message and before the event append: a repeat that took
+	// the key over meanwhile refuses it here, and this transaction rolls back before it takes the
+	// events' global lock.
+	if recoverable {
+		if err := bindRequestKeyRecovery(ctx, tx, agentMessageRecovery{MessageID: message.ID, Delivery: delivery}); err != nil {
 			return model.Message{}, nil, err
 		}
 	}

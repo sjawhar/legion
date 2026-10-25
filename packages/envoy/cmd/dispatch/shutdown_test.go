@@ -227,8 +227,8 @@ func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T)
 	}
 	answered := make(chan answer, 1)
 	go func() {
-		response, err := process.send(http.MethodPost, "/api/v1/agents/"+sessionID+"/messages",
-			`{"body":"Ship it once the checks are green.","delivery":"steer","idempotency_key":"press-1"}`)
+		response, err := process.sendKeyed(http.MethodPost, "/api/v1/agents/"+sessionID+"/messages",
+			`{"body":"Ship it once the checks are green.","delivery":"steer"}`, "press-1")
 		if err != nil {
 			answered <- answer{err: err}
 			return
@@ -296,6 +296,15 @@ func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T)
 	if !slices.Equal(attempts, []string{"1 sent"}) {
 		t.Fatalf("the send's attempts after exit = %v, want [1 sent]", attempts)
 	}
+	// The send's Idempotency-Key kept its answer inside the drain, holding its message, so the
+	// page's retry against the next process is answered from it rather than sent again.
+	var status *int
+	var recovered string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select status, coalesce(recovery ->> 'message_id', '') from request_keys where idempotency_key = 'press-1'`,
+	).Scan(&status, &recovered); err != nil || status == nil || *status != http.StatusCreated || recovered != message.ID {
+		t.Fatalf("the send's key after exit: status %v, recovery %q (%v), want 201 holding message %s", status, recovered, err, message.ID)
+	}
 }
 
 // A broadcast answers as soon as its messages are committed and delivers behind the response, so
@@ -350,9 +359,12 @@ func TestSIGTERMWithABroadcastAtTheListenerSettlesEveryRecipientBeforeExit(t *te
 		Env: map[string]string{"ENVOY_URL": listener.URL},
 	})
 	process.waitHealthy(t)
-	process.call(t, http.MethodPost, "/api/v1/broadcasts",
-		`{"body":"Status before the deploy?","delivery":"btw","session_ids":["s1","s2","s3"],"idempotency_key":"press-1"}`,
-		http.StatusCreated)
+	if response, err := process.sendKeyed(http.MethodPost, "/api/v1/broadcasts",
+		`{"body":"Status before the deploy?","delivery":"btw","session_ids":["s1","s2","s3"]}`, "press-1"); err != nil {
+		t.Fatalf("broadcast: %v", err)
+	} else if response.Body.Close(); response.StatusCode != http.StatusCreated {
+		t.Fatalf("broadcast: status %d, want 201", response.StatusCode)
+	}
 	select {
 	case <-held:
 	case <-time.After(10 * time.Second):
@@ -845,12 +857,21 @@ func (p *dispatchProcess) call(t *testing.T, method, path, body string, status i
 
 // send sends body to path as the test's login.
 func (p *dispatchProcess) send(method, path, body string) (*http.Response, error) {
+	return p.sendKeyed(method, path, body, "")
+}
+
+// sendKeyed sends body to path as the test's login, under the Idempotency-Key key when it is not
+// empty, as the dashboard sends a write.
+func (p *dispatchProcess) sendKeyed(method, path, body, key string) (*http.Response, error) {
 	request, err := http.NewRequest(method, p.url(path), strings.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
+	if key != "" {
+		request.Header.Set("Idempotency-Key", key)
+	}
 	return http.DefaultClient.Do(request)
 }
 

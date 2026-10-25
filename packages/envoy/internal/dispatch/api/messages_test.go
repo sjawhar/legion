@@ -720,7 +720,7 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 
 	nonHuman := bearerRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
-		"body": "Can I send this?", "delivery": "btw", "idempotency_key": "bearer-send",
+		"body": "Can I send this?", "delivery": "btw",
 		"actor": map[string]any{"kind": "session", "id": "s2"},
 	})
 	if nonHuman.Code != http.StatusForbidden || !strings.Contains(nonHuman.Body.String(), `"code":"HUMAN_ONLY"`) {

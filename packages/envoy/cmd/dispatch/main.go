@@ -379,7 +379,8 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
-	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
+	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule; the
+	// same pass deletes the Idempotency-Keys past their 24 hours (INFRA-258).
 	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
@@ -954,6 +955,11 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // the database has applied, read by the same probe (null when the database did not answer).
 // A deploy check compares the two with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess.
+//
+// `idempotency_keys` is true on every build that judges a write's Idempotency-Key (INFRA-258,
+// api/request_keys.go): the agents' client reads it before it retries a write under its key, since
+// an earlier Dispatch ignores the header and would run a retried write again. It is a fact of the
+// binary, never of the probe, so it is true whatever the database or NATS answer.
 func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
@@ -1004,13 +1010,17 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(struct {
-			OK            bool    `json:"ok"`
-			DB            bool    `json:"db"`
-			NATS          *bool   `json:"nats"`
-			Files         *bool   `json:"files"`
-			Commit        *string `json:"commit"`
-			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
+			OK              bool    `json:"ok"`
+			DB              bool    `json:"db"`
+			NATS            *bool   `json:"nats"`
+			Files           *bool   `json:"files"`
+			Commit          *string `json:"commit"`
+			SchemaVersion   *int    `json:"schema_version"`
+			IdempotencyKeys bool    `json:"idempotency_keys"`
+		}{
+			OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion,
+			IdempotencyKeys: true,
+		})
 	}
 }
 
