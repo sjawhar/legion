@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"maps"
 	"math"
 	"regexp"
 	"slices"
@@ -1115,7 +1114,8 @@ func slackDeliveredText(body map[string]any) string {
 		return ""
 	}
 	message := slackMessage(event)
-	walk := slackTextWalk{text: slackEventString(event, message, "text")}
+	var walk slackTextWalk
+	walk.take(slackEventString(event, message, "text"))
 	walk.walk(slackEventSlice(event, message, "attachments"))
 	walk.walk(slackEventSlice(event, message, "blocks"))
 	return walk.text
@@ -1124,6 +1124,8 @@ func slackDeliveredText(body map[string]any) string {
 // slackTextWalk collects the display strings of an attachment or block tree into one text.
 type slackTextWalk struct {
 	text string
+	// runes is the rune count of text, kept as it grows so no piece recounts the whole.
+	runes int
 	// full reports that the text has run past what an envelope carries, so nothing more is read.
 	full bool
 }
@@ -1136,10 +1138,12 @@ func (w *slackTextWalk) take(piece string) {
 	}
 	if w.text == "" {
 		w.text = piece
+		w.runes = utf8.RuneCountInString(piece)
 	} else {
 		w.text += "\n" + piece
+		w.runes += 1 + utf8.RuneCountInString(piece)
 	}
-	w.full = utf8.RuneCountInString(w.text) > maxEnvelopeTextRunes
+	w.full = w.runes > maxEnvelopeTextRunes
 }
 
 // walk takes the display strings of an object, then descends in sorted key order into its values
@@ -1154,10 +1158,16 @@ func (w *slackTextWalk) walk(value any) {
 		for _, field := range slackDisplayFields {
 			w.take(stringValue(node[field]))
 		}
-		for _, key := range slices.Sorted(maps.Keys(node)) {
-			if _, isString := node[key].(string); isString {
-				continue
+		// A block's leaves are commonly all strings, so the keys to descend into are collected
+		// before they are sorted: such a node then sorts and allocates nothing.
+		var keys []string
+		for key, item := range node {
+			if _, isString := item.(string); !isString {
+				keys = append(keys, key)
 			}
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
 			w.walk(node[key])
 			if w.full {
 				return
