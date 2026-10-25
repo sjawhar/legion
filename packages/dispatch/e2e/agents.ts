@@ -3,6 +3,7 @@ import { expect, type Locator, type Page } from "@playwright/test";
 import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { harnessPorts } from "./harness-ports";
+import { sessionIds } from "./session-ids";
 
 export interface FakeSession {
   session_id: string;
@@ -132,7 +133,7 @@ export const plannerSession: FakeSession = {
   dir: "/srv/planner",
   machine_id: "box-1",
   roles: ["planner"],
-  session_id: "planner-session",
+  session_id: sessionIds.planner,
   title: "Planner",
 };
 export const reviewerSession: FakeSession = {
@@ -140,7 +141,7 @@ export const reviewerSession: FakeSession = {
   dir: "/srv/reviewer",
   machine_id: "box-1",
   roles: ["reviewer"],
-  session_id: "reviewer-session",
+  session_id: sessionIds.reviewer,
   title: "Reviewer",
 };
 

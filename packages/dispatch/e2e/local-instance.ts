@@ -7,10 +7,17 @@ import { fileURLToPath } from "node:url";
 import { baseUrl, getInbox, listAgents, listBroadcasts, userHeaders } from "./api";
 import { type HarnessListener, harnessListeners } from "./harness-listeners";
 import { harnessPorts } from "./harness-ports";
-import { databaseUrlRefusal, Interrupted, Supervisor, shellQuote } from "./local-instance-support";
+import {
+  agentViewRefusal,
+  databaseUrlRefusal,
+  Interrupted,
+  Supervisor,
+  shellQuote,
+} from "./local-instance-support";
 import { isPortUsed, takenPorts } from "./port-probe";
 import { sqlAt } from "./psql";
 import { resetDatabase } from "./seed";
+import { sessionIds } from "./session-ids";
 import { seedWorkspace, workspaceSessionIds } from "./workspace";
 
 const dispatchPackage = fileURLToPath(new URL("..", import.meta.url));
@@ -158,6 +165,13 @@ async function main(): Promise<void> {
     workspaceSessionIds.every((id) => agents.has(id)),
     "agents listed"
   );
+  // The live view rides the live socket, not the API, and Dispatch refuses an agent view whose
+  // session id is not a uuid: a seed of named sessions passes every check above and still reads
+  // "This session's conversation is unavailable" at /agents/<id>/live.
+  const liveView = await untilInterrupted(
+    agentViewRefusal(baseUrl, await userHeaders("alice"), sessionIds.planner)
+  );
+  check(liveView === undefined, `the Planner's live view: ${liveView}`);
 
   // 6. Hand over, and run until Ctrl-C or until one of the processes stops by itself.
   const fakeEnvoy = `http://127.0.0.1:${harnessPorts.fakeEnvoy.port}`;
@@ -166,6 +180,7 @@ async function main(): Promise<void> {
       `  Open (signed in as alice): ${baseUrl}/auth/_dev/signin?login=alice&next=/\n` +
       `  Sign in as bob:            ${baseUrl}/auth/_dev/signin?login=bob&next=/\n` +
       `  Seeded broadcast:          ${baseUrl}/agents/broadcasts/${seeded.broadcast.id}\n` +
+      `  Planner's live view:       ${baseUrl}/agents/${sessionIds.planner}/live\n` +
       `  Agent bearer:              e2e-token (for a local Oh My Pi session: DISPATCH_URL=${baseUrl} ` +
       "DISPATCH_TOKEN=e2e-token, with DISPATCH_TOKEN_FILE unset since it wins)\n" +
       `  Database (truncated and reseeded on every start): ${databaseUrl}\n` +

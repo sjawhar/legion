@@ -11,7 +11,7 @@ const scrum: FakeSession = {
   dir: "/workspaces/scrum-bot",
   machine_id: "build-host",
   roles: ["planner"],
-  session_id: "scrum-session",
+  session_id: "019a1c11-6d4b-7e8a-bf39-4a1b5c8d9e11",
   title: "Scrum planning",
 };
 const release: FakeSession = {
@@ -19,7 +19,7 @@ const release: FakeSession = {
   dir: "/workspaces/release-writer",
   machine_id: "release-host",
   roles: ["writer"],
-  session_id: "release-session",
+  session_id: "019a1c12-7e5c-7f9b-8a4a-5b2c6d9e0f12",
   title: "Release notes",
 };
 const archivist: FakeSession = {
@@ -27,7 +27,7 @@ const archivist: FakeSession = {
   dir: "/workspaces/archive",
   machine_id: "archive-host",
   roles: [],
-  session_id: "archivist-session",
+  session_id: "019a1c13-8f6d-7a0c-9b5b-6c3d7e0f1a13",
   title: "Archivist",
 };
 
@@ -85,7 +85,7 @@ test("the search box narrows by a word in the title, directory, machine, session
     await expect(titles()).toHaveText(["Release notes"]);
 
     // The session id itself.
-    await search.fill("archivist-session");
+    await search.fill(archivist.session_id);
     await expect(titles()).toHaveText(["Archivist"]);
 
     // An issue key: the one session with an open ask on it.

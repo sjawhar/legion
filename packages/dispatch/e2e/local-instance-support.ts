@@ -138,3 +138,64 @@ export function databaseUrlRefusal(raw: string): string | undefined {
 export function shellQuote(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
+
+/** How long the live view's answer may take: Dispatch answers a subscription it accepts with the
+ *  responder verdict as soon as it has one, and refuses one it does not at once. */
+const AGENT_VIEW_WAIT_MS = 10_000;
+
+const BunWebSocket = WebSocket as unknown as new (
+  url: string,
+  options: { readonly headers: Record<string, string> }
+) => WebSocket;
+
+/**
+ * Why a seeded session's live view (`/agents/<id>/live`) would read "This session's conversation
+ * is unavailable", or undefined when Dispatch carries it: it subscribes the agent view on the live
+ * socket as the page does, under `headers` (a signed-in person's cookie), and reads Dispatch's
+ * first frame for it. A session id that is not a uuid is refused there (`SESSION_ID_INPUT`), which
+ * is how a seed of named sessions passes every HTTP check and still has no live view.
+ */
+export async function agentViewRefusal(
+  baseUrl: string,
+  headers: Record<string, string>,
+  sessionId: string
+): Promise<string | undefined> {
+  const socketUrl = new URL("/ws/live", baseUrl);
+  socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+  const sub = "local-instance-smoke";
+  const answered = Promise.withResolvers<string | undefined>();
+  const socket = new BunWebSocket(socketUrl.href, { headers });
+  const settle = (reason: string | undefined) => {
+    answered.resolve(reason);
+    socket.close(1000);
+  };
+  const timeout = setTimeout(
+    () => settle(`Dispatch sent nothing for it within ${AGENT_VIEW_WAIT_MS / 1_000}s`),
+    AGENT_VIEW_WAIT_MS
+  );
+  socket.addEventListener("open", () => {
+    socket.send(
+      JSON.stringify({ sub, type: "subscribe", view: { kind: "agent", session_id: sessionId } })
+    );
+  });
+  socket.addEventListener("message", (message) => {
+    let frame: { readonly type?: string; readonly sub?: string; readonly code?: string };
+    try {
+      frame = JSON.parse(String(message.data));
+    } catch {
+      return;
+    }
+    if (frame.sub !== sub) return;
+    if (frame.type === "agent") settle(undefined);
+    else settle(`Dispatch answered ${JSON.stringify(frame)}`);
+  });
+  socket.addEventListener("close", (event) =>
+    settle(`the live socket closed first (${event.code} ${event.reason})`)
+  );
+  socket.addEventListener("error", () => settle("the live socket could not be opened"));
+  try {
+    return await answered.promise;
+  } finally {
+    clearTimeout(timeout);
+  }
+}

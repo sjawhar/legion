@@ -13,6 +13,7 @@ import {
 import { documentEditor, openSpec, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 import { pastePicture } from "./sends";
+import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
 
 // A picture pasted into a message, an ask's answer or a direct message is uploaded and written as
@@ -111,7 +112,7 @@ test("a picture pasted into an ask's answer shows inline in the answer", async (
   const ask = await createAsk(
     issue.key,
     { question: "Which screen is wrong?" },
-    { actor: { id: "planner-session", kind: "session" }, as: "agent" }
+    { actor: { id: sessionIds.planner, kind: "session" }, as: "agent" }
   );
   const alice = await asUser(browser, "alice");
   try {
@@ -151,7 +152,7 @@ test("a picture pasted into a direct message on the Agents page shows inline and
     dir: "/workspaces/planner",
     machine_id: "planner-host",
     roles: ["planner"],
-    session_id: "planner-session",
+    session_id: sessionIds.planner,
     title: "Planner",
   };
   await setLiveSessions([planner]);

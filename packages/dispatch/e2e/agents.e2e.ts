@@ -27,6 +27,7 @@ import {
 import { recordClipboard } from "./clipboard";
 import { holdFirstRequest } from "./editor";
 import { resetDatabase, setCreatedAt } from "./seed";
+import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -35,7 +36,7 @@ const planner: FakeSession = {
   last_seen: Date.now() - 30_000,
   machine_id: "planner-host",
   roles: ["planner"],
-  session_id: "planner-session",
+  session_id: sessionIds.planner,
   title: "Planner",
 };
 const reviewer: FakeSession = {
@@ -44,7 +45,7 @@ const reviewer: FakeSession = {
   last_seen: Date.now() - 5 * 60_000,
   machine_id: "reviewer-host",
   roles: ["reviewer"],
-  session_id: "reviewer-session",
+  session_id: sessionIds.reviewer,
   title: "Reviewer",
 };
 const silent: FakeSession = {
@@ -53,7 +54,7 @@ const silent: FakeSession = {
   last_seen: Date.now() - 10_000,
   machine_id: "silent-host",
   roles: [],
-  session_id: "silent-session",
+  session_id: sessionIds.silent,
   title: "Silent",
 };
 const archivist: FakeSession = {
@@ -62,7 +63,7 @@ const archivist: FakeSession = {
   last_seen: Date.now() - 45 * 60_000,
   machine_id: "archivist-host",
   roles: [],
-  session_id: "archivist-session",
+  session_id: sessionIds.archivist,
   title: "Archivist",
 };
 
@@ -209,23 +210,28 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(reviewerComposer).toBeHidden();
 
     // The identifiers copy from the collapsed row.
-    await plannerCard.getByRole("button", { name: "Copy session ID planner-session" }).click();
+    await plannerCard
+      .getByRole("button", { name: `Copy session ID ${planner.session_id}` })
+      .click();
     await expect(plannerCard.getByText("Copied", { exact: true })).toBeVisible();
     await plannerCard.getByRole("button", { name: "Copy session title Planner" }).click();
-    await expect.poll(copied).toEqual(["planner-session", "Planner"]);
+    await expect.poll(copied).toEqual([planner.session_id, "Planner"]);
 
     // One pill per side of the turn, each counted in its own right: what waits on the reader
     // themselves - a question whose next move is a person's, on an issue assigned to them - and
     // what waits on the session, on anybody's issue. A card with no open asks shows neither.
     const needsYou = plannerCard.getByRole("link", { name: "Needs you 1" });
-    await expect(needsYou).toHaveAttribute("href", "/?agent=planner-session&section=needs-you");
+    await expect(needsYou).toHaveAttribute(
+      "href",
+      `/?agent=${planner.session_id}&section=needs-you`
+    );
     const waitingOnAgent = plannerCard.getByRole("link", { name: "Waiting on agent 2" });
     // The Inbox opens on the reader's own work, and these two questions are on two people's
     // issues, so the link clears the filter: nothing it counted is left out of the list it
     // opens (the rows are counted below, where it is followed).
     await expect(waitingOnAgent).toHaveAttribute(
       "href",
-      "/?agent=planner-session&assignee=everyone"
+      `/?agent=${planner.session_id}&assignee=everyone`
     );
     await expect(plannerCard.getByText(/^Open asks/)).toHaveCount(0);
     // Every card carries the Open action; what this card must not carry is a whose-turn pill.
@@ -286,7 +292,9 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     // Each pill's number is the number of rows the list its link opens holds. Needs you opens
     // the reader's own questions waiting on them, from this session: its one row.
     await needsYou.click();
-    await expect(page).toHaveURL(/\/\?agent=planner-session&section=needs-you$/);
+    await expect(page).toHaveURL(
+      new RegExp(`\\?agent=${planner.session_id}&section=needs-you$`, "u")
+    );
     await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
     await expect(page.getByText("First", { exact: true })).toBeVisible();
     await page.goBack();
@@ -295,7 +303,9 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     // Waiting on agent opens this session's questions with the filter cleared, where the two it
     // counted are both listed - Bob's included - under the band it named.
     await waitingOnAgent.click();
-    await expect(page).toHaveURL(/\/\?agent=planner-session&assignee=everyone$/);
+    await expect(page).toHaveURL(
+      new RegExp(`\\?agent=${planner.session_id}&assignee=everyone$`, "u")
+    );
     const inbox = page.locator("main");
     const chip = inbox.getByRole("link", { name: "Clear agent filter" });
     await expect(chip).toHaveText("Asks from Planner · clear");
