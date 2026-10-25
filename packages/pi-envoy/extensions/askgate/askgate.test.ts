@@ -2116,6 +2116,50 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(0);
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
     });
+    // `/dev/stdin`, `/dev/fd/N` and `/proc/<n>/fd/N` name a descriptor of whichever process opens
+    // them, which here is Oh My Pi, not the command's shell. The census (contract 2) showed the
+    // gate reading Oh My Pi's own stdin when it was a regular file, and posting a snapshot of it.
+    const FD_PATHS: Array<[string, string]> = [
+      ["--path /dev/stdin", "dispatch artifact --issue DSP-1 --name brief.md --path /dev/stdin"],
+      ["--path /dev/fd/0", "dispatch artifact --issue DSP-1 --name brief.md --path /dev/fd/0"],
+      ["--path /dev/stdout", "dispatch artifact --issue DSP-1 --name brief.md --path /dev/stdout"],
+      ["--question-file /dev/stderr", "dispatch ask --issue DSP-1 --question-file /dev/stderr"],
+      ["--question-file /dev/fd/63", "dispatch ask --issue DSP-1 --question-file /dev/fd/63"],
+      ["--body-file /proc/self/fd/0", "dispatch comment --issue DSP-1 --body-file /proc/self/fd/0"],
+      ["--body-file /proc/1/fd/0", "dispatch comment --issue DSP-1 --body-file /proc/1/fd/0"],
+    ];
+    for (const [form, command] of FD_PATHS)
+      test(`a path that names a process's own file descriptor is refused: ${form}`, async () => {
+        const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+        const result = await g.bash("fd", command);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("file descriptor of the process that opens it");
+        expect(result?.reason).toContain("and a quoted here-document");
+        expect(g.dryRuns).toHaveLength(0);
+        expect(g.calls).toHaveLength(0);
+        expect(g.entries.map((e) => e.outcome)).toEqual(["unreadable"]);
+      });
+    test("a /proc/self/fd path that is a regular file in AskGate's own process is refused, not read", async () => {
+      // The census's devstdin-gate probe: with a regular file on that descriptor the gate's `stat`
+      // passes, and the write posted AskGate's own file instead of the agent's text.
+      const decoy = path.join(work, "askgate-own-stdin.md");
+      fs.writeFileSync(decoy, "The text of AskGate's own descriptor.\n");
+      const fd = fs.openSync(decoy, "r");
+      try {
+        const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+        const result = await g.bash(
+          "fd-regular",
+          `dispatch ask --issue DSP-1 --question-file /proc/self/fd/${fd}`
+        );
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("file descriptor of the process that opens it");
+        expect(g.calls).toHaveLength(0);
+        expect(g.entries.map((e) => e.outcome)).toEqual(["unreadable"]);
+      } finally {
+        fs.closeSync(fd);
+      }
+    });
+
     test("an unreadable --path is told to send the text with --content-file -, never --path -, which the CLI opens as a file named -", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
       for (const [id, command] of [

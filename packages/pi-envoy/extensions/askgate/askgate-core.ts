@@ -1251,6 +1251,14 @@ function commandWithSnapshots(command: string, files: readonly CapturedFile[]): 
 }
 
 /**
+ * A path that names a file descriptor of whichever process opens it: AskGate would resolve it in
+ * Oh My Pi's own process and the command in its shell, so the two read different files. The gate
+ * refuses it by name, before any `stat`, since with a regular file on that descriptor the `stat`
+ * passes and the gate would review and post Oh My Pi's own file (census, contract 2).
+ */
+const PROCESS_FD_PATH = /^\/dev\/fd\/|^\/dev\/(stdin|stdout|stderr)$|^\/proc\/(self|\d+)\/fd\//;
+
+/**
  * Copies one source into an exclusive owner-only snapshot, reading only a regular file. `stat`
  * refuses a FIFO, a device, a directory or a link to one before the open, and `O_NONBLOCK` with a
  * second `fstat` on the open descriptor refuses one swapped in between, before the first read.
@@ -2218,6 +2226,26 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               },
             };
         }
+
+        // Refused by name, before any `stat`: such a path resolves in whichever process opens it.
+        const descriptor = scoped.fileInputs.find(
+          (file) =>
+            PROCESS_FD_PATH.test(file.source) ||
+            PROCESS_FD_PATH.test(path.resolve(base, file.source))
+        );
+        if (descriptor !== undefined)
+          return {
+            unreadable: {
+              tool: scoped.tool,
+              label: scoped.label,
+              file: {
+                flag: descriptor.flag,
+                path: descriptor.source,
+                reason:
+                  "names a file descriptor of the process that opens it, which here is Oh My Pi's own and not the command's shell",
+              },
+            },
+          };
 
         const root = path.resolve(os.tmpdir());
         sweepSnapshots(root, deps.now());
