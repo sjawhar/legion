@@ -1,13 +1,13 @@
 //go:build e2e
 
 // The Stage 4a harness's session-store check: the runtime under runtime.kubernetes.session_store
-// postgres, against the scratch Postgres the script started on the devbox's private address
+// postgres — the one store the daemon loads, which every runtime of the run is built on — against
+// the scratch Postgres the script started on the devbox's private address
 // (LEGION_E2E_SESSION_DB_PORT). The rig is live_test.go.
 
 package sandbox
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,30 +21,27 @@ import (
 // under: the run's runtime.kubernetes.session_dsn_secret.
 const liveSessionsSecretKey = "stage4a_sessions"
 
-// postgres-resume: with the runtime replaced by one that keeps sessions in the scratch database
-// (session_store postgres), a new issue pod's role starts with Oh My Pi's two session variables and
-// the URL file mounted, and never the URL itself, in its agent's environment. The harness writes the
-// role's session into the table, as `legion sessions import` copies one whose volume is gone, dated
-// before the pod's workspace was created, under a path the issue's volume holds no file at. Suspended,
-// the role is resumed from that path: a resume of a path the table lacks is refused by the role's
-// launcher, naming the table, before any child runs; the resume from the copied path registers,
-// though the volume holds no such file, since the launcher looked the session up in the table
-// through the pod's URL file; and the agent's environment says the workspace was recreated since the
-// session was last written (launcher.WorkspaceRecreatedVariable), which the Legion plugin tells the
-// agent before its next turn, where the fresh generation's said it was not.
+// postgres-resume: the run keeps every session in the scratch database (session_store postgres,
+// the rig's sessionStore), and a new issue pod's role starts with Oh My Pi's two session variables
+// and the URL file mounted, and never the URL itself, in its agent's environment. The harness
+// writes this one role's session into the table itself, as `legion sessions import` copies one
+// whose disk is gone, dated before the pod's workspace was created, under a path the issue's disk
+// holds no file at. Suspended, the role is resumed from that path: a resume of a path the table
+// lacks is refused by the role's launcher, naming the table, before any child runs; the resume from
+// the copied path registers, though the disk holds no such file, since the launcher looked the
+// session up in the table through the pod's URL file; and the agent's environment says the
+// workspace was recreated since the session was last written (launcher.WorkspaceRecreatedVariable),
+// which the Legion plugin tells the agent before its next turn, where the fresh generation's said
+// it was not.
 func (r *liveRig) checkPostgresResume() error {
 	c := r.claim("sessions")
-	if r.sessionStore == "" {
-		r.sessionStore = liveSessionsSecretKey
-		r.stopRuntime()
-		if err := r.startRuntime(); err != nil {
-			return err
-		}
-		note("runtime", "listener and runtime replaced with session_store postgres: providers Secret key %s at %s", liveSessionsSecretKey, ProvidersDir+"/"+sessionDSNFile)
+	if err := r.startRuntimeOnce(); err != nil {
+		return err
 	}
 	if c.state != stateNone {
-		return fmt.Errorf("%s was launched before this check, which needs its first pod created under session_store postgres", c.name)
+		return fmt.Errorf("%s was launched before this check, which needs its first pod of the run", c.name)
 	}
+	note("runtime", "every runtime of the run keeps sessions in the scratch database: providers Secret key %s at %s", liveSessionsSecretKey, ProvidersDir+"/"+sessionDSNFile)
 	since := time.Now()
 	if _, err := r.spawn(c, true); err != nil {
 		return err
@@ -73,14 +70,14 @@ func (r *liveRig) checkPostgresResume() error {
 
 	session := ompSessionsDir + "/" + SandboxName(c.token) + "-postgres.jsonl"
 	if out, err := r.exec(c, "sh", "-c", `test -e "$1" || echo absent`, "absent", session); err != nil || out != "absent" {
-		return fmt.Errorf("the issue's volume holds %s (%q, %v), want no file there: the resume must be the table's alone", session, out, err)
+		return fmt.Errorf("the issue pod's disk holds %s (%q, %v), want no file there: the resume must be the table's alone", session, out, err)
 	}
 	written := since.Add(-time.Hour)
 	content := `{"type":"session","version":3,"id":"` + string(c.token) + `"}` + "\n"
 	if err := r.writeSession(session, content, written); err != nil {
 		return err
 	}
-	note("harness", "the session table holds %s (%d bytes, mtime_ms %s, before the pod's workspace was created); the issue's volume holds no such file", session, len(content), written.UTC().Format(time.RFC3339))
+	note("harness", "the session table holds %s (%d bytes, mtime_ms %s, before the pod's workspace was created); the issue pod's disk holds no such file", session, len(content), written.UTC().Format(time.RFC3339))
 
 	if err := r.suspend(c); err != nil {
 		return err
@@ -131,27 +128,4 @@ func (r *liveRig) agentEnviron(c *liveClaim) (map[string]string, error) {
 		return nil, err
 	}
 	return r.procEnviron(c, pid)
-}
-
-// writeSession puts content in the scratch database's session table at path, last written at
-// written, as `legion sessions import` copies a session file (ompsessions.Import), through the
-// URL file the script wrote for the harness's own direct use (sessionDSNLocalFile, dialable from
-// the devbox this process runs on — never sessionDSNFile, the pod-advertised address a bridge-mode
-// devbox cannot resolve; liveEnv's doc has the reasoning).
-func (r *liveRig) writeSession(path, content string, written time.Time) error {
-	ctx, cancel := context.WithTimeout(r.ctx, time.Minute)
-	defer cancel()
-	conn, err := ompsessions.Connect(ctx, r.env.sessionDSNLocalFile)
-	if err != nil {
-		return fmt.Errorf("the scratch database (LEGION_E2E_SESSION_DSN_LOCAL_FILE=%s): %w", r.env.sessionDSNLocalFile, err)
-	}
-	defer conn.Close(context.Background())
-	outcome, err := ompsessions.Import(ctx, conn, path, []byte(content), written)
-	if err != nil {
-		return err
-	}
-	if outcome != ompsessions.Copied {
-		return fmt.Errorf("the session table already held %s (%s), want a fresh copy", path, outcome)
-	}
-	return nil
 }

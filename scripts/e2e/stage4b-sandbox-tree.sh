@@ -70,9 +70,11 @@
 #   run_label is the default legsmoke, else a path named for run_label, so a non-default project
 #   never shares today's lock with a default run. LEGION_E2E_DAEMON_PORT (default 13372) and
 #   LEGION_E2E_WORKER_STREAM_PORT (default 13373, the same name Stage 4a reads for its one port)
-#   are the only other inputs: left at their defaults, a run collides with another default run
-#   exactly as before; set all three to distinct values and two runs proceed at once on the same
-#   devbox against the same production cluster. A lane's two ports must be ones the devbox's
+#   are the only other inputs with defaults, beside LEGION_E2E_SESSION_DB_PORT (required, no
+#   default), the port of the run's own scratch Postgres, which every pod of the run keeps its Oh
+#   My Pi session in: left at their defaults, a run collides with another default run
+#   exactly as before; set all four to distinct values and two runs proceed at once on the same
+#   devbox against the same production cluster. A lane's three ports must be ones the devbox's
 #   security group admits from the Legion nodes (README's port-admission note states the current
 #   allocation and how many lanes it leaves room for); widening that admitted range is a change to
 #   the deployment repository's infrastructure, not this one. LEGION_E2E_PROJECT need not already
@@ -184,6 +186,17 @@ opchild="S4BOP-${$}1"
 bind=0.0.0.0
 port_daemon=${LEGION_E2E_DAEMON_PORT:-13372}
 port_worker_stream=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
+# The session database's port, a third of the lane's own, which every pod dials as it dials the
+# worker stream: the daemon loads one session store and it is Postgres
+# (runtime.kubernetes.session_store), since an issue pod's disk dies with the pod and a session
+# kept on it would die too. It must be a port the devbox's security group admits from the Legion
+# nodes, like the two above, and it is never defaulted: a run that would quietly share another
+# lane's database is refused in prerequisites instead.
+port_session_db=${LEGION_E2E_SESSION_DB_PORT:-}
+# The session database's image, the pinned Postgres the repository's CI tests against, and the
+# providers Secret key its URL reaches every pod under (runtime.kubernetes.session_dsn_secret).
+session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+session_dsn_key=SESSION_DSN
 stream=ENVOY_NOTIFICATIONS
 # Roots the run's daemon runs at once. Trees 3 and 4 each take the slot the tree before them leaves,
 # so the run's roots never exceed the cap.
@@ -264,6 +277,7 @@ lock=$HOME/.local/state/legion/e2e/stage4b.lock
 [ "$run_label" = legsmoke ] || lock=$HOME/.local/state/legion/e2e/stage4b.$run_label.lock
 record=$work/sandboxes
 pg_container=legion-e2e4b-pg-$$
+session_db_container=legion-e2e4b-db-$$
 profile=legion-e2e4b-$$-$(date +%s)
 state=$work/state
 # The HOME the controller's Oh My Pi runs under, so its profile lives in the work directory
@@ -813,13 +827,34 @@ issue_pod() {
 issue_sandbox_modes() {
   op get sandboxes -l "legion.dev/project=$run_label,legion.dev/issue=$1" -o json | jq -r '.items[] | .spec.operatingMode // "Running"'
 }
-# assert_one_bound_pvc ISSUE CONTEXT fails unless ISSUE has exactly one PVC and it is Bound, and
-# leaves the row in $found, whose first field is the PVC's name. Called at top level, never in a
-# command substitution: fail must end the run, not a subshell.
-assert_one_bound_pvc() {
-  found=$(issue_pvcs "$1") || fail "the operator could not read $1's PVCs"
-  [ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] ||
-    fail "$1's PVCs$2 are '${found:-none}', want its one, Bound"
+# pod_disk POD prints POD's own disk as `<name> <phase> <owner kind>/<owner name>`, and nothing at
+# all when there is none. An issue pod's disk is a generic ephemeral volume declared in its own pod
+# template, so Kubernetes names the claim `<pod>-issue`, the pod owns it, and it is created with
+# the pod and deleted with it (INFRA-80). It carries no label — the Sandbox CRD declares the
+# ephemeral template's metadata a bare object, so the API server prunes anything set there — so it
+# is read by that name, never by legion.dev/issue, which an issue's Sandbox-owned volume carried
+# before. A read that fails fails the function; a claim that is not there is no failure.
+pod_disk() {
+  local out
+  out=$(op get pvc "$1-issue" --ignore-not-found -o json) || return 1
+  [ -n "$out" ] || return 0
+  jq -r '"\(.metadata.name) \(.status.phase) \(.metadata.ownerReferences // [] | map(select(.controller == true)) | first | if . then "\(.kind)/\(.name)" else "none" end)"' <<<"$out"
+}
+# assert_pod_disk POD CONTEXT fails unless POD has its own disk, Bound and owned by POD itself, and
+# leaves the row in $found, whose first field is the claim's name. CONTEXT says when the read was
+# made, for a failure's message. Called at top level, never in a command substitution: fail must
+# end the run, not a subshell.
+assert_pod_disk() {
+  found=$(pod_disk "$1") || fail "the operator could not read pod $1's disk"
+  [ "$found" = "$1-issue Bound Pod/$1" ] ||
+    fail "pod $1's disk$2 is '${found:-none}', want '$1-issue Bound Pod/$1': a pod's disk is its own, created and deleted with it"
+}
+# assert_no_pod_disk POD CONTEXT fails unless POD's disk is gone, which is what a pod that is gone
+# leaves: the disk is the pod's, not its Sandbox's, so nothing of it outlives the pod.
+assert_no_pod_disk() {
+  found=$(pod_disk "$1") || fail "the operator could not read pod $1's disk"
+  [ -z "$found" ] ||
+    fail "pod $1's disk$2 is still there ('$found'), want none: a pod's disk is deleted with the pod"
 }
 pod_exec() {
   local pod=$1 role=$2
@@ -1172,6 +1207,8 @@ runtime:
     image: $image
     storage_class: gp2
     issue_volume: 20Gi
+    session_store: postgres
+    session_dsn_secret: $session_dsn_key
     kubeconfig: $runtime_kubeconfig
     context: $runtime_context
     plugins:
@@ -1241,32 +1278,38 @@ create_route_configmap() {
     fail "the operator could not create ConfigMap $route_configmap"
   note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
 }
-# create_providers_secret is the operator's step for the NATS nkey seed: a daemon with a seed (the
-# operator's NATS_NKEY_SEED_FILE, else NATS_NKEY_SEED, which the daemon inherits) points every pod
-# and the image probe at the providers Secret's NATS_NKEY_SEED key, so the run puts the same seed
-# there, from a 0600 file, never an argument. With neither set there is no seed and no Secret.
+# create_providers_secret is the operator's step for the keys every pod mounts from the providers
+# Secret. One is always there: the session database's URL, under the key the configuration names
+# (session_dsn_key, runtime.kubernetes.session_dsn_secret), which every pod's Oh My Pi keeps its
+# session in — so this Secret exists on every run, unlike before, when a run with no NATS seed made
+# none. The other is that seed: a daemon with one (the operator's NATS_NKEY_SEED_FILE, else
+# NATS_NKEY_SEED, which the daemon inherits) points every pod and the image probe at the providers
+# Secret's NATS_NKEY_SEED key, so the run puts the same seed there, from a 0600 file, never an
+# argument. Neither value is printed.
 create_providers_secret() {
-  local seed_file=$work/providers-nats-seed
+  local seed_file=$work/providers-nats-seed seed_args=() seed_note="no NATS nkey seed in the environment"
   if [ -n "${NATS_NKEY_SEED_FILE+set}" ]; then
     (umask 077 && tr -d '[:space:]' <"$NATS_NKEY_SEED_FILE" >"$seed_file") || fail "NATS_NKEY_SEED_FILE names $NATS_NKEY_SEED_FILE, which could not be read"
   elif [ -n "${NATS_NKEY_SEED+set}" ]; then
     (umask 077 && printf '%s' "$NATS_NKEY_SEED" | tr -d '[:space:]' >"$seed_file")
-  else
-    note "[operator] no NATS nkey seed in the environment: no providers Secret"
-    return 0
   fi
-  [ -s "$seed_file" ] || fail "the operator's NATS nkey seed is empty"
-  op create secret generic "$providers_secret" --from-file=NATS_NKEY_SEED="$seed_file" \
+  if [ -e "$seed_file" ]; then
+    [ -s "$seed_file" ] || fail "the operator's NATS nkey seed is empty"
+    seed_args=(--from-file=NATS_NKEY_SEED="$seed_file")
+    seed_note="NATS_NKEY_SEED from the operator's seed"
+  fi
+  [ -s "$work/session-dsn" ] || fail "the session database's URL file $work/session-dsn is missing: start the session database before the providers Secret"
+  op create secret generic "$providers_secret" --from-file="$session_dsn_key=$work/session-dsn" "${seed_args[@]}" \
     --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create Secret $providers_secret"
   rm -f "$seed_file"
-  note "[operator] Secret $providers_secret: NATS_NKEY_SEED from the operator's seed, label legion.dev/project=$run_label"
+  note "[operator] Secret $providers_secret: $session_dsn_key (the scratch session database's URL, not printed), $seed_note, label legion.dev/project=$run_label"
 }
-# ports_free fails naming the holder when anything listens on the daemon's API or worker-stream
-# port.
+# ports_free fails naming the holder when anything listens on the daemon's API port, its
+# worker-stream port, or the session database's.
 ports_free() {
   local port
-  for port in "$port_daemon" "$port_worker_stream"; do
+  for port in "$port_daemon" "$port_worker_stream" "$port_session_db"; do
     [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
   done
 }
@@ -2569,7 +2612,7 @@ cleanup() {
     fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
-  docker rm -f "$pg_container" >/dev/null 2>&1
+  docker rm -f "$pg_container" "$session_db_container" >/dev/null 2>&1
   rm -rf "$work"
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
@@ -2839,6 +2882,12 @@ note "$(jq --version) runs lib/stage4b-tools.jq"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
 [[ $project =~ ^[A-Z][A-Z0-9]{1,9}$ ]] ||
   fail "LEGION_E2E_PROJECT must be a Dispatch project key ([A-Z][A-Z0-9]{1,9}, projectKeyPattern in packages/envoy/internal/dispatch/api/server.go), not '$project'"
+case "$port_session_db" in
+  '') fail "LEGION_E2E_SESSION_DB_PORT is unset: the run's scratch Postgres, which every pod of the run keeps its Oh My Pi session in (session_store postgres), listens on a port the devbox's security group admits from the Legion nodes, as the worker stream's is" ;;
+  *[!0-9]*) fail "LEGION_E2E_SESSION_DB_PORT must be a port number, not '$port_session_db'" ;;
+esac
+[ "$port_session_db" != "$port_daemon" ] && [ "$port_session_db" != "$port_worker_stream" ] ||
+  fail "LEGION_E2E_SESSION_DB_PORT $port_session_db is the daemon's API port or its worker stream's: the lane's three ports are three"
 # The production services, each a fully-qualified host (a bare alias resolves through whatever
 # search domain the box or the pod has) and no path. A refusal names the variable, never its value.
 fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
@@ -3109,6 +3158,26 @@ docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/pos
   -p "127.0.0.1::5432" postgres:16 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
+# The run's session database, a second throwaway Postgres: every pod's Oh My Pi keeps its session
+# in it (session_store postgres, the one store the daemon loads), so a role's conversation outlives
+# the issue pod whose disk dies with it. It is its own container and its own credential, never the
+# daemon's own database above: that one holds the daemon's state, and its URL reaches every pod
+# through the providers Secret, which no pod may be given a way into. It binds the devbox's private
+# address, not loopback, since the pods dial it as they dial the worker stream; its password
+# reaches docker through an owner-only env file, never an argument, and its URL is written only to
+# an owner-only file the providers Secret reads, and is never printed.
+session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+(
+  umask 077
+  printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
+  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
+)
+unset session_db_password
+docker run -d --name "$session_db_container" --cpus 1 --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  --env-file "$work/session-db.env" -p "$host:$port_session_db:5432" "$session_db_image" >/dev/null ||
+  fail "docker could not start the scratch session database $session_db_container on $host:$port_session_db"
+until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions
+note "container $session_db_container: database sessions on $host:$port_session_db ($session_db_image), which every pod reads through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
 # Stage 4b proof instructions
@@ -3492,13 +3561,13 @@ for pod in "$root_pod" "$child1_pod" "$child2_pod"; do
   jq -e '.spec.affinity == null' <<<"$spec" >/dev/null || fail "pod $pod carries an affinity, which no Legion pod asks for: $(jq -c .spec.affinity <<<"$spec")"
 done
 note "at $at the three pods are Running, none with an affinity"
-pvcs=
-for issue in "$tree1" "$child1" "$child2"; do
-  assert_one_bound_pvc "$issue" ""
-  pvcs+="${pvcs:+ }${found%% *}"
-  note "[operator] $issue: PVC ${found%% *} Bound (by legion.dev/issue=$issue)"
+disks=
+for pod in "$root_pod" "$child1_pod" "$child2_pod"; do
+  assert_pod_disk "$pod" ""
+  disks+="${disks:+ }${found%% *}"
+  note "[operator] pod $pod: its own disk ${found%% *} Bound, owned by the pod itself"
 done
-[ "$(tr ' ' '\n' <<<"$pvcs" | sort -u | grep -c .)" = 3 ] || fail "the three issues' PVCs are not three: $pvcs"
+[ "$(tr ' ' '\n' <<<"$disks" | sort -u | grep -c .)" = 3 ] || fail "the three issue pods' disks are not three: $disks"
 # Negative control, each way: the root's pod cannot list child 1's workspace, which exists in child
 # 1's pod, and child 1's pod cannot list the root's.
 for pair in "$root_pod architect $child1_pod planner $child1" "$child1_pod planner $root_pod architect $tree1"; do
@@ -3558,11 +3627,12 @@ pass
 begin child-release
 # Acceptance 3, both paths, while the parent keeps running. Child 1 set done by the proof human: the
 # daemon retires every claim of the child with its session dropped (issue_close) and its durable
-# close effect foreground-deletes the child's Sandbox, the volume it owns with it (SuspendIssue with
-# release, internal/runtime/sandbox/issue_suspend.go), logging the release; the root's Sandbox stays
-# Running, its PVC Bound and its pod the same, and no volume is reported lost. Child 2 set backlog:
-# its Sandbox is Suspended and its pod gone, its PVC kept Bound, the path a parked child takes until
-# its tree closes (close takes it with the tree).
+# close effect foreground-deletes the child's Sandbox (SuspendIssue,
+# internal/runtime/sandbox/issue_suspend.go), logging the release; its pod goes with that Sandbox
+# and its disk goes with the pod, since an issue's disk is its pod's own ephemeral volume
+# (INFRA-80); the root's Sandbox stays Running, its own pod's disk Bound and its pod the same.
+# Child 2 set backlog: its Sandbox is Suspended and its pod gone, so its disk is gone too — the
+# path a parked child takes until its tree closes (close takes the Sandbox with the tree).
 root_uid=$(op get pod "$root_pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read the root's pod $root_pod"
 lost_before=$(grep -c 'volume was lost' "$daemon_log" || true)
 released_lines() { log_lines "$released_msg" | jq -c --arg issue "$1" 'select(.issue == $issue)'; }
@@ -3574,13 +3644,14 @@ set_status "$child1" done
 # refusal, a throttle, op's timeout) for an empty answer and pass at once.
 child1_released() {
   local out
-  out=$(op get sandboxes,pvc -l "legion.dev/project=$run_label,legion.dev/issue=$child1" -o name) && [ -z "$out" ]
+  out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/issue=$child1" -o name) && [ -z "$out" ] &&
+    out=$(pod_disk "$child1_pod") && [ -z "$out" ]
 }
-until_true 600 "$child1's Sandbox and PVC to be gone after its done" child1_released
+until_true 600 "$child1's Sandbox, pod and disk to be gone after its done" child1_released
 at=$(date -u +%FT%TZ)
 root_mode=$(op get sandbox "$root_pod" -o jsonpath='{.spec.operatingMode}') || fail "the operator could not read the root's Sandbox $root_pod"
 [ -z "$root_mode" ] || [ "$root_mode" = Running ] || fail "the root's Sandbox $root_pod is $root_mode after $child1's release, want Running"
-assert_one_bound_pvc "$tree1" " after $child1's release"
+assert_pod_disk "$root_pod" " after $child1's release"
 uid_now=$(op get pod "$root_pod" -o jsonpath='{.metadata.uid}') || fail "the root's pod $root_pod could not be read after $child1's release"
 [ "$uid_now" = "$root_uid" ] || fail "the root's pod $root_pod changed from uid $root_uid to $uid_now across $child1's release"
 released=$(released_lines "$child1" | grep -c . || true)
@@ -3590,8 +3661,8 @@ lost_now=$(grep -c 'volume was lost' "$daemon_log" || true)
 retired=$(claims_cli list --json | jq -c --arg issue "$child1" '[.claims[] | select(.issue == $issue) | {role, state, session: (.session // ""), sessionFile: (.sessionFile // "")}]')
 jq -e 'length > 0 and all(.[]; .state == "retired" and .session == "" and .sessionFile == "")' <<<"$retired" >/dev/null ||
   fail "$child1's claims after its done are $retired, want every one retired with no session"
-note "at $at $child1 is done: its Sandbox and PVC are gone (kubectl get sandboxes,pvc -l legion.dev/issue=$child1: nothing); the daemon logged \"$released_msg\" for it once and no lost volume; its claims: $retired"
-note "the root $tree1 kept Sandbox $root_pod Running, PVC ${found%% *} Bound and pod uid $root_uid"
+note "at $at $child1 is done: its Sandbox and pod are gone (kubectl get sandboxes,pods -l legion.dev/issue=$child1: nothing), and the disk $child1_pod-issue its pod owned is gone with it; the daemon logged \"$released_msg\" for it once and no lost volume; its claims: $retired"
+note "the root $tree1 kept Sandbox $root_pod Running, its pod's own disk ${found%% *} Bound and pod uid $root_uid"
 set_status "$child2" backlog
 child2_parked() {
   local mode pods
@@ -3599,8 +3670,8 @@ child2_parked() {
     pods=$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$child2" -o name) && [ -z "$pods" ]
 }
 until_true 600 "$child2's Sandbox to be Suspended and its pod gone after its backlog" child2_parked
-assert_one_bound_pvc "$child2" " after its backlog"
-note "at $(date -u +%FT%TZ) $child2 is in backlog: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound (kept until the tree closes)"
+assert_no_pod_disk "$child2_pod" " after its backlog"
+note "at $(date -u +%FT%TZ) $child2 is in backlog: Sandbox $child2_pod Suspended, no pod, and no disk — the pod took its own with it"
 pass
 
 begin child-reentered
@@ -3644,11 +3715,11 @@ reentry_tasks=$(planning_tasks "$child2") || fail "$child2's planner session cou
 note "$child2 set back to todo: the daemon resumed its planner $reentry_planner by rule ($reentry_rule) on its session $(jq -r .session <<<"$reentry_was"), suspendedBy daemon before and none after, and its session holds the re-entered run's planning task"
 set_status "$child2" backlog
 until_true 900 "$child2's Sandbox to be Suspended and its pod gone after its second backlog" child2_parked
-assert_one_bound_pvc "$child2" " after its second backlog"
+assert_no_pod_disk "$child2_pod" " after its second backlog"
 reentry_parked=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
 jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$reentry_parked" >/dev/null ||
   fail "$child2's planner after its second backlog is $(jq -c '{state, suspendedBy}' <<<"$reentry_parked"), want suspended by the daemon"
-note "$child2 parked again: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound, its planner suspended by the daemon"
+note "$child2 parked again: Sandbox $child2_pod Suspended, no pod and no disk, its planner suspended by the daemon"
 held_planner=$(claims_cli suspend --json --claim "$reentry_planner") || fail "the operator's suspend of $child2's parked planner failed: $held_planner"
 jq -e '.state == "suspended" and .suspendedBy == "operator"' <<<"$held_planner" >/dev/null ||
   fail "the operator's suspend of the parked planner left it $(jq -c '{state, suspendedBy}' <<<"$held_planner"), want suspended by the operator"
@@ -3683,11 +3754,11 @@ held_tasks=$(planning_tasks "$child2") || fail "$child2's planner session could 
 note "the operator's resume relaunched $reentry_planner and the waiting start gave it the run's planning task, its session's third"
 set_status "$child2" backlog
 until_true 900 "$child2's Sandbox to be Suspended and its pod gone after its last backlog" child2_parked
-assert_one_bound_pvc "$child2" " after its last backlog"
+assert_no_pod_disk "$child2_pod" " after its last backlog"
 held_planner_parked=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
 jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$held_planner_parked" >/dev/null ||
   fail "$child2's planner after its last backlog is $(jq -c '{state, suspendedBy}' <<<"$held_planner_parked"), want suspended by the daemon"
-note "$child2 parked a last time: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound, its planner suspended by the daemon"
+note "$child2 parked a last time: Sandbox $child2_pod Suspended, no pod and no disk, its planner suspended by the daemon"
 pass
 
 begin repository-configuration
@@ -4774,9 +4845,10 @@ pass
 
 begin idle-resident
 # Every completed role still names the same process, its one shared issue pod is Running, the
-# root's Sandbox is Running and its PVC Bound; of tree 1's children, child 2, parked in backlog,
-# keeps its Sandbox Suspended and its PVC Bound, and child 1, done, has neither (child-release).
-# Each volume is read by its own issue's label: a tree's issues share no volume.
+# root's Sandbox is Running and its pod's own disk Bound; of tree 1's children, child 2, parked in
+# backlog, keeps its Sandbox Suspended with no pod and so no disk, and child 1, done, has neither
+# Sandbox nor disk (child-release). Each disk is read by its pod's name: an issue's disk is its
+# pod's own ephemeral volume and carries no label of its own.
 for role in planner implementer tester reviewer; do
   resident_kept "$tree1" "$role" || fail "$role on $tree1 left the pod or session it first registered with while tree 1 is open: $(resident_lost "$tree1" "$role")"
   pod=$(claim_sandbox "$tree1" "$role") || fail "$role on $tree1 has no Sandbox"
@@ -4787,12 +4859,10 @@ done
 [ "$(issue_sandbox_modes "$child2")" = Suspended ] || fail "the parked child $child2's Sandboxes are '$(issue_sandbox_modes "$child2" | paste -sd ' ' -)', want its one, Suspended"
 modes=$(issue_sandbox_modes "$child1") || fail "the operator could not read the done child $child1's Sandboxes"
 [ -z "$modes" ] || fail "the done child $child1 still has a Sandbox: $(paste -sd ' ' - <<<"$modes")"
-for issue in "$tree1" "$child2"; do
-  assert_one_bound_pvc "$issue" ""
-done
-gone=$(issue_pvcs "$child1") || fail "the operator could not read the done child $child1's PVCs"
-[ -z "$gone" ] || fail "the done child $child1 still has a PVC: $(paste -sd ' ' - <<<"$gone")"
-note "planner, implementer, tester and reviewer of $tree1 each run in their first process in one issue pod; its Sandbox is Running and its PVC Bound; $child2's Sandbox is Suspended with its PVC Bound; $child1 has neither"
+assert_pod_disk "$root_pod" ""
+assert_no_pod_disk "$child2_pod" ""
+assert_no_pod_disk "$child1_pod" ""
+note "planner, implementer, tester and reviewer of $tree1 each run in their first process in one issue pod; its Sandbox is Running and its pod's own disk $root_pod-issue Bound; $child2's Sandbox is Suspended with no pod and no disk; $child1 has neither"
 pass
 
 begin kill-launcher-resume
@@ -5749,17 +5819,18 @@ child3_tree=$(claims_cli list --json | jq -r --arg issue "$child3" '[.claims[] |
 daemon_state | jq -e --arg issue "$child3" '.issues[$issue] | .generation == 1 and .phase == "planning"' >/dev/null ||
   fail "$child3 under $tree1 is $(daemon_state | jq -c --arg issue "$child3" '.issues[$issue] | {generation, phase}'), want generation 1 in planning"
 child3_pod=$(claim_sandbox "$child3" planner) || fail "$child3's planner has no Sandbox locator"
-assert_one_bound_pvc "$child3" ""
-child3_tree1_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child3's PVC ${found%% *}"
-note "[dispatch] $child3: todo under $tree1, no legion label; its planner claim records tree $child3_tree, and holds in planning in pod $child3_pod with PVC ${found%% *} (uid $child3_tree1_volume) Bound"
+assert_pod_disk "$child3_pod" ""
+child3_tree1_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child3's disk ${found%% *}"
+note "[dispatch] $child3: todo under $tree1, no legion label; its planner claim records tree $child3_tree, and holds in planning in pod $child3_pod on that pod's own disk ${found%% *} (uid $child3_tree1_volume) Bound"
 pass
 
 begin mid-turn-child
 # LEGION-710's setup: a fourth child of tree 1, filed the same way as child 3, whose planner is put
 # in a turn that is still running when tree 1 closes (done sends it the hold). The carry that follows
 # (mid-turn-carry) must stop that turn's role before anything of the child's new tree launches. Its
-# Sandbox's uid, its PVC's uid and its planner's session are read here, in tree 1, so mid-turn-carry
-# can hold the carried tree to keeping all three. It runs beside child 3 and the root, no more of tree
+# Sandbox's uid, its pod's disk's uid and its planner's session are read here, in tree 1, so
+# mid-turn-carry can hold the carried tree to what it must keep. It runs beside child 3 and the
+# root, no more of tree
 # 1's pods at once than issue-independence's.
 child4=$(new_child "Stage 4b proof tree 1 child 4: mid-turn when tree 1 closes, then carried into a tree of its own ($work)" "$tree1") ||
   fail "Dispatch could not create tree 1's fourth child"
@@ -5769,10 +5840,10 @@ claim_by_token "$(claim_token "$child4" planner)" | jq -e --arg tree "$tree1" '.
   fail "the daemon records $child4's planner claim under another tree than $tree1: $(claim_by_token "$(claim_token "$child4" planner)" | jq -c '{tree, state}')"
 child4_pod=$(claim_sandbox "$child4" planner) || fail "$child4's planner has no Sandbox locator"
 child4_sandbox_uid=$(op get sandbox "$child4_pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's Sandbox $child4_pod"
-assert_one_bound_pvc "$child4" ""
-child4_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's PVC ${found%% *}"
+assert_pod_disk "$child4_pod" ""
+child4_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's disk ${found%% *}"
 child4_session=$(issue_worker_session "$child4" planner) || fail "$child4's planner records no session"
-note "[dispatch] $child4: todo under $tree1, no legion label; its planner holds in planning in pod $child4_pod (Sandbox uid $child4_sandbox_uid, PVC ${found%% *} uid $child4_volume), session $child4_session"
+note "[dispatch] $child4: todo under $tree1, no legion label; its planner holds in planning in pod $child4_pod (Sandbox uid $child4_sandbox_uid, its pod's own disk ${found%% *} uid $child4_volume), session $child4_session"
 pass
 
 begin "done"
@@ -5877,11 +5948,11 @@ root_running() {
     pods=$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$tree1" -o name) && [ -n "$pods" ]
 }
 until_true 600 "the pending report to suspend the root's Sandbox $root_pod and take its pod" root_parked
-assert_one_bound_pvc "$tree1" " between the looks of its production check"
+assert_no_pod_disk "$root_pod" " between the looks of its production check"
 until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $tree1" claim_states_are "$tree1" suspended suspended
 [ -n "$(issue_worker_session "$tree1" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
 state_file check-look-1
-note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $tree1 (phase changed awaiting_merge → done on pull_request_merged; Dispatch done) and opened its production check on that commit; the close handed the implementer the first look in the live pod (claims at the look: $first_look_claims), and its pending report left the check open ($(jq -c --arg issue "$tree1" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")), suspended its claim with its session, and parked Sandbox $root_pod Suspended with PVC ${found%% *} Bound and no pod"
+note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $tree1 (phase changed awaiting_merge → done on pull_request_merged; Dispatch done) and opened its production check on that commit; the close handed the implementer the first look in the live pod (claims at the look: $first_look_claims), and its pending report left the check open ($(jq -c --arg issue "$tree1" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")), suspended its claim with its session — which the session database keeps, not the disk — and parked Sandbox $root_pod Suspended with no pod and no disk"
 # The close is what stops the roles the tree kept live: each claim of tree 1 is suspended, its
 # session kept for a re-admission to resume, the implementer's by its look's pending report. The
 # daemon's suspension of a role in a turn waits for that turn to end, however long it takes, so the
@@ -6044,16 +6115,17 @@ sandbox_now=$(op get sandbox "$child4_pod" -o jsonpath='{.metadata.uid} {.metada
   fail "the operator could not read $child4's Sandbox $child4_pod"
 [ "$sandbox_now" = "$child4_sandbox_uid $child4" ] ||
   fail "$child4's Sandbox in its own tree is '$sandbox_now', want the same uid relabelled: '$child4_sandbox_uid $child4'"
-assert_one_bound_pvc "$child4" " in its own tree"
-volume_now=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's PVC ${found%% *}"
-[ "$volume_now" = "$child4_volume" ] || fail "$child4's PVC in its own tree is uid $volume_now, not $child4_volume, the volume it had in $tree1"
+assert_pod_disk "$child4_pod" " in its own tree"
+volume_now=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's disk ${found%% *}"
+[ "$volume_now" != "$child4_volume" ] ||
+  fail "$child4's disk in its own tree is still uid $child4_volume, the one it had in $tree1: the pod it belonged to went with the carry, and a pod's disk goes with the pod"
 resume4="Issue: $child4. Phase: planning. Resume the existing phase work."
 child4_resume_given() {
   claim_session_text "$child4" planner | jq -R -s -e --arg want "$resume4" \
     'any(split("\n")[] | fromjson? | select(.type == "message" and .message.role == "user"); .message.content | tostring | contains($want))' >/dev/null
 }
 until_true 300 "$child4's planner session to be given its phase's resume task" child4_resume_given
-note "$child4's planner was suspended by the daemon once its turn ended, before the architect's first launch; it moved from $tree1 to $child4 once and came back on its kept session $child4_session, given \"$resume4\"; the Sandbox $child4_pod kept uid $child4_sandbox_uid, relabelled $child4, and its PVC kept uid $child4_volume"
+note "$child4's planner was suspended by the daemon once its turn ended, before the architect's first launch; it moved from $tree1 to $child4 once and came back on its kept session $child4_session — the session database's, not its disk's — given \"$resume4\"; the Sandbox $child4_pod kept uid $child4_sandbox_uid, relabelled $child4, and its new pod brought a disk of its own, uid $volume_now, not the $child4_volume it had in $tree1"
 take_out "$child4"
 note "$child4 taken out: Dispatch shows it in backlog and its tree's pods are gone"
 pass
@@ -6085,9 +6157,9 @@ check_closed_as "$tree1" not_run ||
   fail "the daemon log records no close of $tree1's production check as not_run: $(log_lines "workflow: production check closed" | tail -1)"
 until_true 120 "the check's close to retire the implementer's claim beside the five suspended claims of $tree1" claim_states_are "$tree1" retired suspended
 until_true 600 "the check's close to suspend the root's Sandbox $root_pod again and take its pod" root_parked
-assert_one_bound_pvc "$tree1" " after its production check closed"
+assert_no_pod_disk "$root_pod" " after its production check closed"
 state_file check-closed
-note "the bound woke look 2 of $tree1's production check (the state at the wake: $(jq -c --arg issue "$tree1" '.issues[$issue].check | if . == null then "already closed" else {looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: look 2, cause bound, last), Sandbox $root_pod Running with its pod back; its pending closed the check as not_run, the state omits it, the implementer's claim is retired while the five others stay suspended ($(issue_claim_states "$tree1" | paste -sd ',' -)), and the Sandbox is Suspended again with PVC ${found%% *} Bound and no pod"
+note "the bound woke look 2 of $tree1's production check (the state at the wake: $(jq -c --arg issue "$tree1" '.issues[$issue].check | if . == null then "already closed" else {looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: look 2, cause bound, last), Sandbox $root_pod Running with its pod back; its pending closed the check as not_run, the state omits it, the implementer's claim is retired while the five others stay suspended ($(issue_claim_states "$tree1" | paste -sd ',' -)), and the Sandbox is Suspended again with no pod and no disk"
 pass
 
 begin node-release
@@ -6119,15 +6191,16 @@ tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" 
 # driver's clock, so the reads that follow it end before the close starts deleting.
 tree1_lingers() { [ "$(date -u +%s)" -lt "$(($(date -u -d "$tree1_until" +%s) - 60))" ]; }
 # tree1_parked WHEN: tree 1's root, child 2 (parked) and child 3 (mid-run) each have one Sandbox,
-# Suspended, and one PVC, Bound; WHEN says when the read was made, for a failure's message.
+# Suspended, and no pod, so none of them has a disk: an issue's disk is its pod's own ephemeral
+# volume, deleted with the pod. WHEN says when the read was made, for a failure's message.
 tree1_parked() {
-  local issue
+  local issue pod
   [ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' $1, want its one, Suspended"
   for issue in "$child2" "$child3"; do
     [ "$(issue_sandbox_modes "$issue")" = Suspended ] || fail "tree 1's child $issue's Sandboxes are '$(issue_sandbox_modes "$issue" | paste -sd ' ' -)' $1, want its one, Suspended"
   done
-  for issue in "$tree1" "$child2" "$child3"; do
-    assert_one_bound_pvc "$issue" " $1"
+  for pod in "$root_pod" "$child2_pod" "$child3_pod"; do
+    assert_no_pod_disk "$pod" " $1"
   done
 }
 tree1_parked "before tree 1's nodes were released"
@@ -6206,27 +6279,26 @@ begin close
 # foreground-deletes every Sandbox of tree 1, each with the volume it owns: the root's, kept through
 # its production check, and child 2's, kept from child-release (child 1's went with its done).
 # Child 3's, left mid-run, is handed over instead: its hand-over is pending at the cleanup (production
-# Dispatch rides the write out), so the cleanup relabels its Sandbox for the child's own tree and
-# leaves it Suspended with its volume (runtime/sandbox/cleanup.go handOverSandbox); or the child's
-# own launch relabelled it first (runtime/sandbox/relaunch.go). The PVC a carried child keeps carries
-# the same issue label, so no check of child 3's PVC holds here. Its Sandbox must stop being tree
-# 1's either way (the tree label read below), and carried-child judges its volume against the uid
+# Dispatch rides the write out), so the cleanup deletes its Sandbox too and the child's own tree
+# makes one afresh at its next launch; or the child's own launch relabelled the Sandbox first
+# (runtime/sandbox/relaunch.go), in which case the cleanup's fence no longer names it. Either way
+# the child keeps no disk — a carried child's work never outlives the pod it was done in
+# (INFRA-80) — and carried-child judges the disk its new pod brings against the uid
 # mid-run-child recorded.
-# The Sandboxes are read by the tree label, which the cleanup selects them by; the PVCs by issue,
-# since a claim carries no tree label (the volume is the issue's: its tree changes on re-admission
-# and the claim is never relabelled), one read per issue of tree 1 that still owned a volume.
-# tree_gone TREE ISSUE...: TREE has no Sandbox or pod, and no ISSUE of it a PVC. Each read is held
+# The Sandboxes are read by the tree label, which the cleanup selects them by; the disks by their
+# pods' names, since a pod's own ephemeral claim carries no label at all.
+# tree_gone TREE POD...: TREE has no Sandbox or pod, and no POD of it a disk. Each read is held
 # to its exit status (see child1_released).
 tree_gone() {
-  local tree=$1 out issue
+  local tree=$1 out pod
   shift
   out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/tree=$tree" -o name) && [ -z "$out" ] || return 1
-  for issue in "$@"; do
-    out=$(issue_pvcs "$issue") && [ -z "$out" ] || return 1
+  for pod in "$@"; do
+    out=$(pod_disk "$pod") && [ -z "$out" ] || return 1
   done
 }
-until_true 1500 "tree 1 to close at linger expiry" tree_gone "$tree1" "$tree1" "$child2"
-note "tree 1 has no Sandbox or pod left: the root's and $child2's Sandboxes and the volumes they owned are deleted, and $child3's Sandbox is no longer tree 1's"
+until_true 1500 "tree 1 to close at linger expiry" tree_gone "$tree1" "$root_pod" "$child2_pod"
+note "tree 1 has no Sandbox or pod left: the root's and $child2's Sandboxes are deleted, the disks their pods owned went with those pods, and $child3's Sandbox is no longer tree 1's"
 pass
 
 begin carried-child
@@ -6371,23 +6443,20 @@ planner_pod=$(claim_sandbox "$child3" planner) || fail "$child3's planner has no
 [ "$planner_pod" = "$child3_pod" ] || fail "$child3's architect and planner run in pods $child3_pod and $planner_pod, want one issue pod"
 tree_label=$(op get sandbox "$child3_pod" -o jsonpath='{.metadata.labels.legion\.dev/tree}') || fail "the operator could not read $child3's Sandbox $child3_pod"
 [ "$tree_label" = "$child3" ] || fail "$child3's Sandbox $child3_pod carries tree label '$tree_label', want $child3"
-assert_one_bound_pvc "$child3" " in its own tree"
-child3_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child3's PVC ${found%% *}"
-# Child 3's hand-over is pending from tree 1's linger expiry until it is consumed, and its record
-# names its own tree after, so tree 1's cleanup always finds child 3 belonging to another tree and
-# hands its Sandbox over rather than deleting it (runtime/sandbox/cleanup.go handOverSandbox). The
-# planner must therefore come back on its kept session and volume; a fresh one means the cleanup
-# took the carried child's volume.
+assert_pod_disk "$child3_pod" " in its own tree"
+child3_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child3's disk ${found%% *}"
+# What the carried child keeps is its session, which the session database holds, not its disk:
+# the pod it worked in went when tree 1 closed, and an issue's disk goes with its pod (INFRA-80),
+# so its new tree's first pod brings one of its own and provisions the workspace afresh from what
+# the branch holds. A fresh session would mean the table lost it.
 case $came_back in
   fresh)
-    fail "$child3's planner came back as a fresh session on PVC uid $child3_volume (the lost-volume lines of $child3's claims: $lost3); want its kept session on uid $child3_tree1_volume, which tree 1's cleanup hands over rather than deletes"
+    fail "$child3's planner came back as a fresh session (the lost-volume lines of $child3's claims: $lost3); want its kept session, which the session database holds whatever became of its pod"
     ;;
   kept)
-    [ "$child3_volume" = "$child3_tree1_volume" ] ||
-      fail "$child3's planner came back on its kept session, yet its PVC ${found%% *} is uid $child3_volume, not $child3_tree1_volume, the volume it had in $tree1"
-    handed=$(log_lines "sandbox runtime: handed a carried issue's sandbox over to its new tree, keeping its volume" |
-      jq -c --arg sandbox "$child3_pod" 'select(.sandbox == $sandbox)' | grep -c . || true)
-    came_back_note="came back on its kept session and volume (uid $child3_volume), its Sandbox relabelled for $child3 by $([ "$handed" -ge 1 ] && echo "tree 1's cleanup" || echo "its own launch, before tree 1's cleanup")"
+    [ "$child3_volume" != "$child3_tree1_volume" ] ||
+      fail "$child3's disk ${found%% *} in its own tree is still uid $child3_tree1_volume, the one it had in $tree1: the pod that disk belonged to is gone, and a pod's disk goes with the pod"
+    came_back_note="came back on its kept session, the session database's, on a disk of its new pod's own (uid $child3_volume, not the $child3_tree1_volume it had in $tree1)"
     ;;
 esac
 # Either way admission starts the planner in its new tree with its phase's resume task (admit's
@@ -6400,34 +6469,33 @@ confirmed=$(db_value "select cleanup_confirmed_at is not null from tree_lifecycl
   fail "the daemon's database could not be read for tree 1's lifecycle"
 [ "$confirmed" = t ] || fail "tree 1's lifecycle row shows its cleanup unconfirmed ('$confirmed') once $child3 runs in its own tree"
 note "$child3 is a tree of its own at generation 2 in $child3_phase, admitted, by $carry_path; its hand-over row is gone"
-note "$child3_planner moved from $tree1 to $child3 once and $came_back_note; the architect runs beside it in pod $child3_pod (tree label $child3, PVC ${found%% *} Bound) and was told the tree is carried; tree 1's cleanup is confirmed"
+note "$child3_planner moved from $tree1 to $child3 once and $came_back_note; the architect runs beside it in pod $child3_pod (tree label $child3, its pod's own disk ${found%% *} Bound) and was told the tree is carried; tree 1's cleanup is confirmed"
 take_out "$child3"
 note "(c) $child3 taken out: Dispatch shows it in backlog and its tree's pods are gone"
 pass
 
 begin re-admission
-# The volume-lost line is the claim's machine's (`supervise/machine.go` relaunchFresh), whose
-# logger names the claim's token on every line (`deps.Log.With("claim", …)`), so it is read per
-# issue (issue_lost_lines), never counted over the whole log, where another tree's loss would
-# satisfy the wait early or push the count past one.
+# The re-admitted tree's root starts on a pod and a disk of its own: tree 1's close took both at
+# its linger expiry, and nothing of them is recovered. There is no lost-volume verdict and no
+# recovery marker left to read (INFRA-80 deleted both): the architect comes back on the session
+# the session database kept for it, in a workspace provisioned afresh from the branch, and its
+# Legion plugin tells it so from the launcher's own LEGION_WORKSPACE_RECREATED rather than from a
+# file on a disk.
 set_status "$tree1" todo
-lost_seen() { [ "$(issue_lost_lines "$tree1" | wc -l)" -ge 1 ]; }
-on_tree "$tree1" until_true 900 "the re-admitted tree 1 to report its issue's volume lost and relaunch a fresh architect" lost_seen
 on_tree "$tree1" wait_for_worker "$tree1" architect
 pod=$(issue_pod "$tree1")
-recovered=$(pod_exec "$pod" architect cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
-jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
-# Counted per issue, and stricter than counting tree 1's own lines alone: in this run only tree 1's
-# and child 3's volumes are deleted while their claims stay resumable (tree 1's at its close, its
-# claims suspended for this re-admission; child 3's at the same close, its claim moved to its own
-# tree at carried-child, which counted its one loss). Every other issue's volume either survives
-# or goes with claims that are closed for good, so a lost-volume line for any other claim is a
-# defect, not noise, and fails here.
-lost=$(issue_lost_lines "$tree1" | wc -l)
-[ "$lost" = 1 ] || fail "the daemon reported $tree1's volume lost $lost times, want exactly once"
-others=$(log_lines "$lost_msg" | jq -c --arg a "$(claim_token "$tree1" "")" --arg b "$(claim_token "$child3" "")" 'select((.claim // "") | (startswith($a) or startswith($b)) | not)')
-[ -z "$others" ] || fail "the daemon reported a lost volume for claims of neither $tree1 nor $child3: $(head -3 <<<"$others" | cut -c1-300 | tr '\n' ' ')"
-note "the daemon logged \"$lost_msg\" once for $tree1, then a fresh session whose workspace holds .legion/$tree1/workspace-recovered.json naming legion/$tree1"
+assert_pod_disk "$pod" " on the re-admitted tree"
+readmitted_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read the re-admitted root's disk ${found%% *}"
+# No launch of this run may report a lost volume: the verdict is gone, so a line of it is a daemon
+# the run did not build.
+others=$(grep -c 'volume was lost' "$daemon_log" || true)
+[ "$others" = 0 ] || fail "the daemon reported a lost volume $others times, want none: the verdict is gone (INFRA-80)"
+# The recovery marker is gone with it, and a workspace that still carries one is an old image.
+marker_path=/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json
+if left=$(pod_exec "$pod" architect cat "$marker_path" 2>&1); then
+  fail "the re-admitted root's workspace still holds $marker_path: $(head -c 300 <<<"$left")"
+fi
+note "the re-admitted $tree1 came back in pod $pod on a disk of that pod's own (${found%% *}, uid $readmitted_volume), with no lost-volume line anywhere in the daemon's log and no $marker_path in its workspace"
 pass
 
 begin operator-close
@@ -6435,22 +6503,22 @@ begin operator-close
 # workflow's to close: the close of re-admitted tree 1's live root is refused 409, and its claims,
 # Sandboxes and pods are untouched. A tree no workflow issue backs, which the operator spawns here,
 # closes with its worker live: the root and the worker are retired, and the tree's Sandboxes, pods
-# and volumes (the root's and the worker's issue's) are gone.
-# tree_objects TREE ISSUE... prints, as one sorted JSON array, the Sandboxes and pods labelled with
-# TREE and the PVCs of each ISSUE of it: a claim carries no tree label (the volume is the issue's),
-# so a tree's volumes are read by its issues. A read that fails fails the function.
+# and disks (one per pod) are gone.
+# tree_objects TREE prints, as one sorted JSON array, the Sandboxes and pods labelled with TREE and
+# the disk of each of those pods: a pod's disk carries no label of its own, so it is read by the
+# pod's name (pod_disk's doc has why). A read that fails fails the function.
 tree_objects() {
-  local tree=$1 objects issue
-  shift
+  local tree=$1 objects pod disk
   objects=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/tree=$tree" -o json) || return 1
-  for issue in "$@"; do
-    objects+=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/issue=$issue" -o json) || return 1
+  for pod in $(jq -r '.items[] | select(.kind == "Pod") | .metadata.name' <<<"$objects"); do
+    disk=$(op get pvc "$pod-issue" --ignore-not-found -o json) || return 1
+    [ -z "$disk" ] || objects+=$(jq -c '{items: [.]}' <<<"$disk")
   done
   jq -cs '[.[].items[] | {kind, name: .metadata.name, uid: .metadata.uid}] | sort_by(.kind, .name)' <<<"$objects"
 }
 root1=$(claim_token "$tree1" architect)
 states1() { claims_cli list --json | jq -c --arg t "$tree1" '[.claims[] | select(.tree == $t) | {token, state, generation}] | sort_by(.token)'; }
-objects_before=$(tree_objects "$tree1" "$tree1" "$child2")
+objects_before=$(tree_objects "$tree1")
 claims_before=$(states1)
 if refusal=$(claims_cli close --claim "$root1" 2>&1 >/dev/null); then
   fail "the operator's close of workflow tree $tree1 through $root1 was accepted"
@@ -6459,7 +6527,7 @@ case "$refusal" in
   *"409"*) ;;
   *) fail "the operator's close of workflow tree $tree1 was refused with '$refusal', not 409" ;;
 esac
-[ "$(tree_objects "$tree1" "$tree1" "$child2")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1" "$tree1" "$child2")"
+[ "$(tree_objects "$tree1")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1")"
 [ "$(states1)" = "$claims_before" ] || fail "the refused close changed tree 1's claims: $claims_before, then $(states1)"
 note "the operator's close of workflow tree $tree1 was refused ($refusal); its claims $claims_before and objects $objects_before are unchanged"
 take_out "$tree1"
@@ -6471,15 +6539,16 @@ op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$opchild" --role i
   fail "the operator could not spawn a worker of $optree"
 on_tree "$optree" until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
 on_tree "$optree" until_true 900 "$optree's worker $op_worker to be live" claim_live "$op_worker"
-objects=$(tree_objects "$optree" "$optree" "$opchild")
+objects=$(tree_objects "$optree")
 jq -e 'map(select(.kind == "Pod")) | length == 2' <<<"$objects" >/dev/null || fail "$optree does not have its two pods before the close: $objects"
+mapfile -t op_pods < <(jq -r '.[] | select(.kind == "Pod") | .name' <<<"$objects")
 for uid in $(jq -r '.[] | select(.kind == "Pod") | .uid' <<<"$objects"); do driver_action close "$uid"; done
 note "before the close, $optree has: $objects"
 closed=$(claims_cli close --json --claim "$op_root") || fail "the operator's close of $optree through $op_root was refused: $closed"
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close left $optree's root $(jq -c '{state}' <<<"$closed")"
 claim_retired "$op_worker" || fail "the close of $optree left its worker $op_worker $(claim_by_token "$op_worker" | jq -c '{state}')"
-until_true 600 "$optree's Sandboxes, pods and volumes to be gone" tree_gone "$optree" "$optree" "$opchild"
-note "the operator's close of $optree, with its worker $op_worker live, retired the root and the worker; afterwards $optree has: $(tree_objects "$optree" "$optree" "$opchild")"
+until_true 600 "$optree's Sandboxes, pods and disks to be gone" tree_gone "$optree" "${op_pods[@]}"
+note "the operator's close of $optree, with its worker $op_worker live, retired the root and the worker; afterwards $optree has: $(tree_objects "$optree")"
 pass
 
 begin pod-shape
