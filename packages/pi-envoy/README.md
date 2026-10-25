@@ -223,7 +223,8 @@ prints. An upload whose name or path holds an expansion (`"$NAME"`) is refused, 
 gate cannot read is. The gate copies each file that the write posts into a private snapshot. It
 reviews the snapshot and changes the command to post that snapshot. The file must be a regular
 file. The gate refuses a missing file, a directory, a device, a FIFO and `/dev/stdin` before it
-reads them. For text from standard input, use `--<field>-file -` with a quoted here-document. The
+reads them. For text from standard input, use `--<field>-file -` with a quoted here-document. For an
+upload, that is `--content-file -`: the CLI reads `--path -` as a file named `-`. The
 gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long document. It
 judges an upload against content failure 10 alone: a plan or a report is long by nature. An upload
 of any other file is not reviewed. A `task` subagent is not reviewed.
@@ -274,7 +275,21 @@ role resolves, the gate refuses the write in both modes and names the two roles.
 main model is on another provider than the gate's model is not reviewed: its transcript stays on
 that provider.
 
-`OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit (90 s, less than the host's limit for one
-`tool_call` handler). `OMP_ASKGATE_DUMP` names a file that gets each review's two prompts. Every
-review writes one `advisor-gate` entry into the session's transcript, and
-`scripts/askgate-report.ts` reports what those entries sent back and what they cost.
+**The time limit.** `OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit. The default is 90 s. The
+gate holds the limit 5 s under `extensionHandlers.toolCallTimeoutMs`, the host's limit for one
+`tool_call` handler. That key is 30 s by default, so the limit is then 25 s. A review of a long
+session often takes longer than 25 s, and a review that times out lets the write post. Three
+timeouts in a row stop the gate for the rest of the session. Set the key to 120000 or more in the
+session's settings, for example in `~/.omp/agent/config.yml` or an overlay in `PI_CONFIG_FILES`:
+
+```yaml
+extensionHandlers:
+  toolCallTimeoutMs: 120000
+```
+
+When the limit is under 30 s, the gate logs one warning at start that names the key, the host's
+limit and the review's limit. It still reviews each write.
+
+`OMP_ASKGATE_DUMP` names a file that gets each review's two prompts. Every review writes one
+`advisor-gate` entry into the session's transcript, and `scripts/askgate-report.ts` reports what
+those entries sent back and what they cost.

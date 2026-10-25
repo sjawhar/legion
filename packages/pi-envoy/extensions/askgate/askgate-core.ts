@@ -85,7 +85,10 @@
 // tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
 // handler entry. A ceiling that leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no
 // positive integer, throw when the gate binds: the entry then refuses each write the gate would
-// review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
+// review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off. A deadline
+// under 30 s binds, and logs one warning that names the ceiling, the deadline and the key to raise:
+// at the default ceiling the deadline is 25 s, which a review of a long session often exceeds, and a
+// review that times out lets the write post.
 //
 // Per gated call, in order:
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
@@ -184,6 +187,11 @@ const GATE_TIMEOUT_MS = 90_000;
 const CEILING_MARGIN_MS = 5_000;
 const ABORT_GRACE_MS = 2_000;
 const MIN_DEADLINE_MS = 10_000;
+// A deadline under WARN_DEADLINE_MS binds with one warning at bind: a review of a long session often
+// takes longer, and a review that times out lets the write post. The warning names
+// RECOMMENDED_CEILING_MS as the ceiling to set (the README's AskGate section).
+const WARN_DEADLINE_MS = 30_000;
+const RECOMMENDED_CEILING_MS = 120_000;
 // The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
 // the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler
 // waits at most SHUTDOWN_WAIT_MS for their records.
@@ -301,7 +309,7 @@ interface Deps {
   env: Record<string, string | undefined>;
   home: string;
   now: () => number;
-  /** Where the gate's notices go besides the session's UI: the host's logger. */
+  /** Where the gate's notices and its bind-time warning go besides the session's UI: the host's logger. */
   logger: { warn(message: string): void };
   /** The session's envoy.json, whose `askgate.enabled` is the switch: named in the notice for an OMP_ASKGATE the gate ignores. */
   configFile: string;
@@ -2250,10 +2258,23 @@ function characters(chars: readonly string[]): string {
     ? (named[0] ?? "")
     : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
 }
+/**
+ * The flags a refused file's text can go through instead: a `--<field>-file` reads `-` as stdin and
+ * any other path as a file. An upload's `--path` (and `--path-file`, which names it) is a path the
+ * CLI sends as it is, `-` included, so an upload's text goes through `--content-file`, and its
+ * regular file through `--path`.
+ */
+function resendFlags(flag: string): { stdin: string; regular: string } {
+  if (flag === "--path" || flag === "--path-file")
+    return { stdin: "--content-file", regular: "`--path` or `--content-file`" };
+  return { stdin: flag, regular: `\`${flag}\`` };
+}
 /** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
 function renderUnreadable({ label, program, file }: UnreadableCommand): string {
-  if (file !== undefined)
-    return `AskGate did not run this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${file.flag} -\` and a quoted here-document (\`<<'EOF'\`), or use \`--content-file\` with a regular file. Nothing in the call ran.`;
+  if (file !== undefined) {
+    const { stdin, regular } = resendFlags(file.flag);
+    return `AskGate did not run this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. Nothing in the call ran.`;
+  }
   const why =
     program === undefined
       ? ""
@@ -2328,6 +2349,28 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       throw new Error(
         `extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`
       );
+    // A short deadline is no off switch: the gate binds, and says once how to give it more time. The
+    // ceiling is read again on each call (`askModel`); this is the deadline the session starts with.
+    const deadlineAtBind = Math.min(timeoutMs, ceiling - CEILING_MARGIN_MS);
+    if (deadlineAtBind < WARN_DEADLINE_MS) {
+      const raise = [
+        ...(ceiling - CEILING_MARGIN_MS < WARN_DEADLINE_MS
+          ? [
+              `extensionHandlers.toolCallTimeoutMs to ${RECOMMENDED_CEILING_MS} or more in the session's settings`,
+            ]
+          : []),
+        ...(timeoutMs < WARN_DEADLINE_MS
+          ? [`OMP_ASKGATE_TIMEOUT_MS to ${WARN_DEADLINE_MS} or more`]
+          : []),
+      ];
+      const envNote =
+        deps.env.OMP_ASKGATE_TIMEOUT_MS === undefined
+          ? ""
+          : ` OMP_ASKGATE_TIMEOUT_MS is ${timeoutMs}.`;
+      deps.logger.warn(
+        `AskGate: the review deadline is ${deadlineAtBind} ms. A review of a long session often takes longer, and a review that times out lets the write post. extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, and the deadline is held ${CEILING_MARGIN_MS} ms under it.${envNote} Set ${raise.join(" and ")}.`
+      );
+    }
     // The system role holds only the gate's own text and its rules; the agent's system prompt and
     // transcript are data about the agent under review, escaped into the user message.
     const system = `${systemTemplate.trim()}\n\n${rules.trim()}`;

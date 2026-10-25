@@ -400,4 +400,12 @@ describe("the model gateway key command", () => {
       expect(`${result.stdout}${stderr}`).not.toContain("may have failed check");
     }
   }, 120_000);
+
+  test("the profile's config.yml raises Oh My Pi's tool_call handler limit to 120 s, so AskGate's review fits inside it", () => {
+    const { run } = install();
+    const config = Bun.YAML.parse(
+      readFileSync(join(run, "omp-home/.omp/profiles/legion-e2e-test/agent/config.yml"), "utf8")
+    ) as { extensionHandlers?: { toolCallTimeoutMs?: unknown } };
+    expect(config.extensionHandlers?.toolCallTimeoutMs).toBe(120_000);
+  });
 });

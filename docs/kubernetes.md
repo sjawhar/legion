@@ -3377,6 +3377,16 @@ issue's pod (every role container of it alike) and the image probe's.
   turns it off or the probe could not read it — a report, not a refusal; a
   `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to
   keep it off ([The deployment's capability report](#the-deployments-capability-report)).
+- **AskGate's time limit** is the operator's too. Every pod loads pi-envoy, whose AskGate reviews
+  each Dispatch write of a role's main agent before it posts. Its review must finish inside Oh My
+  Pi's limit for one `tool_call` handler, `extensionHandlers.toolCallTimeoutMs`, and the gate holds
+  its deadline 5 s under that limit. The limit is 30 s by default, so the deadline is then 25 s. A
+  review of a long session often takes longer, a review that times out lets the write post
+  unreviewed, and three timeouts in a row stop the gate for the rest of that session. Set
+  `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example
+  overlay does (pi-envoy's README, "The time limit"). Legion's own turn-scoping overlay does not set
+  it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
+  through Oh My Pi's logger.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only

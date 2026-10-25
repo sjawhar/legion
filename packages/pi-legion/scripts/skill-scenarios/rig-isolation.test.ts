@@ -139,16 +139,25 @@ put(
 
 // The work directory: the label's profile, and the batch's services file and Dispatch token.
 const work = path.join(scratch, "work");
-const profile = path.join(work, "profiles/on");
-mkdirSync(path.join(profile, "home/.omp"), { recursive: true });
-for (const [file, text] of [
-  ["checkout", co],
-  ["pin", "omp@stub"],
-  ["profile", "skills-on"],
-  ["built-from", `checkout ${co}`],
-  ["ready", ""],
-])
-  writeFileSync(path.join(profile, file), `${text}\n`);
+/** A label's built profile, with its Oh My Pi settings `settings` (the model route installers'). */
+function label(name: string, settings: string) {
+  const dir = path.join(work, "profiles", name);
+  put(path.join(dir, `home/.omp/profiles/skills-${name}/agent/config.yml`), settings);
+  for (const [file, text] of [
+    ["checkout", co],
+    ["pin", "omp@stub"],
+    ["profile", `skills-${name}`],
+    ["built-from", `checkout ${co}`],
+    ["ready", ""],
+  ])
+    writeFileSync(path.join(dir, file), `${text}\n`);
+}
+label(
+  "on",
+  "modelRoles:\n  default: anthropic/m\nextensionHandlers:\n  toolCallTimeoutMs: 120000\n"
+);
+// A profile built before the installers raised the handler limit.
+label("stale", "modelRoles:\n  default: anthropic/m\n");
 put(path.join(work, "services/env"), "ENVOY_URL=http://127.0.0.1:1\n");
 put(path.join(work, "services/dispatch-token"), "e2e-token\n");
 /** The tag rig.sh names the work directory's containers with. */
@@ -257,4 +266,19 @@ test("each run stops its Dispatch server when it ends", () => {
       !/^\d+ \(.*\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"))
   );
   expect(running).toEqual([]);
+});
+
+// AskGate's review would time out under Oh My Pi's default handler limit, so a run whose profile
+// leaves the limit there scores the timeout rather than the rule: the rig refuses it, starting nothing.
+test("a run on a profile whose settings leave the handler limit at its default is refused, naming the key", async () => {
+  const child = Bun.spawn(["bash", rig, "run", "askgate", "stale", "1", "3", start], {
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  expect(code).toBe(1);
+  expect(stderr).toContain("extensionHandlers.toolCallTimeoutMs to 120000 or more");
+  expect(existsSync(path.join(work, "runs", "askgate-facts-stale-1"))).toBe(false);
+  expect(lines(path.join(stub, "docker.log")).join("\n")).not.toContain("stale");
 });

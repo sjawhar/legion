@@ -17,7 +17,8 @@
   `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
   its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
   from the dry run, and one that holds an expansion is refused. Each posted file is reviewed and
-  posted from a private snapshot. A missing or non-regular file is refused before AskGate reads it.
+  posted from a private snapshot. A missing or non-regular file is refused before AskGate reads it,
+  and the refusal names `--content-file -` for an upload's text from standard input.
   The gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long
   document. Its rules now also send back a fact the reader does not need and text longer than its
   decision needs, and a claim about what the person said is sourced only by a link to where they
@@ -28,6 +29,9 @@
   write. It refuses conditional or state-changing setup that the dry run cannot repeat,
   `printf -v`, expanding here-documents, unproved program names, later stages that can write a
   file, and second writes.
+- AskGate needs `extensionHandlers.toolCallTimeoutMs` at 120000 or more in the session's settings.
+  At the 30 s default its deadline is 25 s, a review of a long session often times out, and the
+  write posts unreviewed. A deadline under 30 s logs one warning at start that names the key.
 
 ### Fixed
 

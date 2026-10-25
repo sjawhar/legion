@@ -82,6 +82,9 @@
 #     (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), under a HOME of its own
 #     copied from the label's, with `env -i` and only the variables its pane file names (base_env).
 #     An agent that writes to its HOME (`mise use -g`, say) changes nothing for another run.
+#   - Its profile's settings set extensionHandlers.toolCallTimeoutMs to 120000 or more, as the model
+#     route installers write them, so AskGate's review fits inside Oh My Pi's handler limit
+#     (load_label refuses a profile that does not).
 #   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
 #     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n> (askgate-<case>-<label>-<n> for
 #     askgate). The pane shows nothing: omp's output goes to <work>/runs/<run>/out.txt, and the
@@ -153,6 +156,15 @@ load_label() {
   co=$(<"$P/checkout")
   pin=$(<"$P/pin")
   profile=$(<"$P/profile")
+  # AskGate holds its review's deadline 5 s under Oh My Pi's limit for one tool_call handler, and at
+  # that limit's 30 s default a review of a long session often times out and its write posts
+  # unreviewed (packages/pi-envoy/README.md, "The time limit"): an askgate run would then score the
+  # timeout, not the rule. The model route installers set the limit in the profile's settings
+  # (scripts/e2e/lib/install-model-gateway.sh, install-key-file-model-route.sh); a profile built
+  # before they did is refused here.
+  local settings=$P/home/.omp/profiles/$profile/agent/config.yml
+  bun -e 'const v = Bun.YAML.parse(await Bun.file(process.argv[1]).text())?.extensionHandlers?.toolCallTimeoutMs; process.exit(typeof v === "number" && v >= 120000 ? 0 : 1)' "$settings" 2>/dev/null ||
+    fail "label $1's profile settings $settings do not set extensionHandlers.toolCallTimeoutMs to 120000 or more, so AskGate's review would often time out: remove $P and run \`rig.sh profile $1 <checkout>\` from a checkout whose model route installer sets it"
 }
 
 cmd_profile() {

@@ -182,7 +182,10 @@ the error and `askgate.enabled`, and records a `load-failed` entry. `session_sta
 load and shows a load failure or a switch that does not parse as a notice. `askgate-core.ts` holds
 every rule of the gate and takes the host through its dependencies, so `askgate.test.ts` drives it
 with fakes. The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
-model.
+model. The review's deadline is held 5 s under `extensionHandlers.toolCallTimeoutMs`, so at that
+key's 30 s default a review often times out and the write posts unreviewed: a session that loads
+this plugin sets the key to 120000 or more (the README's "The time limit"), and a deadline under
+30 s logs one warning at bind.
 `rules.md`, `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an
 upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
 

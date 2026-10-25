@@ -856,6 +856,32 @@ describe("deadline and abandonment", () => {
   test("a ceiling that leaves no room for a verdict throws when the gate binds, saying why", () => {
     expect(() => bind({ ceiling: 8_000 })).toThrow(/8000 ms/);
   });
+  test("a deadline under 30 s binds the gate and logs one warning naming the ceiling, the deadline and the key to raise", async () => {
+    const defaults = bind({ ceiling: 30_000 });
+    expect(defaults.warnings).toEqual([expect.stringContaining("review deadline is 25000 ms")]);
+    expect(defaults.warnings[0]).toContain("extensionHandlers.toolCallTimeoutMs is 30000 ms");
+    expect(defaults.warnings[0]).toContain(
+      "Set extensionHandlers.toolCallTimeoutMs to 120000 or more"
+    );
+    // It still binds: the call is reviewed against the short deadline, and the warning is not repeated.
+    expect(await defaults.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
+    await defaults.device("t2", "dispatch_comment", { issue: "X-2", body: "two" });
+    expect(defaults.entries).toMatchObject([
+      { outcome: "verdict", deadlineMs: 25_000 },
+      { outcome: "verdict", deadlineMs: 25_000 },
+    ]);
+    expect(defaults.warnings).toHaveLength(1);
+    expect(defaults.notices).toEqual([]);
+    // A short OMP_ASKGATE_TIMEOUT_MS names that variable as the key to raise.
+    const env = bind({ ceiling: 120_000, env: { OMP_ASKGATE_TIMEOUT_MS: "20000" } });
+    expect(env.warnings).toEqual([expect.stringContaining("review deadline is 20000 ms")]);
+    expect(env.warnings[0]).toContain("OMP_ASKGATE_TIMEOUT_MS is 20000");
+    expect(env.warnings[0]).toContain("extensionHandlers.toolCallTimeoutMs is 120000 ms");
+    expect(env.warnings[0]).toContain("Set OMP_ASKGATE_TIMEOUT_MS to 30000 or more");
+    // At 30 s and over, nothing is logged.
+    expect(bind({ ceiling: 35_000 }).warnings).toEqual([]);
+    expect(bind({ ceiling: 120_000 }).warnings).toEqual([]);
+  });
   test("a call abandoned by its tool (a user abort, or the runner's ceiling) cancels the model call and never counts toward the halt", async () => {
     const signals: AbortSignal[] = [];
     let started = Promise.withResolvers<void>();
@@ -2115,6 +2141,29 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(0);
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
     });
+    test("an unreadable --path is told to send the text with --content-file -, never --path -, which the CLI opens as a file named -", async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      for (const [id, command] of [
+        [
+          "p-device",
+          "dispatch artifact --issue DSP-1 --name brief.md --path /dev/stdin <<'EOF'\nhi\nEOF",
+        ],
+        ["p-dash", "dispatch artifact --issue DSP-1 --name brief.md --path - <<'EOF'\nhi\nEOF"],
+      ]) {
+        const result = await g.bash(id, command);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("`--content-file -` and a quoted here-document");
+        expect(result?.reason).not.toContain("`--path -`");
+      }
+      expect(g.calls).toHaveLength(0);
+      // The advice, followed, is reviewed and posts.
+      const followed = await g.bash(
+        "p-followed",
+        "dispatch artifact --issue DSP-1 --name brief.md --content-file - <<'EOF'\nhi\nEOF"
+      );
+      expect(followed?.block).toBeUndefined();
+      expect(g.calls).toHaveLength(1);
+    });
     test("astra 5: an artifact posts the file snapshot reviewed before the model answers", async () => {
       const source = path.join(work, "snapshot.md");
       const posted = path.join(work, "snapshot-posted.json");
@@ -2760,6 +2809,19 @@ describe("askgate.ts, the entry", () => {
       expect(result?.block).toBe(true);
       expect(result?.reason).toContain("extensionHandlers.toolCallTimeoutMs is 8000 ms");
       expect(entries).toMatchObject([{ outcome: "load-failed", decision: "revise" }]);
+    } finally {
+      toolCallCeilingMs = 120_000;
+    }
+  });
+  test("the default handler ceiling binds the gate, and its warning reaches the host's logger once", async () => {
+    toolCallCeilingMs = 30_000;
+    try {
+      const { result, entries, warnings } = await gateOnce();
+      expect(result).toBeUndefined();
+      expect(entries).toMatchObject([{ outcome: "verdict", deadlineMs: 25_000 }]);
+      expect(warnings).toEqual([
+        expect.stringContaining("extensionHandlers.toolCallTimeoutMs is 30000 ms"),
+      ]);
     } finally {
       toolCallCeilingMs = 120_000;
     }
