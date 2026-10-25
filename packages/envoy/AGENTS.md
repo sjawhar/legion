@@ -2262,6 +2262,10 @@ ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with
 service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`. Migration 0007 is forward-only: an
 older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
 two slots, so the binary is never rolled back past it once a slotted enrollment exists.
+An older broker binary refuses a `BROKER_SERVICES` that names a service for more than one account
+(`must give each service once`), and the broker is one pod, so once the setting names a service
+twice the image is never rolled back past this change without moving the setting back in the same
+step.
 An enrollment's kind is `session` (an agent session on a machine its person logged in: the
 helper's own, or a key a launcher such as agentbox brings through the helper's
 `enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
@@ -2355,9 +2359,9 @@ load; GCP: the latest version's
 value check comes after every other reason, so a secret refused for a tag or its key is logged for
 that (`secrets.Local` gives a secret created without a value no version, as Secrets Manager does);
 an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
-`cmd/broker` fills with `BROKER_SERVICES`' names; and `Loader.secretName` asks `Store.ValidName`
-whether a name can exist in the store at all (Secrets Manager's 512-character limit; Secret
-Manager's 255-character `[A-Za-z0-9_-]` id), so no lookup is made for one that cannot.
+`cmd/broker` fills with `BROKER_SERVICES`' distinct services; and `Loader.secretName` asks
+`Store.ValidName` whether a name can exist in the store at all (Secrets Manager's 512-character
+limit; Secret Manager's 255-character `[A-Za-z0-9_-]` id), so no lookup is made for one that cannot.
 `secrets.GCP` counts against Secret Manager's 600-a-minute per-project read quota for every call but
 `AccessSecretVersion` (`TestGCPReadQuotaCost` pins a `List` at 1+N, a `Describe` at 2, a `Read` at 1), so
 `Current.RefreshOne` anchors a reread only when it changed the live answer, and `NewGCPClient` retries
@@ -2368,12 +2372,12 @@ off, since at debug it prints response bodies, a value among them, and logs a fa
 status code alone, never its message, which can quote a request. A session's `policy.Requester.Service` is the
 `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
-and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
-to (`requests.Machine.ServiceAccounts`, `requester()`): a credential's service is the one a token
-login's `BROKER_SERVICE_LOGINS` entry names, or, for a service login a person approved through a
-code before token logins, the machine's own claim. So a `legion-worker` pod the Legion daemon's
-login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
-one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
+and its verified `enrollments.subject` is one of the accounts `BROKER_SERVICES` maps to that
+service (`requests.Machine.ServicesByAccount`, `requester()`): a credential's service is the one a
+token login's `BROKER_SERVICE_LOGINS` entry names, or, for a service login a person approved
+through a code before token logins, the machine's own claim. So a `legion-worker` pod the Legion
+daemon's login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and
+to no one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
@@ -2917,10 +2921,12 @@ store, refused with the GCP one; the agent-secrets key's ARN, `arn:aws:kms:…:k
 agent-secrets key's resource name in the `global` location, the only one automatic replication
 takes),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
-entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
-to one name, never a namespace's `default` account (every pod there that names no account runs as
-it) — any other entry is refused naming it, and an account given twice names both; unset,
-`Config.ServiceAccounts` is nil and no service is registered),
+entries, each name `record.ValidService`'s form and not `shared`, and each account given once and
+proving one name, never a namespace's `default` account (every pod there that names no account runs
+as it); a name may be given for several accounts, one entry each — any other entry is refused naming
+it, and an account given twice is refused naming the account and, when the two entries differ, both
+names; keyed by account in `Config.ServicesByAccount`; unset, it is nil and no service is
+registered),
 `BROKER_MINT_TARGETS` (removed; startup refuses it because a secret's `kind` tag now selects what
 the broker mints),
 `BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
