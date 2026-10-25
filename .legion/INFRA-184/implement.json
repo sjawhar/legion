@@ -9,7 +9,7 @@
       "surface": "The Go test as the repository runs it, against a real Postgres 17 with pgvector, driving the claim route through the handler.",
       "command": "`cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/api/ -run 'Claim' -count=1`, covering the new `TestClaimSurvivesAHangingLegionLabelWalk` and the existing `TestClaimSurvivesAFailingLegionLabelWalk`.",
       "observed": "With `legionManagedStatusSQL` swapped for `select count(*) > 0 from (select pg_sleep(5)) slow where $1 <> ''` — ten times the 500 ms bound — the claim answers 200, the body carries the claim, `legion_managed_status` is absent from the raw JSON, the issue read back through `GET /api/v1/issues/{key}` still holds the claim, and the release that follows is served rather than blocked behind the row. Three changes make that true: the walk runs before `writeIssueClaim`, so nothing at all sits between `appendEvent` and `tx.Commit`; it runs on `context.WithoutCancel(ctx)`, so a cancellation cannot skip its savepoint's rollback; and its savepoint sets `statement_timeout = '500ms'` and restores the default before release, the shape `writeAdvice` uses on the same predicate.",
-      "headSha": "77dd5bebe32e01d0d7fd3b1cb1ea6ce05e34b1c5",
+      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
       "negativeControl": "The reviewer's own measurement of the previous head stands as the before: at `347d8432fb17` the same walk took no bound and ran on the request context. Within this round the control is the sibling test `TestClaimSurvivesAFailingLegionLabelWalk`, which forces a statement error rather than a hang and asserts the same invariant, and the unlabelled rows of `TestClaimAnswersWhoOwnsTheIssuesStatus`, which show the field answered `false` rather than omitted when the walk succeeds — so the omission is the failure path and not the default."
     },
     {
@@ -17,7 +17,7 @@
       "surface": "The Go test as the repository runs it, through the message route with the package's failing-advice rig armed on the walk's query name.",
       "command": "`cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/api/ -run 'Advice' -count=1`, covering the new `TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails`.",
       "observed": "With `newFailingAdviceHandler(t, \"legion_managed_status\", 0)` arming that query to fail, a session's write on a triage issue still answers advice carrying `issue_status: triage`, `session_writes_since_human: 2` and the one `your_open_asks` entry, with `legion_managed_status` absent from the raw JSON. `legionManagedStatusAdvice` takes a savepoint of its own inside the advice savepoint — a failed statement aborts the transaction it ran in, so run directly it would have taken the `statement_timeout` reset and the release with it and dropped the advice anyway — logs once through `logAdviceError`, and returns nil.",
-      "headSha": "77dd5bebe32e01d0d7fd3b1cb1ea6ce05e34b1c5",
+      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
       "negativeControl": "The two queries before it keep their fatal behaviour, and the package's existing tests prove it unchanged: `TestWriteAdviceFailureDoesNotAbortWrite` and `TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails` both arm `session_writes_since_human` and still expect the whole advice dropped, and both pass. So the new tolerance is the walk's alone."
     },
     {
@@ -25,7 +25,7 @@
       "surface": "`packages/envoy/AGENTS.md` and `packages/envoy/internal/dispatch/api/issue_claim_test.go`, read at the lines the reviewer named.",
       "command": "`grep -c 'Both answer the issue' packages/envoy/AGENTS.md` and `grep -o 'Both answer [^.]*\\.' packages/envoy/AGENTS.md`; the advice paragraph read at `:404-420`.",
       "observed": "`Both answer the issue` is gone (count 0); the claim paragraph now reads `Both answer \\`claimAnswer\\`: the issue flat, with \\`legion_managed_status\\` … beside it, omitted when that walk failed or timed out, which costs the field and never the claim.` The advice paragraph cites `internal/dispatch/api/issue_parent.go` for `legionManagedStatus` and names `claimLegionManagedStatus` in `issue_claim.go` as the claim-side wrapper, and states the new failure behaviour: the two session-scoped queries drop the advice, the walk omits its own field alone. The SQL swap in `TestClaimSurvivesAFailingLegionLabelWalk` now carries the sentence naming what it depends on — nothing in `internal/dispatch/api` calls `t.Parallel` — and why `server.adviceQueryHook` is not used instead: it fires from `computeWriteAdvice` and never reaches `claimWrite`.",
-      "headSha": "77dd5bebe32e01d0d7fd3b1cb1ea6ce05e34b1c5",
+      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
       "negativeControl": "The claim paragraph is one very long line carrying many other statements; `git diff` of `AGENTS.md` shows the only change inside it is the final sentence, so nothing else in it moved."
     },
     {
@@ -33,7 +33,7 @@
       "surface": "The `dispatch` command an agent runs (this branch's CLI), against `packages/dispatch/e2e/run-server.sh` servers on a real Postgres 17 with pgvector: port 8777 built from this head, port 8778 built from 7bf2759c6e17.",
       "command": "`bash /tmp/infra-184/prove.sh`.",
       "observed": "36 assertions, 0 failures: A1's sixth post of three sessions recorded `session_writes_since_human: 2` with no cadence line; A2's own sixth post still printed the stop line; A3's claim and release on `legion`, `Legion` and a child of a labelled parent named `issue-update` nowhere, and the triage comments on the labelled issue and the labelled parent's child printed no triage line with `issue_status=triage legion_managed_status=true` recorded; A4's no-artifact `doc-edit` minted spec v2 and reached the same document as `--artifact spec`.",
-      "headSha": "77dd5bebe32e01d0d7fd3b1cb1ea6ce05e34b1c5",
+      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
       "negativeControl": "Each criterion ran with its own control, including the pre-change server for A1 and the labelled triage issue on it for A3's triage half; the whole `internal/dispatch/api` (658 s) and `model` Go packages are green, `gofmt`/`go vet`/`go build ./...` clean, and `claude-envoy`'s `check-dist` matches a fresh build (this round changed no TypeScript, so no bundle moved)."
     }
   ],
