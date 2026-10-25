@@ -584,9 +584,15 @@ func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
 	if err := delayed.Commit(ctx); err != nil {
 		t.Fatalf("commit the delayed review: %v", err)
 	}
-	if !second.CreatedAt.Before(first.CreatedAt) || second.EventSeq == nil || *second.EventSeq <= *first.EventSeq {
-		t.Fatalf("delayed review at=%s seq=%v, first at=%s seq=%v; want the delayed one earlier in time and later in sequence",
-			second.CreatedAt, second.EventSeq, first.CreatedAt, first.EventSeq)
+	// The HTTP review response carries no sequence (EventSeq is not serialized), so read the first
+	// review's from its row.
+	var firstSeq int64
+	if err := database.Pool.QueryRow(ctx, `select event_seq from artifact_reviews where id = $1`, first.ID).Scan(&firstSeq); err != nil {
+		t.Fatalf("read the first review's sequence: %v", err)
+	}
+	if !second.CreatedAt.Before(first.CreatedAt) || second.EventSeq == nil || *second.EventSeq <= firstSeq {
+		t.Fatalf("delayed review at=%s seq=%v, first at=%s seq=%d; want the delayed one earlier in time and later in sequence",
+			second.CreatedAt, second.EventSeq, first.CreatedAt, firstSeq)
 	}
 	type orderedRead struct {
 		Approval struct {
