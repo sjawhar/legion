@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -54,6 +55,13 @@ const broadcastDeliveryWorkers = 4
 const broadcastResolveConcurrency = 8
 
 const broadcastResolveTimeout = 5 * time.Second
+
+// broadcastResolveAllowance is the budget a send's recipient resolution runs under:
+// broadcastResolveTimeout on every server the deployment builds, since register builds
+// &server{deps: deps} and sets no broadcastResolveBudget, and whatever a test set otherwise.
+func (s *server) broadcastResolveAllowance() time.Duration {
+	return cmp.Or(s.broadcastResolveBudget, broadcastResolveTimeout)
+}
 
 // maxBroadcastIdempotencyKey bounds the caller's key. The dashboard sends a UUID (36); the cap
 // keeps a runaway key out of the index. broadcastKeyPattern keeps a key printable wherever it is
@@ -166,7 +174,8 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 	// a single list read buys that is worth that.
 	sessions, err := s.resolveBroadcastSessions(r.Context(), requested)
 	if err != nil {
-		// Nothing is written when a read did not answer, not even the recipients that did:
+		// Nothing is written when a read did not answer, or the budget ended before every
+		// selected session was read, not even the recipients whose reads answered:
 		// a broadcast commits under its idempotency key, and a replay of that key answers
 		// "excluded by the original send" for every requested session the original missed
 		// (replayedExclusions), so a transient refusal turned into a recipient's absence
@@ -359,22 +368,27 @@ func replayedExclusions(requested []string, recipients []broadcastRecipient) []b
 // resolveBroadcastSessions reads each selected session's own record from the session store,
 // through the listener's per-session route, and returns the ones it holds a record for; an id
 // the store has no record of is simply missing from the map, which is the one absence a send
-// is allowed to turn into an exclusion. Any other failure ends the whole resolution with that
-// error, because a read that did not answer says nothing about whether the session is working.
+// is allowed to turn into an exclusion. It answers only once it has decided every requested
+// id - found its record, or had the store say it holds none - and any other outcome ends the
+// whole resolution with an error, because a read that did not answer, or was never made, says
+// nothing about whether the session is working.
 //
-// The reads run broadcastResolveConcurrency at a time under one broadcastResolveTimeout taken
-// from the request's context, and those two together are what keep a send's resolution short:
-// one request may name contracts.MaxBroadcastRecipients sessions, so a hundred reads that each
-// wait out a five-second listener timeout, run one after another, would hold the request for
-// the better part of ten minutes. Bounded at eight in flight and cut off at five seconds
-// altogether, the resolution costs a send five seconds at worst, whatever the listener does.
+// The reads run broadcastResolveConcurrency at a time under one budget taken from the
+// request's context (broadcastResolveAllowance), and those two together are what keep a send's
+// resolution short: one request may name contracts.MaxBroadcastRecipients sessions, so a
+// hundred reads that each wait out a five-second listener timeout, run one after another,
+// would hold the request for the better part of ten minutes. Bounded at eight in flight and
+// cut off at five seconds altogether, the resolution costs a send five seconds at worst,
+// whatever the listener does.
 func (s *server) resolveBroadcastSessions(
 	ctx context.Context, requested []string,
 ) (map[string]dispatchenvoy.Session, error) {
-	ctx, cancel := context.WithTimeout(ctx, broadcastResolveTimeout)
+	budget := s.broadcastResolveAllowance()
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	var mu sync.Mutex
 	live := make(map[string]dispatchenvoy.Session, len(requested))
+	decided := 0
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(broadcastResolveConcurrency)
 	for _, sessionID := range requested {
@@ -383,20 +397,38 @@ func (s *server) resolveBroadcastSessions(
 		}
 		group.Go(func() error {
 			session, err := s.deps.Envoy.Session(groupCtx, sessionID)
-			if errors.Is(err, dispatchenvoy.ErrNotFound) {
-				return nil
-			}
-			if err != nil {
+			if err != nil && !errors.Is(err, dispatchenvoy.ErrNotFound) {
 				return err
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			live[sessionID] = session
+			decided++
+			if err == nil {
+				live[sessionID] = session
+			}
 			return nil
 		})
 	}
 	if err := group.Wait(); err != nil {
 		return nil, err
+	}
+	// Wait reports only the errors the reads returned, never the budget's: a budget that ends
+	// after every launched read has answered, and before the loop launches the next, leaves
+	// the rest of the selection unread with no error to show for it. Answering then would let
+	// resolveBroadcastTargets exclude each unread session as "no live session", and a send
+	// with one recipient left would commit that exclusion under its idempotency key, where
+	// replayedExclusions repeats it as "excluded by the original send" to every retry of that
+	// key - a session dropped because time ran out, recorded as left out on purpose. The count
+	// is the invariant the caller depends on, that every selected session was judged against
+	// its own record, so it is checked rather than the budget's context: it also refuses an id
+	// a future change drops for some other reason, which a context test would let through.
+	// The reason names the budget's own context, not groupCtx, which Wait cancels even when
+	// every read succeeded.
+	if decided != len(requested) {
+		return nil, fmt.Errorf(
+			"%w: decided %d of %d selected sessions within the %s resolution budget (%v)",
+			dispatchenvoy.ErrUnavailable, decided, len(requested), budget, ctx.Err(),
+		)
 	}
 	return live, nil
 }

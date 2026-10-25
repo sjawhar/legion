@@ -498,6 +498,63 @@ func TestBroadcastWhoseSessionReadDoesNotAnswerWritesNothingAndLeavesItsKeyFree(
 	awaitBroadcastDeliveries(t, handler, created.ID)
 }
 
+// INFRA-249. A send answers only once it has decided every selected session. The resolution's
+// budget can end after every read it launched has answered and before it launches the next,
+// and a read that was never made returns no error; taken for an absence, each unread session
+// would be excluded "no live session" and, with one recipient left, committed under the send's
+// idempotency key, where every retry of that key is told the session was excluded by the
+// original send. So a send whose budget ends first is refused, nothing is written, and the key
+// is still free for the same send once the budget allows it.
+func TestBroadcastWhoseBudgetEndsBeforeEverySessionIsReadWritesNothingAndLeavesItsKeyFree(t *testing.T) {
+	listener, sends := newBroadcastListener(t, broadcastSessions)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	// A nanosecond has ended by the time the resolution first looks at its budget, so it
+	// launches no read and no read fails: the count of decided sessions is all that stands
+	// between this send and a selection it never read. A budget of a millisecond would race the
+	// stub's answers, and a read cut off in flight is refused on its own error, whether or not
+	// the count is checked.
+	expired := &server{deps: deps, broadcastResolveBudget: time.Nanosecond}
+	send := func(handler http.Handler) *httptest.ResponseRecorder {
+		t.Helper()
+		return postBroadcast(t, handler, map[string]any{
+			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester"},
+			"idempotency_key": "budget-ended-before-every-read",
+		}, "alice")
+	}
+
+	refused := send(http.HandlerFunc(expired.createBroadcast))
+	if refused.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(refused.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
+		t.Fatalf("a send whose budget ended before every session was read: status=%d body=%s, want 503 ENVOY_UNAVAILABLE",
+			refused.Code, refused.Body.String())
+	}
+	if listed := broadcastCount(t, handler); listed != 0 {
+		t.Fatalf("the broadcast list holds %d broadcasts, want nothing written", listed)
+	}
+	if messages := countMessages(t, database); messages != 0 {
+		t.Fatalf("the database holds %d messages, want nothing written", messages)
+	}
+	if got := sends.targets(); len(got) != 0 {
+		t.Fatalf("listener sends = %v, want none", got)
+	}
+
+	// The key is still the sender's to use: the same send under the deployment's budget is a
+	// broadcast to both sessions rather than a replay that excludes the ones never read.
+	retried := send(handler)
+	if retried.Code != http.StatusCreated {
+		t.Fatalf("the same send under the deployment's budget: status=%d body=%s, want 201 under a free key",
+			retried.Code, retried.Body.String())
+	}
+	created := decodeBody[broadcastResponse](t, retried)
+	if got := sendTargets(created); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("the retry's recipients = %v, want both selected sessions", got)
+	}
+	if len(created.Excluded) != 0 {
+		t.Fatalf("the retry's exclusions = %#v, want the refused send to have left none behind", created.Excluded)
+	}
+	awaitBroadcastDeliveries(t, handler, created.ID)
+}
+
 // Broadcasting is human-only, like the one-session route it is built from, and so is reading
 // one back.
 func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {

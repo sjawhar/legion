@@ -1195,7 +1195,10 @@ those decisions now read one session by id rather than scanning the live list: a
 in flight under one five-second budget) and whether an issue's claim holder is still working
 (`fetchHolderLiveness`). A list is one listener's cache of the session registry, so only the
 per-session read tells a session that ended from one that cache has not refilled yet, and a read
-that did not answer refuses the request `503` rather than reporting the session gone. A write -
+that did not answer never reports the session gone: a broadcast and a claim are refused `503
+ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still
+created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
+listener: …` text. A write -
 `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
 sent, and settled by a second short transaction, so a process that dies in between leaves a
 record of the attempt rather than losing it.
