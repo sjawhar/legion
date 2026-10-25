@@ -33,7 +33,10 @@ related_issues:
   decode error, because a YAML error can quote the file.
 - **The implementer owns the scratch branch.** The review App has `push: false` on sjawhar/legion.
   The implementer creates the branch, leaves it for the tester and the reviewer, and deletes it at
-  retro. Record the creation and the deletion as comments on the pull request.
+  retro. Record the creation and the deletion as comments on the pull request. A retro is not
+  always the last one: when the issue comes back, point a new ref at the same commit
+  (`POST git/refs` with its SHA; GitHub still holds the unreferenced commit) so the proofs read
+  the same commit, and delete it again at the next retro.
 - **Drive the real binary against real GitHub without the App's private key.** Point
   `DISPATCH_GITHUB_API_BASE` at a loopback proxy:
   - The proxy answers the App-JWT endpoints (installation lookup, token mint) itself.
@@ -67,4 +70,6 @@ related_issues:
   - With `Accept` dropped, the sync failed safe and kept the model.
   - The base binary recorded the 1 MiB error with `last_commit` null.
 - The branch was created at 2026-10-25T15:48:34Z and deleted at 2026-10-25T18:07:09Z
-  (sjawhar/legion#2202 comments 6400547094 and 6401241797).
+  (sjawhar/legion#2202 comments 6400547094 and 6401241797). After the architect sent the issue
+  back, a ref was pointed at the same commit 43aeb35d at 18:15:18Z for round 2's proofs
+  (comment 6401406913).
