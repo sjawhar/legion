@@ -2,16 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-388",
-  "completed": "2026-10-25T18:17:30Z",
-  "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+  "completed": "2026-10-25T18:49:30Z",
+  "headSha": "833909e7373d9704bfd19f754aea8f6dfd2a7f3d",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's throwaway driver ($TMPDIR/liveproof_deploy_test.go), copied into a scratch copy of the tree at 19e78ffe, against my own Postgres 16 (port 55433) and NATS 2.10 JetStream (port 14223): `go test -tags liveproof ./internal/daemon -run 'TestLiveDeployRunWake$|TestLiveDeployRunReRunWake$' -count=1 -v`. Both PASS (64.5 s, 18.2 s), with the same looks and refusals as the proof comment: 1->2 (run 40184206819), 3 (run 40186577548 kept), 4 (older run 40177490116), and no look for attempt 2 of run 39304834688 (kept job)."
+    "how": "Round 2: I re-ran the implementer's throwaway driver, copied into a scratch copy of the tree at 833909e, against my own Postgres and NATS: `go test -tags liveproof ./internal/daemon -run 'TestLiveDeployRunWake$|TestLiveDeployRunReRunWake$'`. Both PASS with the same looks as round 1: 1->2->3 (kept)->4 on #2182, and look 2 then none on #2018. I read the review's regression lock, TestACheckCompareOfADeployRunStillRunningWakesNothingUntilItCompletes, against the status gate. It asserts that a running attempt causes no jobs read, no fact and no processed event, and that a later completed read gives exactly one wake under the job's event id. A gate moved after the jobs read, or a wake that spends its event id early, would fail that test."
   },
   "failures": [],
   "failed": 0,
-  "ci": "Read at 19e78ffe on 2026-10-25: Tests 40219336654 in progress (changes and typecheck success); Legion Envoy and Contracts 40219336917 queued; Docs 40219336630 success; Worker Image 40219336639 in progress; PR Title 40219396449 success. None of these lanes was re-run by the tester.",
+  "ci": "Read at 833909e on 2026-10-25T18:49Z: Tests 40221983516 in progress (typecheck success; lint and test in progress); Legion Envoy and Contracts 40221983470 queued; Docs 40221983489 in progress; Worker Image 40221983459 in progress; PR Title 40222023462 success. None of these lanes was re-run by the tester.",
   "proof": [
+    {
+      "criterion": "Review round 1: a deploy wake comes only from an attempt GitHub reports completed (a forged completed envelope of a running attempt wakes nothing and spends no event id)",
+      "surface": "the daemon (check-wake rig run) over real Postgres 16 and NATS JetStream with its durable GitHub intake and outbox; GitHub answered by api.github.com through a gh api proxy; the genuine envelope built by Envoy's own contracts.GithubEnvelopes",
+      "command": "TESTER_RUN_ID=40220571121 TESTER_WORKFLOW=.github/workflows/pr-and-main.yaml TESTER_STEP='Set up job' go test -tags liveproof ./internal/daemon -run 'TestTesterRunningRun$' (throwaway; https://github.com/sjawhar/legion/pull/2203#issuecomment-6401687282)",
+      "observed": "At 18:39:47Z, real push run 40220571121 on main was in_progress, and its typecheck job's 'Set up job' had succeeded at 18:22:13Z, after the merge. A forged completed envelope gave the log 'the run has not completed' (status in_progress). It read no jobs, recorded 0 deploy wake events and opened no look. Once GitHub reported the attempt completed, the run's Envoy-normalized genuine envelope opened look 2 with 'sjawhar/legion .github/workflows/pr-and-main.yaml run 40220571121 attempt 1, job typecheck: Set up job succeeded at 2026-10-25T18:22:13Z'.",
+      "headSha": "833909e7373d9704bfd19f754aea8f6dfd2a7f3d",
+      "negativeControl": "The forged envelope named the real, configured run on main, with the configured step already succeeded after the merge. Only its status was wrong, and the daemon refused it on the status alone. The genuine completion of the same run then woke the check."
+    },
+    {
+      "criterion": "A genuine completion is not dropped by the status gate (GitHub's REST status at Envoy's delivery)",
+      "surface": "a subscriber on the production Envoy NATS, notifications.github.sjawhar.legion.workflow.>",
+      "command": "throwaway testersub: on each completed envelope, gh api repos/sjawhar/legion/actions/runs/<id>/attempts/<n> --jq .status",
+      "observed": "8 completed envelopes arrived between 18:40 and 18:46Z: release.yaml run 40219754404, pr-and-main.yaml run 40220571121 and six pr-title.yaml runs. Each arrived 1 to 9 s after the run's updated_at. REST about 0.7 s after each arrival said completed, 8 of 8. Production Envoy also delivers workflow_run completions for sjawhar/legion.",
+      "headSha": "833909e7373d9704bfd19f754aea8f6dfd2a7f3d",
+      "negativeControl": "The same REST read 6 minutes earlier, in the driver, for run 40220571121 said in_progress. So the probe's read does distinguish the two states."
+    },
     {
       "criterion": "An open check gets a new look at each successful Apply after its merge, and the log names the run",
       "surface": "the daemon (check-wake rig `run`) over real Postgres 16 and NATS JetStream with its durable GitHub intake and outbox; GitHub answered by api.github.com through a gh api proxy; envelopes built by Envoy's own contracts.GithubEnvelopes from real sjawhar/legion runs",
@@ -53,12 +69,14 @@
       "negativeControl": "Each refused file is the valid file with one change."
     }
   ],
-  "testAdequacy": "Every break attempt above has a regression lock in the implementer's tests: outbox_check_test.go cases for another workflow, another branch, another head repository, pull_request and pull_request_target, 404, a skipped (preview-only) step, an apply at or before the merge, two applying jobs, kept and re-run jobs, and two pages of jobs; check_wake_test.go rig cases through the durable GitHub intake; workflow/check_test.go for branch, last-look, closed checks and the kept cause; config_test.go for the config refusals. I found no break that these tests would miss, so I wrote no red test.",
+  "testAdequacy": "Every break attempt above has a regression lock in the implementer's tests: outbox_check_test.go cases for another workflow, another branch, another head repository, pull_request and pull_request_target, 404, a skipped (preview-only) step, an apply at or before the merge, two applying jobs, kept and re-run jobs, and two pages of jobs; check_wake_test.go rig cases through the durable GitHub intake; workflow/check_test.go for branch, last-look, closed checks and the kept cause; config_test.go for the config refusals. I found no break that these tests would miss, so I wrote no red test. Round 2: the status gate's regression lock (outbox_deploy_test.go) covers the forged running attempt, and the moved deploy tests run unchanged in their new files. Round 1's break cases ran at 19e78ffe on completed runs, and the gate only adds a refusal before the jobs read for a status other than completed. Re-running the implementer's driver at 833909e covers the completed path.",
   "observations": [
     "Wording only (Fast-follow class): the outbox logs 'outbox check compare found a deploy after the merge; the check is woken' for every job that applied. It also logs this when the workflow then keeps or ignores the wake, or takes it as a duplicate. The build compare path already does the same. The workflow's own woken/kept/ignored line records the decision.",
-    "Envoy's normalizer drops a workflow_run whose pull_requests is not empty (seen live on pull_request run 40218586433), so a deploy only wakes a check through a run with no pull request attached. A push run on main after a squash merge has none (all real release.yaml runs I used)."
+    "Envoy's normalizer drops a workflow_run whose pull_requests is not empty (seen live on pull_request run 40218586433), so a deploy only wakes a check through a run with no pull request attached. A push run on main after a squash merge has none (all real release.yaml runs I used).",
+    "Round 2: the gate finishes a not-completed row without retrying, so a genuine completion whose REST read still said in_progress would be lost. Measured against production Envoy, this did not happen in 8 of 8 deliveries (REST already said completed when each envelope arrived). This is evidence from 8 samples, not a guarantee."
   ],
   "notProven": [
     "A real agent-infra envoy.yaml Apply waking a check in the INFRA deployment needs the deployment's legion.yaml value, Envoy delivering workflow_run for agent-infra, and the implement App's Actions read there. That is the root's live proof (plan.json forRoot.liveA4), not reachable from this tree."
-  ]
+  ],
+  "round": 2
 }
