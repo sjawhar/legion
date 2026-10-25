@@ -317,12 +317,30 @@ func (c *Client) EnrollSession(t *testing.T, machineKey *ecdsa.PrivateKey, crede
 	return enrolled.EnrollmentID, sessionKey
 }
 
-// RequestAgentSecret opens an agent_secret request for one name from the session, signed by its
-// own key, and answers the grant the broker gave it. It fails t unless the request was granted
-// outright, with no approval asked for: these rows ask only for an agent-tier secret the session's
-// own person owns, which the policy releases at once, so a pending answer means the fixture's
-// secret is not the one the row believes it is.
-func (c *Client) RequestAgentSecret(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, reason, name string) (grantID string) {
+// AgentSecretAnswer is what POST /v1/requests answered one session's ask for one name: the status
+// and the body itself, so a failure message names what the broker actually said, and the fields a
+// row reads the policy's own verdict from.
+type AgentSecretAnswer struct {
+	// Status and Body are the HTTP answer exactly as it came back.
+	Status int
+	Body   string
+	// State is "granted", "pending" (a person must decide it) or "denied"; GrantID is the grant
+	// an outright release named and is nil otherwise; Approver is who the policy asked instead
+	// and is nil when it asked nobody. All three are zero unless Status was 200.
+	State    string
+	GrantID  *string
+	Approver *string
+}
+
+// AskForAgentSecret opens an agent_secret request for one name from the session, signed by its own
+// key, and answers what the broker said without asserting any of it.
+//
+// It exists beside RequestAgentSecret for the rows whose observation IS the verdict: a retag that
+// narrows a secret turns what was an outright grant into an approval request to the secret's new
+// owner, and a row proving the retag reached a second process has to read which of the two came
+// back. RequestAgentSecret, which fails t on anything but a grant, could only report that
+// something other than a grant happened.
+func (c *Client) AskForAgentSecret(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, reason, name string) AgentSecretAnswer {
 	t.Helper()
 	request, err := record.Sign(key, c.PublicURL, []record.AuthorizationDetail{
 		{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}},
@@ -332,19 +350,36 @@ func (c *Client) RequestAgentSecret(t *testing.T, key *ecdsa.PrivateKey, enrollm
 	}
 	status, body := c.Session(t, key, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": request, "session_id": nil})
+	answer := AgentSecretAnswer{Status: status, Body: string(body)}
 	if status != http.StatusOK {
-		t.Fatalf("POST /v1/requests (%s, at %s) = %d, want 200: %s", name, c.Addr, status, body)
+		return answer
 	}
 	var created struct {
-		State   string  `json:"state"`
-		GrantID *string `json:"grant_id"`
+		State    string  `json:"state"`
+		GrantID  *string `json:"grant_id"`
+		Approver *string `json:"approver"`
 	}
-	if err := json.Unmarshal(body, &created); err != nil || created.State != "granted" ||
-		created.GrantID == nil || *created.GrantID == "" {
-		t.Fatalf("POST /v1/requests (%s, at %s) answered %s (%v), want state granted with a grant id",
+	if err := json.Unmarshal(body, &created); err != nil || created.State == "" {
+		t.Fatalf("POST /v1/requests (%s, at %s) answered %s (%v), want the state the policy decided it in",
 			name, c.Addr, body, err)
 	}
-	return *created.GrantID
+	answer.State, answer.GrantID, answer.Approver = created.State, created.GrantID, created.Approver
+	return answer
+}
+
+// RequestAgentSecret opens an agent_secret request for one name from the session, signed by its
+// own key, and answers the grant the broker gave it. It fails t unless the request was granted
+// outright, with no approval asked for: its rows ask only for an agent-tier secret the session's
+// own person owns, which the policy releases at once, so a pending answer means the fixture's
+// secret is not the one the row believes it is.
+func (c *Client) RequestAgentSecret(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, reason, name string) (grantID string) {
+	t.Helper()
+	answer := c.AskForAgentSecret(t, key, enrollmentID, reason, name)
+	if answer.Status != http.StatusOK || answer.State != "granted" || answer.GrantID == nil || *answer.GrantID == "" {
+		t.Fatalf("POST /v1/requests (%s, at %s) = %d %s, want 200 with state granted and a grant id",
+			name, c.Addr, answer.Status, answer.Body)
+	}
+	return *answer.GrantID
 }
 
 // GrantValues reads the values the grant releases to the session that holds it.

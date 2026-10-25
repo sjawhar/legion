@@ -2,10 +2,17 @@
 
 // Two secrets-broker processes serving one Postgres, which is what the broker's Deployment runs
 // once it carries more than one replica. Every row here starts real cmd/broker binaries and
-// drives them over real HTTP, because each thing it checks is a property of two processes
-// together and of nothing either of them can show on its own: one refresh token redeemed against
-// both at the same moment, one device code exchanged against both at the same moment, and two
-// processes migrating one empty database at the same moment.
+// drives them over real HTTP, because each thing it checks is a property of whole processes and
+// of nothing a handler driven in-process can show: one refresh token redeemed against both at
+// the same moment, one device code exchanged against both at the same moment, two processes
+// migrating one empty database at the same moment, a retag one process is told to reread being
+// enforced by the other within seconds, and that fan-out spending no rate-limit token on the pod
+// it reaches.
+//
+// The last row takes one process rather than a pair, and says so: what a pod does between its
+// SIGTERM and its exit — failing its health check while it goes on serving every other route,
+// and finishing a request held in flight past the ten-second shutdown budget the broker used to
+// have — is a property of one process and of a signal only a real one can be sent.
 //
 // Its own build tag, and its own CI job, for the reason cmd/dispatch/multiprocess_test.go has
 // its: a row here builds a binary, starts two processes, and waits for Postgres to settle a race
@@ -25,12 +32,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,6 +73,11 @@ const (
 	// started with: the policy loader refuses a secret on any other key, so a mismatch shows up
 	// as the fixture's one secret never being served.
 	multiprocessKMSKey = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+	// multiprocessNewOwner is who a retag narrows multiprocessSecret to: a person no session
+	// here is, so once the retag is in force the owner's own session is "another person's
+	// session" to the policy and is answered with an approval request to this person rather
+	// than a grant (internal/broker/policy's own table).
+	multiprocessNewOwner = "grace@example.com"
 )
 
 // migrateTimeout bounds how long a process of a pair gets to log "broker listening". It is far
@@ -70,12 +86,48 @@ const (
 // a wait that is unbounded by design.
 const migrateTimeout = 2 * time.Minute
 
+// fakeSecretsJSON is the secret store every broker here is started over: BROKER_FAKE_SECRETS_FILE's
+// shape (cmd/broker/main.go's own note on it) holding the one agent-tier secret, owned by owner.
+// A row that retags the secret writes this same function's output with another owner, so what it
+// writes differs from what the processes booted on in the owner tag and nothing else — which is
+// what a retag in the real store is.
+func fakeSecretsJSON(owner string) string {
+	return `{"secrets": [
+		{"name": "example/agent-secrets/` + multiprocessSecretSlug + `", "kms_key_id": "` + multiprocessKMSKey + `", "tags": {"owner": "` + owner + `", "tier": "agent"}, "value": "` + multiprocessSecretValue + `"}
+	]}`
+}
+
+// writeFakeSecrets writes the store's content to path, as a write to the real store would land:
+// the brokers read the file again on every list and every describe, so this is the only kind of
+// "the store changed" these rows can stage.
+func writeFakeSecrets(t *testing.T, path, owner string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(fakeSecretsJSON(owner)), 0o600); err != nil {
+		t.Fatalf("write the fake secrets file %s: %v", path, err)
+	}
+}
+
+// newBrokerClient is a brokertest.Client for a process this file started. The binary under test
+// takes its own UI bearer and its own DPoP signer; brokertest supplies neither, for the reasons
+// its own fields give.
+func newBrokerClient(t *testing.T, publicURL, addr string) *brokertest.Client {
+	t.Helper()
+	client := brokertest.NewClient(t, publicURL, addr)
+	client.UIToken = testUIToken
+	client.DPoP = helper.NewDPoPTransport
+	return client
+}
+
 // brokerPair is two cmd/broker processes serving one database, one fake secrets file and one
 // BROKER_PUBLIC_URL, with a client pinned to each.
 type brokerPair struct {
 	// DatabaseURL is the DSN both processes were started with, which a row connects to directly
 	// to read a table no broker route exposes.
 	DatabaseURL string
+	// FakeSecretsFile is the file standing in for the secret store, which both processes read
+	// again on every call, so rewriting it is the write the reread row needs the store to have
+	// taken.
+	FakeSecretsFile string
 	// Processes and Clients are index-matched: Clients[i] drives Processes[i] and nothing else.
 	Processes [2]*brokerProcess
 	Clients   [2]*brokertest.Client
@@ -90,13 +142,11 @@ type brokerPair struct {
 // migrated, which is the state the migration row is about and which a staggered start would hide.
 func startBrokerPair(t *testing.T, binary string) *brokerPair {
 	t.Helper()
-	pair := &brokerPair{DatabaseURL: storetest.DatabaseURL(t)}
-	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
-	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": [
-		{"name": "example/agent-secrets/`+multiprocessSecretSlug+`", "kms_key_id": "`+multiprocessKMSKey+`", "tags": {"owner": "`+multiprocessPerson+`", "tier": "agent"}, "value": "`+multiprocessSecretValue+`"}
-	]}`), 0o600); err != nil {
-		t.Fatal(err)
+	pair := &brokerPair{
+		DatabaseURL:     storetest.DatabaseURL(t),
+		FakeSecretsFile: filepath.Join(t.TempDir(), "fake-secrets.json"),
 	}
+	writeFakeSecrets(t, pair.FakeSecretsFile, multiprocessPerson)
 	for i := range pair.Processes {
 		pair.Processes[i] = startBroker(t, brokerOptions{
 			Binary:             binary,
@@ -105,7 +155,7 @@ func startBrokerPair(t *testing.T, binary string) *brokerPair {
 				"BROKER_DATABASE_URL=" + pair.DatabaseURL,
 				"BROKER_LISTEN_ADDR=127.0.0.1:0",
 				"BROKER_PUBLIC_URL=" + multiprocessPublicURL,
-				"BROKER_FAKE_SECRETS_FILE=" + fakeSecretsFile,
+				"BROKER_FAKE_SECRETS_FILE=" + pair.FakeSecretsFile,
 				// Nothing here is in flight when a row ends, so a drain would only make every
 				// row's cleanup wait out a budget it has no use for.
 				"BROKER_DRAIN_SECONDS=0",
@@ -114,12 +164,7 @@ func startBrokerPair(t *testing.T, binary string) *brokerPair {
 	}
 	for i, process := range pair.Processes {
 		process.AwaitListening(t, migrateTimeout)
-		client := brokertest.NewClient(t, multiprocessPublicURL, process.Addr)
-		// The binary under test takes its own UI bearer and its own DPoP signer; brokertest
-		// supplies neither, for the reasons its own fields give.
-		client.UIToken = testUIToken
-		client.DPoP = helper.NewDPoPTransport
-		pair.Clients[i] = client
+		pair.Clients[i] = newBrokerClient(t, multiprocessPublicURL, process.Addr)
 	}
 	return pair
 }
@@ -145,9 +190,18 @@ func (p *brokerPair) warm(t *testing.T) {
 // processes share, not what either process is willing to say about it.
 func (p *brokerPair) database(t *testing.T) *pgx.Conn {
 	t.Helper()
-	conn, err := pgx.Connect(context.Background(), p.DatabaseURL)
+	return connectToBroker(t, p.DatabaseURL)
+}
+
+// connectToBroker opens a connection of the test's own to a broker's database, closed when t
+// ends. It is a connection outside every broker's pool, which is what a row needs to hold a row
+// lock a broker then waits on: a lock taken through the pool the broker draws on would starve it
+// of a connection rather than block it on the row.
+func connectToBroker(t *testing.T, databaseURL string) *pgx.Conn {
+	t.Helper()
+	conn, err := pgx.Connect(context.Background(), databaseURL)
 	if err != nil {
-		t.Fatalf("connect to the brokers' database: %v", err)
+		t.Fatalf("connect to the broker's database: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	return conn
@@ -161,6 +215,102 @@ func countRows(t *testing.T, conn *pgx.Conn, query string, args ...any) int {
 		t.Fatalf("%s: %v", query, err)
 	}
 	return n
+}
+
+// countMigrations is how many migrations the binary embeds, counted from the directory it embeds
+// (internal/broker/store's `//go:embed all:migrations`) rather than written down here, so a
+// migration added without touching this file still has to show up in the table a row reads.
+func countMigrations(t *testing.T) int {
+	t.Helper()
+	const dir = "../../internal/broker/store/migrations"
+	files, err := filepath.Glob(filepath.Join(dir, "*.up.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("count the migrations under %s: %d files, %v", dir, len(files), err)
+	}
+	return len(files)
+}
+
+// soloBroker is one cmd/broker process on a database of its own, with a client pinned to it. The
+// row about what a pod does between its SIGTERM and its exit takes one of these rather than the
+// shared pair: there is no second process in what it checks, and a row that stops a process must
+// not leave the pair every other row shares half stopped.
+type soloBroker struct {
+	Process     *brokerProcess
+	Client      *brokertest.Client
+	DatabaseURL string
+}
+
+// startSoloBroker starts one broker from binary with drain as its BROKER_DRAIN_SECONDS, on a
+// database and a fake secrets file of its own, and returns once it has logged the address it
+// bound.
+//
+// Its BROKER_PUBLIC_URL is dev-broker.sh's derive-from-bind convention (http://127.0.0.1:0,
+// which main resolves from the real bound address), so the one address its client dials is also
+// the URL every proof that client signs names. The pair's shared public URL stands for a load
+// balancer in front of two pods, and there is no second pod here to stand in front of.
+func startSoloBroker(t *testing.T, binary string, drain time.Duration) *soloBroker {
+	t.Helper()
+	solo := &soloBroker{DatabaseURL: storetest.DatabaseURL(t)}
+	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
+	writeFakeSecrets(t, fakeSecretsFile, multiprocessPerson)
+	// It does not wait for its own listening line here: its database is fresh and unmigrated, so
+	// the wait is AwaitListening's own migrateTimeout rather than startBroker's listenTimeout,
+	// which is sized for a broker that has only to bind.
+	solo.Process = startBroker(t, brokerOptions{
+		Binary:             binary,
+		NoWaitForListening: true,
+		Env: []string{
+			"BROKER_DATABASE_URL=" + solo.DatabaseURL,
+			"BROKER_LISTEN_ADDR=127.0.0.1:0",
+			"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+			"BROKER_FAKE_SECRETS_FILE=" + fakeSecretsFile,
+			"BROKER_DRAIN_SECONDS=" + strconv.Itoa(int(drain/time.Second)),
+		},
+	})
+	solo.Process.AwaitListening(t, migrateTimeout)
+	solo.Client = newBrokerClient(t, "http://"+solo.Process.Addr, solo.Process.Addr)
+	return solo
+}
+
+// freshRequest GETs path at addr over a connection of its own and answers the status, the body,
+// and whatever went wrong instead. A transport per call, never a client's idle keep-alive
+// connection: what a drain is about is whether the listener is still ACCEPTING, which only a
+// connection opened after the signal can show, and whether it is gone, which a reused connection
+// would not notice at all.
+func freshRequest(addr, path string) (int, string, error) {
+	transport := &http.Transport{DisableKeepAlives: true}
+	defer transport.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: transport, Timeout: 10 * time.Second}).Get("http://" + addr + path)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body), err
+}
+
+// mustRequest is freshRequest for a caller that is asserting what the broker ANSWERED: a request
+// that never reached it at all is this row's failure rather than its observation.
+func mustRequest(t *testing.T, addr, path string) (int, string) {
+	t.Helper()
+	status, body, err := freshRequest(addr, path)
+	if err != nil {
+		t.Fatalf("GET http://%s%s: %v", addr, path, err)
+	}
+	return status, body
+}
+
+// errorCode is the code an error answer names ({"code", "error"}, api/server.go's writeError),
+// for a row that pins which refusal it got rather than only its status.
+func errorCode(t *testing.T, body string) string {
+	t.Helper()
+	var answer struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(body), &answer); err != nil {
+		t.Fatalf("read the error code out of %s: %v", body, err)
+	}
+	return answer.Code
 }
 
 // tokenAnswer is what one process answered a racing OAuth step with: the token pair it issued, or
@@ -203,10 +353,12 @@ func race[T any](pair *brokerPair, step func(client *brokertest.Client) T) [2]T 
 	return answers
 }
 
-// TestTwoBrokers drives two real broker processes on one database. Its rows share one pair,
-// because what each of them races is a record of its own and no row leaves the shared state the
-// next one reads in any other condition; the one row that cannot share — two processes migrating
-// a database neither has migrated yet — starts a pair of its own on a fresh database and says so.
+// TestTwoBrokers drives real broker processes on one database. Most of its rows share one pair,
+// because what each of them races is a record of its own; the rows that cannot share say why and
+// start what they need. Two processes migrating a database neither has migrated yet take a pair
+// of their own on a fresh database; the reread row retags the pair's shared secret store and
+// leaves it retagged, which only the reread rate-limit row after it reads, and that row reads
+// the buckets rather than the tags; and the drain row takes a process and a database of its own.
 // The binary is built once for every row here.
 func TestTwoBrokers(t *testing.T) {
 	binary := buildBroker(t)
@@ -338,6 +490,12 @@ func TestTwoBrokers(t *testing.T) {
 	// wait or to say which process wins. It waits for both to come up (startBrokerPair's own
 	// AwaitListening, which fails if either never logs "broker listening"), asks both for their
 	// health, and then reads what the two of them left in the schema table.
+	//
+	// What it reads there is the COMPLETE set: as many rows as the binary embeds migrations.
+	// Asserting that each version appears once would assert nothing at all — version is that
+	// table's primary key — and a count of its own would pass on a half-applied schema, which is
+	// the outcome a race between two migrators could actually leave and the one a broker would
+	// then serve requests against.
 	t.Run("3_TwoProcessesMigratingAtOnce", func(t *testing.T) {
 		fresh := startBrokerPair(t, binary)
 		for i, process := range fresh.Processes {
@@ -348,13 +506,299 @@ func TestTwoBrokers(t *testing.T) {
 		}
 
 		freshConn := fresh.database(t)
+		embedded := countMigrations(t)
 		versions := countRows(t, freshConn, `select count(*) from broker_schema_migrations`)
-		distinct := countRows(t, freshConn, `select count(distinct version) from broker_schema_migrations`)
-		switch {
-		case versions == 0:
-			t.Fatal("two brokers booted on an empty database and broker_schema_migrations holds nothing")
-		case versions != distinct:
-			t.Fatalf("broker_schema_migrations holds %d rows for %d versions, want each version exactly once", versions, distinct)
+		if versions != embedded {
+			t.Fatalf("two brokers booted together on an empty database and broker_schema_migrations holds %d rows, want the %d migrations the binary embeds",
+				versions, embedded)
+		}
+	})
+
+	// A reread told to one process takes effect on the other. This is what the fan-out is for: a
+	// retag that narrows who may have a secret must be in force across the whole Deployment
+	// within seconds, rather than at each pod's own five-minute reload (policyRefresh in
+	// main.go). One POST rereads the pod it reached and, on its 200 path alone, tells every
+	// other pod serving the same database to do the same, over Postgres LISTEN/NOTIFY
+	// (internal/broker/reread).
+	//
+	// The row is the production story with its control placed before the act: the store is
+	// retagged, a fresh session is STILL granted the secret by B, and only then is A told to
+	// reread. So the one step that can account for B's answer changing is the notification —
+	// not the write, which both processes could see at any moment and neither reads until
+	// something makes it.
+	//
+	// Ten seconds bounds the wait, which is a thirtieth of the five-minute reload that is the
+	// fan-out's documented backstop: inside that window no reload has run, so a pass here is
+	// the notification and nothing else.
+	//
+	// Every ask comes from a session enrolled for the first time. requests.Machine.Create hands
+	// a still-live grant back for an exact name-set match against the SAME enrollment before it
+	// evaluates the policy at all, so a second ask from one enrollment would repeat the first
+	// answer whatever the policy now says — forever.
+	t.Run("4_ARereadOnOneProcessNarrowsTheSecretOnTheOther", func(t *testing.T) {
+		// fanOutWithin bounds how long B may go on granting the secret after A was told to
+		// reread it.
+		const fanOutWithin = 10 * time.Second
+		const host = "two-brokers-reread"
+		// A is the process the reread is sent to; B is the one that must learn of it without
+		// the test ever telling it anything.
+		a, b := pair.Clients[0], pair.Clients[1]
+		machineKey := brokertest.NewSigningKey(t)
+		authorization := b.DeviceLogin(t, machineKey, multiprocessPerson, host)
+		credentialID := b.ApproveMachineLogin(t, multiprocessPerson, authorization.UserCode)
+		if _, err := b.DeviceToken(t, machineKey, authorization); err != nil {
+			t.Fatalf("exchange %s's device code: %s", host, describeRefusal(err))
+		}
+		asks := 0
+		ask := func() brokertest.AgentSecretAnswer {
+			asks++
+			enrollmentID, sessionKey := b.EnrollSession(t, machineKey, credentialID, fmt.Sprintf("%s-session-%d", host, asks))
+			return b.AskForAgentSecret(t, sessionKey, enrollmentID, "the reread fan-out row", multiprocessSecret)
+		}
+
+		if baseline := ask(); baseline.State != "granted" {
+			t.Fatalf("before the retag, B (%s) answered a session of %s's own owner %d %s; want it granted at once",
+				b.Addr, multiprocessSecret, baseline.Status, baseline.Body)
+		}
+
+		writeFakeSecrets(t, pair.FakeSecretsFile, multiprocessNewOwner)
+
+		if control := ask(); control.State != "granted" {
+			t.Fatalf("with the store retagged but nothing reread, B (%s) already answered %d %s; want it still granted — a write to the store changes what a pod serves only once something makes that pod read it again",
+				b.Addr, control.Status, control.Body)
+		}
+
+		status, body := a.Req(t, http.MethodPost, "/v1/secrets/"+multiprocessSecret+"/reread", nil, nil)
+		var reread struct {
+			Served bool `json:"served"`
+		}
+		if status != http.StatusOK || json.Unmarshal(body, &reread) != nil || !reread.Served {
+			t.Fatalf("POST /v1/secrets/%s/reread at A (%s) = %d %s; want 200 with the retagged secret still served, which is the only answer that fans out",
+				multiprocessSecret, a.Addr, status, body)
+		}
+		rereadAt := time.Now()
+
+		// Polled by asking again, which is the only observable there is: either B grants a
+		// fresh session the secret at once or it does not. Every turn is two real requests to
+		// B, so nothing here waits on a clock.
+		var answer brokertest.AgentSecretAnswer
+		for {
+			answer = ask()
+			if answer.State != "granted" {
+				break
+			}
+			if time.Since(rereadAt) > fanOutWithin {
+				t.Fatalf("%s and %d asks after A (%s) reread %s, B (%s) still answered a freshly enrolled session %d %s; want the retag in force on B, which this far inside B's %s reload only the fan-out could have put there",
+					fanOutWithin, asks, a.Addr, multiprocessSecret, b.Addr, answer.Status, answer.Body, policyRefresh)
+			}
+		}
+		t.Logf("B (%s) stopped granting %s at once %s after A was told to reread it, on ask %d: %d %s",
+			b.Addr, multiprocessSecret, time.Since(rereadAt).Round(time.Millisecond), asks, answer.Status, answer.Body)
+
+		// What B answers instead is pinned, not merely "something other than granted": the
+		// secret is now another person's agent-tier secret, so the policy turns the ask into an
+		// approval request to that person and releases nothing (internal/broker/policy).
+		if answer.Status != http.StatusOK || answer.State != "pending" || answer.GrantID != nil ||
+			answer.Approver == nil || *answer.Approver != multiprocessNewOwner {
+			t.Fatalf("once the retag had reached B (%s) it answered %d %s; want 200 with state pending, no grant, and %s to approve",
+				b.Addr, answer.Status, answer.Body, multiprocessNewOwner)
+		}
+	})
+
+	// The fan-out spends no rate-limit token on the pod it reaches. Every reread takes the
+	// policy's writer lock for one store read, so the public route is capped broker-wide as well
+	// as per address (api.DefaultRereadOverallLimit: a burst of five, one back every 500 ms),
+	// and that cap is sized as the fleet's whole budget divided by the replica count. That
+	// arithmetic holds only if a reread another pod's notification drives takes nothing from the
+	// receiving pod's bucket: otherwise one caller hammering one pod would refuse every other
+	// pod's callers too, and the fleet would spend twice what the figure says.
+	//
+	// So the row empties A's broker-wide bucket with a burst — which is also a burst of
+	// notifications at B — and then asks B for a reread of its own, which must be answered 200
+	// straight away.
+	//
+	// The burst is bounded well below the per-address bucket's own burst (thirty, one back every
+	// two seconds, of which the row above spent one), so the 429 this row stops on can only be
+	// the broker-wide bucket's. The two buckets are refused with the same body, and nothing in
+	// the answer would otherwise tell them apart.
+	t.Run("5_ANotificationSpendsNoRereadTokenOnTheReceivingPod", func(t *testing.T) {
+		const burstBound = 20
+		a, b := pair.Clients[0], pair.Clients[1]
+		path := "/v1/secrets/" + multiprocessSecret + "/reread"
+		var status int
+		var body []byte
+		sent := 0
+		for sent < burstBound && status != http.StatusTooManyRequests {
+			status, body = a.Req(t, http.MethodPost, path, nil, nil)
+			sent++
+			if status != http.StatusOK && status != http.StatusTooManyRequests {
+				t.Fatalf("reread %d at A (%s) = %d %s; want 200 until a bucket runs out", sent, a.Addr, status, body)
+			}
+		}
+		if status != http.StatusTooManyRequests {
+			t.Fatalf("%d rereads at A (%s) and it still answered %d %s; want the broker-wide bucket to refuse one",
+				sent, a.Addr, status, body)
+		}
+		if code := errorCode(t, string(body)); code != "RATE_LIMITED" {
+			t.Fatalf("A (%s) refused reread %d with %s; want RATE_LIMITED", a.Addr, sent, body)
+		}
+		refusal := string(body)
+		t.Logf("A (%s) served %d rereads and refused the next: %s", a.Addr, sent-1, refusal)
+
+		if status, body := b.Req(t, http.MethodPost, path, nil, nil); status != http.StatusOK {
+			t.Fatalf("A (%s) refused its own next reread with %s, and B (%s) then answered a reread of its own %d %s; want 200 — the %d notifications B took from A must have spent nothing of B's bucket",
+				a.Addr, refusal, b.Addr, status, body, sent-1)
+		}
+	})
+
+	// What a pod does between its SIGTERM and its exit: it fails its health check at once while
+	// it goes on serving every other route for the whole drain, and it finishes a request that
+	// is still in flight long past the ten-second shutdown budget the broker used to have.
+	//
+	// One process, and a database of its own: nothing here is about two pods, and a row that
+	// stops a process must not stop one the rows above share. The request held in flight is a
+	// real refresh blocked where the broker's own code takes a row lock — oauthstore's
+	// RotateRefreshToken opens the rotation with `select … for update` on the redeemed token's
+	// row — so a transaction of the test's own holding that row stops a genuine request inside
+	// the handler, with nothing faked and nothing sleeping in the broker.
+	t.Run("6_ADrainingProcessFailsReadinessAndServesOn", func(t *testing.T) {
+		const (
+			// drain is this broker's BROKER_DRAIN_SECONDS: long enough to get both observations
+			// out inside the window, short enough that the row pays for no budget it does not
+			// use.
+			drain = 5 * time.Second
+			// observeWithin bounds each observation taken against a signalled process, so a row
+			// that fails names what the broker answered instead of running a budget out.
+			observeWithin = 2 * time.Second
+			// oldShutdownBudget is what main.go's shutdownTimeout was before it became the
+			// write timeout: the figure this row exists to outlive.
+			oldShutdownBudget = 10 * time.Second
+			// holdFor is when the blocked refresh is let go, measured from the signal, past
+			// oldShutdownBudget by a margin no scheduling hiccup closes.
+			holdFor = 12 * time.Second
+			// exitWithin bounds the wait for the process to go once its last request has been
+			// answered. It covers the whole stop budget the broker logs at boot (this drain
+			// plus main.go's 60-second shutdown), so only a broker that hangs fails it.
+			exitWithin = 90 * time.Second
+			host       = "draining-broker"
+		)
+		solo := startSoloBroker(t, binary, drain)
+		machineKey := brokertest.NewSigningKey(t)
+		authorization := solo.Client.DeviceLogin(t, machineKey, multiprocessPerson, host)
+		credentialID := solo.Client.ApproveMachineLogin(t, multiprocessPerson, authorization.UserCode)
+		token, err := solo.Client.DeviceToken(t, machineKey, authorization)
+		if err != nil {
+			t.Fatalf("exchange %s's device code: %s", host, describeRefusal(err))
+		}
+
+		ctx := context.Background()
+		holder, err := connectToBroker(t, solo.DatabaseURL).Begin(ctx)
+		if err != nil {
+			t.Fatalf("open the transaction that holds the refresh token's row: %v", err)
+		}
+		defer func() { _ = holder.Rollback(ctx) }()
+		// Exactly one row, which is the only one there is to block on: the exchange above minted
+		// this login's single refresh token, and a lock that found none would leave the refresh
+		// below running straight through instead of waiting.
+		locked, err := holder.Exec(ctx, `select 1 from oauth_refresh_tokens
+			where credential_id::text = $1 for update`, credentialID)
+		if err != nil || locked.RowsAffected() != 1 {
+			t.Fatalf("lock %s's refresh token row: %d rows locked, %v", host, locked.RowsAffected(), err)
+		}
+		watch := connectToBroker(t, solo.DatabaseURL)
+
+		refreshed := make(chan tokenAnswer, 1)
+		go func() {
+			rotated, err := solo.Client.Refresh(t, machineKey, token)
+			refreshed <- tokenAnswer{token: rotated, err: err}
+		}()
+		// The refresh is really waiting on that row, not merely sent: without this the row
+		// could not say anything was in flight at the signal at all, and a sleep in its place
+		// would say it without knowing it.
+		storetest.AwaitLockWaiters(t, watch, holder, 1)
+
+		solo.Process.Signal(t, syscall.SIGTERM)
+		signalled := time.Now()
+
+		// Inside the drain, readiness fails. Polled because the signal handler flips the flag on
+		// a goroutine of its own; every turn is a real request on a connection of its own.
+		var health int
+		var healthBody string
+		for {
+			health, healthBody = mustRequest(t, solo.Process.Addr, "/healthz")
+			if health != http.StatusOK {
+				break
+			}
+			if time.Since(signalled) > observeWithin {
+				t.Fatalf("GET /healthz at %s still answered 200 %s after the SIGTERM; want 503 SHUTTING_DOWN from the moment it begins draining",
+					solo.Process.Addr, observeWithin)
+			}
+		}
+		if health != http.StatusServiceUnavailable || errorCode(t, healthBody) != "SHUTTING_DOWN" {
+			t.Fatalf("GET /healthz at %s after the SIGTERM = %d %s; want 503 SHUTTING_DOWN",
+				solo.Process.Addr, health, healthBody)
+		}
+		// …and in the same breath a connection opened after that signal still gets a whole
+		// answer out of a route that is not the health check. The pair is the claim: the pod
+		// takes itself out of its Service's endpoints while it goes on serving the traffic the
+		// kubelet is still routing to it.
+		if status, body := mustRequest(t, solo.Process.Addr, "/v1/settings"); status != http.StatusOK {
+			t.Fatalf("GET /v1/settings at %s, %s into its drain, = %d %s; want 200 — a draining broker serves every route but its health check",
+				solo.Process.Addr, time.Since(signalled).Round(time.Millisecond), status, body)
+		}
+
+		// This wait IS the experiment, and it is the only bare sleep in this file: the claim is
+		// about a request still in flight when the old ten-second shutdown budget would have run
+		// out, so the length of the wait is the thing under test rather than a stand-in for some
+		// observable the row could have waited on instead.
+		time.Sleep(time.Until(signalled.Add(holdFor)))
+		if err := holder.Rollback(ctx); err != nil {
+			t.Fatalf("release the refresh token's row: %v", err)
+		}
+
+		answer := <-refreshed
+		if answer.err != nil {
+			t.Fatalf("the refresh held in flight across the drain was answered %s; want the broker to finish it:\n%s",
+				describeRefusal(answer.err), solo.Process.Log())
+		}
+		if answer.token.AccessToken == "" || answer.token.RefreshToken == "" {
+			t.Fatalf("the refresh held in flight answered access token %t, refresh token %t; want both",
+				answer.token.AccessToken != "", answer.token.RefreshToken != "")
+		}
+		if err := solo.Process.AwaitExit(t, exitWithin); err != nil {
+			t.Fatalf("the broker exited with %v after draining; want 0:\n%s", err, solo.Process.Log())
+		}
+		stopped := time.Since(signalled)
+		t.Logf("the broker exited 0 %s after its SIGTERM, having finished the refresh it was holding",
+			stopped.Round(time.Millisecond))
+		if stopped <= oldShutdownBudget {
+			t.Fatalf("the broker exited %s after its SIGTERM, inside the old %s budget; the row says nothing about that budget unless the request it held outlived it",
+				stopped.Round(time.Millisecond), oldShutdownBudget)
+		}
+
+		// The control, which is what makes the serving window above mean anything: the same
+		// binary and the same request, with the drain set to zero and nothing in flight. Here
+		// the listener must be gone almost at once, where the drained process answered
+		// /v1/settings at the same point after its own signal — so that window came from
+		// BROKER_DRAIN_SECONDS and not from a process that happens to be slow to stop.
+		control := startSoloBroker(t, binary, 0)
+		if status, body := mustRequest(t, control.Process.Addr, "/v1/settings"); status != http.StatusOK {
+			t.Fatalf("GET /v1/settings at the control broker %s before its signal = %d %s; want 200",
+				control.Process.Addr, status, body)
+		}
+		control.Process.Signal(t, syscall.SIGTERM)
+		controlSignalled := time.Now()
+		for {
+			status, body, err := freshRequest(control.Process.Addr, "/v1/settings")
+			if err != nil {
+				t.Logf("the control broker refused a fresh connection %s after its signal: %v",
+					time.Since(controlSignalled).Round(time.Millisecond), err)
+				break
+			}
+			if time.Since(controlSignalled) > observeWithin {
+				t.Fatalf("the control broker at %s went on answering GET /v1/settings %d %s for %s after a SIGTERM with BROKER_DRAIN_SECONDS=0; want its listener gone",
+					control.Process.Addr, status, body, observeWithin)
+			}
 		}
 	})
 }
