@@ -687,12 +687,14 @@ test("on a phone, the connection pill covers none of the docked composer", async
     await page.setViewportSize(phone);
     await expectUncovered(pill, form);
 
-    // A stream the server refuses for good: the pill offers a reload instead.
-    await page.route(/\/api\/v1\/events(\?|$)/, (route) =>
-      route.fulfill({ body: "{}", contentType: "application/json", status: 410 })
-    );
+    // Every reconnect is refused after Playwright opens the routed socket, so the socket's own
+    // backoff keeps the pill reconnecting.
+    await page.routeWebSocket(/\/ws\/live$/u, (route) => {
+      // Playwright opens a routed socket once this handler returns; close it after that open.
+      setTimeout(() => void route.close({ code: 1011, reason: "test network drop" }), 100);
+    });
     await alice.setOffline(false);
-    await expect(pill).toContainText("Live updates unavailable");
+    await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, form);
     await page.setViewportSize(narrow);
     await expectUncovered(pill, form);
@@ -731,12 +733,14 @@ test("on a phone, the connection pill covers none of a thread's composers", asyn
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, threadForm);
 
-    // A stream the server refuses for good: the pill offers a reload instead.
-    await page.route(/\/api\/v1\/events(\?|$)/, (route) =>
-      route.fulfill({ body: "{}", contentType: "application/json", status: 410 })
-    );
+    // Every reconnect is refused after Playwright opens the routed socket, so the socket's own
+    // backoff keeps the pill reconnecting.
+    await page.routeWebSocket(/\/ws\/live$/u, (route) => {
+      // Playwright opens a routed socket once this handler returns; close it after that open.
+      setTimeout(() => void route.close({ code: 1011, reason: "test network drop" }), 100);
+    });
     await alice.setOffline(false);
-    await expect(pill).toContainText("Live updates unavailable");
+    await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, threadForm);
 
     // Cancel reply gives the thread back its card's own reply, which a refusal grows too.

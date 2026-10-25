@@ -402,8 +402,10 @@ test("a stale board refreshes and says so when the server rejects the rank", asy
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   try {
-    // Without the live stream the board does not learn about the API move below.
-    await page.route("**/api/v1/events*", (route) => route.abort());
+    // Without the event subscription the board does not learn about the API move below.
+    await page.routeWebSocket(/\/ws\/live$/u, (route) =>
+      route.close({ code: 1011, reason: "test network drop" })
+    );
     await page.setViewportSize({ width: 1920, height: 900 });
     await page.goto("/projects/CORE");
     await page.getByRole("button", { name: "Board" }).click();

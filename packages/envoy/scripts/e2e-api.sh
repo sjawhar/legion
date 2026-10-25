@@ -12,19 +12,21 @@ read -r agent_token _ <<<"$DISPATCH_AGENT_TOKEN"
 readonly agent_token
 readonly project_key="E2E${RANDOM}"
 readonly issue_key="${project_key}-1"
-readonly sse_file="$(mktemp)"
-readonly sse_pid_file="${sse_file}.pid"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly script_dir
+root="$(cd "$script_dir/../../.." && pwd -P)"
+readonly root
+events_file="$(mktemp)"
+readonly events_file
+events_pid=
 
+# shellcheck disable=SC2329 # cleanup runs through the EXIT trap below
 cleanup() {
-  if [[ -f "$sse_pid_file" ]]; then
-    local sse_pid
-    sse_pid="$(<"$sse_pid_file")"
-    if kill -0 "$sse_pid" 2>/dev/null; then
-      kill "$sse_pid" 2>/dev/null || true
-      wait "$sse_pid" 2>/dev/null || true
-    fi
+  if [ -n "${events_pid:-}" ] && kill -0 "$events_pid" 2>/dev/null; then
+    kill "$events_pid" 2>/dev/null || true
+    wait "$events_pid" 2>/dev/null || true
   fi
-  rm -f "$sse_pid_file" "$sse_file"
+  rm -f "$events_file"
 }
 trap cleanup EXIT
 
@@ -56,11 +58,11 @@ issue="$(request -X POST "${dispatch_url}/api/v1/issues" \
   exit 1
 }
 
-# The stream replays the issue creation, then must emit the live answer event.
-timeout 5s curl -fsSN \
-  -H "X-Dispatch-User: ${dispatch_user}" \
-  "${dispatch_url}/api/v1/events?since=0" >"$sse_file" &
-echo "$!" >"$sse_pid_file"
+# The event feed replays the issue creation, then must emit the live answer event.
+bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+  --url "$dispatch_url" --user "$dispatch_user" --since 0 --until '"state":"answered"' --timeout 5 \
+  >"$events_file" &
+events_pid=$!
 sleep 0.1
 
 ask="$(agent_request -X POST "${dispatch_url}/api/v1/issues/${issue_key}/asks" \
@@ -84,12 +86,16 @@ jq -e '.state == "answered" and .answer.user != "" and .answer.selected == ["bro
 }
 
 for _ in $(seq 1 40); do
-  if grep -Fq 'event: ask.answered' "$sse_file" && grep -Fq '"state":"answered"' "$sse_file"; then
-    printf 'PASS: project %s, anchored ask, inbox, answer, and live ask.answered SSE event\n' "$project_key"
-    exit 0
+  if grep -Fq '"state":"answered"' "$events_file"; then
+    if wait "$events_pid"; then
+      events_pid=
+      printf 'PASS: project %s, anchored ask, inbox, answer, and live ask.answered event\n' "$project_key"
+      exit 0
+    fi
+    break
   fi
   sleep 0.1
 done
-printf 'SSE ask.answered event was not observed:\n' >&2
-cat "$sse_file" >&2
+printf 'live ask.answered event was not observed:\n' >&2
+cat "$events_file" >&2
 exit 1

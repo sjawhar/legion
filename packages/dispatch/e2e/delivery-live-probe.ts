@@ -1,10 +1,11 @@
-/** `bun e2e/delivery-live-probe.ts`: an agent's client for `GET /ws/delivery`, the websocket the
- *  Delivery and Pipeline pages keep themselves current over. It subscribes one view under a bearer
- *  token and writes one JSON line per frame Dispatch sends, applying each to the body it holds with
- *  the page's own `applyDelta` and `applyRevs`. It reconnects as the page does: at once after
- *  Dispatch's restart close (1012), with backoff after any other close, and in place of a socket
- *  that has carried no frame for three heartbeats; each new connection resumes from the last change
- *  it applied. The watch ends after `--minutes`, on Ctrl-C, or when Dispatch refuses the view.
+/** `bun e2e/delivery-live-probe.ts`: an agent's client for `GET /ws/live`, the websocket the
+ * Delivery and Pipeline pages keep themselves current over. It subscribes one view under a bearer
+ * token and writes one JSON line per frame Dispatch sends, applying each to the body it holds with
+ * the page's own `applyDelta` and `applyRevs`. It reconnects as the page does: at once after
+ * Dispatch's restart (1012) or rotation (4001), with backoff after any other close, and by
+ * replacing a socket that has carried no frame for three heartbeats; each new connection resumes
+ * from the last change it applied. The watch ends after `--minutes`, on Ctrl-C, or when Dispatch
+ * refuses the view.
  *  Then `--body-file` writes the body it holds, and `--compare` reads the matching GET routes for
  *  the last window it applied and writes, for each, whether the pull request ids, run ids and every
  *  measure are equal.
@@ -34,8 +35,8 @@ import type {
 } from "../web/src/api/types";
 import { applyDelta, applyRevs } from "../web/src/features/delivery/lib/applyDelta";
 
-/** The frames `GET /ws/delivery` sends: a delivery view's own, the freshness verdict, a refusal
- *  and the heartbeat. */
+/** The frames `GET /ws/live` sends: a delivery view's own, the freshness verdict, a refusal and
+ * the heartbeat. */
 type DeliveryServerFrame = Extract<
   LiveServerFrame,
   { readonly type: "snapshot" | "delta" | "freshness" | "error" | "heartbeat" }
@@ -126,6 +127,8 @@ const USAGE =
 const SUB = "probe";
 /** Dispatch closes every socket with this code when it shuts down; the page reconnects at once. */
 const SERVICE_RESTART = 1012;
+/** Dispatch rotates a socket at this code; the page reconnects before any backoff. */
+const SOCKET_ROTATED = 4001;
 /** The code the page closes a silent socket with before it opens another (api/live-socket.ts). */
 const REPLACED = 4000;
 /** The error codes that refuse what the probe sent: its view or its frame. Waiting cannot change
@@ -395,7 +398,7 @@ function frameLine(frame: DeliveryServerFrame, bytes: number): ProbeFrameLine {
  *  resolves with the body the probe holds then, or null when no snapshot arrived. Rejects when the
  *  first connection is refused, the view is refused, or a frame breaks the contract. */
 async function watch(options: Options, token: string): Promise<ProbeHeld | null> {
-  const liveUrl = new URL("/ws/delivery", options.url);
+  const liveUrl = new URL("/ws/live", options.url);
   liveUrl.protocol = options.url.protocol === "https:" ? "wss:" : "ws:";
   let held: ProbeHeld | null = null;
   let socket: WebSocket | null = null;
@@ -495,7 +498,7 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
       fail(`Dispatch refused the connection to ${liveUrl.href}: ${reason || `close ${code}`}`);
       return;
     }
-    if (code === SERVICE_RESTART) {
+    if (code === SERVICE_RESTART || code === SOCKET_ROTATED) {
       open();
       return;
     }

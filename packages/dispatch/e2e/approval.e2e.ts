@@ -312,12 +312,11 @@ test("a hand-back is an Activity line, live and after a reload, and leaves one a
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    // A cold event stream starts at the server's head, and the client refetches nothing on its first
-    // open, so an event committed before the stream subscribes never arrives live. The server
-    // subscribes before it answers the stream's headers (streamEvents, api/events.go), so once the
-    // response arrives the hand-back below reaches this tab.
-    const streaming = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    // The first events subscription resumes from the sign-in check's head. Once its socket opens,
+    // the hand-back below reaches this tab.
+    const streaming = page.waitForEvent(
+      "websocket",
+      (socket) => new URL(socket.url()).pathname === "/ws/live"
     );
     await page.goto(`/issues/${issue.key}/activity`);
     await streaming;
@@ -366,9 +365,11 @@ test("an answer started before a hand-back that rewords nothing is saved, and th
 
   const alice = await asUser(browser, "alice");
   try {
-    // No live stream on this page: the card stays as the human loaded it, mid-answer.
+    // No live socket on this page: the card stays as the human loaded it, mid-answer.
     const answering = await alice.newPage();
-    await answering.route("**/api/v1/events**", (route) => route.abort());
+    await answering.routeWebSocket(/\/ws\/live$/u, (route) =>
+      route.close({ code: 1011, reason: "test network drop" })
+    );
     await answering.goto("/");
     const shown = answering
       .locator('[data-inbox-section="agent"]')

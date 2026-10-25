@@ -293,60 +293,103 @@ async function count(): Promise<void> {
   process.stdout.write(`${JSON.stringify(counts)}\n`);
 }
 
-/** The user messages in the replay the session's stream serves a page that opens, which pi-envoy
- *  tagged as delivering a Dispatch message: [{"id": <Dispatch message id>, "text"}]. Read over
- *  the page's own connection, so the page and this read are served the same ring. */
+/** The user messages in the replay the session's agent view serves a page that opens, which
+ * pi-envoy tagged as delivering a Dispatch message: [{"id": <Dispatch message id>, "text"}].
+ * Read through the live socket, so the page and this read are served the same ring. */
 async function taggedUserTurns(
   page: PageLike,
   session: string
 ): Promise<{ id: string; text: string }[]> {
-  return page.evaluate(async (sessionID) => {
-    const response = await fetch(`/api/v1/agents/${encodeURIComponent(sessionID)}/stream`);
-    if (!response.ok || response.body === null) throw new Error(`stream: ${response.status}`);
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) throw new Error("the stream ended before its replay");
-        buffer += decoder.decode(value, { stream: true });
-        for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
-          const lines = buffer.slice(0, end).split("\n");
-          buffer = buffer.slice(end + 2);
-          if (!lines.includes("event: replay")) continue;
-          const data = lines
-            .filter((line) => line.startsWith("data: "))
-            .map((line) => line.slice("data: ".length))
-            .join("\n");
-          const frames: {
-            kind: string;
-            message?: {
-              role: string;
-              dispatchMessageId?: unknown;
-              parts: { type: string; text?: string }[];
-            };
-          }[] = JSON.parse(data).frames;
-          return frames.flatMap((frame) =>
-            frame.kind === "message" &&
-            frame.message?.role === "user" &&
-            typeof frame.message.dispatchMessageId === "string"
-              ? [
-                  {
-                    id: frame.message.dispatchMessageId,
-                    text: frame.message.parts
-                      .filter((part) => part.type === "text")
-                      .map((part) => part.text ?? "")
-                      .join("\n"),
-                  },
-                ]
-              : []
-          );
-        }
+  return page.evaluate((sessionID) => {
+    const result = Promise.withResolvers<{ id: string; text: string }[]>();
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${location.host}/ws/live`);
+    const sub = "dispatch-user-turns";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.close(1000);
+      result.reject(new Error("the live socket did not send the session replay within 30s"));
+    }, 30_000);
+    socket.addEventListener("open", () => {
+      socket.send(
+        JSON.stringify({
+          sub,
+          type: "subscribe",
+          view: { kind: "agent", session_id: sessionID },
+        })
+      );
+    });
+    socket.addEventListener("message", (message) => {
+      let frame: unknown;
+      try {
+        frame = JSON.parse(String(message.data));
+      } catch {
+        return;
       }
-    } finally {
-      await reader.cancel();
-    }
+      if (
+        settled ||
+        typeof frame !== "object" ||
+        frame === null ||
+        !("type" in frame) ||
+        frame.type !== "agent" ||
+        !("sub" in frame) ||
+        frame.sub !== sub ||
+        !("event" in frame) ||
+        frame.event !== "replay" ||
+        !("data" in frame) ||
+        typeof frame.data !== "object" ||
+        frame.data === null ||
+        !("frames" in frame.data) ||
+        !Array.isArray(frame.data.frames)
+      ) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      socket.close(1000);
+      result.resolve(
+        frame.data.frames.flatMap((entry) =>
+          typeof entry !== "object" ||
+          entry === null ||
+          !("kind" in entry) ||
+          entry.kind !== "message" ||
+          !("message" in entry) ||
+          typeof entry.message !== "object" ||
+          entry.message === null ||
+          !("role" in entry.message) ||
+          entry.message.role !== "user" ||
+          !("dispatchMessageId" in entry.message) ||
+          typeof entry.message.dispatchMessageId !== "string" ||
+          !("parts" in entry.message) ||
+          !Array.isArray(entry.message.parts)
+            ? []
+            : [
+                {
+                  id: entry.message.dispatchMessageId,
+                  text: entry.message.parts
+                    .filter(
+                      (part): part is { text?: string; type: string } =>
+                        typeof part === "object" &&
+                        part !== null &&
+                        "type" in part &&
+                        part.type === "text"
+                    )
+                    .map((part) => part.text ?? "")
+                    .join("\n"),
+                },
+              ]
+        )
+      );
+    });
+    socket.addEventListener("close", (event) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      result.reject(new Error(`the live socket closed before its replay (${event.code} ${event.reason})`));
+    });
+    return result.promise;
   }, session);
 }
 

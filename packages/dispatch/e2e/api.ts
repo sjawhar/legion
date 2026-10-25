@@ -780,14 +780,26 @@ export function putIssueState(
 }
 
 /**
- * Forces every open SSE connection on the server closed, as if it had restarted.
+ * Forces every open live socket on the server closed, as if it had restarted.
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
- * proves the client's reconnect-from-lastId path without seeding thousands of
- * events to trip the real replay cap.
+ * proves the page resumes every subscription after an unplanned gap.
  */
 export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(
-    "/api/v1/events/_test/disconnect",
+    "/api/v1/live/_test/disconnect",
+    "POST",
+    {},
+    {
+      as: "agent",
+      ...options,
+    }
+  );
+}
+
+/** Forces every open live socket closed with 4001, as its bounded age does. */
+export function rotateLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/live/_test/rotate",
     "POST",
     {},
     {
@@ -906,10 +918,10 @@ export function publishAgentStreamFrame(
   );
 }
 
-/** Ends every open viewer stream for a session, as a connection lost on the way to the browser
- *  does. The live stream carries no cursor, so the browser's reconnect asks the session for its
- *  replay again and rebuilds its whole transcript from it: this is how a test gets a second
- *  replay into a page that is already open, which a published frame alone cannot do. */
+/** Ends every open agent viewer for a session. The page resubscribes its dropped view on the live
+ * socket, which asks the session for its replay again and rebuilds the transcript: this is how a
+ * test gets a second replay into a page that is already open, which a published frame alone
+ * cannot do. */
 export function dropAgentStreamViewers(
   sessionID: string,
   options: ApiOptions = {}

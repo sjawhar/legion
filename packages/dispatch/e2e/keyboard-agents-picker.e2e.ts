@@ -836,7 +836,7 @@ test.describe("agents page", () => {
           path: `/api/v1/issues/${issueKey}/comments`,
         },
         {
-          body: { body: "third", delivery: "aside" },
+          body: { body: "third", delivery: "aside", idempotency_key: expect.any(String) },
           ok: true,
           path: `/api/v1/agents/${plannerSession.session_id}/messages`,
         },

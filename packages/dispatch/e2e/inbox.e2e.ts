@@ -227,8 +227,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   const page = await alice.newPage();
   const listRequested = Promise.withResolvers<void>();
   const releaseList = Promise.withResolvers<void>();
-  const streamResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/v1/events"
+  const streamResponse = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   // Only the first response is held on the pre-event snapshot; a refresh the client issues
   // after the event reaches the real server, exactly as a browser's would.
@@ -299,8 +300,9 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
 
   try {
-    const streamResponse = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    const streamResponse = page.waitForEvent(
+      "websocket",
+      (socket) => new URL(socket.url()).pathname === "/ws/live"
     );
     const reloaded = page.reload();
     // A reload is a cold client: the server starts its stream at the current head and replays

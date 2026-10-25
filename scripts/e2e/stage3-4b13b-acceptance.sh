@@ -384,7 +384,7 @@ rig_sessions_json() {
   jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$evidence/logs/daemon.log"
 }
 production_audit() {
-  local sessions header events envoy found=0
+  local sessions bearer events envoy found=0
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
@@ -393,12 +393,16 @@ production_audit() {
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"; found=1; fi
   if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
-  header=$(prod_header_file)
-  curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" >"$work/production-events.sse" 2>/dev/null || true
-  rm -f "$header"
-  events=$(sed -n 's/^data: //p' "$work/production-events.sse" | jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" 2>/dev/null || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event] |
     {control: any(.[]; .id == $baseline), count: length,
-     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}')
+     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
   if ! jq -e '.control' >/dev/null <<<"$events"; then printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"; return 1; fi
   if ! jq -e '.rig == []' >/dev/null <<<"$events"; then printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"; found=1; fi

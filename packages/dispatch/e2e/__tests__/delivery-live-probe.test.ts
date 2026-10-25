@@ -107,7 +107,7 @@ function fakeDispatch(script: Script): FakeDispatch {
   const server = Bun.serve({
     fetch(request, srv) {
       const url = new URL(request.url);
-      if (url.pathname === "/ws/delivery") {
+      if (url.pathname === "/ws/live") {
         const authorization = request.headers.get("authorization");
         upgrades.push(authorization);
         if (authorization !== `Bearer ${TOKEN}`) {
@@ -438,14 +438,14 @@ test(
 );
 
 test(
-  "after a restart close the probe reconnects at once and resumes with the change and revisions it holds",
+  "after a rotation close the probe reconnects at once and resumes with the change and revisions it holds",
   async () => {
     const dispatch = fakeDispatch({
       onSubscribe(socket, sub, count) {
         if (count > 1) return;
         socket.send(forSub(snapshot, sub));
         socket.send(forSub(delta, sub));
-        socket.close(1012, "service restart");
+        socket.close(4001, "max age");
       },
     });
     const run = runProbe(args(dispatch));
@@ -463,7 +463,7 @@ test(
         if (line.type === "close") return `close ${line.code}`;
         return line.type;
       })
-    ).toEqual(["open null", "snapshot", "delta", "close 1012", `open ${change.seq}`]);
+    ).toEqual(["open null", "snapshot", "delta", "close 4001", `open ${change.seq}`]);
   },
   PROCESS_TEST_MS
 );
