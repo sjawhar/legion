@@ -5,7 +5,9 @@
 // every owner's documents and files share one address; artifact sources are the artifact uuid.
 // Closure returns at most eight hops and marks the result truncated when it finds a ninth.
 // References whose target is absent stay stored but are absent from closures and referenced-by
-// results.
+// results. A bare issue key and a `#id` are read only as what they resolve to when the source is
+// written (NewResolver): a key only when its issue exists, a `#id` only as the question its
+// source's document declares under that id (ScopeOf, QuestionMap).
 package refs
 
 import (
@@ -73,7 +75,10 @@ func ReplaceCounted(
 // inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
 // batched backlink count.
 func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
-	kinds, ids := targets(body, serverURL)
+	kinds, ids, err := targets(ctx, tx, fromKind, fromID, body, serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("read references: %w", err)
+	}
 	changed, err := scanTargets(tx.Query(ctx, `
 		delete from refs
 		where from_kind = $1 and from_id = $2
@@ -117,15 +122,21 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 	return changed, rows.Err()
 }
 
-// targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays.
-func targets(body, serverURL string) ([]string, []string) {
+// targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays: the
+// references text.Mentions reads in it, a bare key and a `#id` resolved for the source (fromKind,
+// fromID) through q (NewResolver).
+func targets(ctx context.Context, q Queryer, fromKind, fromID, body, serverURL string) ([]string, []string, error) {
+	mentions, err := text.Mentions(body, serverURL, NewResolver(ctx, q, fromKind, fromID))
+	if err != nil {
+		return nil, nil, err
+	}
 	kinds, ids := []string{}, []string{}
 	seen := make(map[[2]string]struct{})
-	for _, ref := range text.Extract(body, serverURL) {
+	for _, ref := range mentions {
 		if ref.Kind == "url" {
 			continue
 		}
-		target := [2]string{ref.Kind, ToID(ref)}
+		target := [2]string{ref.Kind, ToID(ref.Ref)}
 		if _, dup := seen[target]; dup {
 			continue
 		}
@@ -133,7 +144,7 @@ func targets(body, serverURL string) ([]string, []string) {
 		kinds = append(kinds, target[0])
 		ids = append(ids, target[1])
 	}
-	return kinds, ids
+	return kinds, ids, nil
 }
 
 // Stamp records eventID as the write that introduced every edge of one source that has no
@@ -183,7 +194,7 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 			ordered = append(ordered, target)
 		}
 	}
-	issues, err := resolveIssueTargets(ctx, q, issueKeys)
+	issues, err := existingIssues(ctx, q, issueKeys)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -194,7 +205,7 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	references := make([]model.ChangedReference, 0, len(ordered))
 	for _, target := range ordered {
 		if target.Kind == "issue" {
-			if _, found := issues[target.ID]; found {
+			if issues[target.ID] {
 				references = append(references, model.ChangedReference{Kind: "issue", ID: target.ID})
 			}
 			continue
@@ -212,22 +223,23 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	return model.ReferenceChanges{Targets: references}, nil
 }
 
-func resolveIssueTargets(ctx context.Context, q Queryer, keys []string) (map[string]struct{}, error) {
-	found := map[string]struct{}{}
+// existingIssues is which of keys names an issue that exists, in one select.
+func existingIssues(ctx context.Context, q Queryer, keys []string) (map[string]bool, error) {
+	found := map[string]bool{}
 	if len(keys) == 0 {
 		return found, nil
 	}
 	rows, err := q.Query(ctx, `select key from issues where key = any($1)`, keys)
 	if err != nil {
-		return nil, fmt.Errorf("resolve changed issue references: %w", err)
+		return nil, fmt.Errorf("resolve issue keys: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var key string
 		if err := rows.Scan(&key); err != nil {
-			return nil, fmt.Errorf("scan changed issue reference: %w", err)
+			return nil, fmt.Errorf("scan issue key: %w", err)
 		}
-		found[key] = struct{}{}
+		found[key] = true
 	}
 	return found, rows.Err()
 }

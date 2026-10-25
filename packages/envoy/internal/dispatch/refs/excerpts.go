@@ -21,10 +21,15 @@ type Execer interface {
 // MentionExcerpts is, for each target markdown mentions, the block holding its first mention that
 // lies inside a block - blocks index markdown by byte, in document order - as the references route
 // shows it: the block's id and its markdown cut to BlockExcerptRunes. A target none of whose
-// mentions lies inside a block has none.
-func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL string) map[Target]model.GraphExcerpt {
+// mentions lies inside a block has none. The mentions are text.Mentions' with resolver, the
+// document's NewResolver, so a bare key or `#id` is cut where it is written, as the index reads it.
+func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL string, resolver text.Resolver) (map[Target]model.GraphExcerpt, error) {
+	mentions, err := text.Mentions(markdown, serverURL, resolver)
+	if err != nil {
+		return nil, err
+	}
 	excerpts := make(map[Target]model.GraphExcerpt)
-	for _, located := range text.ExtractAt(markdown, serverURL) {
+	for _, located := range mentions {
 		if located.Kind == "url" {
 			continue
 		}
@@ -42,7 +47,7 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL st
 			}
 		}
 	}
-	return excerpts
+	return excerpts, nil
 }
 
 // RecordExcerpts stores, on every mention the document fromID writes, the excerpt excerpts holds

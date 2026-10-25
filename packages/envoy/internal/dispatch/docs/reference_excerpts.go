@@ -52,7 +52,11 @@ func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID 
 	for index, offset := range rendered.offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(rendered.markdown, blocks, s.serverURL))
+	excerpts, err := refs.MentionExcerpts(rendered.markdown, blocks, s.serverURL, refs.NewResolver(ctx, tx, "artifact", artifactID))
+	if err != nil {
+		return err
+	}
+	return refs.RecordExcerpts(ctx, tx, artifactID, version, excerpts)
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
@@ -164,7 +168,15 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 				"artifact", document.FromID, "error", err)
 			continue
 		default:
-			excerpts = refs.MentionExcerpts(markdown, blocks, s.serverURL)
+			excerpts, err = refs.MentionExcerpts(markdown, blocks, s.serverURL, refs.NewResolver(ctx, s.store.Pool, "artifact", document.FromID))
+			if err != nil {
+				if ctx.Err() != nil {
+					return documents, false, ctx.Err()
+				}
+				slog.Error("dispatch: reference excerpt reconciliation skipped a document whose mentions it could not read",
+					"artifact", document.FromID, "error", err)
+				continue
+			}
 		}
 		if err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
 			if ctx.Err() != nil {
