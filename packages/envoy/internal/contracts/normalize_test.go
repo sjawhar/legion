@@ -2791,6 +2791,307 @@ func TestSlackPayload(t *testing.T) {
 	}
 }
 
+func TestSlackDeliveredText(t *testing.T) {
+	ownWords := strings.Repeat("a", 2040)
+	tests := []struct {
+		name          string
+		body          map[string]any
+		wantSummary   string
+		wantText      string
+		wantNoText    bool
+		wantTruncated bool
+		forbidden     []string
+	}{
+		{
+			name: "words only in an attachment",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "bot_message", "channel": "C01234567", "user": "U01234567",
+					"bot_id": "B01234567", "username": "datadog", "text": "",
+					"attachments": []any{map[string]any{
+						"title":    "[Triggered] CPU load high",
+						"text":     "host web-1 is at 97%",
+						"fallback": "[Triggered] CPU load high",
+					}},
+				},
+			},
+			wantSummary: "slack bot message in C01234567 from datadog: [Triggered] CPU load high",
+			wantText:    "[Triggered] CPU load high\nhost web-1 is at 97%",
+		},
+		{
+			name: "words only in a block",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type": "section",
+						"text": map[string]any{"type": "mrkdwn", "text": "Deploy failed on web-1"},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Deploy failed on web-1",
+			wantText:    "Deploy failed on web-1",
+		},
+		{
+			name: "a block kind the test invents",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type":     "quantum_panel_v2",
+						"elements": []any{map[string]any{"type": "gizmo", "title": "Nightly job", "value": "job-42"}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Nightly job",
+			wantText:    "Nightly job\njob-42",
+		},
+		{
+			name: "own words and an attachment",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "Deploy finished",
+					"attachments": []any{map[string]any{"text": "web-1 ok", "fallback": "web-1 ok"}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Deploy finished",
+			wantText:    "Deploy finished\nweb-1 ok",
+		},
+		{
+			name: "a repeated piece",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "Build failed",
+					"attachments": []any{map[string]any{
+						"title": "Build failed", "text": "Build failed", "fallback": "Build failed",
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Build failed",
+			wantText:    "Build failed",
+		},
+		{
+			name: "own words and a rich-text block",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "Deploy failed <@U1>",
+					"blocks": []any{map[string]any{
+						"type": "rich_text",
+						"elements": []any{map[string]any{
+							"type": "rich_text_section",
+							"elements": []any{
+								map[string]any{"type": "text", "text": "Deploy failed "},
+								map[string]any{"type": "user", "user_id": "U1"},
+							},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Deploy failed <@U1>",
+			wantText:    "Deploy failed <@U1>",
+		},
+		{
+			name: "a contained piece shorter than the words",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "deploy to web-1 failed",
+					"attachments": []any{map[string]any{"value": "web-1"}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: deploy to web-1 failed",
+			wantText:    "deploy to web-1 failed",
+		},
+		{
+			name: "a piece that extends one already taken",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"attachments": []any{map[string]any{"fallback": "CPU high"}},
+					"blocks": []any{map[string]any{
+						"type": "section",
+						"text": map[string]any{"type": "plain_text", "text": "CPU high on host-a"},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: CPU high",
+			wantText:    "CPU high\nCPU high on host-a",
+		},
+		{
+			name: "an edited message",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "message_changed", "channel": "C01234567", "user": "U01234567",
+					"previous_message": map[string]any{
+						"text":        "old words",
+						"attachments": []any{map[string]any{"text": "old attachment"}},
+					},
+					"message": map[string]any{
+						"text": "", "ts": "456.789", "user": "U01234567",
+						"attachments": []any{map[string]any{"text": "new attachment words"}},
+					},
+				},
+			},
+			wantSummary: "slack message edited in C01234567 by U01234567 at 456.789: new attachment words",
+			wantText:    "new attachment words",
+			forbidden:   []string{"old words", "old attachment"},
+		},
+		{
+			name: "an edited message whose new message has no attachments",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "message_changed", "channel": "C01234567", "user": "U01234567",
+					"message":     map[string]any{"text": "", "ts": "456.789", "user": "U01234567"},
+					"attachments": []any{map[string]any{"text": "event attachment words"}},
+				},
+			},
+			wantSummary: "slack message edited in C01234567 by U01234567 at 456.789: event attachment words",
+			wantText:    "event attachment words",
+		},
+		{
+			name: "whitespace-only own words",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "   ",
+					"attachments": []any{map[string]any{"text": "the words"}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: the words",
+			wantText:    "   \nthe words",
+		},
+		{
+			name: "shapes that carry nothing: a list that is not a list",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"attachments": "x",
+					"blocks":      map[string]any{},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: ",
+			wantNoText:  true,
+		},
+		{
+			name: "shapes that carry nothing: values that are not strings",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"attachments": []any{map[string]any{"text": 42, "title": nil, "fallback": true}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: ",
+			wantNoText:  true,
+		},
+		{
+			name: "shapes that carry nothing: a loose string in an array",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type":     "x",
+						"elements": []any{"loose string", map[string]any{"text": "taken"}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: taken",
+			wantText:    "taken",
+		},
+		{
+			name: "the 2,048-rune cut",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": ownWords,
+					"attachments": []any{map[string]any{"text": strings.Repeat("b", 100)}},
+				},
+			},
+			wantSummary:   "slack message in C01234567 from U01234567: " + strings.Repeat("a", 100) + "…",
+			wantText:      ownWords + "\n" + strings.Repeat("b", 7),
+			wantTruncated: true,
+		},
+		{
+			name: "exactly 2,048 runes, nothing dropped",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": ownWords,
+					"attachments": []any{map[string]any{"text": strings.Repeat("b", 7)}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: " + strings.Repeat("a", 100) + "…",
+			wantText:    ownWords + "\n" + strings.Repeat("b", 7),
+		},
+		{
+			name: "nothing to deliver",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"files": []any{map[string]any{"title": "design", "filetype": "pdf"}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567:  (1 file(s): design)",
+			wantNoText:  true,
+		},
+		{
+			name: "a deleted message",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "message_deleted", "channel": "C01234567", "user": "U01234567",
+					"deleted_ts":  "456.789",
+					"attachments": []any{map[string]any{"text": "words that must not be delivered"}},
+				},
+			},
+			wantSummary: "slack message deleted in C01234567: 456.789",
+			wantNoText:  true,
+			forbidden:   []string{"words that must not be delivered"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envelope := SlackEnvelope(SlackEnvelopeInput{Body: tt.body, EventID: "event", TraceID: "trace"})
+			if envelope.PayloadSummary != tt.wantSummary {
+				t.Fatalf("summary = %q, want %q", envelope.PayloadSummary, tt.wantSummary)
+			}
+			payload := decodePayload(t, envelope.Payload)
+			text, hasText := payload["text"]
+			switch {
+			case tt.wantNoText && hasText:
+				t.Fatalf("payload unexpectedly contains text: %q", text)
+			case !tt.wantNoText && text != tt.wantText:
+				t.Fatalf("payload[\"text\"] = %q, want %q", text, tt.wantText)
+			}
+			truncated, hasTruncated := payload["body_truncated"]
+			switch {
+			case tt.wantTruncated && truncated != "true":
+				t.Fatalf("payload[\"body_truncated\"] = %q, want \"true\"", truncated)
+			case !tt.wantTruncated && hasTruncated:
+				t.Fatalf("payload unexpectedly contains body_truncated: %q", truncated)
+			}
+			for _, piece := range tt.forbidden {
+				if strings.Contains(envelope.Payload, piece) {
+					t.Fatalf("payload %q must not carry %q", envelope.Payload, piece)
+				}
+			}
+		})
+	}
+}
+
 func TestGhostWisprSummary(t *testing.T) {
 	tests := []struct {
 		name      string
