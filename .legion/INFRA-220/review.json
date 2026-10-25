@@ -2,26 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T17:00:00Z",
+  "completed": "2026-10-25T20:44:30Z",
   "round": 4,
-  "reviewedHead": "4105bd1332397d9e0c9e3136f4b88202ea4c1134 plus this handoff commit (code head 801c889482930f3ce5ead51c08eabd30de754642; compare 801c8894...4105bd13 shows status ahead, 2 files, both under .legion/)",
-  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title. At CI head 801c8894, read 16:59Z: lint, typecheck and test completed success (Tests run 40212834721); pr-title success (one superseded run cancelled).",
-  "roundThreeFindings": {
-    "cacheRace": "Fixed in 801c8894: `mkdir -p -- \"$cache\" 2>/dev/null || { rm -f -- \"$cache\" && mkdir -p -- \"$cache\"; }` (plugins.go:385). Two roles creating a missing cache both succeed, so the old check-then-remove window is gone. Checked in sh with set -eu: a directory already present exits 0, and a regular file is recovered to a directory. TestAClaudeLaunchMakesItsSharedNpmCacheWhateverItFinds passes here.",
-    "staleComments": "Fixed: runtime/backend.go:42 and scripts/e2e/stage1-skeleton.sh:251 now describe the pin and the install at launch.",
-    "prBody": "Fixed: the Change bullet says the image carries the pin and a pod installs the release; the E2E (implementer) line names 801c8894 in all four items, the fourth being the pod's own install."
+  "kind": "confirmation after a conflict-forced forward merge, not a new round",
+  "reviewedHead": "50aee6fcbecd8a661c1a9fb1f0c153012b521d12 plus this handoff commit (code head 990ebd7341e03fcab9a41a600bfdcbe6fb1e911e, a forward merge of 40a963e2 with main f2c17ded). Compare 990ebd73...50aee6fc: status ahead, total_commits 2, files_returned 2, truncated false; both files under .legion/.",
+  "fingerprint": {
+    "method": "skill://legion-worker/references/conflicts-and-rewrites.md: jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)', with @@ and index lines dropped, then sha256. This reads the branch's own changes from the local repository, with no forge file list and so no cap.",
+    "atLastReview": "40a963e258e5c34960df709a88de20f242f04142 (my APPROVE 5644238582): c0f38d54c32f00d83ce174f3191b5c0f10ae3051d145a811fa673b266dd9d3a9, fork point 371d6c87",
+    "atNewHead": "50aee6fcbecd8a661c1a9fb1f0c153012b521d12: c0f38d54c32f00d83ce174f3191b5c0f10ae3051d145a811fa673b266dd9d3a9, fork point f2c17ded",
+    "result": "unchanged. Control: the two fork points differ, so the equal hashes come from two different diff runs; neither hash is e3b0c442…, the hash of empty input."
   },
-  "thermonuclear": {
-    "deepReview": "CHANGES at 4105bd13: one Medium, two roles recovering a regular file at the cache path concurrently.",
-    "codeQuality": "CHANGES at 4105bd13: the same interleaving.",
-    "adjudication": "Declined as not a defect. A regular file at $XDG_CACHE_HOME/legion-claude-code is something nothing in Legion creates: this block is the path's only writer (grep: plugins.go:384 alone), and it always runs mkdir -p before flock, so flock never meets a missing path and never creates a file. The pair's trigger needs that unreachable file and two roles racing on it. Even then it fails closed (one launch failure, after which the directory exists and the retry succeeds) and hides no error. The recovery branch is defensive code for a state the code cannot reach."
-  },
+  "conflictResolution": "scripts/e2e/README.md: main's rewording of the claude-implementer-registers and every-launch-endpoint-checked bullets and of the rig paragraph, with this branch's stop-hook-reminds-the-open-phase bullet kept after the first. Read in full; no conflict marker anywhere in the tree at 990ebd73 (git grep for <<<<<<<, >>>>>>>, %%%%%%%, +++++++).",
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title. At CI head 990ebd73, read 20:43Z: lint, typecheck and test completed success (Tests run 40230176858); pr-title success (one superseded run cancelled).",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "keyFindings": [],
-  "notProven": [
-    "scripts/e2e/claude-backend-sandbox.sh (acceptance bullet 1's cluster run, including the pod's fetch of the pinned Claude Code) and the tmux step of scripts/e2e/claude-backend-tmux.sh are written but not run; whether to accept without them is with the owner (ask 14f85ee4)."
-  ]
+  "keyFindings": []
 }
