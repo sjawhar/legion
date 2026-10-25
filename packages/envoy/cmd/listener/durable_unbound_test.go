@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,7 +25,7 @@ import (
 // stops with no signal anywhere that the listener has gone deaf.
 func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 	consumer := "listener-unbound-health"
-	client, _, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	client, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("before the durable is recreated: /healthz = %d %v, want 200 healthy", code, body)
 	}
@@ -43,9 +41,9 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 
 // setupUnboundDurableFixture is the listener a recreated durable is tested against: handler bound
 // to the durable, both registries open with their caches ready, and the listenerDeps /healthz
-// reads. It returns the client, the deps pointer and a get() that serves one /healthz request,
-// which is every piece the tests in this file share.
-func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.MsgHandler) (*bus.Client, *atomic.Pointer[listenerDeps], func() (int, map[string]any)) {
+// reads. It returns the client and a get() that serves one /healthz request, which is every piece
+// the tests in this file share.
+func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.MsgHandler) (*bus.Client, func() (int, map[string]any)) {
 	t.Helper()
 	client := setupTestNATS(t)
 	sub, err := startListenerSubscription(client, consumer, handler)
@@ -80,7 +78,40 @@ func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.Ms
 		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
 		return recorder.Code, body
 	}
-	return client, state, get
+	return client, get
+}
+
+// startUnboundDurableMonitor runs the self-health monitor over client's durable the way the
+// listener does, with the probe and the rebuild both reading consumer. It returns the flag the
+// monitor's terminate callback sets and a stop function that ends the monitor and waits for it,
+// so each test keeps only its own logger, handler and assertions.
+func startUnboundDurableMonitor(t *testing.T, client *bus.Client, consumer string, logger *logging.Logger, handler natsgo.MsgHandler) (*atomic.Bool, func()) {
+	t.Helper()
+	caches := []listenerCache{}
+	ctx, cancel := context.WithCancel(context.Background())
+	probe := func() error { return durableProbe(ctx, client, consumer) }
+	terminated := &atomic.Bool{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(
+			ctx,
+			logger,
+			func() error { return checkSelfHealth(caches, probe) },
+			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
+			client.Connected,
+			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, handler) },
+			func() { terminated.Store(true) },
+			50*time.Millisecond,
+			3,
+		)
+	}()
+	stop := func() {
+		cancel()
+		<-done
+	}
+	t.Cleanup(stop)
+	return terminated, stop
 }
 
 // recreateListenerDurable is what `nats consumer rm` then `nats consumer add` does: the same
@@ -112,33 +143,14 @@ func TestTheSelfHealthMonitorRebindsARecreatedDurable(t *testing.T) {
 		delivered.Add(1)
 		_ = msg.Ack()
 	}
-	client, _, _ := setupUnboundDurableFixture(t, consumer, handler)
+	client, _ := setupUnboundDurableFixture(t, consumer, handler)
 
 	recreateListenerDurable(t, client, consumer)
 	if _, err := client.JS().Publish("notifications.github.acme.widgets.push.branch.main", []byte(`{}`)); err != nil {
 		t.Fatalf("publish after the recreation: %v", err)
 	}
 
-	caches := []listenerCache{}
-	probe := func() error { return durableProbe(client, consumer) }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var terminated atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		runSelfHealthMonitor(
-			ctx,
-			logging.New("test"),
-			func() error { return checkSelfHealth(caches, probe) },
-			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
-			client.Connected,
-			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, handler) },
-			func() { terminated.Store(true) },
-			50*time.Millisecond,
-			3,
-		)
-	}()
+	terminated, stop := startUnboundDurableMonitor(t, client, consumer, logging.New("test"), handler)
 
 	// The probe's confirming read alone costs 250ms, so the repair takes several intervals.
 	deadline := time.Now().Add(10 * time.Second)
@@ -159,8 +171,7 @@ func TestTheSelfHealthMonitorRebindsARecreatedDurable(t *testing.T) {
 		t.Fatalf("after the rebind the durable delivers to %q (push bound %v), want this listener's subscription subject %q", info.Config.DeliverSubject, info.PushBound, client.SubSubject())
 	}
 
-	cancel()
-	<-done
+	stop()
 }
 
 // A durable that is bound never fails its own probe: the unbound check compares the consumer's
@@ -168,37 +179,11 @@ func TestTheSelfHealthMonitorRebindsARecreatedDurable(t *testing.T) {
 // listener rebuild itself every interval and eventually terminate.
 func TestABoundDurableNeverFailsItsProbe(t *testing.T) {
 	consumer := "listener-unbound-control"
-	client, _, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	client, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 
 	// The monitor logs from its own goroutine, so the buffer the test reads back is guarded.
-	var logMu sync.Mutex
-	logs := &bytes.Buffer{}
-	writer := writerFunc(func(p []byte) (int, error) {
-		logMu.Lock()
-		defer logMu.Unlock()
-		return logs.Write(p)
-	})
-
-	caches := []listenerCache{}
-	probe := func() error { return durableProbe(client, consumer) }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var terminated atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		runSelfHealthMonitor(
-			ctx,
-			logging.NewWithWriter("test", writer),
-			func() error { return checkSelfHealth(caches, probe) },
-			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
-			client.Connected,
-			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, nil) },
-			func() { terminated.Store(true) },
-			50*time.Millisecond,
-			3,
-		)
-	}()
+	logs := &lockedBuffer{}
+	terminated, stop := startUnboundDurableMonitor(t, client, consumer, logging.NewWithWriter("test", logs), nil)
 
 	deadline := time.Now().Add(15 * 50 * time.Millisecond)
 	for time.Now().Before(deadline) {
@@ -207,12 +192,9 @@ func TestABoundDurableNeverFailsItsProbe(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	cancel()
-	<-done
+	stop()
 
-	logMu.Lock()
 	captured := logs.String()
-	logMu.Unlock()
 	if strings.Contains(captured, "self-health probe failed") {
 		t.Fatalf("a bound durable failed its probe; the monitor logged: %s", captured)
 	}
@@ -220,8 +202,3 @@ func TestABoundDurableNeverFailsItsProbe(t *testing.T) {
 		t.Fatal("the monitor terminated a listener whose durable was bound throughout")
 	}
 }
-
-// writerFunc adapts the locked write above to the io.Writer logging.NewWithWriter takes.
-type writerFunc func(p []byte) (int, error)
-
-func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

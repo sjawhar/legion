@@ -2,8 +2,8 @@ package bus_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -11,73 +11,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
-
-// reconnectErrRecords collects the records the package logs while a test runs, so the test can
-// count the warnings a client's failed reconnect attempts made. slog calls a handler from
-// whichever goroutine logs, nats.go's reconnect loop here, so every field is read and written
-// under the mutex.
-type reconnectErrRecords struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (r *reconnectErrRecords) Enabled(context.Context, slog.Level) bool { return true }
-
-func (r *reconnectErrRecords) Handle(_ context.Context, record slog.Record) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.records = append(r.records, record.Clone())
-	return nil
-}
-
-func (r *reconnectErrRecords) WithAttrs([]slog.Attr) slog.Handler { return r }
-
-func (r *reconnectErrRecords) WithGroup(string) slog.Handler { return r }
-
-// warnings returns the reconnect-failure records of the client named name, so nothing another
-// part of the run logs can satisfy or break the count.
-func (r *reconnectErrRecords) warnings(name string) []slog.Record {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var found []slog.Record
-	for _, record := range r.records {
-		if record.Message != "envoy nats reconnect attempt failed" {
-			continue
-		}
-		if attrValue(record, "name") == name {
-			found = append(found, record)
-		}
-	}
-	return found
-}
-
-// text is every message and every attribute value captured so far, for the credential check.
-func (r *reconnectErrRecords) text() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var all string
-	for _, record := range r.records {
-		all += record.Message + "\n"
-		record.Attrs(func(a slog.Attr) bool {
-			all += a.Value.String() + "\n"
-			return true
-		})
-	}
-	return all
-}
-
-// attrValue is the value of the record's attribute key, formatted, or "" when it has none.
-func attrValue(record slog.Record, key string) string {
-	value := ""
-	record.Attrs(func(a slog.Attr) bool {
-		if a.Key == key {
-			value = a.Value.String()
-			return false
-		}
-		return true
-	})
-	return value
-}
 
 // reconnectErrClock is a clock a test moves itself, so a minute of the throttle's clock passes
 // without the test waiting one. nats.go's reconnect loop reads it while the test advances it.
@@ -117,10 +50,8 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 	uri := gate.URL()
 	t.Setenv("NATS_NKEY_SEED", seed)
 
-	records := &reconnectErrRecords{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(records))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs := captureBusLogs(t)
+	const reconnectFailed = "envoy nats reconnect attempt failed"
 
 	clock := &reconnectErrClock{now: time.Now()}
 	name := "reconnect-err-test-" + t.Name()
@@ -134,16 +65,16 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 	t.Cleanup(func() { client.Close() })
 
 	// A successful connect reports no failed attempt.
-	if got := len(records.warnings(name)); got != 0 {
+	if got := logs.count(name, reconnectFailed); got != 0 {
 		t.Fatalf("a connected client logged %d reconnect failures, want 0", got)
 	}
 
 	awaitWarnings := func(want int) {
 		t.Helper()
 		waitFor(t, 30*time.Second, fmt.Sprintf("%d reconnect failures of %s", want, name), func() bool {
-			return len(records.warnings(name)) >= want
+			return logs.count(name, reconnectFailed) >= want
 		})
-		if got := len(records.warnings(name)); got != want {
+		if got := logs.count(name, reconnectFailed); got != want {
 			t.Fatalf("%d reconnect failures logged, want %d", got, want)
 		}
 	}
@@ -159,28 +90,49 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 			// The throttle: several more attempts (ReconnectWait is a second) add no line while
 			// the clock stands still.
 			time.Sleep(5 * time.Second)
-			if got := len(records.warnings(name)); got != 2+i {
+			if got := logs.count(name, reconnectFailed); got != 2+i {
 				t.Fatalf("%d reconnect failures logged while the clock stood still, want %d", got, 2+i)
 			}
 		}
 	}
 
-	warnings := records.warnings(name)
+	// slog's JSON handler writes the record's attributes flat beside its level and message, so
+	// one decode per line reads everything the assertions below need.
+	type reconnectWarning struct {
+		Level   string
+		Msg     string
+		Name    string
+		Servers string
+		Error   string
+	}
+	var warnings []reconnectWarning
+	for _, line := range logs.lines() {
+		if line == "" {
+			continue
+		}
+		var record reconnectWarning
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode the bus log record %q: %v", line, err)
+		}
+		if record.Name == name && record.Msg == reconnectFailed {
+			warnings = append(warnings, record)
+		}
+	}
 	if len(warnings) != 11 {
 		t.Fatalf("%d reconnect failures logged, want 11", len(warnings))
 	}
 	for i, record := range warnings {
-		if record.Level != slog.LevelWarn {
+		if record.Level != "WARN" {
 			t.Errorf("reconnect failure %d logged at %v, want WARN", i, record.Level)
 		}
-		if got := attrValue(record, "servers"); got != uri {
-			t.Errorf("reconnect failure %d names servers %q, want %q", i, got, uri)
+		if record.Servers != uri {
+			t.Errorf("reconnect failure %d names servers %q, want %q", i, record.Servers, uri)
 		}
-		if attrValue(record, "error") == "" {
+		if record.Error == "" {
 			t.Errorf("reconnect failure %d carries no error", i)
 		}
 	}
-	if bus.HoldsSeed(records.text()) {
+	if bus.HoldsSeed(logs.String()) {
 		t.Error("a captured log line holds an nkey seed")
 	}
 
@@ -189,7 +141,7 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 	}
 	gate.Open()
 	waitFor(t, 60*time.Second, "the client to reconnect", func() bool { return client.Conn.IsConnected() })
-	if got := len(records.warnings(name)); got != 11 {
+	if got := logs.count(name, reconnectFailed); got != 11 {
 		t.Fatalf("%d reconnect failures logged across a successful reconnect, want 11", got)
 	}
 

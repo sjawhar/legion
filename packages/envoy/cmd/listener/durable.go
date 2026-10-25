@@ -224,13 +224,9 @@ func bindListenerDurable(ctx context.Context, client *bus.Client, consumer strin
 				slog.String("deadline", deadline.String()),
 			)
 		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if err := waitUnlessDone(ctx, wait); err != nil {
 			bind.waited = time.Since(start)
-			return bind, ctx.Err()
-		case <-timer.C:
+			return bind, err
 		}
 		// A reconnect during the wait re-subscribes the subscription the failed attempt registered
 		// (bus.Client.onReconnect), which binds it once the durable is free. Another attempt would
@@ -272,28 +268,24 @@ const durableProbeConfirm = 250 * time.Millisecond
 // unsubscribes the live handle before it binds (internal/bus/nats.go:341-348), so a single stale
 // answer taken during somebody else's rebuild would cost this listener a working subscription, and
 // the server's PushBound is one round trip old anyway. A confirming read that fails, or that reads
-// bound, returns whatever the rules above return for it.
-func durableProbe(client *bus.Client, consumer string) error {
-	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-	if err != nil {
-		if errors.Is(err, nats.ErrConsumerNotFound) {
-			return err
+// bound, returns whatever the rules above return for it. ctx ending during the confirming wait
+// reports success too: the unbound read was never confirmed, and an unconfirmed read is no more a
+// probe failure than an unclassified error is.
+func durableProbe(ctx context.Context, client *bus.Client, consumer string) error {
+	for read := range 2 {
+		if read > 0 && waitUnlessDone(ctx, durableProbeConfirm) != nil {
+			return nil
 		}
-		return nil
-	}
-	if !durableUnbound(info, client) {
-		return nil
-	}
-	time.Sleep(durableProbeConfirm)
-	info, err = client.JS().ConsumerInfo(bus.Stream, consumer)
-	if err != nil {
-		if errors.Is(err, nats.ErrConsumerNotFound) {
-			return err
+		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+		if err != nil {
+			if errors.Is(err, nats.ErrConsumerNotFound) {
+				return err
+			}
+			return nil
 		}
-		return nil
-	}
-	if !durableUnbound(info, client) {
-		return nil
+		if !durableUnbound(info, client) {
+			return nil
+		}
 	}
 	return errDurableUnbound
 }
@@ -326,12 +318,22 @@ func awaitDurableBound(ctx context.Context, client *bus.Client, consumer string,
 		if waited >= deadline {
 			return fmt.Errorf("durable %s %w after %s", consumer, errDurableUnbound, waited.Round(time.Millisecond))
 		}
-		timer := time.NewTimer(min(interval, deadline-waited))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := waitUnlessDone(ctx, min(interval, deadline-waited)); err != nil {
+			return err
 		}
+	}
+}
+
+// waitUnlessDone waits d out and reports nil, or returns ctx.Err() when ctx ended first. Both the
+// bind retry and the bound wait sleep this way, so neither holds a shutdown waiting for a timer
+// the cancellation cannot cut.
+func waitUnlessDone(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }

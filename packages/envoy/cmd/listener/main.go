@@ -857,8 +857,8 @@ func main() {
 	// path and exits non-zero for Docker to replace the listener. The rebuild runs under
 	// monitorCtx, so the shutdown's monitorCancel ends a rebind still waiting for the server and
 	// the 10 s shutdown budget is never held by one.
-	probeDurable := func() error { return durableProbe(client, consumer) }
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	probeDurable := func() error { return durableProbe(monitorCtx, client, consumer) }
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
