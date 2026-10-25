@@ -243,6 +243,26 @@ func writeNATSError(w http.ResponseWriter, err error, status int, message string
 	}
 }
 
+// busUnansweredPrefix opens the body of every answer this listener gives a request the message bus
+// did not answer, so one string matches in a test and in a deployed log filter. It is deliberately
+// distinct from the starting gate's "service starting" 503 (main.go): that one says this listener
+// is not ready yet and the same request will be served here in a moment, this one says the bus
+// itself did not answer, and the two ask the caller for different actions.
+const busUnansweredPrefix = "envoy: the message bus did not answer"
+
+// writeBusUnavailable answers a send or a publish the bus did not serve, in the one place that
+// writes that 503, so the body's prefix and the hint never drift apart. Retry-After is set only
+// where retrying can help: bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy
+// errors.Is(err, bus.ErrRefused) - a refusal NATS repeats however often the same bytes are sent -
+// and writeNATSError answers those as the 413 and the 400 they are, so this one guard keeps the
+// header off exactly those two and off nothing else.
+func writeBusUnavailable(w http.ResponseWriter, err error) {
+	if !errors.Is(err, bus.ErrRefused) {
+		w.Header().Set("Retry-After", "1")
+	}
+	writeNATSError(w, err, http.StatusServiceUnavailable, fmt.Sprintf("%s: %s", busUnansweredPrefix, err))
+}
+
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
 	response := roleHolderError{
 		Reason: result.state,
@@ -396,34 +416,54 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 	return release, release == store.ExpiredRoleClaimSuperseded, nil
 }
 
-// roleHolderSession is a role holder's session entry for a decision that can take the role from it:
-// a lookup or role delivery that releases a lapsed claim, a soft claim that supersedes a gone holder,
-// the role reaper. live is the caller's test of an entry. The cache answers when it holds an entry
-// live accepts; otherwise the holder is read again from the session bucket
-// (session.SessionRegistry.Refresh), because the cache trails the bucket while a claim is read from
-// the role bucket itself: a holder another listener registered and gave the role a moment ago is in
-// both buckets before it is in this cache, and during a rolling deploy the old task resolves the
-// claims the replacement accepts. nats.ErrKeyNotFound is the bucket's word that the holder is gone
-// or fails live; any other error is a read that did not answer, on which nothing is taken from it.
-// The bucket read gets roleHolderReadTimeout, so a lookup that cannot read the bucket answers its
-// 500, and a soft claim its 503, inside the listener's 10 s HTTP write timeout.
-func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+// liveSessionEntry is sessionID's session entry for a decision that acts on its absence: a role
+// lookup or role delivery that releases a lapsed claim, a soft claim that supersedes a gone holder,
+// the role reaper, and a session-addressed send, which tells its sender the destination is gone.
+// live is the caller's test of an entry. The cache answers when it holds an entry live accepts;
+// otherwise the session is read from the session bucket itself (session.SessionRegistry.Refresh),
+// because the cache follows the bucket through a watcher and so trails it: a session another
+// listener registered a moment ago, or one this listener has not re-read since its bus connection
+// came back, is in the bucket before it is here. A role claim is read from the role bucket itself,
+// so during a rolling deploy the old task resolves the claims the replacement accepts; a send asks
+// the same question for the same reason, since a sender told its destination is gone acts on that
+// answer - it routes around the pane, reports it, or stops - and the cache alone cannot tell a
+// session that ended from one it has not caught up with. nats.ErrKeyNotFound is the bucket's word
+// that the session is gone or fails live; any other error is a read that did not answer, on which
+// nothing is taken from a holder and no send is refused as unaddressed. The bucket read gets bound,
+// derived from ctx, so a lookup that cannot read the bucket answers its 500, a soft claim and a
+// send their 503, inside the deadline their own caller holds.
+func liveSessionEntry(
+	ctx context.Context,
+	sessions *session.SessionRegistry,
+	sessionID string,
+	bound time.Duration,
+	live func(session.SessionEntry) bool,
+) (session.SessionEntry, error) {
 	if entry, err := sessions.Get(sessionID); err == nil && live(entry) {
 		return entry, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), roleHolderReadTimeout)
+	readCtx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
-	entry, err := sessions.Refresh(ctx, sessionID)
+	entry, err := sessions.Refresh(readCtx, sessionID)
 	if err == nil && !live(entry) {
 		return session.SessionEntry{}, nats.ErrKeyNotFound
 	}
 	return entry, err
 }
 
-// registered is the liveness a lookup, a soft claim and the reaper ask of a role holder: any entry.
+// roleHolderSession is liveSessionEntry as the role paths ask it. They carry no request context of
+// their own - the reaper and role delivery answer no caller at all - and they share one bound, so
+// every decision that can take a role from its holder waits the same roleHolderReadTimeout out of
+// one place rather than out of each call site.
+func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+	return liveSessionEntry(context.Background(), sessions, sessionID, roleHolderReadTimeout, live)
+}
+
+// registered is the liveness a lookup, a soft claim, the reaper and a session-addressed send ask of
+// the session they name: any entry.
 func registered(session.SessionEntry) bool { return true }
 
-// roleHolderReadTimeout bounds roleHolderSession's bucket read, well inside the listener's 10 s HTTP
+// roleHolderReadTimeout bounds the role paths' bucket read, well inside the listener's 10 s HTTP
 // write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
 const roleHolderReadTimeout = 2 * time.Second
 
@@ -466,14 +506,34 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 	return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
 }
 
-// sendHandler publishes a direct message only while the target session has a
-// live registry entry.
+// sendRequestBudget is the whole of a send's or a publish's work, taken from the request's own
+// context: the session read, the role-holder read and the publish share it. The HTTP client gives
+// each attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout
+// is 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a
+// sender whose bus cannot be reached reads the 503 that names the reason, in time to act on it,
+// instead of the timeout it would otherwise retry blind.
+const sendRequestBudget = 3500 * time.Millisecond
+
+// sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a
+// bucket that does not answer still leaves the publish most of sendRequestBudget (~2.5 s). The role
+// paths keep roleHolderReadTimeout instead: no caller holds this deadline over them.
+const sendSessionReadTimeout = 1 * time.Second
+
+// sendHandler publishes a direct message only while the session store itself, not merely this
+// listener's cache of it, holds the target's entry: a 404 here is a sender's cue to route around
+// the pane, so only the store's word that the key is gone earns one, and a store or a bus that did
+// not answer earns the 503 that asks the sender to try the same route again.
 func sendHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		// Every bus read and the publish below share one deadline derived from the caller's own, so
+		// a bus this listener cannot reach is answered as a named 503 inside the caller's attempt
+		// rather than left to that caller's timeout.
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
 		var body messageBody
 		var targetSession string
 		var request struct {
@@ -507,9 +567,18 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		target, err := d.sessions.Get(targetSession)
-		if err != nil {
+		// The cache alone cannot say a session is gone: it trails the bucket it follows, and is
+		// still being refilled after a reconnect, so a miss is read through to the bucket itself.
+		// Only the bucket's own word for it (nats.ErrKeyNotFound, which Refresh also returns for a
+		// key no session can register under) is the 404 a sender routes around the pane on; a read
+		// that did not answer is the 503 below, which asks it to try again instead.
+		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, registered)
+		if errors.Is(err, nats.ErrKeyNotFound) {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
+			return
+		}
+		if err != nil {
+			writeBusUnavailable(w, err)
 			return
 		}
 		var itemPayload *string
@@ -530,9 +599,9 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
-		duplicate, err := d.client.PublishReportingDuplicate(item)
+		duplicate, err := d.client.PublishReportingDuplicateWithin(ctx, item)
 		if err != nil {
-			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+			writeBusUnavailable(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, sendResponse{
@@ -578,6 +647,11 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		// The role-holder read and the publish below take the same deadline a send's do, derived
+		// from the caller's own context, so this route too answers a bus it cannot reach rather
+		// than spending the caller's attempt.
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
 		var request struct {
 			messageBody
 			Topic string `json:"topic"`
@@ -635,7 +709,10 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			var err error
 			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
 			if err != nil {
-				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+				// A role holder read that did not answer says nothing about the role: the claim is
+				// not resolved, so the caller is asked to try again rather than told the role has
+				// no live holder.
+				writeBusUnavailable(w, err)
 				return
 			}
 			if result.state != roleHolderLive {
@@ -644,8 +721,8 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			}
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
-		if err := d.client.Publish(item); err != nil {
-			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+		if err := d.client.PublishWithin(ctx, item); err != nil {
+			writeBusUnavailable(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})

@@ -305,11 +305,15 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 
 // Refresh reads sessionID's entry from the session bucket itself, applies it to the cache through
 // the watcher's own path (applyWatched), and then answers as Get does. The cache follows the bucket
-// through a watcher and so trails it: a session another listener registered a moment ago can be in
-// the bucket and not yet here. Get is the read for a caller that refuses or retries when a session
-// is missing; a caller about to take something away from a session because it looks gone asks here
-// first. A key no read may name is nats.ErrKeyNotFound, since no session can register under it:
-// one bus.KeyValue refuses (bus.ErrRefused), `ses:bad` among them, which is outside nats.go's key
+// through a watcher and so trails it: a session another listener registered a moment ago, or one
+// this listener has not re-read since its connection to the bus came back, can be in the bucket and
+// not yet here. A caller that acts on a session being missing asks here — one about to take
+// something away from a session because it looks gone, and one about to tell a sender that its
+// destination is gone, which makes that sender route around the pane, report it, or stop. Get is
+// the read for a caller that only enriches what it already holds, or that asks again anyway, since
+// a cache miss cannot tell a session that ended from one this cache has not caught up with. A key
+// no read may name is nats.ErrKeyNotFound, since no session can register under it: one
+// bus.KeyValue refuses (bus.ErrRefused), `ses:bad` among them, which is outside nats.go's key
 // alphabet and which an earlier build or a direct bucket write could leave as a role holder. Any
 // other error is a read that did not answer, ctx's end among them: nats.go's KV read takes no
 // context and waits out the JetStream MaxWait (10 s), so Refresh stops waiting when ctx ends and
