@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -942,6 +943,163 @@ func TestOnTheContainersShutdownASessionDatabaseEndsOnceItsWedgedChildIsKilled(t
 	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the generation's directory outlived Run: %v", err)
 	}
+}
+
+// echoUpstream is an instance that answers every connection by echoing it back, and holds it open
+// until its far end closes it or the test ends, as a database holds an idle session.
+func echoUpstream(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+			go func() {
+				_, _ = io.Copy(conn, conn)
+				_ = conn.Close()
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return listener.Addr().String()
+}
+
+// holdSessionSocket connects the test process itself to a generation's session socket, a holder
+// outside the generation's process group as a setsid'd psql would be, shows by a round trip that
+// the connection reaches the upstream, and returns it held open.
+func holdSessionSocket(t *testing.T, socket string) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("dial the generation's session socket: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write through the session socket: %v", err)
+	}
+	echoed := make([]byte, len("ping"))
+	if _, err := io.ReadFull(conn, echoed); err != nil || string(echoed) != "ping" {
+		t.Fatalf("the upstream echoed %q, %v; want ping", echoed, err)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+// expectHeldClosed fails unless the proxy has closed a held connection: a read on it ends with no
+// bytes, within a bound and not for want of time.
+func expectHeldClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	n, err := conn.Read(buf)
+	var timeout net.Error
+	if n != 0 || err == nil || errors.As(err, &timeout) && timeout.Timeout() {
+		t.Fatalf("the held connection read %q, %v; want it closed", buf[:n], err)
+	}
+}
+
+// A socket holder outside the generation's process group cannot hold the generation open on the
+// container's shutdown. Off PID 1 the launcher's signals reach only the child's process group and
+// nothing reaps the rest, so the holder outlives the child; the proxy closes its connection once
+// sessionDrain is over, and Run returns within the stop grace and the drain, with the socket no
+// longer served, the generation's directory gone and the holder's connection closed under it.
+func TestASocketHolderOutsideTheGenerationCannotHoldItOpenOnTheContainersShutdown(t *testing.T) {
+	dialer := &sessionDialer{addr: echoUpstream(t)}
+	const grace = 300 * time.Millisecond
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(1, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	publishedAll(t, marker)
+	dir := g.generationDir(1)
+	socket := filepath.Join(dir, ompsessions.SocketName)
+	held := holdSessionSocket(t, socket)
+
+	g.cancel()
+	bound := grace + sessionDrain + 3*time.Second
+	select {
+	case err := <-g.result:
+		// The rig's cleanup reads the result too.
+		g.result <- err
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want the container's shutdown", err)
+		}
+	case <-time.After(bound):
+		t.Fatalf("Run did not return within %s of the shutdown while a holder outside the generation kept its session socket open", bound)
+	}
+	if conn, err := net.Dial("unix", socket); err == nil {
+		_ = conn.Close()
+		t.Fatal("the session socket is still served after Run returned")
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the generation's directory outlived Run: %v", err)
+	}
+	expectHeldClosed(t, held)
+	if logged := g.stderr.String(); !strings.Contains(logged, "still open after "+sessionDrain.String()) {
+		t.Fatalf("the launcher logged %q, want the connection closed after the drain named", logged)
+	}
+}
+
+// A socket holder outside the generation's process group cannot hold up the daemon's stop either:
+// the stop is answered within its grace and the drain, the holder's connection is closed under it,
+// and the next generation starts and is served.
+func TestASocketHolderOutsideTheGenerationCannotHoldUpTheDaemonsStop(t *testing.T) {
+	dialer := &sessionDialer{addr: echoUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: 300 * time.Millisecond})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(1, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	publishedAll(t, marker)
+	dir := g.generationDir(1)
+	held := holdSessionSocket(t, filepath.Join(dir, ompsessions.SocketName))
+
+	began := time.Now()
+	// g.stop sends the stop with a one-second grace.
+	g.stop(1)
+	if waited, bound := time.Since(began), time.Second+sessionDrain+3*time.Second; waited > bound {
+		t.Fatalf("the stop was answered %s after it was sent, past %s", waited, bound)
+	}
+	expectHeldClosed(t, held)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stopped generation's directory survived: %v", err)
+	}
+
+	next := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(2, next, nil)); !got.OK {
+		t.Fatalf("start of generation 2 = %#v", got)
+	}
+	if seen := publishedAll(t, next); seen.socket != "bound" {
+		t.Fatalf("generation 2's child found its session socket %s, want it already bound", seen.socket)
+	}
+	// Generation 2's socket carries a round trip to the upstream: the proxy serves it.
+	_ = holdSessionSocket(t, filepath.Join(g.generationDir(2), ompsessions.SocketName)).Close()
+	g.stop(2)
 }
 
 // The connection file a generation's agent reads is the agent's own spelling of that generation's

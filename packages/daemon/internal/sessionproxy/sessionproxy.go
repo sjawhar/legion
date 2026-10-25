@@ -50,14 +50,21 @@ type Config struct {
 	// an unreachable address or a peer that stalls its handshake, would otherwise hold Start for as
 	// long as its caller's context lives. The per-connection dials after Start are not bounded by it.
 	ProofTimeout time.Duration
+	// Drain is how long Close lets established connections finish on their own before it closes
+	// them. Zero closes them at once; a negative Drain is refused. Whatever it is, Close is bounded
+	// by it: a client that never hangs up holds Close for Drain and no longer.
+	Drain time.Duration
 	// Log takes one line per event: the proxy's start, a connection the upstream refused, an
-	// accept loop that stopped on its own. Nil logs nothing.
+	// accept loop that stopped on its own, connections Close closed once the drain was over. Nil
+	// logs nothing.
 	Log io.Writer
 }
 
 // Proxy is a started session database proxy: a bound socket, a dialer whose credential path has
 // been proven once, and an accept loop that runs until Close and nothing else. The context Start
-// was given bounds only the start; its owner decides when the proxy goes by calling Close.
+// was given bounds only the start; its owner decides when the proxy goes by calling Close. The
+// proxy keeps every connection it is copying for, the client and its upstream, so that Close can
+// end those still open once the drain is over rather than wait on whoever holds them.
 type Proxy struct {
 	instance string
 	listener net.Listener
@@ -69,6 +76,15 @@ type Proxy struct {
 	cancel context.CancelFunc
 	// inFlight counts the accept loop and every connection it is still copying for.
 	inFlight sync.WaitGroup
+	// drain is Config.Drain: how long Close waits for established connections before closing them.
+	drain time.Duration
+
+	// connsMu guards closing and conns. closing is set once Close has begun, after which a pair
+	// serve would register is closed at once instead; conns maps every client the proxy is copying
+	// for to its upstream.
+	connsMu sync.Mutex
+	closing bool
+	conns   map[net.Conn]net.Conn
 
 	closeOnce sync.Once
 	closeErr  error
@@ -99,6 +115,9 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 	}
 	if cfg.ProofTimeout <= 0 {
 		return nil, fmt.Errorf("sessionproxy: ProofTimeout %s is not positive", cfg.ProofTimeout)
+	}
+	if cfg.Drain < 0 {
+		return nil, fmt.Errorf("sessionproxy: Drain %s is negative", cfg.Drain)
 	}
 
 	// An address another process holds is never taken from it: net.Listen refuses a path that
@@ -142,6 +161,8 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 		listener: listener,
 		dialer:   dialer,
 		cancel:   cancel,
+		drain:    cfg.Drain,
+		conns:    make(map[net.Conn]net.Conn),
 		log:      cfg.Log,
 	}
 	p.logf("sessionproxy: serving %s on %s", cfg.Instance, cfg.Socket)
@@ -150,25 +171,79 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 	return p, nil
 }
 
-// Close stops accepting, releases the dialer and returns once every connection the proxy was
-// copying for has finished. It is the only way a started proxy ends. A second call is a no-op that
-// returns nil.
+// Close stops accepting, releases the dialer, lets established connections finish for up to Drain,
+// then closes those still open, and returns once every connection has ended. It is the only way a
+// started proxy ends, and it never waits on a client longer than Drain: a holder that never hangs
+// up, inside the generation or outside it, cannot keep it from returning. A second call is a no-op
+// that returns nil.
 func (p *Proxy) Close() error {
 	first := false
 	p.closeOnce.Do(func() {
 		first = true
+		p.connsMu.Lock()
+		p.closing = true
+		p.connsMu.Unlock()
 		err := p.listener.Close()
 		if dialerErr := p.dialer.Close(); err == nil {
 			err = dialerErr
 		}
 		p.cancel()
-		p.inFlight.Wait()
+
+		drained := make(chan struct{})
+		go func() {
+			p.inFlight.Wait()
+			close(drained)
+		}()
+		timer := time.NewTimer(p.drain)
+		defer timer.Stop()
+		select {
+		case <-drained:
+		case <-timer.C:
+			if n := p.closeConns(); n > 0 {
+				p.logf("sessionproxy: closed %d connections to %s still open after %s", n, p.instance, p.drain)
+			}
+			<-drained
+		}
 		p.closeErr = err
 	})
 	if !first {
 		return nil
 	}
 	return p.closeErr
+}
+
+// closeConns closes both ends of every connection the proxy is still copying for, which ends both
+// of its copies and so its serve, and reports how many there were.
+func (p *Proxy) closeConns() int {
+	p.connsMu.Lock()
+	defer p.connsMu.Unlock()
+	for client, upstream := range p.conns {
+		_ = client.Close()
+		_ = upstream.Close()
+	}
+	return len(p.conns)
+}
+
+// track registers a pair serve is about to copy for, so Close can close it. A pair that arrives
+// once Close has begun, accepted or dialed just as it marked the proxy closing, is closed here
+// instead and track reports false: nothing Close has stopped waiting to close can escape it.
+func (p *Proxy) track(client, upstream net.Conn) bool {
+	p.connsMu.Lock()
+	defer p.connsMu.Unlock()
+	if p.closing {
+		_ = client.Close()
+		_ = upstream.Close()
+		return false
+	}
+	p.conns[client] = upstream
+	return true
+}
+
+// untrack forgets a pair whose copies have both ended.
+func (p *Proxy) untrack(client net.Conn) {
+	p.connsMu.Lock()
+	defer p.connsMu.Unlock()
+	delete(p.conns, client)
 }
 
 // accept serves one connection per accepted client until the listener is closed, which is the
@@ -194,7 +269,9 @@ func (p *Proxy) accept(ctx context.Context) {
 // serve gives one accepted connection an upstream of its own and copies between them. The dial is
 // per connection on purpose: the connector mints the connection's credential as it dials, from a
 // certificate cache it keeps refreshed, so every connection carries a freshly minted one. serve
-// already runs on a goroutine of its own, so only the other copy direction takes one.
+// already runs on a goroutine of its own, so only the other copy direction takes one. The pair is
+// tracked from the dial's success until both copies end, so Close can close it once the drain is
+// over; a pair dialed once Close has begun is closed at once and never copied for.
 func (p *Proxy) serve(ctx context.Context, client net.Conn) {
 	upstream, err := p.dialer.Dial(ctx, p.instance)
 	if err != nil {
@@ -204,6 +281,10 @@ func (p *Proxy) serve(ctx context.Context, client net.Conn) {
 		p.logf("sessionproxy: could not dial %s for a connection: %v", p.instance, err)
 		return
 	}
+	if !p.track(client, upstream) {
+		return
+	}
+	defer p.untrack(client)
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {

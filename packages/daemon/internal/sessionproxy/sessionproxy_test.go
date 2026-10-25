@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -130,12 +131,15 @@ func socketPath(t *testing.T) string {
 // upstream connection a test reads is the one its own client caused.
 func startProxy(ctx context.Context, t *testing.T, up *upstream, dialer *fakeDialer, socket string) *Proxy {
 	t.Helper()
-	proxy, err := Start(ctx, Config{
-		Socket:       socket,
-		Instance:     testInstance,
-		NewDialer:    dialer.build,
-		ProofTimeout: testProofTimeout,
-	})
+	return startConfigured(ctx, t, up, Config{Socket: socket, NewDialer: dialer.build})
+}
+
+// startConfigured is startProxy for a test that sets more of the Config: it fills in the test's
+// instance and proof bound, starts the proxy and takes the connection the proof dial made.
+func startConfigured(ctx context.Context, t *testing.T, up *upstream, cfg Config) *Proxy {
+	t.Helper()
+	cfg.Instance, cfg.ProofTimeout = testInstance, testProofTimeout
+	proxy, err := Start(ctx, cfg)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -371,6 +375,30 @@ func TestStartRefusesAnUnboundedProofDial(t *testing.T) {
 	}
 }
 
+// A negative drain is refused, naming the field, before Start binds or dials anything.
+func TestStartRefusesANegativeDrain(t *testing.T) {
+	up := newUpstream(t)
+	dialer := &fakeDialer{addr: up.listener.Addr().String()}
+	socket := socketPath(t)
+
+	_, err := Start(context.Background(), Config{
+		Socket:       socket,
+		Instance:     testInstance,
+		NewDialer:    dialer.build,
+		ProofTimeout: testProofTimeout,
+		Drain:        -time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "Drain") {
+		t.Fatalf("Start = %v, want a refusal naming Drain", err)
+	}
+	if got := dialer.dials(); got != 0 {
+		t.Fatalf("a Start with a negative drain dialed the upstream %d times", got)
+	}
+	if _, err := os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a Start with a negative drain left something at the socket path: %v", err)
+	}
+}
+
 func TestStartRefusesWhenSomethingHoldsTheSocket(t *testing.T) {
 	up := newUpstream(t)
 	dialer := &fakeDialer{addr: up.listener.Addr().String()}
@@ -507,52 +535,160 @@ func TestEachConnectionDialsItsOwnUpstream(t *testing.T) {
 	}
 }
 
+// expectClosed fails unless conn's far end has been closed: a read ends with no bytes, at once and
+// not for want of time.
+func expectClosed(t *testing.T, conn net.Conn, who string) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set a read deadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if n != 0 {
+		t.Fatalf("%s read %q on a connection that should have been closed", who, buf[:n])
+	}
+	var timeout net.Error
+	if err == nil || errors.As(err, &timeout) && timeout.Timeout() {
+		t.Fatalf("%s's connection is still open: %v", who, err)
+	}
+}
+
+// Close ends the proxy however long its clients hold on: a client that keeps its connection open
+// is given the drain and no more, after which Close closes both ends of that connection, says so
+// and returns. The address is gone, the dialer is closed once, and a second Close is a no-op.
 func TestCloseEndsTheProxy(t *testing.T) {
+	for _, drain := range []time.Duration{0, 200 * time.Millisecond} {
+		t.Run("drain "+drain.String(), func(t *testing.T) {
+			up := newUpstream(t)
+			dialer := &fakeDialer{addr: up.listener.Addr().String()}
+			socket := socketPath(t)
+			var logged strings.Builder
+			proxy := startConfigured(context.Background(), t, up, Config{
+				Socket: socket, NewDialer: dialer.build, Drain: drain, Log: &logged,
+			})
+
+			// Bytes cross both ways first, so the connection is established end to end, and the
+			// client then holds it open and never hangs up.
+			client, err := net.Dial("unix", socket)
+			if err != nil {
+				t.Fatalf("dial the proxy: %v", err)
+			}
+			defer client.Close()
+			writeAll(t, client, "in flight")
+			server := up.next(t)
+			defer server.Close()
+			if got := readString(t, server, len("in flight")); got != "in flight" {
+				t.Fatalf("the upstream read %q", got)
+			}
+			writeAll(t, server, "answered")
+			if got := readString(t, client, len("answered")); got != "answered" {
+				t.Fatalf("the client read %q", got)
+			}
+
+			began := time.Now()
+			closed := make(chan error, 1)
+			go func() { closed <- proxy.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("Close did not return within 2s while a client held its connection past the %s drain", drain)
+			}
+			if waited := time.Since(began); waited < drain {
+				t.Fatalf("Close returned after %s, inside the %s drain an open connection is owed", waited, drain)
+			}
+
+			expectClosed(t, client, "the client")
+			expectClosed(t, server, "the upstream")
+			if conn, err := net.Dial("unix", socket); err == nil {
+				_ = conn.Close()
+				t.Fatal("the proxy still accepts connections after Close")
+			}
+			if got := dialer.closeCount(); got != 1 {
+				t.Fatalf("Close closed the dialer %d times", got)
+			}
+			want := fmt.Sprintf("sessionproxy: closed 1 connections to %s still open after %s", testInstance, drain)
+			if !strings.Contains(logged.String(), want) {
+				t.Fatalf("the proxy logged %q, want %q", logged.String(), want)
+			}
+			if err := proxy.Close(); err != nil {
+				t.Fatalf("a second Close: %v", err)
+			}
+		})
+	}
+}
+
+// A connection that finishes on its own inside the drain is not cut: its last write, made after
+// Close began, reaches the upstream whole, the answer reaches the client, and Close returns as soon
+// as the client hangs up, long before the drain is over, without closing anything itself.
+func TestCloseLetsAConnectionFinishInsideTheDrain(t *testing.T) {
+	const drain = 5 * time.Second
 	up := newUpstream(t)
 	dialer := &fakeDialer{addr: up.listener.Addr().String()}
 	socket := socketPath(t)
-	proxy := startProxy(context.Background(), t, up, dialer, socket)
+	var logged strings.Builder
+	proxy := startConfigured(context.Background(), t, up, Config{
+		Socket: socket, NewDialer: dialer.build, Drain: drain, Log: &logged,
+	})
 
 	client, err := net.Dial("unix", socket)
 	if err != nil {
 		t.Fatalf("dial the proxy: %v", err)
 	}
 	defer client.Close()
-	writeAll(t, client, "in flight")
+	writeAll(t, client, "first")
 	server := up.next(t)
-	if got := readString(t, server, len("in flight")); got != "in flight" {
+	defer server.Close()
+	if got := readString(t, server, len("first")); got != "first" {
 		t.Fatalf("the upstream read %q", got)
 	}
 
+	began := time.Now()
 	closed := make(chan error, 1)
 	go func() { closed <- proxy.Close() }()
-
-	select {
-	case err := <-closed:
-		t.Fatalf("Close returned while a copy was still in flight: %v", err)
-	case <-time.After(200 * time.Millisecond):
+	// Close closes the dialer before it waits on the connections, so a closed dialer means Close
+	// is under way.
+	for deadline := time.Now().Add(2 * time.Second); dialer.closeCount() == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("Close never closed the dialer")
+		}
 	}
 
-	// The address is gone even though Close has not returned yet.
-	if conn, err := net.Dial("unix", socket); err == nil {
-		_ = conn.Close()
-		t.Fatal("the proxy still accepts connections after Close")
+	// Larger than a socket buffer holds, so the copy is still under way as the write is made.
+	payload := strings.Repeat("last write ", 64<<10)
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := client.Write([]byte(payload))
+		wrote <- err
+	}()
+	if got := readString(t, server, len(payload)); got != payload {
+		t.Fatalf("the upstream read %d bytes that are not the client's last write", len(got))
 	}
-
+	if err := <-wrote; err != nil {
+		t.Fatalf("the client's last write: %v", err)
+	}
+	writeAll(t, server, "done")
+	if got := readString(t, client, len("done")); got != "done" {
+		t.Fatalf("the client read %q", got)
+	}
 	_ = client.Close()
+
 	select {
 	case err := <-closed:
 		if err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Close did not return once the copy had finished")
+		t.Fatal("Close did not return once the connection had finished")
 	}
-	if got := dialer.closeCount(); got != 1 {
-		t.Fatalf("Close closed the dialer %d times", got)
+	if waited := time.Since(began); waited >= drain {
+		t.Fatalf("Close returned %s after it began, not before the %s drain was over", waited, drain)
 	}
-	if err := proxy.Close(); err != nil {
-		t.Fatalf("a second Close: %v", err)
+	expectClosed(t, server, "the upstream")
+	if strings.Contains(logged.String(), "still open") {
+		t.Fatalf("Close closed a connection that finished inside the drain: %q", logged.String())
 	}
 }
 

@@ -350,11 +350,14 @@ func (m *manager) remember(id string, body []byte, result shimwire.Frame) {
 
 // wait ends a generation once its child has exited. The generation's proxy is closed only then, so
 // the child is served through the whole of its stop grace however the stop arrives, the daemon's
-// stop or the container's own SIGTERM; and only after cleanExitedGeneration, so no process of the
-// generation left behind still holds a connection Close would wait on. It is closed before the
-// generation's directory goes, so nothing is left listening over a socket that has been removed,
-// and between generations nothing is bound at all. active.done is closed last, so endGeneration,
-// and with it Run's stopActive, returns only once the proxy is closed.
+// stop or the container's own SIGTERM; and after cleanExitedGeneration, which in a pod's PID 1 has
+// ended every process of the generation and so every connection they held. Close is bounded by
+// sessionDrain however many holders remain, in PID 1 or not: off PID 1 cleanExitedGeneration
+// returns at once and a socket holder outside the child's process group outlives it, and Close
+// closes that holder's connection once the drain is over rather than wait on it. It is closed
+// before the generation's directory goes, so nothing is left listening over a socket that has been
+// removed, and between generations nothing is bound at all. active.done is closed last, so
+// endGeneration, and with it Run's stopActive, returns only once the proxy is closed.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	err := cmd.Wait()
 	m.cleanExitedGeneration()
@@ -497,7 +500,7 @@ func (m *manager) startSession(ctx context.Context, generation uint64, dir strin
 	}
 	proxy, err := sessionproxy.Start(ctx, sessionproxy.Config{
 		Socket: endpoint.Socket(), Instance: m.cfg.SessionDatabase.Instance, NewDialer: m.cfg.SessionDialer,
-		ProofTimeout: m.proofTimeout(), Log: m.cfg.Stderr,
+		ProofTimeout: m.proofTimeout(), Drain: sessionDrain, Log: m.cfg.Stderr,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("the session database proxy for generation %d: %v", generation, err)
@@ -512,6 +515,14 @@ func (m *manager) startSession(ctx context.Context, generation uint64, dir strin
 // StopGrace past the launcher's connection, however late it connected. Half of it bounds the
 // proof; the other half is left for the rest of the start and its answer.
 func (m *manager) proofTimeout() time.Duration { return m.cfg.StopGrace / 2 }
+
+// sessionDrain is how long a generation's proxy lets connections still open at its Close finish
+// (sessionproxy.Config.Drain) before it closes them. Close runs only once the generation's child
+// has exited, and in a pod's PID 1 once every process of the generation is gone, whose connections
+// have then already closed, so anything still connected is no part of the agent's work. One second
+// lets a copy already under way deliver what it holds, and no holder outside the generation can
+// keep the generation, the next one or Run waiting longer.
+const sessionDrain = time.Second
 
 // endSession ends a generation that will not run after all: its proxy stops and its directory goes,
 // so no child ever starts against a half-made generation and nothing of it is left bound or on
