@@ -2,10 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T17:02:20Z",
+  "completed": "2026-10-25T17:17:44Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+  "codeHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
   "proof": [
+    {
+      "criterion": "Round 6: any stop reaching the trap is named as able to cut it short; the advice is a stop only while the work runs, at most one; the bullet separates the two label-path runs that found a Job from the rest; A1-A8 hold",
+      "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=b773e1100696e877c3b10d0b44a6c31ab89bec93\" -H \"Accept: application/vnd.github.raw\"; plan section 4 checks; grep -c 'a second stop that'; hunks5.awk",
+      "observed": "pushed page identical to the checked working copy; A1 0; A2 1 x7; A3 date 4; A4 abe1b4cf...; A6 no NONCOMMENT, old-closing 0, old-listing 1; A7 0; A8 0; 'inside the create' 0; 'a second stop that' 0; A5 seven hunks all ok",
+      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+      "negativeControl": "at 241f4e1a: 'a second stop that' 1 and 'Send one stop and let the trap finish' present"
+    },
+    {
+      "criterion": "One stop during a trap started by a failed step cuts the clean-up short (the mechanism the new sentences state)",
+      "surface": "this issue's role container, bash, the trap stub with its work ending in 'sleep 0.2; false', run under setsid -f",
+      "command": "setsid -f bash stub-fail.sh; one kill -TERM -- -<pid> 0.8 s after start (inside the trap's sleep 3); read its log after 4 s",
+      "observed": "'cleanup: start' and nothing after it",
+      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+      "negativeControl": "same stub, no stop: 'cleanup: start', 'cleanup: delete done', 'sequence: exit 1'"
+    },
+    {
+      "criterion": "Round 6 reader probe: a reader treats a single stop sent after a failed step as unsafe from the text itself",
+      "surface": "fresh scout subagents given only the closing comment, the stop and recovery paragraphs, and a run log (check failed, one stop sent, no sequence: exit line)",
+      "command": "(1) was the single stop safe; (2) is the workload gone, what to run",
+      "observed": "head: '(1) No. The text says \"Send a stop only while the work runs\" ... (2) Assume the workload is still there', then the delete by the printed name",
+      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+      "negativeControl": "241f4e1a: '(1) Not clearly safe ... \"Send one stop and let the trap finish\" ... this stop acted as a \"second stop\" [INFERENCE]'"
+    },
+    {
+      "criterion": "A9, round 6: no private name enters the change",
+      "surface": "the repository at the head, the round's added lines, the live PR body",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over the round's added lines and the PR body before the PATCH",
+      "observed": "check-private-names exit 0; sweep 0 literal, 0 whole-word for each",
+      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+      "negativeControl": "a scratch file holding the reachability label gives literal 1 (same script, round 1)"
+    },
     {
       "criterion": "Round 5: the four reviewed sentences no longer claim more than the block or the runs show; A1-A8 hold; no command changed",
       "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
@@ -160,14 +192,18 @@
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
-  "round": 5,
-  "roundReason": "Review at 355ffe8e requested changes on four sentences: the closing comment (no-trap exits, second stop), the recovery paragraph's list (failed label delete, cut-short label-path trap), the trap paragraph's count of label-path runs, the bullet's placement caveat.",
-  "previousCodeHead": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+  "round": 6,
+  "roundReason": "Review at 241f4e1a requested changes: any stop that reaches the trap, not only a second one, can cut it short (closing comment, stop paragraph, recovery list); the bullet's placement caveat split between the two runs that found a Job and the rest.",
+  "previousCodeHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
   "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body).",
   "threads": [
     "PRRT_kwDORFy7ds6wDE3_ fixed, replied, resolved",
     "PRRT_kwDORFy7ds6wDE4C fixed, replied, resolved",
     "PRRT_kwDORFy7ds6wDE4D fixed, replied, resolved",
-    "PRRT_kwDORFy7ds6wDE4G fixed, replied, resolved"
+    "PRRT_kwDORFy7ds6wDE4G fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wDNvP fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wDNvR fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wDNvV fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wDNvY fixed, replied, resolved"
   ]
 }
