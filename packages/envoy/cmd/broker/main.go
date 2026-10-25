@@ -1,9 +1,10 @@
-// Command broker is the secrets broker: it enrolls agent sessions and pods, decides
-// their secret requests by policy or an approver's Dispatch login over a signed credential-request
+// Command broker is the secrets broker: it enrolls agent sessions and pods, decides their secret
+// requests by policy or, for a request that needs a person, on its own approval page, where the
+// approver signs in to the broker itself (BROKER_SIGNIN_*), over a signed credential-request
 // record, and releases granted values. Its HTTP API is documented at
-// https://sjawhar.github.io/legion/broker/reference/api/. The broker holds no Dispatch credential —
-// Dispatch's server calls the broker's UI routes with the deciding human's login, and the broker
-// never opens a Dispatch ask.
+// https://sjawhar.github.io/legion/broker/reference/api/. The broker holds no Dispatch credential
+// and never opens a Dispatch ask: Dispatch's server lists pending requests and links each to the
+// broker's page, and relays a machine login's decision with its typed code.
 package main
 
 import (

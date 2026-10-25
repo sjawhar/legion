@@ -2,8 +2,9 @@
 // driven as real HTTP against the mux built by api.Register, on a real Postgres store and a fake
 // Secrets Manager. Every step below drives HTTP; none calls a service method directly
 // (Machine.ApplyDecision and friends are exercised only through the routes that wrap them). A
-// human decision is a UI-route call naming the approver's login, the body Dispatch's server sends
-// on the human's behalf.
+// machine login's decision is a UI-route call naming the approver's login with the login's code,
+// the body Dispatch's server sends on the person's behalf; a secret request's decision is made on
+// the broker's own approval page, by a browser signed in to the broker at the test's provider.
 //
 // Unlike internal/broker/api/api_test.go's per-route unit coverage, this test's wiring mirrors
 // cmd/broker/main.go exactly: policy.NewCurrent runs a real policy.Loader over the fake Secrets
@@ -16,11 +17,12 @@
 //  1. machine login -> code -> lookup -> approve by the operator's login -> credential id;
 //     enrollment routes accept lid proofs by the machine key            -> "1_..."
 //  2. box enrollment, session request -> pending in GET /v1/pending     -> "2_..."
-//  3. UI record read -> approve -> grant -> values releases             -> "3_..."
+//  3. the approver's broker page -> approve -> grant -> values releases  -> "3_..."
 //  4. deny path on a second request                                    -> "4_..."
 //  5. revoke-by-approver kills the grant                                -> "5_..."
 //  6. forged grant row releases nothing                                -> "6_..."
-//  7. another login, or no caller token, decides nothing                 -> "7_..."
+//  7. the account routes, another person's page, or no caller token
+//     decide nothing                                                    -> "7_..."
 //  8. a secret whose owner tag is edited to no person is refused by the
 //     live reload, logged by name, and served again once fixed          -> "8_..."
 //  9. anyone signed in approves a shared human-tier secret              -> "9_..."
@@ -98,6 +100,8 @@ type e2eServer struct {
 	// uiToken is dispatchAccount's own projected token, the credential the routes Dispatch's
 	// server calls take.
 	uiToken string
+	// issuer is the provider people sign in to the broker's approval page at.
+	issuer *oidctest.Issuer
 }
 
 // newE2EServer holds e2eSecrets in a fake Secrets Manager and wires the full service graph —
@@ -155,6 +159,8 @@ func newE2EServer(t *testing.T) *e2eServer {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		// People sign in to the page at the same local issuer, which stands in for every provider.
+		Approval: brokertest.NewApprovalPage(t, brokertest.SignIn(issuer, issuerKey), srv.URL, st, reqMachine),
 	})
 
 	// The caller's token lives well inside the hour one may, as a projected token does.
@@ -162,7 +168,7 @@ func newE2EServer(t *testing.T) *e2eServer {
 	callerClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
 	return &e2eServer{
 		URL: srv.URL, Store: st, Secrets: local, Log: logged,
-		uiToken: issuer.Mint(t, issuerKey, callerClaims),
+		uiToken: issuer.Mint(t, issuerKey, callerClaims), issuer: issuer,
 	}
 }
 
@@ -259,6 +265,35 @@ func (s *e2eServer) createPending(t *testing.T, key *ecdsa.PrivateKey, enrollmen
 	return created.RequestID, *created.RecordID
 }
 
+// signedIn is a browser signed in to the broker as person, through recordID's page as a person
+// arrives from Dispatch's Inbox.
+func (s *e2eServer) signedIn(t *testing.T, person, recordID string) *brokertest.Browser {
+	t.Helper()
+	b := brokertest.NewBrowser(t, s.URL, http.DefaultTransport, s.issuer)
+	b.SignIn(t, recordID, brokertest.Person(person))
+	return b
+}
+
+// status reads the session's own request requestID.
+func (s *e2eServer) status(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, requestID string) wireRequestStatus {
+	t.Helper()
+	status, body := s.session(t, key, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/requests/%s = %d: %s", requestID, status, body)
+	}
+	return decode[wireRequestStatus](t, body)
+}
+
+// grantOf is the grant the session's request requestID was granted, failing t unless it was.
+func (s *e2eServer) grantOf(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, requestID string) string {
+	t.Helper()
+	read := s.status(t, key, enrollmentID, requestID)
+	if read.State != "granted" || read.GrantID == nil || *read.GrantID == "" {
+		t.Fatalf("request %s = %+v, want granted with a grant_id", requestID, read)
+	}
+	return *read.GrantID
+}
+
 func decode[T any](t *testing.T, body []byte) T {
 	t.Helper()
 	var v T
@@ -299,14 +334,16 @@ type wireCreateRequestResponse struct {
 }
 
 type wireRequestStatus struct {
-	State   string  `json:"state"`
-	GrantID *string `json:"grant_id"`
+	State    string  `json:"state"`
+	GrantID  *string `json:"grant_id"`
+	Approver *string `json:"approver"`
 }
 
 type wirePendingEntry struct {
 	RecordID    string   `json:"record_id"`
 	Kind        string   `json:"kind"`
 	Identifiers []string `json:"identifiers"`
+	ApproveURL  string   `json:"approve_url"`
 }
 
 // --- signing helpers ---
@@ -450,12 +487,12 @@ func TestEndToEnd(t *testing.T) {
 		enrollmentID = created.EnrollmentID
 	})
 
-	var pendingRecordID string
+	var pendingRequestID, pendingRecordID string
 
 	// Step 2: box enrollment (from step 1), session request with a request object -> pending
-	// record listed in GET /v1/pending?approver=sjawhar.
+	// record listed in GET /v1/pending?approver=sjawhar, linking the record's page on the broker.
 	t.Run("2_SessionRequestGoesPendingAndListsForApprover", func(t *testing.T) {
-		_, pendingRecordID = ts.createPending(t, sessionKey, enrollmentID, "e2e needs it for the demo", "DEEL_API_KEY")
+		pendingRequestID, pendingRecordID = ts.createPending(t, sessionKey, enrollmentID, "e2e needs it for the demo", "DEEL_API_KEY")
 
 		status, body := ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
 		if status != http.StatusOK {
@@ -468,8 +505,8 @@ func TestEndToEnd(t *testing.T) {
 		for _, p := range pending.Pending {
 			if p.RecordID == pendingRecordID {
 				found = true
-				if p.Kind != "agent_secret" || len(p.Identifiers) != 1 || p.Identifiers[0] != "DEEL_API_KEY" {
-					t.Fatalf("pending entry = %+v, want kind=agent_secret identifiers=[DEEL_API_KEY]", p)
+				if p.Kind != "agent_secret" || len(p.Identifiers) != 1 || p.Identifiers[0] != "DEEL_API_KEY" || p.ApproveURL != ts.URL+"/approve/"+pendingRecordID {
+					t.Fatalf("pending entry = %+v, want kind=agent_secret identifiers=[DEEL_API_KEY] linking %s/approve/%s", p, ts.URL, pendingRecordID)
 				}
 			}
 		}
@@ -478,33 +515,19 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 3: UI record read -> approve by the record's approver -> grant -> the session's own
-	// POST .../values releases the fake secret's exact configured value.
-	t.Run("3_UIApprovalGrantsAndValuesReleases", func(t *testing.T) {
-		status, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+pendingRecordID, nil)
-		if status != http.StatusOK {
-			t.Fatalf("GET /v1/credential-requests/{id} = %d: %s", status, body)
+	// Step 3: the record's approver opens its page on the broker, signs in to the broker, and
+	// approves it there -> grant -> the session's own POST .../values releases the fake secret's
+	// exact configured value.
+	t.Run("3_ApproverApprovesOnTheBrokersPageAndValuesRelease", func(t *testing.T) {
+		b := ts.signedIn(t, testApprover, pendingRecordID)
+		page := b.Page(t, pendingRecordID)
+		if text := brokertest.PageText(t, page.Body); !strings.Contains(text, "DEEL_API_KEY") || !strings.Contains(text, "e2e needs it for the demo") {
+			t.Fatalf("the record's page does not print its secret and reason:\n%s", text)
 		}
-		readBack := decode[wireRecord](t, body)
-		if readBack.State != "pending" || readBack.Approver != testApprover {
-			t.Fatalf("record read = %+v, want pending with approver %s", readBack, testApprover)
-		}
+		b.Decide(t, pendingRecordID, true)
+		grantID = ts.grantOf(t, sessionKey, enrollmentID, pendingRequestID)
 
-		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+pendingRecordID+"/approve",
-			map[string]any{"approver": testApprover})
-		if status != http.StatusOK {
-			t.Fatalf("approve = %d: %s", status, body)
-		}
-		approved := decode[struct {
-			State   string  `json:"state"`
-			GrantID *string `json:"grant_id"`
-		}](t, body)
-		if approved.State != "approved" || approved.GrantID == nil || *approved.GrantID == "" {
-			t.Fatalf("approve response = %+v, want state=approved with a grant_id", approved)
-		}
-		grantID = *approved.GrantID
-
-		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
+		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
 		if status != http.StatusOK {
 			t.Fatalf("POST /v1/grants/{id}/values = %d: %s", status, body)
 		}
@@ -521,19 +544,9 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("4_SecondRequestDeniedHasNoGrant", func(t *testing.T) {
 		requestID, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e second ask", "SLACK_MCP_XOXP_TOKEN")
 
-		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/deny",
-			map[string]any{"approver": testApprover})
-		if status != http.StatusOK {
-			t.Fatalf("deny = %d: %s", status, body)
-		}
-		denied := decode[struct {
-			State string `json:"state"`
-		}](t, body)
-		if denied.State != "denied" {
-			t.Fatalf("deny response = %+v, want state=denied", denied)
-		}
+		ts.signedIn(t, testApprover, recordID).Decide(t, recordID, false)
 
-		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
+		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
 		if status != http.StatusOK {
 			t.Fatalf("GET /v1/requests/{id} (denied) = %d: %s", status, body)
 		}
@@ -585,11 +598,13 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 7: only the record's approver decides it, and only from a listed caller: the approver's
-	// own login sent with no ServiceAccount token is 401, another login is 403 NOT_APPROVER, and
-	// the record is still pending for its approver, whose approval then releases the value.
-	t.Run("7_AnotherLoginOrNoCallerTokenDecidesNothing", func(t *testing.T) {
-		_, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e wrong login", "NOTION_API_KEY")
+	// Step 7: a secret request is decided only on the broker's own page, by its approver signed in
+	// to the broker: the account route, given the approver's own login, answers 403
+	// DECIDE_ON_BROKER_PAGE naming that page, and with no ServiceAccount token 401; another person
+	// signed in to the page is offered no decision; the request is still pending, and its
+	// approver's approval on the page then releases the value.
+	t.Run("7_TheAccountRoutesOrAnotherPersonDecideNothing", func(t *testing.T) {
+		requestID, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e wrong login", "NOTION_API_KEY")
 
 		status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
 			map[string]any{"approver": testApprover})
@@ -597,29 +612,23 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("approve with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
 		}
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"approver": "mallory"})
-		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
-			t.Fatalf("approve as mallory = %d %s, want 403 NOT_APPROVER", status, body)
+			map[string]any{"approver": testApprover})
+		refusal := decode[struct {
+			Code       string `json:"code"`
+			ApproveURL string `json:"approve_url"`
+		}](t, body)
+		if status != http.StatusForbidden || refusal.Code != "DECIDE_ON_BROKER_PAGE" || refusal.ApproveURL != ts.URL+"/approve/"+recordID {
+			t.Fatalf("approve through the account route = %d %s, want 403 DECIDE_ON_BROKER_PAGE naming the record's page", status, body)
 		}
-		_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-		if read := decode[wireRecord](t, body); read.State != "pending" {
-			t.Fatalf("record after refused decisions = %+v, want pending", read)
+		if form := brokertest.DecisionForm(t, ts.signedIn(t, otherPerson, recordID).Page(t, recordID).Body, recordID); form != nil {
+			t.Fatalf("%s's page offers a decision on %s's request", otherPerson, testApprover)
+		}
+		if read := ts.status(t, sessionKey, enrollmentID, requestID); read.State != "pending" {
+			t.Fatalf("request after the refused decisions = %+v, want pending", read)
 		}
 
-		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"approver": testApprover})
-		if status != http.StatusOK {
-			t.Fatalf("approve by the approver = %d: %s", status, body)
-		}
-		granted := decode[struct {
-			GrantID *string `json:"grant_id"`
-		}](t, body)
-		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*granted.GrantID+"/values", nil)
-		if status != http.StatusOK || decode[struct {
-			Values map[string]string `json:"values"`
-		}](t, body).Values["NOTION_API_KEY"] != "notion-v1" {
-			t.Fatalf("values after the approver's approval = %d %s, want NOTION_API_KEY=notion-v1", status, body)
-		}
+		ts.signedIn(t, testApprover, recordID).Decide(t, recordID, true)
+		ts.awaitValue(t, sessionKey, enrollmentID, ts.grantOf(t, sessionKey, enrollmentID, requestID), "NOTION_API_KEY", "notion-v1")
 	})
 
 	// Step 8: an owner edits LINEAR_API_KEY's owner tag to a GitHub login, which names no person.
@@ -643,29 +652,16 @@ func TestEndToEnd(t *testing.T) {
 
 	// Step 9: a shared human-tier secret's request names "anyone" as its approver, reaches the
 	// pending list of a person who is neither its requester's operator nor anyone the policy names,
-	// is refused to the sentinel itself, and that person's approval releases its value.
+	// and that person's approval on the broker's page releases its value.
 	t.Run("9_AnyoneSignedInApprovesASharedHumanTierSecret", func(t *testing.T) {
-		_, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e shared deploy", "SHARED_DEPLOY_KEY")
-		_, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-		if read := decode[wireRecord](t, body); read.Approver != record.AnyoneApprover {
-			t.Fatalf("shared record = %+v, want approver %q", read, record.AnyoneApprover)
+		requestID, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e shared deploy", "SHARED_DEPLOY_KEY")
+		if read := ts.status(t, sessionKey, enrollmentID, requestID); read.Approver == nil || *read.Approver != record.AnyoneApprover {
+			t.Fatalf("shared request = %+v, want approver %q", read, record.AnyoneApprover)
 		}
 		ts.awaitPendingFor(t, otherPerson, recordID)
 
-		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"approver": record.AnyoneApprover})
-		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
-			t.Fatalf("approve as %q = %d %s, want 403 NOT_APPROVER", record.AnyoneApprover, status, body)
-		}
-		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"approver": otherPerson})
-		if status != http.StatusOK {
-			t.Fatalf("approve as %s = %d: %s", otherPerson, status, body)
-		}
-		granted := decode[struct {
-			GrantID *string `json:"grant_id"`
-		}](t, body)
-		ts.awaitValue(t, sessionKey, enrollmentID, *granted.GrantID, "SHARED_DEPLOY_KEY", "shared-deploy-v1")
+		ts.signedIn(t, otherPerson, recordID).Decide(t, recordID, true)
+		ts.awaitValue(t, sessionKey, enrollmentID, ts.grantOf(t, sessionKey, enrollmentID, requestID), "SHARED_DEPLOY_KEY", "shared-deploy-v1")
 	})
 
 	// Step 10: otherPerson logs their own machine in and its session asks for testApprover's
@@ -680,26 +676,16 @@ func TestEndToEnd(t *testing.T) {
 		}
 
 		otherEnrollment, otherKey := ts.loginAndEnroll(t, otherPerson, "e2e-ben")
-		_, recordID := ts.createPending(t, otherKey, otherEnrollment, "ben's agent needs it", "AUTO_READ_TOKEN")
-		_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-		if read := decode[wireRecord](t, body); read.Approver != testApprover {
+		requestID, recordID := ts.createPending(t, otherKey, otherEnrollment, "ben's agent needs it", "AUTO_READ_TOKEN")
+		if read := ts.status(t, otherKey, otherEnrollment, requestID); read.Approver == nil || *read.Approver != testApprover {
 			t.Fatalf("ben's request = %+v, want its approver to be the owner %s", read, testApprover)
 		}
 		ts.awaitPendingFor(t, testApprover, recordID)
-		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"approver": otherPerson})
-		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
-			t.Fatalf("approve as the requester's own operator = %d %s, want 403 NOT_APPROVER", status, body)
+		if form := brokertest.DecisionForm(t, ts.signedIn(t, otherPerson, recordID).Page(t, recordID).Body, recordID); form != nil {
+			t.Fatalf("the requester's own operator %s is offered a decision on the owner's request", otherPerson)
 		}
-		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"approver": testApprover})
-		if status != http.StatusOK {
-			t.Fatalf("approve as the owner = %d: %s", status, body)
-		}
-		granted := decode[struct {
-			GrantID *string `json:"grant_id"`
-		}](t, body)
-		ts.awaitValue(t, otherKey, otherEnrollment, *granted.GrantID, "AUTO_READ_TOKEN", "read-v1")
+		ts.signedIn(t, testApprover, recordID).Decide(t, recordID, true)
+		ts.awaitValue(t, otherKey, otherEnrollment, ts.grantOf(t, otherKey, otherEnrollment, requestID), "AUTO_READ_TOKEN", "read-v1")
 	})
 }
 

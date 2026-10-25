@@ -261,7 +261,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_DISPATCH_TOKEN_FILE", noDispatchCredential},
 	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
 	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
-	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
+	{"BROKER_UI_ORIGIN", "a person approves on the broker's own page, signed in to the broker (BROKER_SIGNIN_*), so the broker checks no WebAuthn origin"},
 	{"BROKER_UI_TOKEN", noUIToken},
 	{"BROKER_UI_TOKEN_FILE", noUIToken},
 	{"BROKER_DATABASE_PASSWORD", noDatabasePassword},

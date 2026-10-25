@@ -9,20 +9,16 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
-	"golang.org/x/net/html"
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
-	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
-	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/machine"
@@ -41,11 +37,10 @@ import (
 )
 
 const (
-	// clientID and clientSecret are the broker's own client at the test's provider.
-	clientID     = "broker-client"
-	clientSecret = "broker-client-secret"
-	// domain is the Workspace domain a person must belong to (BROKER_SIGNIN_DOMAIN).
-	domain = "example.com"
+	// clientID is the broker's own client at the test's provider, and domain the Workspace domain
+	// a person must belong to (BROKER_SIGNIN_DOMAIN).
+	clientID = brokertest.SignInClientID
+	domain   = brokertest.SignInDomain
 	// ada owns every secret but the shared one, so she approves their requests.
 	ada = "ada@example.com"
 	// ben operates the machine every secret request comes from.
@@ -90,9 +85,10 @@ func newRig(t *testing.T, signIn bool) *rig {
 
 	issuer := oidctest.New(t)
 	key := issuer.PublishKey(t, "signing-key")
-	issuer.EnableCodeFlow(key, clientID, clientSecret)
-	// Google answers an online sign-in with no refresh token, and the broker keeps none.
-	issuer.OmitRefreshTokens()
+	signInConfig := brokertest.SignIn(issuer, key)
+	if !signIn {
+		signInConfig = nil
+	}
 	accounts, err := oidc.New(context.Background(), issuer.URL(), dispatchAudience)
 	if err != nil {
 		t.Fatalf("oidc.New: %v", err)
@@ -111,17 +107,6 @@ func newRig(t *testing.T, signIn bool) *rig {
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		OAuth: provider, Replay: enr.Replay,
 	}
-	var signInConfig *config.SignIn
-	if signIn {
-		signInConfig = &config.SignIn{Issuer: issuer.URL(), ClientID: clientID, ClientSecret: clientSecret, Domain: domain, SessionLifetime: time.Hour}
-	}
-	page, err := approval.New(approval.Config{
-		SignIn: signInConfig, PublicURL: srv.URL, MachineLoginURL: brokertest.MachineLoginURL,
-		Store: st, Machine: reqMachine,
-	})
-	if err != nil {
-		t.Fatalf("approval.New: %v", err)
-	}
 	api.Register(mux, api.Deps{
 		PublicURL:     srv.URL,
 		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
@@ -130,7 +115,7 @@ func newRig(t *testing.T, signIn bool) *rig {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
-		Approval: page,
+		Approval: brokertest.NewApprovalPage(t, signInConfig, srv.URL, st, reqMachine),
 	})
 
 	claims := issuer.Claims(dispatchAccount, dispatchAudience)
@@ -355,7 +340,7 @@ func (r *rig) requirePending(t *testing.T, recordID string) {
 	}
 }
 
-// --- the browser ---
+// --- the browser: brokertest.Browser, every answer of the broker held to the page's headers ---
 
 // response is one answer as a browser received it.
 type response struct {
@@ -364,50 +349,30 @@ type response struct {
 	body   string
 }
 
+func answer(res brokertest.Response) response {
+	return response{status: res.Status, header: res.Header, body: res.Body}
+}
+
+func (res response) wire() brokertest.Response {
+	return brokertest.Response{Status: res.status, Header: res.header, Body: res.body}
+}
+
 func (res response) location(t *testing.T) *url.URL {
 	t.Helper()
-	u, err := url.Parse(res.header.Get("Location"))
-	if err != nil || res.header.Get("Location") == "" {
-		t.Fatalf("answer %d has no Location: %v\n%s", res.status, err, res.body)
-	}
-	return u
+	return res.wire().Location(t)
 }
 
 // cookie is the Set-Cookie of the answer naming name, or nil.
-func (res response) cookie(name string) *http.Cookie {
-	for _, c := range (&http.Response{Header: res.header}).Cookies() {
-		if c.Name == name {
-			return c
-		}
-	}
-	return nil
-}
+func (res response) cookie(name string) *http.Cookie { return res.wire().Cookie(name) }
 
-// browser is a person's browser: a cookie jar, following no redirect by itself so a test sees
-// each hop.
-type browser struct {
-	rig    *rig
-	jar    *cookiejar.Jar
-	client *http.Client
-}
+// browser is a person's browser on the rig's broker, trusting its TLS test server.
+type browser struct{ b *brokertest.Browser }
 
 func (r *rig) browser(t *testing.T) *browser {
 	t.Helper()
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &browser{rig: r, jar: jar, client: r.client(jar)}
-}
-
-// client is an HTTP client trusting the test server, following no redirect, with jar (none when
-// nil).
-func (r *rig) client(jar http.CookieJar) *http.Client {
-	return &http.Client{
-		Transport:     r.srv.Client().Transport,
-		Jar:           jar,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	b := brokertest.NewBrowser(t, r.url, r.srv.Client().Transport, r.issuer)
+	b.Check = checkPageHeaders
+	return &browser{b}
 }
 
 // pageHeaders are the headers every answer of the approval page must carry.
@@ -419,236 +384,80 @@ var pageHeaders = map[string]string{
 	"X-Content-Type-Options":  "nosniff",
 }
 
-// send sends req with client, and checks every answer of the broker carries the page's headers and
-// no CORS header.
-func (r *rig) send(t *testing.T, client *http.Client, req *http.Request) response {
+// checkPageHeaders checks an answer of the broker carries the page's headers and no CORS header.
+func checkPageHeaders(t *testing.T, req *http.Request, res brokertest.Response) {
 	t.Helper()
-	res, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", req.Method, req.URL, err)
-	}
-	defer res.Body.Close()
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatalf("read %s %s: %v", req.Method, req.URL, err)
-	}
-	if strings.HasPrefix(req.URL.String(), r.url) {
-		for name, want := range pageHeaders {
-			if got := res.Header.Get(name); got != want {
-				t.Errorf("%s %s answered %d with %s %q, want %q", req.Method, req.URL.Path, res.StatusCode, name, got, want)
-			}
-		}
-		for name := range res.Header {
-			if strings.HasPrefix(name, "Access-Control-") {
-				t.Errorf("%s %s answered the CORS header %s", req.Method, req.URL.Path, name)
-			}
+	for name, want := range pageHeaders {
+		if got := res.Header.Get(name); got != want {
+			t.Errorf("%s %s answered %d with %s %q, want %q", req.Method, req.URL.Path, res.Status, name, got, want)
 		}
 	}
-	return response{status: res.StatusCode, header: res.Header, body: string(body)}
-}
-
-// target is path on the broker, or an absolute URL as given.
-func (r *rig) target(path string) string {
-	if strings.HasPrefix(path, "http") {
-		return path
+	for name := range res.Header {
+		if strings.HasPrefix(name, "Access-Control-") {
+			t.Errorf("%s %s answered the CORS header %s", req.Method, req.URL.Path, name)
+		}
 	}
-	return r.url + path
 }
 
-func (b *browser) get(t *testing.T, path string) response {
+func (b *browser) get(t *testing.T, path string, cookies ...*http.Cookie) response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, b.rig.target(path), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b.rig.send(t, b.client, req)
+	return answer(b.b.Get(t, path, cookies...))
 }
 
 // post posts form to path with headers; fromPage adds the Origin the broker's own page sends.
-func (b *browser) post(t *testing.T, path string, form url.Values, headers map[string]string) response {
+func (b *browser) post(t *testing.T, path string, form url.Values, headers map[string]string, cookies ...*http.Cookie) response {
 	t.Helper()
-	return b.rig.post(t, b.client, path, form, headers)
+	return answer(b.b.Post(t, path, form, headers, cookies...))
 }
 
 func (b *browser) fromPage(t *testing.T, path string, form url.Values) response {
 	t.Helper()
-	return b.post(t, path, form, map[string]string{"Origin": b.rig.url})
-}
-
-func (r *rig) post(t *testing.T, client *http.Client, path string, form url.Values, headers map[string]string, cookies ...*http.Cookie) response {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, r.target(path), strings.NewReader(form.Encode()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-	return r.send(t, client, req)
+	return answer(b.b.FromPage(t, path, form))
 }
 
 // cookie is the value of the jar's cookie name for the broker, or "".
 func (b *browser) cookie(t *testing.T, name string) string {
 	t.Helper()
-	u, err := url.Parse(b.rig.url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range b.jar.Cookies(u) {
-		if c.Name == name {
-			return c.Value
-		}
-	}
-	return ""
+	return b.b.Cookie(t, name)
 }
 
-// person is the claims of a domain member with a verified email, as the provider signs them in.
-func person(email string) map[string]any {
-	return map[string]any{"sub": "sub-" + email, "email": email, "email_verified": true, "hd": domain}
-}
-
-// startSignIn opens path with no live session and answers the provider URL the broker sends the
-// browser to.
 func (b *browser) startSignIn(t *testing.T, path string) *url.URL {
 	t.Helper()
-	res := b.get(t, path)
-	if res.status != http.StatusFound {
-		t.Fatalf("GET %s = %d, want 302 to the provider:\n%s", path, res.status, res.body)
-	}
-	return res.location(t)
+	return b.b.StartSignIn(t, path)
 }
 
-// authorize signs in at the provider as claims and answers the callback URL it returns to.
 func (b *browser) authorize(t *testing.T, authURL *url.URL, claims map[string]any) string {
 	t.Helper()
-	b.rig.issuer.SignInAs(claims)
-	res := b.get(t, authURL.String())
-	if res.status != http.StatusFound {
-		t.Fatalf("the provider answered %d, want 302 to the callback: %s", res.status, res.body)
-	}
-	return res.header.Get("Location")
+	return b.b.Authorize(t, authURL, claims)
 }
 
-// signIn signs the browser in as claims through recordID's page, the way a person arrives.
 func (b *browser) signIn(t *testing.T, recordID string, claims map[string]any) {
 	t.Helper()
-	res := b.get(t, b.authorize(t, b.startSignIn(t, "/approve/"+recordID), claims))
-	if res.status != http.StatusSeeOther || res.header.Get("Location") != "/approve/"+recordID {
-		t.Fatalf("callback = %d to %q, want 303 to /approve/%s:\n%s", res.status, res.header.Get("Location"), recordID, res.body)
-	}
+	b.b.SignIn(t, recordID, claims)
 }
 
-// page opens recordID's page with a live session.
 func (b *browser) page(t *testing.T, recordID string) response {
 	t.Helper()
-	res := b.get(t, "/approve/"+recordID)
-	if res.status != http.StatusOK {
-		t.Fatalf("GET /approve/%s = %d, want the page:\n%s", recordID, res.status, res.body)
-	}
-	return res
+	return answer(b.b.Page(t, recordID))
 }
 
 // --- reading the page ---
 
-// htmlForm is one form of a page: its action, its hidden fields and its buttons.
-type htmlForm struct {
-	action  string
-	fields  url.Values
-	buttons []htmlButton
-}
-
-type htmlButton struct{ name, value, text string }
-
-func parse(t *testing.T, body string) *html.Node {
-	t.Helper()
-	doc, err := html.Parse(strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("parse the page: %v", err)
-	}
-	return doc
-}
-
-func attr(n *html.Node, key string) string {
-	for _, a := range n.Attr {
-		if a.Key == key {
-			return a.Val
-		}
-	}
-	return ""
-}
-
-// text is every text node under n, with runs of whitespace as one space. The templates put a
-// newline between block elements, so their texts stay apart.
-func text(n *html.Node) string {
-	var sb strings.Builder
-	for d := range n.Descendants() {
-		if d.Type == html.TextNode {
-			sb.WriteString(d.Data)
-		}
-	}
-	return strings.Join(strings.Fields(sb.String()), " ")
-}
-
-func pageText(t *testing.T, body string) string {
-	t.Helper()
-	return text(parse(t, body))
-}
-
-func forms(t *testing.T, body string) []htmlForm {
-	t.Helper()
-	var out []htmlForm
-	for n := range parse(t, body).Descendants() {
-		if n.Type != html.ElementNode || n.Data != "form" {
-			continue
-		}
-		f := htmlForm{action: attr(n, "action"), fields: url.Values{}}
-		for d := range n.Descendants() {
-			switch {
-			case d.Type == html.ElementNode && d.Data == "input" && attr(d, "type") == "hidden":
-				f.fields.Add(attr(d, "name"), attr(d, "value"))
-			case d.Type == html.ElementNode && d.Data == "button":
-				f.buttons = append(f.buttons, htmlButton{name: attr(d, "name"), value: attr(d, "value"), text: text(d)})
-			}
-		}
-		out = append(out, f)
-	}
-	return out
-}
-
-// decisionForm is the hidden fields of the page's Approve/Deny form for recordID, nil when the
-// page offers none.
-func decisionForm(t *testing.T, body, recordID string) url.Values {
-	t.Helper()
-	for _, f := range forms(t, body) {
-		if f.action == "/approve" && len(f.fields["record"]) == 1 && f.fields.Get("record") == recordID {
-			return f.fields
-		}
-	}
-	return nil
-}
-
-// decision is form with decision set, a copy.
-func decision(form url.Values, value string) url.Values {
-	out := url.Values{}
-	for k, v := range form {
-		out[k] = append([]string(nil), v...)
-	}
-	out.Set("decision", value)
-	return out
-}
+var (
+	person       = brokertest.Person
+	pageText     = brokertest.PageText
+	decisionForm = brokertest.DecisionForm
+	decision     = brokertest.Decision
+)
 
 // approveAll is the page's "Approve all N shown" form and its button's label, nil when it offers
 // none.
 func approveAll(t *testing.T, body string) (url.Values, string) {
 	t.Helper()
-	for _, f := range forms(t, body) {
-		for _, b := range f.buttons {
-			if strings.HasPrefix(b.text, "Approve all") {
-				return f.fields, b.text
+	for _, f := range brokertest.Forms(t, body) {
+		for _, b := range f.Buttons {
+			if strings.HasPrefix(b.Text, "Approve all") {
+				return f.Fields, b.Text
 			}
 		}
 	}
@@ -679,15 +488,8 @@ func encodePending(t *testing.T, fields map[string]string) string {
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-// getWith GETs target with exactly the cookies given and no jar.
+// getWith GETs target with exactly the cookies given, from a browser holding none.
 func (r *rig) getWith(t *testing.T, target string, cookies ...*http.Cookie) response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, r.target(target), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-	return r.send(t, r.client(nil), req)
+	return r.browser(t).get(t, target, cookies...)
 }

@@ -72,10 +72,11 @@ func renewAuth(h func(*server, http.ResponseWriter, *http.Request, string)) rout
 }
 
 // accountAuth is a route for a service calling the broker with its own Kubernetes ServiceAccount
-// token: Dispatch's server, which relays a person's decisions, and whatever resource server reads
-// a token back through introspection. The token is verified against the broker's Kubernetes
-// issuer and its account must be one BROKER_API_ACCOUNTS lists, and the handler is given that
-// entry's name — the caller's identity, which it logs when it acts.
+// token: Dispatch's server, which lists what waits on a person, relays a person's machine-login
+// decisions and revokes, and links the broker's own page for a secret request; and whatever
+// resource server reads a token back through introspection. The token is verified against the
+// broker's Kubernetes issuer and its account must be one BROKER_API_ACCOUNTS lists, and the
+// handler is given that entry's name — the caller's identity, which it logs when it acts.
 func accountAuth(h func(*server, http.ResponseWriter, *http.Request, string)) routeHandler {
 	return routeHandler{auth: authAccount, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
 		h(s, w, r, who.account)
@@ -140,39 +141,39 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/grants/{id}/values", sessionAuth((*server).grantValues)},
 		// End a grant the calling session holds.
 		{http.MethodPost, "/v1/grants/{id}/revoke", sessionAuth((*server).revokeGrant)},
-		// List the pending requests and machine logins the named person decides.
+		// List the pending requests and machine logins the named person decides, each secret
+		// request with the broker's own page where that person decides it.
 		{http.MethodGet, "/v1/pending", accountAuth((*server).listPending)},
-		// Read a credential-request record: what was asked, by whom, why, and its decision.
-		{http.MethodGet, "/v1/credential-requests/{record}", accountAuth((*server).readRecord)},
-		// Approve a pending record as the named person; a machine login also needs its code. The
-		// caller is a named service identity, its own ServiceAccount token, and the approver is
-		// still the login the request names: the broker takes that name on the caller's word, and
-		// dispatch://INFRA-314 is what replaces it with a signed assertion the broker verifies.
+		// Approve a pending machine login as the named person, who must type its code: the broker
+		// takes the person's name on the caller's word. A secret request is decided only on the
+		// broker's own page by a person signed in to the broker, so this refuses one, writing
+		// nothing, with 403 DECIDE_ON_BROKER_PAGE naming that page.
 		{http.MethodPost, "/v1/credential-requests/{record}/approve", accountAuth((*server).approveRecord)},
-		// Deny a pending record as the named person; a machine login also needs its code. As with
-		// approve, the caller is a named service identity and the approver is still the login the
-		// request names, until dispatch://INFRA-314.
+		// Deny a pending machine login as the named person, who must type its code, on the caller's
+		// word as with approve. A secret request is refused, writing nothing, with 403
+		// DECIDE_ON_BROKER_PAGE naming the page where a person signed in to the broker denies it.
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", accountAuth((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", accountAuth((*server).lookupMachineLogin)},
 		// List the machine logins the named person may revoke, every service's, such as the Legion
 		// daemon's, whoever approved it, and the person's own machines', that are not revoked and
-		// are unexpired or expired with a session still running, each naming who approved it.
+		// are unexpired or expired with a session still running, each naming who approved it. The
+		// person is the one the caller names.
 		{http.MethodGet, "/v1/launcher-credentials", accountAuth((*server).listLauncherCredentials)},
 		// End a machine login, expired or not: a service's (its token login, or one a person approved
 		// before token logins) as anyone signed in, a person's machine's as the person who approved
 		// it. Its launcher proofs stop authenticating and every session it enrolled, pods included,
 		// ends with its grants and pending requests. The revoking person is the login the request
-		// names, taken on the caller's word until dispatch://INFRA-314.
+		// names, which the broker still takes on the caller's word: a revoke only takes power away.
 		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", accountAuth((*server).revokeLauncherCredential)},
 		// List the live grants of the named person's sessions, automatic or approved, and those the
-		// person approved.
+		// person approved. The person is the one the caller names.
 		{http.MethodGet, "/v1/grants", accountAuth((*server).listGrantsForApprover)},
 		// End a grant as its approver or as its enrollment's operator. The operator's revoke also
 		// withholds the secrets the grant's request got automatically from that session, even when
 		// the grant had already ended: its other grants that got them automatically end too, and it
-		// asks before it gets them again. The revoking person is the login the request names, taken
-		// on the caller's word until dispatch://INFRA-314.
+		// asks before it gets them again. The revoking person is the login the request names, which
+		// the broker still takes on the caller's word: a revoke only takes power away.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", accountAuth((*server).revokeByApprover)},
 		// List the logins of the calling credential's operator's own machines, as Dispatch's
 		// machine-logins page lists them, without the service logins that page also lists.

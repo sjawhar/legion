@@ -668,8 +668,8 @@ func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]Pe
 	return out, rows.Err()
 }
 
-// RecordDecision is a decided credential-request record's own terminal event, for
-// GET /v1/credential-requests/{id}'s "decided" field and the broker's approval page.
+// RecordDecision is a decided credential-request record's own terminal event, for the broker's
+// approval page and POST /v1/machine-logins/lookup's "decided" field.
 type RecordDecision struct {
 	Event        string
 	At           time.Time
@@ -683,7 +683,7 @@ type RecordDecision struct {
 	Detail string
 }
 
-// RecordDetail is a full credential-request record for GET /v1/credential-requests/{id}: its
+// RecordDetail is a full credential-request record for the broker's approval page: its
 // decoded request object plus its current state, folding in a later grant revocation the record's
 // own decision events never overwrite (State becomes "revoked" while Decided keeps the original
 // approval). Enrollment is nil for a machine login (Kind == "launcher_credential"), which carries
@@ -705,8 +705,8 @@ type RecordDetail struct {
 	Session         Session
 }
 
-// ReadRecord reads a credential-request record's full detail by id, for GET
-// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
+// ReadRecord reads a credential-request record's full detail by id, for the broker's approval page
+// and, reused verbatim, POST /v1/machine-logins/lookup.
 // pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
 	var canonical, approver, kind, requestSession, enrollmentSession string

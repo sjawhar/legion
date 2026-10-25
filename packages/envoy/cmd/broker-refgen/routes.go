@@ -10,17 +10,24 @@ import (
 	"strings"
 )
 
-// apiDir is the broker's HTTP package: routes_table.go's routes() lists every route, and each
-// handler answers through writeError and writeJSON.
+// apiDir is the broker's HTTP package: routes_table.go's routes() lists every route, and each of
+// its own handlers answers JSON through writeError, writePageRefusal and writeJSON. A route's
+// handler may instead be a method of another of the broker's packages, such as the approval
+// page's, which answers HTML pages and redirects through w.WriteHeader.
 const apiDir = envoyDir + "/internal/broker/api"
 
 // varies stands in for a message refgen cannot spell out, such as a wrapped error's own text.
 const varies = "(varies)"
 
+// refusalWriters is each API function that answers a refusal, called (w, status, code, message,
+// …), with the type of the body it answers when that body carries more than code and error.
+var refusalWriters = map[string]string{"writeError": "", "writePageRefusal": "pageRefusal"}
+
 type route struct {
 	Method, Pattern string
 	Wrapper         string // the adapter that fixes the route's authentication
-	Handler         string // the *server method that serves it
+	Handler         string // the method that serves it
+	Dir             string // the package declaring Handler: apiDir for a *server method
 	Summary         string // the comment above its row
 	At              string
 }
@@ -59,12 +66,16 @@ func readRoutes(src *source, funcs map[string]*ast.FuncDecl) ([]route, error) {
 		}
 		call, ok := row.Elts[2].(*ast.CallExpr)
 		if !ok || len(call.Args) != 1 {
-			return nil, fmt.Errorf("%s: a route's handler is adapter((*server).handler)", src.at(row))
+			return nil, fmt.Errorf("%s: a route's handler is adapter((*server).handler) or adapter((*pkg.Type).handler)", src.at(row))
 		}
 		wrapper, ok := call.Fun.(*ast.Ident)
 		handler, ok2 := call.Args[0].(*ast.SelectorExpr)
 		if !ok || !ok2 {
-			return nil, fmt.Errorf("%s: a route's handler is adapter((*server).handler)", src.at(row))
+			return nil, fmt.Errorf("%s: a route's handler is adapter((*server).handler) or adapter((*pkg.Type).handler)", src.at(row))
+		}
+		dir, ok := handlerDir(file, handler)
+		if !ok {
+			return nil, fmt.Errorf("%s: a route's handler is a method of *server or of a type of one of the broker's own packages", src.at(row))
 		}
 		summary := src.commentAbove(file, src.line(row.Pos()))
 		if summary == "" {
@@ -72,11 +83,33 @@ func readRoutes(src *source, funcs map[string]*ast.FuncDecl) ([]route, error) {
 		}
 		out = append(out, route{
 			Method:  strings.ToUpper(strings.TrimPrefix(method.Sel.Name, "Method")),
-			Pattern: pattern, Wrapper: wrapper.Name, Handler: handler.Sel.Name,
+			Pattern: pattern, Wrapper: wrapper.Name, Handler: handler.Sel.Name, Dir: dir,
 			Summary: summary, At: src.at(row),
 		})
 	}
 	return out, nil
+}
+
+// handlerDir is the package declaring a route's method expression: apiDir for (*server).name, and
+// for (*pkg.Type).name the directory of pkg, which must be one of the broker's own packages.
+func handlerDir(file *ast.File, handler *ast.SelectorExpr) (string, bool) {
+	paren, ok := handler.X.(*ast.ParenExpr)
+	if !ok {
+		return "", false
+	}
+	star, ok := paren.X.(*ast.StarExpr)
+	if !ok {
+		return "", false
+	}
+	switch recv := star.X.(type) {
+	case *ast.Ident:
+		return apiDir, recv.Name == "server"
+	case *ast.SelectorExpr:
+		if pkg, ok := recv.X.(*ast.Ident); ok {
+			return importDir(file, pkg.Name)
+		}
+	}
+	return "", false
 }
 
 // authClass is one route adapter: the credential its routes need and the refusals
@@ -94,6 +127,7 @@ var credentialLabels = map[string]string{
 	"renewAuth":    "Renewal session proof",
 	"launcherAuth": "Machine credential",
 	"accountAuth":  "Caller ServiceAccount token",
+	"signInAuth":   "Broker sign-in session",
 }
 
 // readAuthClasses reads each adapter a route uses: its doc comment, the routeAuth constant it
@@ -162,11 +196,15 @@ func (g *graph) readAuthClasses(routes []route) ([]authClass, error) {
 	return out, nil
 }
 
-// graph is the broker API package's functions, read for what each one can answer.
+// graph is one of the broker's packages' functions, read for what each one can answer: the API
+// package's, or another's whose method serves a route.
 type graph struct {
 	src   *source
 	funcs map[string]*ast.FuncDecl
 	pkgs  map[string]*source // the broker's other packages, parsed on first use, by directory
+	// graphs is the graph of each package a route's handler is declared in, by directory, shared
+	// by every graph read from one tree.
+	graphs map[string]*graph
 }
 
 func newGraph(root string) (*graph, error) {
@@ -178,13 +216,38 @@ func newGraph(root string) (*graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &graph{src: src, funcs: funcs, pkgs: map[string]*source{}}, nil
+	g := &graph{src: src, funcs: funcs, pkgs: map[string]*source{}, graphs: map[string]*graph{}}
+	g.graphs[apiDir] = g
+	return g, nil
 }
+
+// in is the graph of the broker's package dir, read on first use.
+func (g *graph) in(dir string) (*graph, error) {
+	if other, ok := g.graphs[dir]; ok {
+		return other, nil
+	}
+	src, err := g.pkg(dir)
+	if err != nil {
+		return nil, err
+	}
+	funcs, err := src.funcs()
+	if err != nil {
+		return nil, err
+	}
+	other := &graph{src: src, funcs: funcs, pkgs: g.pkgs, graphs: g.graphs}
+	g.graphs[dir] = other
+	return other, nil
+}
+
+// pages reports whether the package answers HTML pages and redirects, as every package but the
+// API's does: each status its handlers write through w.WriteHeader is an answer of its own,
+// documented by status alone.
+func (g *graph) pages() bool { return g.src.dir != apiDir }
 
 type siteKind int
 
 const (
-	siteError   siteKind = iota // writeError(w, status, code, message)
+	siteError   siteKind = iota // a refusalWriters call: writeError(w, status, code, message, …)
 	siteSuccess                 // writeJSON(w, status, v) or w.WriteHeader(status)
 	siteCall                    // a call to another function or method of the package
 )
@@ -196,7 +259,7 @@ type site struct {
 	callee    string
 	sentinels []string // the messages of the errors.Is targets of the case clause around it
 	bodyType  string   // readJSON's: the request body's type
-	respType  string   // writeJSON's: the response body's type, "" when refgen cannot name it
+	respType  string   // writeJSON's: the response body's type, "" when refgen cannot name it; a refusal writer's, the body it answers beyond code and error
 	query     string   // r.URL.Query().Get's: the query parameter
 	guards    []guard  // the boolean conditions it runs under
 	at        string
@@ -325,9 +388,10 @@ func (g *graph) collect(file *ast.File, body ast.Node, params *ast.FieldList) fu
 		s := site{call: call, at: g.src.at(call)}
 		switch fun := call.Fun.(type) {
 		case *ast.Ident:
+			refusalBody, refusal := refusalWriters[fun.Name]
 			switch {
-			case fun.Name == "writeError":
-				s.kind = siteError
+			case refusal && !g.pages():
+				s.kind, s.respType = siteError, refusalBody
 			case fun.Name == "writeJSON":
 				s.kind = siteSuccess
 				if len(call.Args) == 3 {
@@ -488,7 +552,8 @@ type outcome struct {
 	Messages []string
 	Query    string // a query parameter the route reads
 	BodyType string // the type its JSON request body decodes into
-	RespType string // a success's: the type its JSON response body encodes, "" for no body
+	RespType string // the type its JSON body encodes, "" for no body, or for a refusal whose body is only code and error
+	Page     bool   // an answer of the broker's own pages: an HTML page, or a redirect
 	At       string
 }
 
@@ -514,8 +579,8 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 		}
 		switch s.kind {
 		case siteError:
-			if len(s.call.Args) != 4 {
-				return nil, fmt.Errorf("%s: writeError takes (w, status, code, message)", s.at)
+			if len(s.call.Args) < 4 {
+				return nil, fmt.Errorf("%s: a refusal writer takes (w, status, code, message, …)", s.at)
 			}
 			statuses, err := statusCodes(g.eval(s.call.Args[1], env, nil), s.at)
 			if err != nil {
@@ -531,7 +596,7 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			}
 			for _, status := range statuses {
 				for _, code := range codes {
-					out = append(out, outcome{Status: status, Code: code, Messages: messages, At: s.at})
+					out = append(out, outcome{Status: status, Code: code, Messages: messages, RespType: s.respType, At: s.at})
 				}
 			}
 		case siteSuccess:
@@ -553,6 +618,12 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 				return nil, fmt.Errorf("%s: cannot name this answer's body type; answer with one of the package's named response types", s.at)
 			}
 			if sel, ok := s.call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "WriteHeader" {
+				if g.pages() {
+					for _, status := range statuses {
+						out = append(out, outcome{Status: status, Page: true, At: s.at})
+					}
+					continue
+				}
 				for _, status := range statuses {
 					if status != http.StatusNoContent {
 						return nil, fmt.Errorf("%s: answers %d through WriteHeader, which the page would document as having no body; answer a body with writeJSON, and no body with 204", s.at, status)
@@ -687,12 +758,25 @@ func (g *graph) eval(e ast.Expr, env map[string][]string, sentinels []string) []
 // handlerOutcomes is everything a route's handler can answer, with its authentication's
 // refusals left to its auth class.
 func (g *graph) handlerOutcomes(r route) ([]outcome, error) {
-	fn, ok := g.funcs[r.Handler]
-	if !ok {
-		return nil, fmt.Errorf("%s: no handler %s", r.At, r.Handler)
+	hg, fn, err := g.handler(r)
+	if err != nil {
+		return nil, err
 	}
-	info := g.collect(g.src.fileOf(fn), fn.Body, fn.Type.Params)
-	return g.resolve(info, map[string][]string{}, map[string]bool{r.Handler: true})
+	info := hg.collect(hg.src.fileOf(fn), fn.Body, fn.Type.Params)
+	return hg.resolve(info, map[string][]string{}, map[string]bool{r.Handler: true})
+}
+
+// handler is r's handler and the graph of the package declaring it.
+func (g *graph) handler(r route) (*graph, *ast.FuncDecl, error) {
+	hg, err := g.in(r.Dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	fn, ok := hg.funcs[r.Handler]
+	if !ok || fn.Recv == nil {
+		return nil, nil, fmt.Errorf("%s: %s declares no method %s", r.At, r.Dir, r.Handler)
+	}
+	return hg, fn, nil
 }
 
 // refusals is the distinct error outcomes in outs, by code and then status.

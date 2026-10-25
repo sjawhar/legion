@@ -1,7 +1,7 @@
 // request_approver_test.go pins the approver POST /v1/requests and GET /v1/requests/{id} answer:
 // whom the request's credential-request record names to decide it, a person's login or anyone
-// signed in to Dispatch, so the asking session can tell whom it waits on. A request no person
-// decides answers null.
+// signed in to the broker's approval page, so the asking session can tell whom it waits on. A
+// request no person decides answers null.
 package api_test
 
 import (
@@ -139,8 +139,7 @@ func TestARequestNamesWhomItWaitsOn(t *testing.T) {
 			if c.approver == "" {
 				return
 			}
-			_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+*created.RecordID, nil)
-			if got := decode[wireRecord](t, body).Approver; got != c.approver {
+			if got := ts.record(t, *created.RecordID).Approver; got != c.approver {
 				t.Fatalf("record %s names approver %q; the request answered %q", *created.RecordID, got, c.approver)
 			}
 		})
@@ -179,10 +178,7 @@ func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T
 	if !pendingFor(t, ts, owner, *first.RecordID) || pendingFor(t, ts, newOwner, *first.RecordID) {
 		t.Fatalf("record %s: want it on %s's pending list and off %s's", *first.RecordID, owner, newOwner)
 	}
-	status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+*first.RecordID+"/deny", map[string]any{"approver": owner})
-	if status != http.StatusOK {
-		t.Fatalf("deny as %s after the owner change = %d %s", owner, status, body)
-	}
+	ts.decide(t, owner, *first.RecordID, false)
 	if read, body := ts.statusOf(t, sessionKey, session, first.RequestID); read.State != "denied" || string(read.Approver) != wantOwner {
 		t.Fatalf("GET /v1/requests/{id} once denied = %s; want denied, still naming %s", body, owner)
 	}

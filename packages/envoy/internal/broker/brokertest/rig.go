@@ -80,9 +80,10 @@ const (
 // Rig is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to its
 // store — enough to drive a machine login, a session enrollment, and an agent-secret request
 // end to end over genuine HTTP, and to reach into the store directly for what the API itself has
-// no route to do (e.g. forcing a launcher credential's expiry). A human decision is a call to one
+// no route to do (e.g. forcing a launcher credential's expiry). A machine login is decided on one
 // of the routes Dispatch's server calls, with UIToken as the caller's credential and Operator
-// named in the body as the approver.
+// named in the body as the approver; a secret request on the broker's own approval page, by
+// Operator signed in at the Rig's provider (Decide).
 type Rig struct {
 	// URL is the broker's own httptest.Server base URL: every proof's htu and every request
 	// object's aud must check against this one value.
@@ -193,6 +194,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		Approval: NewApprovalPage(t, SignIn(issuer, podKey), srv.URL, st, reqMachine),
 	})
 
 	operatorFile := filepath.Join(t.TempDir(), "operator")
@@ -336,6 +338,14 @@ func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (crede
 		return ""
 	}
 	return *decided.CredentialID
+}
+
+// Decide decides the pending secret request recordID as Operator on the broker's own approval
+// page, as the operator does: signed in at the Rig's provider, from the record's page
+// (brokertest.Decide).
+func (r *Rig) Decide(t *testing.T, recordID string, approve bool) {
+	t.Helper()
+	Decide(t, r.URL, r.podIssuer, r.Operator, recordID, approve)
 }
 
 // MintPodToken mints a projected service-account token bound to podUID — the shape

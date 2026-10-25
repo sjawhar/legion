@@ -206,7 +206,7 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 		if after := r.sessions(t); after != before-1 {
 			t.Errorf("sessions after logout = %d, want %d", after, before-1)
 		}
-		if res := r.post(t, r.client(nil), "/approve", decision(form, "approve"), map[string]string{"Origin": r.url}, stolen); res.status != http.StatusForbidden {
+		if res := r.browser(t).post(t, "/approve", decision(form, "approve"), map[string]string{"Origin": r.url}, stolen); res.status != http.StatusForbidden {
 			t.Errorf("POST with the logged-out cookie = %d, want 403", res.status)
 		}
 		r.requirePending(t, p.recordID)

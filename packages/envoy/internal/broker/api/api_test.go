@@ -1,9 +1,11 @@
 // api_test.go mounts the real broker handlers (api.Register) on a real Postgres test store — no
-// fakes: every dependency (enroll.Service, requests.Machine, machine.Service) is the genuine
-// article, wired exactly as cmd/broker/main.go wires it, with real signed request/proof JWS
-// objects. A human decision is a call from a listed service account, presenting its own projected
-// token, naming the approver's login in the body — the request Dispatch's server sends. It
-// rebuilds route-level coverage for every row of routes_table.go's table.
+// fakes: every dependency (enroll.Service, requests.Machine, machine.Service, the approval page) is
+// the genuine article, wired exactly as cmd/broker/main.go wires it, with real signed
+// request/proof JWS objects. A machine login's decision is a call from a listed service account,
+// presenting its own projected token, naming the approver's login in the body — the request
+// Dispatch's server sends. A secret request's decision is made on the broker's own approval page,
+// by the person signed in at the test's provider (decide). It rebuilds route-level coverage for
+// every row of routes_table.go's table.
 package api_test
 
 import (
@@ -66,6 +68,8 @@ type testServer struct {
 	Secrets   *secrets.Local
 	podIssuer *oidctest.Issuer
 	podKey    *oidctest.Key
+	// machine is the broker's requests.Machine, which reads a record as the approval page does.
+	machine *requests.Machine
 	// uiToken is dispatchAccount's own projected token, the credential the routes Dispatch's
 	// server calls take; minted once per server so a test may send it from a goroutine too.
 	uiToken string
@@ -145,11 +149,13 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		// The page signs people in at the same local issuer, which stands in for every provider.
+		Approval: brokertest.NewApprovalPage(t, brokertest.SignIn(issuer, podKey), srv.URL, st, reqMachine),
 	}
 	adjust(&deps)
 	api.Register(mux, deps)
 
-	ts := &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey, ServiceLogins: serviceLogins}
+	ts := &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey, machine: reqMachine, ServiceLogins: serviceLogins}
 	ts.uiToken = ts.accountToken(t, dispatchAccount, "", time.Hour)
 	return ts
 }
@@ -233,6 +239,23 @@ func (ts *testServer) ui(t *testing.T, method, path string, body any) (int, []by
 	return ts.req(t, method, path, map[string]string{"Authorization": "Bearer " + ts.uiToken}, body)
 }
 
+// decide decides the secret request recordID as login on the broker's own approval page, as that
+// person does: signed in at the test's provider, from the record's page (brokertest.Decide).
+func (ts *testServer) decide(t *testing.T, login, recordID string, approve bool) {
+	t.Helper()
+	brokertest.Decide(t, ts.URL, ts.podIssuer, login, recordID, approve)
+}
+
+// record reads recordID as the approval page prints it (requests.Machine.ReadRecord).
+func (ts *testServer) record(t *testing.T, recordID string) requests.RecordDetail {
+	t.Helper()
+	detail, err := ts.machine.ReadRecord(context.Background(), recordID)
+	if err != nil {
+		t.Fatalf("ReadRecord(%s): %v", recordID, err)
+	}
+	return detail
+}
+
 func (ts *testServer) session(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, method, path string, body any) (int, []byte) {
 	t.Helper()
 	p, err := proof.Sign(key, enrollmentID, method, ts.URL+path, time.Now())
@@ -305,11 +328,12 @@ type wireRecord struct {
 }
 
 type wireCreateRequestResponse struct {
-	RequestID string  `json:"request_id"`
-	State     string  `json:"state"`
-	GrantID   *string `json:"grant_id"`
-	RecordID  *string `json:"record_id"`
-	Coalesced bool    `json:"coalesced"`
+	RequestID  string  `json:"request_id"`
+	State      string  `json:"state"`
+	GrantID    *string `json:"grant_id"`
+	RecordID   *string `json:"record_id"`
+	Coalesced  bool    `json:"coalesced"`
+	ApproveURL *string `json:"approve_url"`
 }
 
 type wireRequestDecision struct {
@@ -318,11 +342,12 @@ type wireRequestDecision struct {
 }
 
 type wireRequestStatus struct {
-	State     string               `json:"state"`
-	GrantID   *string              `json:"grant_id"`
-	RecordID  *string              `json:"record_id"`
-	DecidedAt *time.Time           `json:"decided_at"`
-	Decision  *wireRequestDecision `json:"decision"`
+	State      string               `json:"state"`
+	GrantID    *string              `json:"grant_id"`
+	RecordID   *string              `json:"record_id"`
+	DecidedAt  *time.Time           `json:"decided_at"`
+	Decision   *wireRequestDecision `json:"decision"`
+	ApproveURL *string              `json:"approve_url"`
 }
 
 type wirePendingEntry struct {
@@ -331,6 +356,14 @@ type wirePendingEntry struct {
 	Identifiers []string    `json:"identifiers"`
 	RequestedAt time.Time   `json:"requested_at"`
 	Session     wireSession `json:"session"`
+	ApproveURL  *string     `json:"approve_url"`
+}
+
+// wirePageRefusal is a refusal naming the record's approval page.
+type wirePageRefusal struct {
+	Code       string `json:"code"`
+	Error      string `json:"error"`
+	ApproveURL string `json:"approve_url"`
 }
 
 type wireApproverGrant struct {
@@ -563,16 +596,11 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 		t.Fatalf("lookup = %+v, want kind=launcher_credential state=pending approver=%s", looked, testApprover)
 	}
 
-	status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+looked.RecordID, nil)
-	if status != http.StatusOK {
-		t.Fatalf("GET /v1/credential-requests/{machine record} = %d: %s", status, body)
+	if looked.Enrollment != nil {
+		t.Fatalf("machine record enrollment = %+v, want nil (no requesting enrollment)", looked.Enrollment)
 	}
-	plainRead := decode[wireRecord](t, body)
-	if plainRead.Enrollment != nil {
-		t.Fatalf("machine record enrollment = %+v, want nil (no requesting enrollment)", plainRead.Enrollment)
-	}
-	if plainRead.LifetimeSeconds == nil || *plainRead.LifetimeSeconds != int((7*24*time.Hour).Seconds()) {
-		t.Fatalf("machine record lifetime_seconds = %v, want the credential's week", plainRead.LifetimeSeconds)
+	if looked.LifetimeSeconds == nil || *looked.LifetimeSeconds != int((7*24*time.Hour).Seconds()) {
+		t.Fatalf("machine record lifetime_seconds = %v, want the credential's week", looked.LifetimeSeconds)
 	}
 
 	// The code selects the login, but only its approver (the login_hint) decides it.
@@ -589,11 +617,10 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 	}
 	approved := decode[struct {
 		State        string  `json:"state"`
-		GrantID      *string `json:"grant_id"`
 		CredentialID *string `json:"credential_id"`
 	}](t, body)
-	if approved.State != "approved" || approved.GrantID != nil || approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("approve response = %+v, want state=approved grant_id=nil credential_id set", approved)
+	if approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
+		t.Fatalf("approve response = %+v, want state=approved with a credential_id", approved)
 	}
 	credentialID := *approved.CredentialID
 
@@ -604,8 +631,7 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 	if want := time.Now().Add(7 * 24 * time.Hour); minted.Before(want.Add(-time.Minute)) || minted.After(want) {
 		t.Fatalf("minted credential expires %s, want CredentialLifetime from the approval, about %s", minted, want)
 	}
-	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+looked.RecordID, nil)
-	if decided := decode[wireRecord](t, body).Decided; decided == nil || decided.CredentialID == nil || *decided.CredentialID != credentialID {
+	if decided := ts.record(t, looked.RecordID).Decided; decided == nil || decided.CredentialID != credentialID {
 		t.Fatalf("decided machine record = %+v, want its decision to name credential %s", decided, credentialID)
 	}
 
@@ -700,10 +726,11 @@ func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 }
 
 // TestAgentSecretRequestLifecycle drives an approval-needing agent_secret request end to end:
-// creation (session proof, naming an explicit session_id override), the UI's pending list and
-// record read (with an enrollment, its session, and no code required), approval by the record's
-// approver, the session's own status/values reads, the UI's grant list, and human revocation,
-// refused for any login but the approver's.
+// creation (session proof, naming an explicit session_id override) answering the record's page,
+// the UI's pending list linking that page, the record the page prints (with an enrollment, its
+// session, and no code required), approval by the record's approver on the broker's own page, the
+// session's own status/values reads, the UI's grant list, and human revocation, refused for any
+// login but the approver's.
 func TestAgentSecretRequestLifecycle(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
@@ -720,6 +747,10 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		t.Fatalf("create response = %+v, want state=pending with a record_id", created)
 	}
 	requestID, recordID := created.RequestID, *created.RecordID
+	page := ts.URL + "/approve/" + recordID
+	if created.ApproveURL == nil || *created.ApproveURL != page {
+		t.Fatalf("create response approve_url = %v, want the record's page %s", created.ApproveURL, page)
+	}
 
 	status, body = ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
 	if status != http.StatusOK {
@@ -738,54 +769,36 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 			if p.Session.Request == nil || *p.Session.Request != sessionID || p.Session.Enrollment != nil {
 				t.Fatalf("pending entry session = %+v, want request=%s and no enrollment session_id (this box enrolled none)", p.Session, sessionID)
 			}
+			if p.ApproveURL == nil || *p.ApproveURL != page {
+				t.Fatalf("pending entry approve_url = %v, want the record's page %s", p.ApproveURL, page)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("GET /v1/pending = %+v, want record %s listed", pendingList, recordID)
 	}
 
-	status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-	if status != http.StatusOK {
-		t.Fatalf("GET /v1/credential-requests/{id} = %d: %s", status, body)
-	}
-	readBack := decode[wireRecord](t, body)
+	readBack := ts.record(t, recordID)
 	if readBack.State != "pending" || readBack.Approver != testApprover {
-		t.Fatalf("record read = %+v, want pending with approver %s", readBack, testApprover)
+		t.Fatalf("record = %+v, want pending with approver %s", readBack, testApprover)
 	}
-	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "session" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != nil {
+	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "session" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != "" {
 		t.Fatalf("record enrollment = %+v, want kind=session operator=%s and no slot", readBack.Enrollment, testApprover)
 	}
 	if readBack.LifetimeSeconds != nil {
 		t.Fatalf("record lifetime_seconds = %d, want null for a request naming no lifetime (until the session ends)", *readBack.LifetimeSeconds)
 	}
-	if readBack.Session.Request == nil || *readBack.Session.Request != sessionID || readBack.Session.Enrollment != nil {
+	if readBack.Session.Request != sessionID || readBack.Session.Enrollment != "" {
 		t.Fatalf("record session = %+v, want request=%s and no enrollment session_id", readBack.Session, sessionID)
 	}
 
-	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-		map[string]any{"approver": testApprover})
-	if status != http.StatusOK {
-		t.Fatalf("approve = %d: %s", status, body)
-	}
-	approved := decode[struct {
-		State        string  `json:"state"`
-		GrantID      *string `json:"grant_id"`
-		CredentialID *string `json:"credential_id"`
-	}](t, body)
-	if approved.State != "approved" || approved.GrantID == nil || *approved.GrantID == "" || approved.CredentialID != nil {
-		t.Fatalf("approve response = %+v, want state=approved grant_id set credential_id=nil", approved)
-	}
-	grantID := *approved.GrantID
+	ts.decide(t, testApprover, recordID, true)
 
-	status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-	if status != http.StatusOK {
-		t.Fatalf("GET /v1/credential-requests/{id} (after approval) = %d: %s", status, body)
+	decidedRead := ts.record(t, recordID)
+	if decidedRead.State != "approved" || decidedRead.Decided == nil || decidedRead.Decided.Event != "approved" || decidedRead.Decided.CredentialID != "" {
+		t.Fatalf("decided record = %+v, want state=approved with its approved event and no credential", decidedRead)
 	}
-	decidedRead := decode[wireRecord](t, body)
-	if decidedRead.State != "approved" || decidedRead.Decided == nil || decidedRead.Decided.Event != "approved" || decidedRead.Decided.CredentialID != nil {
-		t.Fatalf("decided record read = %+v, want state=approved with its approved event and a null credential_id", decidedRead)
-	}
-	if decidedRead.Session.Request == nil || *decidedRead.Session.Request != sessionID {
+	if decidedRead.Session.Request != sessionID {
 		t.Fatalf("decided record session = %+v, want request=%s still named after approval", decidedRead.Session, sessionID)
 	}
 
@@ -794,12 +807,16 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		t.Fatalf("GET /v1/requests/{id} = %d: %s", status, body)
 	}
 	statusResp := decode[wireRequestStatus](t, body)
-	if statusResp.State != "granted" || statusResp.GrantID == nil || *statusResp.GrantID != grantID {
-		t.Fatalf("request status = %+v, want granted with grant_id %s", statusResp, grantID)
+	if statusResp.State != "granted" || statusResp.GrantID == nil || *statusResp.GrantID == "" {
+		t.Fatalf("request status = %+v, want granted with a grant_id", statusResp)
 	}
 	if statusResp.Decision == nil || statusResp.Decision.By != testApprover {
 		t.Fatalf("request decision = %+v, want by=%s", statusResp.Decision, testApprover)
 	}
+	if statusResp.ApproveURL != nil {
+		t.Fatalf("granted request's approve_url = %q, want none once it is no longer pending", *statusResp.ApproveURL)
+	}
+	grantID := *statusResp.GrantID
 
 	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
 	if status != http.StatusOK {
@@ -1032,13 +1049,14 @@ func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
 	}
 }
 
-// TestDecisionsTakeOnlyTheApproversLogin pins that only the record's approver decides it, and
-// only through Dispatch: the approver's own login sent with no ServiceAccount token is 401
-// ACCOUNT_TOKEN_INVALID, another login's approve and deny are both 403 NOT_APPROVER, a missing
-// approver is 400 APPROVER_REQUIRED, all of them leave the record pending, the approver's deny
-// succeeds, and a second decision on the now-terminal record is 409 RECORD_TERMINAL for its
-// approver and still 403 NOT_APPROVER for another login.
-func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
+// TestTheAccountRoutesDecideNoSecretRequest pins that no route a service calls decides a secret
+// request: the listed caller's approve and deny of an agent_secret record — naming the record's
+// own approver, another login or none, with a code or a body that is not one — each answer 403
+// DECIDE_ON_BROKER_PAGE carrying the record's page as approve_url and in the message, and write
+// nothing: the record stays pending, with no event, no grant and no audit row. Without a
+// ServiceAccount token it is still 401. The same routes still decide a machine login with its code,
+// and the secret request is decided on the broker's page, after which the routes still refuse it.
+func TestTheAccountRoutesDecideNoSecretRequest(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
@@ -1046,6 +1064,14 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 		map[string]any{"request": compact, "session_id": nil})
 	created := decode[wireCreateRequestResponse](t, body)
 	recordID := *created.RecordID
+	page := ts.URL + "/approve/" + recordID
+	written := func() []string {
+		t.Helper()
+		return ts.column(t, `select concat_ws(' ',
+			(select count(*) from credential_request_events where record_id=$1),
+			(select count(*) from grants), (select count(*) from audit))`, recordID)
+	}
+	before := written()
 
 	status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
 		map[string]any{"approver": testApprover})
@@ -1053,49 +1079,147 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 		t.Fatalf("approve with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
 	}
 	for _, route := range []string{"approve", "deny"} {
-		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/"+route,
-			map[string]any{"approver": "mallory"})
-		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
-			t.Fatalf("%s as mallory = %d %s, want 403 NOT_APPROVER", route, status, body)
+		for name, decision := range map[string]any{
+			"the approver":     map[string]any{"approver": testApprover},
+			"another login":    map[string]any{"approver": "mallory"},
+			"no approver":      map[string]any{},
+			"a code":           map[string]any{"approver": testApprover, "code": "ABCD-EFGH"},
+			"not a decision":   map[string]any{"approve": true},
+			"the anyone token": map[string]any{"approver": record.AnyoneApprover},
+		} {
+			status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/"+route, decision)
+			refusal := decode[wirePageRefusal](t, body)
+			if status != http.StatusForbidden || refusal.Code != "DECIDE_ON_BROKER_PAGE" || refusal.ApproveURL != page || !strings.Contains(refusal.Error, page) {
+				t.Fatalf("%s naming %s = %d %s, want 403 DECIDE_ON_BROKER_PAGE naming %s", route, name, status, body, page)
+			}
 		}
 	}
-	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{})
-	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "APPROVER_REQUIRED" {
-		t.Fatalf("approve with no approver = %d %s, want 400 APPROVER_REQUIRED", status, body)
+	if got := ts.record(t, recordID); got.State != "pending" || got.Decided != nil {
+		t.Fatalf("record after the refused decisions = %+v, want still pending", got)
 	}
-	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-	if stillPending := decode[wireRecord](t, body); stillPending.State != "pending" {
-		t.Fatalf("record after refused decisions = %+v, want still pending", stillPending)
+	if after := written(); !slices.Equal(after, before) {
+		t.Fatalf("events, grants and audit rows = %v after the refused decisions, want %v as before", after, before)
 	}
 
-	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/deny",
-		map[string]any{"approver": testApprover})
-	if status != http.StatusOK {
-		t.Fatalf("deny = %d: %s", status, body)
+	machineKey := newSigningKey(t)
+	code := ts.openMachineLogin(t, machineKey, testApprover, "example-host-devbox")
+	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	login := decode[wireRecord](t, body).RecordID
+	if status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+login+"/approve", map[string]any{"approver": testApprover}); status != http.StatusBadRequest || decode[wireError](t, body).Code != "CODE_REQUIRED" {
+		t.Fatalf("approve a machine login without its code = %d %s, want 400 CODE_REQUIRED", status, body)
 	}
-	denied := decode[stateBody](t, body)
-	if denied.State != "denied" {
-		t.Fatalf("deny response = %+v, want state=denied", denied)
+	if status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+login+"/approve", map[string]any{"approver": testApprover, "code": code}); status != http.StatusOK {
+		t.Fatalf("approve a machine login with its code = %d %s, want 200", status, body)
 	}
 
-	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-		map[string]any{"approver": testApprover})
-	if status != http.StatusConflict {
-		t.Fatalf("second decision = %d, want 409: %s", status, body)
+	ts.decide(t, testApprover, recordID, false)
+	if got := ts.record(t, recordID); got.State != "denied" || got.Decided == nil || got.Decided.Login != testApprover {
+		t.Fatalf("record after its approver's deny on the page = %+v, want denied by %s", got, testApprover)
 	}
-	if werr := decode[wireError](t, body); werr.Code != "RECORD_TERMINAL" {
-		t.Fatalf("code = %q, want RECORD_TERMINAL", werr.Code)
-	}
-	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{"approver": "mallory"})
-	if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
-		t.Fatalf("approve the decided record as mallory = %d %s, want 403 NOT_APPROVER", status, body)
+	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{"approver": testApprover})
+	if status != http.StatusForbidden || decode[wirePageRefusal](t, body).Code != "DECIDE_ON_BROKER_PAGE" {
+		t.Fatalf("approve the decided record = %d %s, want 403 DECIDE_ON_BROKER_PAGE", status, body)
 	}
 }
 
-// TestRecordCancelledWithNoEventLeavesThePendingList pins GET /v1/pending and GET
-// /v1/credential-requests/{id} against the record of a request cancelled with no terminal event on
-// the record, which an enrollment that ended before the broker wrote that event left behind: the
-// list leaves it out and its read says cancelled, at the time its request was, while a pending
+// TestEveryAnswerNamingAPendingSecretRequestLinksItsPage pins approve_url: GET /v1/pending carries
+// it on each agent_secret row and on no machine login's; POST /v1/requests and GET
+// /v1/requests/{id} carry it while the request is pending with a record, and neither does for a
+// request granted at once, one denied at once, or one no longer pending.
+func TestEveryAnswerNamingAPendingSecretRequestLinksItsPage(t *testing.T) {
+	// SERVICE_KEY is a service's own secret, which a person's session is denied at once.
+	ts := newApproverTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
+	request := func(names ...string) wireCreateRequestResponse {
+		t.Helper()
+		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+			map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "", names...), "session_id": nil})
+		if status != http.StatusOK {
+			t.Fatalf("POST /v1/requests %v = %d: %s", names, status, body)
+		}
+		return decode[wireCreateRequestResponse](t, body)
+	}
+	status := func(requestID string) wireRequestStatus {
+		t.Helper()
+		code, body := ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
+		if code != http.StatusOK {
+			t.Fatalf("GET /v1/requests/%s = %d: %s", requestID, code, body)
+		}
+		return decode[wireRequestStatus](t, body)
+	}
+
+	pending := request("DEEL_API_KEY")
+	page := ts.URL + "/approve/" + *pending.RecordID
+	if pending.State != "pending" || pending.ApproveURL == nil || *pending.ApproveURL != page {
+		t.Fatalf("a pending request = %+v, want approve_url %s", pending, page)
+	}
+	if got := status(pending.RequestID); got.ApproveURL == nil || *got.ApproveURL != page {
+		t.Fatalf("a pending request's status = %+v, want approve_url %s", got, page)
+	}
+	if again := request("DEEL_API_KEY"); !again.Coalesced || again.ApproveURL == nil || *again.ApproveURL != page {
+		t.Fatalf("the same request again = %+v, want it coalesced with approve_url %s", again, page)
+	}
+	granted := request("WORKER_TOKEN")
+	if granted.State != "granted" || granted.ApproveURL != nil {
+		t.Fatalf("a request granted at once = %+v, want no approve_url", granted)
+	}
+	if got := status(granted.RequestID); got.ApproveURL != nil {
+		t.Fatalf("a request granted at once's status has approve_url %q, want none", *got.ApproveURL)
+	}
+	if denied := request("SERVICE_KEY"); denied.State != "denied" || denied.RecordID != nil || denied.ApproveURL != nil {
+		t.Fatalf("a request denied at once = %+v, want no record and no approve_url", denied)
+	}
+
+	code := ts.openMachineLogin(t, newSigningKey(t), testApprover, "example-host-devbox")
+	_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	login := decode[wireRecord](t, body).RecordID
+	_, body = ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
+	rows := decode[struct {
+		Pending []wirePendingEntry `json:"pending"`
+	}](t, body).Pending
+	if len(rows) != 2 {
+		t.Fatalf("GET /v1/pending = %s, want the secret request and the machine login", body)
+	}
+	for _, row := range rows {
+		switch row.RecordID {
+		case *pending.RecordID:
+			if row.ApproveURL == nil || *row.ApproveURL != page {
+				t.Errorf("the secret request's row = %+v, want approve_url %s", row, page)
+			}
+		case login:
+			if row.ApproveURL != nil {
+				t.Errorf("the machine login's row has approve_url %q, want none", *row.ApproveURL)
+			}
+		}
+	}
+
+	ts.decide(t, testApprover, *pending.RecordID, true)
+	if got := status(pending.RequestID); got.State != "granted" || got.ApproveURL != nil {
+		t.Fatalf("the approved request's status = %+v, want granted with no approve_url", got)
+	}
+}
+
+// TestTheRecordReadRouteIsGone pins the removal of GET /v1/credential-requests/{record}: the
+// listed caller's read of a pending secret request's record is not a route, while the decide
+// routes under the same path still answer.
+func TestTheRecordReadRouteIsGone(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
+	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY"), "session_id": nil})
+	recordID := *decode[wireCreateRequestResponse](t, body).RecordID
+	if status, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil); status != http.StatusNotFound && status != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /v1/credential-requests/{record} = %d %s, want no such route", status, body)
+	}
+	if status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/deny", map[string]any{"approver": testApprover}); status != http.StatusForbidden {
+		t.Fatalf("POST .../deny = %d %s, want the route's own 403", status, body)
+	}
+}
+
+// TestRecordCancelledWithNoEventLeavesThePendingList pins GET /v1/pending and the record the
+// approval page prints against the record of a request cancelled with no terminal event on the
+// record, which an enrollment that ended before the broker wrote that event left behind: the list
+// leaves it out and the record says cancelled, at the time its request was, while a pending
 // request's record and a pending machine login are both still listed and a denied machine login
 // is not.
 func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
@@ -1146,13 +1270,11 @@ func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 		t.Fatalf("GET /v1/pending lists %v, want the machine login and the pending request's record, newest first: %v", listed, want)
 	}
 
-	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+*ended.RecordID, nil)
-	if read := decode[wireRecord](t, body); read.State != "cancelled" || read.Decided == nil || read.Decided.Event != "cancelled" || !read.Decided.At.Equal(cancelledAt) {
-		t.Fatalf("record of the cancelled request = %s, want state cancelled, decided cancelled at %s", body, cancelledAt)
+	if read := ts.record(t, *ended.RecordID); read.State != "cancelled" || read.Decided == nil || read.Decided.Event != "cancelled" || !read.Decided.At.Equal(cancelledAt) {
+		t.Fatalf("record of the cancelled request = %+v, want state cancelled, decided cancelled at %s", read, cancelledAt)
 	}
-	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+*pending.RecordID, nil)
-	if read := decode[wireRecord](t, body); read.State != "pending" || read.Decided != nil {
-		t.Fatalf("record of the pending request = %s, want pending and undecided", body)
+	if read := ts.record(t, *pending.RecordID); read.State != "pending" || read.Decided != nil {
+		t.Fatalf("record of the pending request = %+v, want pending and undecided", read)
 	}
 }
 
@@ -1194,14 +1316,7 @@ func TestRevokeGrantBySession(t *testing.T) {
 	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": compact, "session_id": nil})
 	created := decode[wireCreateRequestResponse](t, body)
-	recordID := *created.RecordID
-
-	_, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-		map[string]any{"approver": testApprover})
-	approved := decode[struct {
-		GrantID *string `json:"grant_id"`
-	}](t, body)
-	grantID := *approved.GrantID
+	grantID := ts.approveAs(t, created, testApprover)
 
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+grantID+"/revoke", nil)
 	if status != http.StatusOK {
@@ -1254,9 +1369,9 @@ func TestRenewAndReadSelf(t *testing.T) {
 func TestPathValidation(t *testing.T) {
 	ts := newTestServer(t)
 
-	status, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/not-a-valid-record-id", nil)
+	status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/not-a-valid-record-id/approve", map[string]any{"approver": testApprover})
 	if status != http.StatusBadRequest {
-		t.Fatalf("GET with a bad record id = %d, want 400: %s", status, body)
+		t.Fatalf("approve with a bad record id = %d, want 400: %s", status, body)
 	}
 	werr := decode[wireError](t, body)
 	if werr.Code != "RECORD_ID_INPUT" {

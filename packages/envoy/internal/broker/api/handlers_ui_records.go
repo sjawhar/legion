@@ -1,13 +1,14 @@
-// handlers_ui_records.go: GET /v1/credential-requests/{record}, POST .../approve, .../deny — a
-// record's own read, approve and deny routes. Part of the routes a listed service calls with its
-// own Kubernetes ServiceAccount token (accountAuth): that token proves which service is calling,
-// and the service names the deciding human in the body's approver field from its own session. The
-// broker takes that name on the caller's word — a decision is authorized by the record's rule
-// admitting that login (record.MayDecide): its approver, or anyone signed in for a shared
-// secret's request or a service's machine login — and dispatch://INFRA-314 is what replaces the
-// name with a signed assertion the broker verifies. Each decision is logged with the caller that
-// made it and the approver it named. A service's machine login, which only a broker before token
-// logins opened, may only be denied: approving it is 400 SERVICE_LOGS_IN_WITH_TOKEN.
+// handlers_ui_records.go: POST /v1/credential-requests/{record}/approve and .../deny, the routes a
+// listed service calls with its own Kubernetes ServiceAccount token (accountAuth) to decide a
+// machine login, and the record shape POST /v1/machine-logins/lookup answers. A machine login is
+// decided here on the caller's word: the token proves which service is calling, and the service
+// names the deciding person in the body's approver field, who must be one the record's rule admits
+// (record.MayDecide) and must type the login's code. Each such decision is logged with the caller
+// that relayed it and the approver it named. A secret request is never decided here: it is decided
+// only on the broker's own approval page (internal/broker/approval), by a person signed in to the
+// broker, and these routes refuse it naming that page. A service's machine login, which only a
+// broker before token logins opened, may only be denied: approving it is 400
+// SERVICE_LOGS_IN_WITH_TOKEN.
 package api
 
 import (
@@ -72,8 +73,7 @@ type recordDecisionResp struct {
 	CredentialID *string `json:"credential_id"`
 }
 
-// recordResponse is a credential-request record as GET /v1/credential-requests/{record} and
-// POST /v1/machine-logins/lookup answer it.
+// recordResponse is a credential-request record as POST /v1/machine-logins/lookup answers it.
 type recordResponse struct {
 	// The record's id: the SHA-256 of its text.
 	RecordID string `json:"record_id"`
@@ -111,8 +111,7 @@ type recordResponse struct {
 	Decided *recordDecisionResp `json:"decided"`
 }
 
-// buildRecordResponse is GET /v1/credential-requests/{id}'s exact shape, reused verbatim by
-// lookupMachineLogin.
+// buildRecordResponse is POST /v1/machine-logins/lookup's exact shape.
 func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	resp := recordResponse{
 		RecordID: detail.RecordID, Kind: detail.Kind, State: detail.State, Approver: detail.Approver,
@@ -131,42 +130,22 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	return resp
 }
 
-func (s *server) readRecord(w http.ResponseWriter, r *http.Request, _ string) {
-	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
-	if !ok {
-		return
-	}
-	detail, err := s.deps.Machine.ReadRecord(r.Context(), recordID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
-		return
-	case err != nil:
-		writeInternal(w, "read credential request", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, buildRecordResponse(detail))
-}
-
-// decideBody is both approve's and deny's request body: {"approver", "code"?}. approver is the
-// deciding human's Dispatch login, which Dispatch's server sets from its own session. code is
-// required only for a launcher_credential (machine login) record — machine.Service.ApplyDecision
-// checks it unconditionally on both approve and deny — and ignored for an agent_secret record,
-// which requests.Machine.ApplyDecision never asks for.
+// decideBody is both approve's and deny's request body for a machine login, {"approver", "code"}.
+// approver is the deciding person's login, which Dispatch's server sets from its own session, and
+// code the login's confirmation code: machine.Service.ApplyDecision checks it on both approve and
+// deny.
 type decideBody struct {
-	// The Dispatch login of the person deciding, which the record's rule must admit: its approver,
-	// or anyone signed in for a shared secret's request or the denial of a service's machine login.
+	// The login of the person deciding, which the record's rule must admit: its approver, or
+	// anyone signed in for the denial of a service's machine login.
 	Approver string `json:"approver"`
-	// A machine login only: its confirmation code, typed again; ignored for a secret request.
+	// The machine login's confirmation code, typed again.
 	Code *string `json:"code"`
 }
 
-// decisionResponse is what an approval answers.
+// decisionResponse is what a machine login's approval answers.
 type decisionResponse struct {
-	// The machine credential an approved machine login minted; null for a secret request.
+	// The machine credential the approval minted.
 	CredentialID *string `json:"credential_id"`
-	// The grant an approved secret request made; null for a machine login.
-	GrantID *string `json:"grant_id"`
 	// "approved".
 	State string `json:"state"`
 }
@@ -179,15 +158,31 @@ func (s *server) denyRecord(w http.ResponseWriter, r *http.Request, callerName s
 	s.decideRecord(w, r, callerName, false)
 }
 
-// decideRecord dispatches by the record's own kind — agent_secret to requests.Machine.
-// ApplyDecision, launcher_credential to machine.Service.ApplyDecision — since the two are decided
-// by different services with different state (a request row vs. a poll row) behind one shared
-// record id. It logs the caller that relayed the decision and the approver that caller named,
-// which is the record of who acted while the approver's name is still the caller's to state
-// (dispatch://INFRA-314).
+// decideRecord decides a machine login (machine.Service.ApplyDecision), the one kind of record a
+// service may decide, and refuses every other record, writing nothing, with 403
+// DECIDE_ON_BROKER_PAGE naming the record's approval page: a secret request is decided only there,
+// by a person signed in to the broker, never on a service's word. The record's kind is read before
+// anything else, so a secret request is refused whatever the body says. A machine login's
+// decision is logged with the caller that relayed it and the approver it named, the record of who
+// acted, since that name is the caller's to state.
 func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, callerName string, approve bool) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
 	if !ok {
+		return
+	}
+	kind, err := s.deps.Machine.RecordKind(r.Context(), recordID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
+		return
+	case err != nil:
+		writeInternal(w, "read credential request kind", err)
+		return
+	}
+	if kind != record.KindLauncherCredential {
+		page := s.approveURL(recordID)
+		writePageRefusal(w, http.StatusForbidden, "DECIDE_ON_BROKER_PAGE",
+			"a secret request is decided only on the secrets broker's own page, by a person signed in to the broker: "+page, page)
 		return
 	}
 	var body decideBody
@@ -198,20 +193,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, callerName
 		return
 	}
 	slog.Info("decision relayed", "caller", callerName, "approver", body.Approver, "record", recordID, "approve", approve)
-	kind, err := s.deps.Machine.RecordKind(r.Context(), recordID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
-		return
-	case err != nil:
-		writeInternal(w, "read credential request kind", err)
-		return
-	}
-	if kind == record.KindLauncherCredential {
-		s.decideMachineLogin(w, r, recordID, approve, body)
-		return
-	}
-	s.decideAgentSecret(w, r, recordID, approve, body.Approver)
+	s.decideMachineLogin(w, r, recordID, approve, body)
 }
 
 func (s *server) decideMachineLogin(w http.ResponseWriter, r *http.Request, recordID string, approve bool, body decideBody) {
@@ -248,30 +230,4 @@ func (s *server) decideMachineLogin(w http.ResponseWriter, r *http.Request, reco
 		return
 	}
 	writeJSON(w, http.StatusOK, decisionResponse{CredentialID: strPtr(credentialID), State: "approved"})
-}
-
-func (s *server) decideAgentSecret(w http.ResponseWriter, r *http.Request, recordID string, approve bool, login string) {
-	dec, err := s.deps.Machine.ApplyDecision(r.Context(), recordID, approve, login)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
-		return
-	case errors.Is(err, requests.ErrTerminal), errors.Is(err, requests.ErrExpired):
-		writeError(w, http.StatusConflict, "RECORD_TERMINAL", err.Error())
-		return
-	case errors.Is(err, requests.ErrGrantChainInvalid):
-		writeError(w, http.StatusForbidden, "GRANT_CHAIN_INVALID", err.Error())
-		return
-	case errors.Is(err, record.ErrNotApprover):
-		writeError(w, http.StatusForbidden, "NOT_APPROVER", err.Error())
-		return
-	case err != nil:
-		writeInternal(w, "decide credential request", err)
-		return
-	}
-	if !approve {
-		writeJSON(w, http.StatusOK, stateResponse{State: "denied"})
-		return
-	}
-	writeJSON(w, http.StatusOK, decisionResponse{GrantID: strPtr(dec.GrantID), State: "approved"})
 }

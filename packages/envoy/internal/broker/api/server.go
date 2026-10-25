@@ -342,6 +342,41 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"code": code, "error": msg})
 }
 
+// pageRefusal is the body of a refusal that names the approval page where a person decides the
+// record instead, beside the code and error every refusal carries.
+type pageRefusal struct {
+	// The refusal's code.
+	Code string `json:"code"`
+	// What was refused, naming the page.
+	Error string `json:"error"`
+	// The record's page on the broker's own approval page, <BROKER_PUBLIC_URL>/approve/<record>.
+	ApproveURL string `json:"approve_url"`
+}
+
+// writePageRefusal is writeError for a refusal naming the record's approval page, approveURL,
+// which its body carries as approve_url (pageRefusal) for a caller to link.
+func writePageRefusal(w http.ResponseWriter, status int, code, msg, approveURL string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(pageRefusal{Code: code, Error: msg, ApproveURL: approveURL})
+}
+
+// approveURL is recordID's page on the broker's own approval page (GET /approve/{record}), on the
+// public URL the broker resolved at boot: the one place a person signed in to the broker decides
+// a secret request, which every answer naming a pending one links.
+func (s *server) approveURL(recordID string) string {
+	return s.deps.PublicURL + "/approve/" + recordID
+}
+
+// pendingApproveURL is approveURL for a request's record while the request waits on it, and ""
+// for a request granted or denied at once (no record), and once it is no longer pending.
+func (s *server) pendingApproveURL(state string, recordID *string) string {
+	if state != "pending" || recordID == nil {
+		return ""
+	}
+	return s.approveURL(*recordID)
+}
+
 // writeInternal logs a failed operation with its error and answers 500 INTERNAL naming the
 // operation. Errors on these paths carry no secret values; the log line is the only place the
 // cause of a 500 is recorded.
