@@ -2,52 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-122",
-  "completed": "2026-10-25T19:45:00Z",
-  "round": 3,
-  "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
-  "rule": "Owner-only, confirmed by the architect at 19:34Z (superseding its 19:09Z narrow rule): a listener delivers only to a serving-port session it owns and returns session.ErrWrongMachine for another machine's.",
+  "completed": "2026-10-25T20:37:00Z",
+  "round": 4,
+  "headSha": "311640e7692341d75896ce75e491b702f3e18281",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface with a listener the tester built from c6889bb0: run.sh -> one prompt carrying Topic notifications.team.smoke-1792956934 at the pod's own address 10.1.10.198:18080 with no bridge, malformed host 400; refusal.sh -> 200 with the grant, 503 live subscription inactive after NATS restarted without it, with the server's Permissions Violation logged; the implementer's inbox case reproduced independently (two-machine rig below)."
+    "how": "Drove the same surfaces independently with a listener the tester built from 311640e7: the two-listener inbox and stored-topic case (one prompt each, no exception from the non-owner), run.sh (one prompt at the pod address 10.1.10.198:18080 with no bridge, malformed host 400) and refusal.sh (503 live subscription inactive after NATS restarted without the grant). The implementer's own criterion-1 and refusal entries name c6889bb0; the tester's runs put both at this head."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "2. Nothing arrives twice: an agent's own inbox (round 2's failure)",
-      "surface": "listeners built by the tester: m1 (owner) and m2 on one real nats-server, a fake serving port; session registered through m1",
-      "command": "POST /v1/messages/send to the session, (a) m1 with ENVOY_HOST_BRIDGE=127.0.0.1 and the session registered by envoy-client's own subscribe, sent via m1; (b) m1 with no bridge and the session's host = the pod's own address 10.1.10.198, sent via m2; red test TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus run once locally",
-      "observed": "(a) and (b) each 1 prompt: m1 'listener agent delivered', m2 'listener agent session not found anywhere'; the red test passes (ok 6.5 s)",
-      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
-      "negativeControl": "round 2's binary d73383ee in rig (b) -> 2 prompts, both m1 and m2 'listener agent delivered'"
+      "criterion": "Review round 2 finding 1: a non-owning listener reports no exception for an inbox message its owner delivered",
+      "surface": "listeners mA (owner, ENVOY_HOST_BRIDGE=127.0.0.1) and mB built by the tester on one real nats-server, a fake serving port, a raw subscriber (natscli sub) on notifications.envoy.exceptions.> for 8 s",
+      "command": "register IN through mA; POST /v1/messages/send to IN through mB; raw publish on notifications.github.acme.repo.pr.7.comment",
+      "observed": "port got inbox-r4 and stored-r4 once each; mA 'listener agent delivered'; mB logged nothing at INFO or above for it; the raw subscriber saw no exception",
+      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
+      "negativeControl": "round 3's binary c6889bb0 in the same rig -> the raw subscriber saw notifications.envoy.exceptions.notifications.agent.IN, and mB logged WARN 'listener agent session not found anywhere'"
     },
     {
-      "criterion": "Owner-only cost, measured as the architect asked",
-      "surface": "same rig, owner m1 stopped",
-      "command": "stop m1, send via m2, restart m1 after 1 s; then again with m1 down 320 s (past the 5 min session TTL), restart m1, wait 15 s, then re-register the session",
-      "observed": "owner down 1 s: 0 prompts while down, 1 prompt once m1 was back (from its durable). Owner down 320 s: /v1/sessions empty (registration lapsed); m1 back -> 0 prompts in 15 s; the session re-registers -> the message arrives once (m1 received it twice, delivered once). Nothing delivered by m2 in either case.",
-      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
-      "negativeControl": "m2 was never a deliverer: 'listener agent session not found anywhere' each time, no request to the port"
+      "criterion": "Review round 2 finding 2 and acceptance 2: a session re-registered through another listener still gets its stored topics, once",
+      "surface": "same rig, IN registered through mA, then again through mB with the same port and host; with mA bridged (host 127.0.0.1) and with mA unbridged (host = pod address)",
+      "command": "send an inbox message through mB and raw-publish a stored GitHub topic the session subscribed to; then with ENVOY_SUBSCRIBE_ALL_TOPICS=1 on both, 3 raw team publishes after the re-registration",
+      "observed": "bridged and unbridged: inbox-r4 and stored-r4 once each, both delivered by mA (the listener its stored subscription names), no ERROR, no exception; the 3 team publishes arrived once each",
+      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
+      "negativeControl": "round 3's binary in the bridged rig -> the stored topic never arrived (mA ERROR 'listener delivery failed', NAKed for retry) and an exception was published for the inbox message"
+    },
+    {
+      "criterion": "2. Nothing arrives twice; the owner-only cost",
+      "surface": "same rig, mA without bridge, session host = pod address",
+      "command": "red test TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus run once locally; stop mA, send through mB, restart mA",
+      "observed": "red test ok (6.9 s); owner down: 0 prompts, owner back: 1 prompt from its durable",
+      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
+      "negativeControl": "round 2's binary d73383ee in that rig gave 2 prompts (round 3 measurement, delivery code unchanged in kind)"
     },
     {
       "criterion": "1. and 5. A serving-port session receives a topic the stream does not store, at its recorded host",
-      "surface": "listener from c6889bb0 with ENVOY_SUBSCRIBE_ALL_TOPICS=1, no bridge, session host = pod address",
-      "command": "bash $TMPDIR/smoke/run.sh <c6889bb0 listener> t3-on ENVOY_SUBSCRIBE_ALL_TOPICS=1",
-      "observed": "one prompt at 10.1.10.198:18080 in the publish's second; two m1 listeners plus one m2 with the opt-in -> each of 5 team publishes reached each machine's session once, a stored GitHub topic once, each inbox once; a session with a port and no host is dialled at host.docker.internal by its owner, as before",
-      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
-      "negativeControl": "host evil.example:80/x -> 400 expected [host]; raw envelope on notifications.team.zzz naming notifications.team.dup -> no prompt"
+      "surface": "listener from 311640e7, ENVOY_SUBSCRIBE_ALL_TOPICS=1, no bridge, session host = pod address 10.1.10.198",
+      "command": "bash $TMPDIR/smoke/run.sh <311640e7 listener> t4-on ENVOY_SUBSCRIBE_ALL_TOPICS=1",
+      "observed": "one prompt carrying Topic notifications.team.smoke-1792960442 at 10.1.10.198:18080 in the publish's second",
+      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
+      "negativeControl": "host evil.example:80/x -> 400 expected [host]"
     },
     {
-      "criterion": "Review finding 1: the live lane reads unhealthy while the server refuses it",
-      "surface": "listener from c6889bb0 under a nats-server authorization config",
-      "command": "bash $TMPDIR/smoke/refusal.sh <c6889bb0 listener> t3-refusal",
-      "observed": "200 healthy with the grant; after NATS restarted without notifications.>, 503 live subscription inactive, and the server's refusal ('Permissions Violation for Subscription to notifications.> using queue envoy-listener-live-smoke') in the listener log as the second source",
-      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
-      "negativeControl": "round 2 measured the grant restored by restart -> 200 subscribed and delivery resumes; not re-run, the bus code is unchanged since d73383ee"
+      "criterion": "Review round 1 finding 1 and the refusal-parse hardening: the live lane reads unhealthy while the server refuses it",
+      "surface": "listener from 311640e7 under a nats-server authorization config",
+      "command": "bash $TMPDIR/smoke/refusal.sh <311640e7 listener> t4-refusal",
+      "observed": "200 healthy with the grant; 503 live subscription inactive after NATS restarted without notifications.>, with the server's 'Permissions Violation for Subscription to notifications.> using queue envoy-listener-live-smoke' in the log as the second source",
+      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
+      "negativeControl": "round 1's binary 5bdf1607 stayed 200 healthy under the same restart (round 2 measurement)"
     }
   ],
   "accepted": [
-    "A grant removed and given back by config reloads stays 503 with no team delivery until the listener restarts (measured in round 2). The architect accepts it: the report is truthful, the cluster's probe restarts the container on it, and a host's compose healthcheck shows it unhealthy."
+    "A grant removed and given back by config reloads stays 503 until the listener restarts (round 2), accepted by the architect.",
+    "A re-registration does not move the stored subscription's owner; dispatch://INFRA-429 owns that, per the code comment."
   ],
-  "ciAtTest": "Code head c6889bb0 (the handoff commit 5be2d79e carries skip-checks and reports none of its own), read 19:42Z: Docs success, PR Title 40226524652 success; Legion Envoy and Contracts 40226426618 and Tests 40226426511 queued; Worker Image 40226426503 in progress. Cited as running, not waited on."
+  "ciAtTest": "Code head 311640e7 (the handoff commit 072b68d0 carries skip-checks), read 20:34Z: Legion Envoy and Contracts 40231008588, Tests 40231008552, Worker Image 40231008495, Docs 40231008526 and PR Title runs all queued. Cited as queued, not waited on."
 }
