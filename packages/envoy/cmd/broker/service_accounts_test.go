@@ -43,16 +43,17 @@ func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	addr, boot := startBroker(t,
-		"BROKER_DATABASE_URL="+databaseURL,
+	process := startBroker(t, brokerOptions{Env: []string{
+		"BROKER_DATABASE_URL=" + databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
-		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
-		"BROKER_K8S_OIDC_ISSUER="+issuer.URL(),
-		"BROKER_K8S_OIDC_AUDIENCE="+podAudience,
-		"BROKER_SERVICE_LOGINS="+service+"="+loginAccount,
-		"BROKER_SERVICES="+service+"="+accountA+" "+service+"="+accountB,
-	)
+		"BROKER_FAKE_SECRETS_FILE=" + fakeSecretsFile,
+		"BROKER_K8S_OIDC_ISSUER=" + issuer.URL(),
+		"BROKER_K8S_OIDC_AUDIENCE=" + podAudience,
+		"BROKER_SERVICE_LOGINS=" + service + "=" + loginAccount,
+		"BROKER_SERVICES=" + service + "=" + accountA + " " + service + "=" + accountB,
+	}})
+	addr, boot := process.Addr, process.Boot
 	requireHealthy(t, addr)
 	if strings.Contains(boot, "agent secret policy refused") || strings.Contains(boot, policy.ReasonOwnerTagMalformed) {
 		t.Fatalf("boot log refuses the secret %s owns, which BROKER_SERVICES registers for two accounts:\n%s", service, boot)
