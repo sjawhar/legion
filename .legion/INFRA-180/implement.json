@@ -2,83 +2,71 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-180",
-  "completed": "2026-10-25T06:26:00Z",
-  "round": 4,
+  "completed": "2026-10-25T07:11:00Z",
+  "round": 5,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
-  "headSha": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
+  "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
   "proof": [
     {
-      "criterion": "The six changes the architect ruled for this round, each driven on the real surface: R1's cost, R2's duplicate content, R3's order of the two top-level lists, the fields pairing, and the two new display names.",
-      "surface": "A real nats-server v2.11.4, a real envoy-listener built from this head, and a fake agent session subscribed to notifications.slack.> receiving over prompt_async, posted to over /webhook/slack with real Slack signatures through the tester's own rig.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server CASES=$PWD/packages/envoy/out/e2e/infra180-r4-cases.jsonl bash packages/envoy/out/e2e/infra180-tester-rig.sh",
-      "observed": "6 posts, 6 wakes. R2: 'Build failed\\nFAIL TestFoo at line 42\\nsee logs' (five lines at the previous head). R3: 'CPU high on host-a\\nCPU high' with the summary 'slack bot message in C_R4 from ci: CPU high on host-a' (the attachment's fallback was the first line before). Fields: 'Deploy failed\\nPrimary: oncall-a\\nSecondary: oncall-a\\nEscalation: oncall-b' (was 'Primary\\noncall-a\\nSecondary\\nEscalation\\noncall-b', the second label orphaned). alt_text: 'CPU chart: 97% for 10 minutes' on an image-only Block Kit post, where the previous head delivered no text key at all. author_subname: 'grafana\\nalerting\\np99 is 3.2s'. Nested rich_text: 'Build failed on web-1\\nweb-1\\nsee logs', the nested block read as part of its parent rather than measured on its own.",
-      "headSha": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
-      "negativeControl": "In the same run, the same body with the signature v0=deadbeef was refused HTTP 401 and woke nobody, and a correct HMAC over a timestamp 4,000 s old was refused HTTP 401 and woke nobody."
-    },
-    {
-      "criterion": "R1: the own-words measurement costs one pass per outermost rich_text object, not one per level, so a deep chain inside the listener's 1 MiB cap no longer holds a core past its 10 s write timeout.",
-      "surface": "SlackEnvelope driven in process on the reviewer's own body — four chains of 9,900 rich_text levels through a plain object key, each leaf carrying a string the message's own text does not hold — in two scratch copies of the module, one with the committed normalize.go of the reviewed head and one with this head's.",
-      "command": "go test ./internal/contracts/ -count=1 -run TestDepthProbe -v -timeout 900s, in /tmp copies of packages/envoy with normalize.go taken from af457dfde5b7 (before) and from this head (after)",
-      "observed": "Body 990,364 B. Before: SlackEnvelope took 1m25.385488966s. After: 56.696685ms. Both on this machine, same harness, same body; the summary is identical ('slack message in C1 from U1: Build failed on web-1'). 85.385 s is the reviewer's measured bound of 85.4 s reproduced, not the 6.0 s or 33.0 s figures the earlier rounds carried.",
-      "headSha": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
-      "negativeControl": "The before copy differs from the after copy in normalize.go alone (jj file show of the reviewed head into an otherwise identical tree), so the 1,500-fold difference is this round's change and not the harness."
+      "criterion": "The review's one blocking defect: a word Slack shows is lost whenever two cells anywhere in a message carry the same string. The repeat comparison must be the object's, not the message's.",
+      "surface": "A real nats-server v2.11.4, a fake agent session subscribed to notifications.slack.> receiving over prompt_async, and two real envoy-listeners: one built from this head and one built from round 4's code head 709538bf7d44 as the before, each posted the same signed bodies through the tester's rig.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server CASES=$PWD/packages/envoy/out/e2e/infra180-r5-cases.jsonl bash packages/envoy/out/e2e/infra180-tester-rig.sh (and the same with LISTENER=$PWD/packages/envoy/out/bin/envoy-listener-r4)",
+      "observed": "6 posts, 6 wakes on each listener. A CI alert whose section fields read *Passed* 3, *Failed* 0, *Skipped* 0: '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*' before, '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*\\n0' after. Two attachments reading web-1/ok and web-2/ok: 'web-1\\nok\\nweb-2' before, 'web-1\\nok\\nweb-2\\nok' after. Four sibling sections all saying 'retry scheduled': one line before, four after. An attachment's fields Primary/Secondary/Escalation: 'Deploy failed\\nPrimary: oncall-a\\nSecondary: oncall-a\\nEscalation: oncall-b' before, 'Deploy failed\\nPrimary\\noncall-a\\nSecondary\\noncall-a\\nEscalation\\noncall-b' after. Both guards are identical on the two listeners: an attachment whose fallback repeats its own title delivers '[Triggered] CPU load high\\nhost web-1 is at 97%', two lines, and a message whose own words are echoed by a block and by an attachment's text and fallback delivers 'deploy failed' once.",
+      "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
+      "negativeControl": "In each run the same body with the signature v0=deadbeef was refused HTTP 401 and woke nobody, and a correct HMAC over a timestamp 4,000 s old was refused HTTP 401 and woke nobody."
     },
     {
       "criterion": "The symptom itself: an agent woken by a Slack message whose words are only in an attachment reads those words. Unchanged by this round and re-proven at its head.",
       "surface": "The same real nats-server, a real envoy-listener built from this head, and a subscribed session.",
       "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server bash packages/envoy/out/e2e/infra180-slack-wake-rig.sh",
       "observed": "The wake carried 'Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high' and \"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\". At the branch's base commit the same post gave a summary ending at the colon and no text field at all.",
-      "headSha": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
+      "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
       "negativeControl": "'unsigned post status (want 401) : 401', 'wakes delivered: 1' — the one wake being the signed post's."
     },
     {
       "criterion": "Acceptance 1: Go tests in packages/envoy/internal/contracts assert the delivered text exactly for every shape the rule names, and fail at the commit before the change.",
       "surface": "The contracts package's own test binary, driving SlackEnvelope end to end.",
       "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/contracts/ -count=1",
-      "observed": "ok github.com/sjawhar/envoy/internal/contracts, 32 TestSlackDeliveredText subtests passing with the tester's red case unmodified among them, and TestSlackSummary (8) and TestSlackPayload (5) still passing. Round 4's cases: an app's plain-text copy beside its rich-text formatting; a rich-text block nested in one already measured; two fields sharing a value keep their labels; an image block's alt text; an attachment's author name and subname; and the two cases whose expectations the ruling moved, a piece that extends one already taken and an attachment's label and value fields.",
-      "headSha": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
-      "negativeControl": "The same 32-case table run against the base commit's normalize.go in a scratch copy fails 25 cases; the 7 that pass are guards asserting today's behaviour (a repeated piece, the client's rich-text copy, the escaped characters, the two shapes that carry nothing, the file-only message and the deleted message)."
+      "observed": "ok github.com/sjawhar/envoy/internal/contracts, 37 TestSlackDeliveredText subtests passing with the tester's red case unmodified among them, and TestSlackSummary (8) and TestSlackPayload (5) still passing. Round 5's cases: a CI alert whose counts repeat; a section's fields with two equal values; two attachments carrying the same status; four sibling sections saying the same thing; the message's own words echoed by a block and an attachment; and the two whose expectations the deleted pairing moved, an attachment's label and value fields and two fields sharing a value keep their labels.",
+      "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
+      "negativeControl": "The same 37-case table run against the base commit's normalize.go in a scratch copy fails 29 cases; the 8 that pass are guards asserting today's behaviour."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/contracts/normalize.go — one traversal, slackWalkPieces, read by slackTextWalk.walk and by slackOwnWordsOnly; the rich_text measurement threaded as its measure parameter; takeOwn; blocks before attachments; slackFieldPiece and slackFieldHalf; nine display names.",
-    "packages/envoy/internal/contracts/normalize_test.go — TestSlackDeliveredText, 32 cases.",
+    "packages/envoy/internal/contracts/normalize.go — the repeat comparison scoped: slackTextWalk.ownWords (the message's own text and its lines, walk-wide) replaces the message-wide taken set, and slackWalkPieces keeps a per-object tally of the strings an object yields under its own keys; slackFieldPiece, slackFieldHalf, the fields parameter and the pair latch are deleted.",
+    "packages/envoy/internal/contracts/normalize_test.go — TestSlackDeliveredText, 37 cases.",
     "packages/envoy/internal/integration/webhook_redelivery_test.go — streamEnvelopes and TestSlackAttachmentWordsReachTheStream.",
-    "packages/envoy/CHANGELOG.md — the Fixed entry, rewritten for this round's rule.",
+    "packages/envoy/CHANGELOG.md — the Fixed entry, rewritten for the scoped rule.",
     "skills/legion-controller/references/slack-mentions.md — the text clause of 'What a mention carries'.",
     "packages/claude-envoy/legion/skills/legion-controller/references/slack-mentions.md — the committed plugin bundle's copy, regenerated with bun run build (check-dist: 'dist/ and legion/ match a fresh build')."
   ],
   "trickyParts": [
-    "The measurement is cleared for the whole subtree of a rich_text object that is read, and slackOwnWordsOnly itself calls the producer with no measurement left to make, so neither reading nor measuring nests: a chain of rich_text costs one measure and one read rather than one of each per level.",
-    "The fields pairing is flagged by the descent into a key named 'fields' and carried to that array's elements; the paired piece is yielded where the first of title and value sits in the key order, and both keys are then spoken for. A Block Kit section's fields elements carry neither name, so they are read exactly as before.",
-    "takeOwn records the lines of the own text as it arrives, matching the whole string take already records; the entity-resolved copy is still used only for the rich_text measurement.",
+    "The per-object tally reaches the object's own keys and never its subtree. A nested text object, and each element of a fields array, is an object of its own with a tally of its own; a subtree-wide tally would drop a nested block's word for matching a title above it, which is the same defect class one level down.",
+    "At most one string is yielded per display name, so a tally holds nine at the most and is a slice scanned straight through rather than a map.",
+    "takeOwn still delivers the own text as one piece and then records it and each of its non-blank lines; take compares against nothing else, so no piece gathered from the tree ever suppresses another.",
     "The committed claude-envoy plugin bundle mirrors skills/, and the required check-dist step fails if the skill file is edited without rebuilding it."
   ],
   "deviations": [
-    "Blocks are read before attachments. This contradicts approved spec version 11's 'in its attachments and blocks'. The architect's ruling of 2026-10-25T06:00:29Z (Envoy message 2bcf844fa07dac607ef80e0231d96a23, confirmed in e6f1b7b7675b1d546403503bd666abc7) is its authority: Slack renders blocks as the message body and an attachment after it, so an attachment's fallback must not be the first line an agent reads.",
-    "An attachment's fields entry is emitted as one piece, 'title: value', and the single present string alone where only one of the two holds a word. This contradicts approved spec version 11's 'each entry of its fields as that entry's title and value, each non-blank one on its own line'. Same ruling as its authority: two fields sharing a value is ordinary, and the equality rule then left a label without its value, so the delivery asserted a pairing the channel does not make.",
-    "The display names are nine, not the approved seven: alt_text and author_subname join them, in the rank pretext, author_name, author_subname, title, text, alt_text, value, footer, fallback. Same ruling as its authority: an image-only Block Kit post delivered nothing at all, which is this issue's own symptom, and both strings are ones Slack renders for a person to read, which is the test approved spec version 11 states for the list.",
-    "RECORDED DEPARTURE, carried forward from round 3 and unchanged: approved spec version 11 says the walk 'never has to know the kind of a block or an attachment' and that 'the one exception is a deleted message'. The code knows the block kind rich_text by name and has two exceptions. The architect has told the human what the code does and ruled that no new spec version follows.",
-    "The rich_text exception itself, and the exact-equality repeat rule, and the one ordered key list per object, are the architect's rulings of 2026-10-25T04:55:00Z (d2bf744d502b32e22f038606045cd18b) and 2026-10-25T05:18:01Z (d7ac4a19e3e6eeb53c232d618d7c8470), unchanged by this round except where the six items above change them.",
-    "Not in this round, recorded as risks by the architect's ruling and not built: the link-unfurl path, where a crawled page's title and text reach a person's message that carries no bot_id (behaviour unchanged here, in the review's Security line, the architect is telling the human); and the rich_text object skipped because every one of its display strings sits inside the message's own text (confined to that one decision, cannot delete a piece gathered elsewhere).",
-    "ce-simplify-code ran once at e587427d7f0c in round 1, the one slot per pull request; a round answering a review runs no second pass. The unification of the two traversals in this round is the reviewer's structural finding, built as part of R1 on the architect's instruction, not a simplify pass."
+    "Blocks are read before attachments, against approved spec version 11's 'in its attachments and blocks'. Authority: the architect's ruling of 2026-10-25T06:00:29Z (Envoy message 2bcf844fa07dac607ef80e0231d96a23). Slack renders blocks as the message body and an attachment after it.",
+    "The display names are nine, not the approved seven: alt_text and author_subname join them, in the rank pretext, author_name, author_subname, title, text, alt_text, value, footer, fallback. Same ruling as its authority: an image-only Block Kit post delivered nothing at all, and both strings are ones Slack renders for a person to read.",
+    "The walk knows one block kind by name, rich_text, and has two exceptions rather than the one approved spec version 11 states. Authority: the architect's rulings of 2026-10-25T04:55:00Z (d2bf744d502b32e22f038606045cd18b) and 05:18:01Z (d7ac4a19e3e6eeb53c232d618d7c8470); the architect has told the human what the code does.",
+    "The repeat comparison is the object's, with the message's own words and their lines walk-wide. Authority: the architect's ruling of 2026-10-25T06:56:27Z (617021e9e3dde5c07653f951a39ed57c), confirmed in ed4bd365529e0e4159e0e8a83b294bb4. The architect has put the scoped rule into the spec, which is at version 14 and with the human.",
+    "CLOSED THIS ROUND, not carried: round 4's deviation against approved spec version 11's 'each entry of its fields as that entry's title and value, each non-blank one on its own line'. The field pairing is deleted and an attachment's fields entry delivers its label and its value on their own lines again, which is what version 11 says.",
+    "Not in this round, recorded as risks on the architect's ruling and not built: an attachment's fallback still precedes the blocks nested inside that same attachment, which follows the ruled key order; the rich_text object skipped because every one of its display strings sits inside the message's own text; and the Security[prompt] paths — fallback and a button's value, which Slack renders to nobody, and Slack's link unfurl, which arrives as message_changed on a person's message carrying no bot_id, with packages/envoy/internal/session/session.go:113-118 rendering the payload into the wake prompt. The architect has the whole chain with the human.",
+    "ce-simplify-code ran once at e587427d7f0c in round 1, the one slot per pull request; a round answering a review runs no second pass."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Acceptance 2's lane cannot run on an issue pod (no Docker, no Podman): packages/envoy/internal/integration starts a real NATS server through testcontainers. The test is compiled and type-checked here (go vet ./... and go test -run NoSuchTest ./internal/integration/ clean) and runs in CI, in the envoy-go job of 'Legion Envoy and Contracts', run 40168908245 on this head.",
-    "Posting a review reply starts a PR Title workflow run of its own, so this head carries several of them beside the five runs the push started."
+    "Acceptance 2's lane cannot run on an issue pod (no Docker, no Podman): packages/envoy/internal/integration starts a real NATS server through testcontainers. The test is compiled and type-checked here (go vet ./... and go test -run NoSuchTest ./internal/integration/ clean) and runs in CI, in the envoy-go job of 'Legion Envoy and Contracts', run 40171710283 on this head.",
+    "The before listener of this round's proof is built by restoring normalize.go from round 4's code head into a scratch copy of packages/envoy, so the two listeners differ in that file alone."
   ],
   "reviewRound": {
-    "round": 2,
+    "round": 3,
     "decision": "changes_requested",
-    "reviewedHead": "af457dfde5b74b4d8739484a4a3696a0fde1f8da",
-    "answeredAt": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
+    "reviewedHead": "17577750d5496cc39c36f12a023d4d6746dfc3b1",
+    "answeredAt": "50f2638ba9413593f1e5cdcdf937860388d81109",
     "threads": [
-      {"id": "PRRT_kwDORFy7ds6v-3fI", "disposition": "fixed in 4567f4cb9453c690d586e35070915c72b57861e5", "note": "R1 measured once per outermost rich_text object, 85.385 s to 56.70 ms on the reviewer's 990,364 B body; R2 each line of the own text in the taken set", "resolved": true},
-      {"id": "PRRT_kwDORFy7ds6v-3fM", "disposition": "fixed in 4567f4cb9453c690d586e35070915c72b57861e5", "note": "R3 blocks read before attachments", "resolved": true},
-      {"id": "PRRT_kwDORFy7ds6v-3fO", "disposition": "fixed in 4567f4cb9453c690d586e35070915c72b57861e5", "note": "the architect took the fields finding: one piece, title: value", "resolved": true},
-      {"id": "PRRT_kwDORFy7ds6v-3fR", "disposition": "fixed in 4567f4cb9453c690d586e35070915c72b57861e5", "note": "the two traversals are one producer read by two consumers", "resolved": true},
-      {"id": "PRRT_kwDORFy7ds6v-3fV", "disposition": "fixed in 709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f", "note": "R4 the false clause dropped from both documents, bundle regenerated", "resolved": true}
+      {"id": "PRRT_kwDORFy7ds6v_JNd", "disposition": "fixed in 4bf6cd89d9e7ca5ba26c9f80df0c33e0aa2e38a6", "note": "the repeat comparison scoped to the object that yields the pieces, the message's own words walk-wide, the field pairing deleted with it", "resolved": true}
     ]
   },
   "localChecks": [
