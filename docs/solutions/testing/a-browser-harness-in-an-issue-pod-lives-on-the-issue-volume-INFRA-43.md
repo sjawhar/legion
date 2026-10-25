@@ -40,12 +40,11 @@ Go binary. The delta is where the harness lives and how it is built.
   or every row fails `spawn psql ENOENT`.
   **Note 2026-10-25 (INFRA-221):** still the step, judged by both conditions of
   `skills/legion-worker/references/tools.md`, "The test: where it lands, and what it leaves
-  resolving": the root lands under `/legion`, the issue's volume, and a role reaches it only by
-  sourcing the env file for the harness's own commands, so nothing resolves through it that did
-  not name it. Keep it that way — source it in the same invocation as the harness command (a
-  subshell such as `(. /legion/harness/env.sh && <command>)`), not into the shell you go on
-  working in. `psql` is in the image now, so the `spawn psql ENOENT` above no longer depends on
-  that export at all.
+  resolving": the root lands under `/legion`, the issue's volume, at a path the harness names
+  itself, and a role reaches it only by sourcing the env file for the harness's own commands, so
+  nothing resolves through it that did not name it. That is a statement of scope, not a change to
+  the recipe above. `psql` is in the image now, so the `spawn psql ENOENT` above no longer depends
+  on that export at all.
 - **Move the caches with it:** `GOCACHE`, `GOMODCACHE` and `PLAYWRIGHT_BROWSERS_PATH`. They are
   the bulk of the scratch, and a cold Go cache also overruns Playwright's 60 s `webServer` window
   when `run-server.sh` rebuilds the Dispatch binary inside it — pre-build the binary once with the

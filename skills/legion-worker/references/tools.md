@@ -82,13 +82,16 @@ for it*.
 ### The test: where it lands, and what it leaves resolving
 
 An install of your own — an interpreter, a browser, a second toolchain, an extraction prefix — is
-on the sanctioned side when both of these hold: what it writes lands under the
-issue's own volume, through one of the variables the runtime actually sets for you —
+on the sanctioned side when both of these hold: what it writes lands on the issue's own volume,
+under `/legion`, which outlives the pod and is shared by the issue's roles — whether through a
+variable the runtime sets for you there or under a path on that volume your harness names
+itself — and after the command exits nothing else resolves differently. The variables the
+runtime sets on the volume, where a tool's own cache already goes, are
 `XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
 `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
-`UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`) — and after the command exits nothing else
-resolves differently. (`XDG_CONFIG_HOME` is set too and is not one of them: it is the pod's shared
-in-memory volume.)
+`UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`). (`XDG_CONFIG_HOME` is set too and is not
+one of them: it is the pod's shared in-memory volume.) `$HOME` and `/tmp` are not on the volume:
+both are the container's own filesystem.
 
 It is the withheld capability when either condition fails — anything that writes into a
 system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
