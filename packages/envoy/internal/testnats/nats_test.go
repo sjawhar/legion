@@ -479,61 +479,26 @@ const containerModule = "github.com/testcontainers/testcontainers-go/modules/nat
 // spelled in two pieces so that this file, which has to name them, is not itself a finding.
 var dockerDrivers = []string{"exec.Command(" + `"docker"`, "NewDockerClient" + "WithOpts"}
 
-// packagesAwaitingMigration and filesAwaitingMigration are the call sites of this rig that still
-// start a container, each one INFRA-250's migration moves to the in-process server. They are
-// listed so this guard holds every other package of the module to the in-process rig from the day
-// it lands; the migration deletes each entry with the call site it moves, and a stale entry is a
-// finding of its own, so the lists cannot outlive the work. Delete them, and this allowance, when
-// they are empty.
-var (
-	packagesAwaitingMigration = []string{
-		// internal/smoke is not here: its container-backed tests are behind the smoke build tag,
-		// which this walk does not see, as it does not see image.go either.
-	}
-	filesAwaitingMigration = []string{}
-)
-
-// No package of this module outside internal/testnats may reach a container runtime: Envoy's
-// agents have none, and a test that needs one cannot run where they do. The rig's own
-// container-backed half is behind the natslive tag, which an untagged go list does not see, so the
-// one package allowed here is this one.
+// No package of this module outside internal/testnats may start a NATS container or drive a
+// container runtime by hand: Envoy's agents have none, and a test that needs one cannot run where
+// they do. Other packages of this module do start containers on purpose (internal/tests3 runs
+// SeaweedFS, internal/testpg pgvector); what this guard pins is the NATS container module and the
+// two hand-written ways to drive Docker. The rig's own container-backed half is behind the
+// natslive tag, which an untagged go list does not see, so the one package allowed here is this
+// one.
 func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
 	t.Run("imports", func(t *testing.T) {
-		importers := natsContainerImporters(t)
-		missing, remaining := allowedAnd(packagesAwaitingMigration, importers)
-		for _, pkg := range remaining {
+		// internal/smoke is never a finding here: its container-backed tests are behind the smoke
+		// build tag, which this walk does not see, as it does not see image.go either.
+		for _, pkg := range natsContainerImporters(t) {
 			t.Errorf("package %s imports %s, which needs a container runtime; start the server with testnats.Start, StartConfig or URL instead", pkg, containerModule)
-		}
-		for _, pkg := range missing {
-			t.Errorf("package %s no longer imports %s: take it out of packagesAwaitingMigration", pkg, containerModule)
 		}
 	})
 	t.Run("docker", func(t *testing.T) {
-		drivers := dockerDriverFiles(t)
-		missing, remaining := allowedAnd(filesAwaitingMigration, drivers)
-		for _, file := range remaining {
+		for _, file := range dockerDriverFiles(t) {
 			t.Errorf("%s drives a container runtime itself; a test that has to stop a server's traffic uses testnats.Server.Freeze, and one that has to stop the server, Server.Stop", file)
 		}
-		for _, file := range missing {
-			t.Errorf("%s no longer drives a container runtime: take it out of filesAwaitingMigration", file)
-		}
 	})
-}
-
-// allowedAnd splits found into the allowances nothing found any more and the findings no allowance
-// covers.
-func allowedAnd(allowed, found []string) (missing, remaining []string) {
-	for _, entry := range allowed {
-		if !slices.Contains(found, entry) {
-			missing = append(missing, entry)
-		}
-	}
-	for _, entry := range found {
-		if !slices.Contains(allowed, entry) {
-			remaining = append(remaining, entry)
-		}
-	}
-	return missing, remaining
 }
 
 // natsContainerImporters lists every package of this module, outside this one, that imports the

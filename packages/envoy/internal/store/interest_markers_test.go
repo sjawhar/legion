@@ -12,7 +12,6 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
@@ -731,23 +730,11 @@ func startGrantedServer(t *testing.T, deny []string) grantedServer {
 		"{ publish: { allow: [\">\"], deny: [%s] }, subscribe: { allow: [\">\"] } } } ]\n}\n",
 		public, strings.Join(quoted, ", "))
 	srv, uri := testnats.StartConfig(t, config, []string{"-DV", "-js"}, false)
-	pair, err := nkeys.FromSeed([]byte(seed))
+	// StartConfig returned once the server refused a credential-less client with its own
+	// authorization violation, so it is up, speaking the client protocol and enforcing this user.
+	conn, err := testnats.ConnectSeed(t, uri, seed)
 	if err != nil {
-		t.Fatalf("read the user's seed: %v", err)
-	}
-	var conn *natsgo.Conn
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		conn, err = natsgo.Connect(uri,
-			natsgo.Nkey(public, func(nonce []byte) ([]byte, error) { return pair.Sign(nonce) }),
-			natsgo.Timeout(time.Second), natsgo.NoReconnect())
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("connect to the granted NATS: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
+		t.Fatalf("connect to the granted NATS: %v", err)
 	}
 	t.Cleanup(conn.Close)
 	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
@@ -797,21 +784,18 @@ func (g grantedServer) traceThrough(t *testing.T) []string {
 	want := "[PUB " + sentinel + " "
 	deadline := time.Now().Add(traceWait)
 	for {
-		lines := serverLog(g.srv)
-		if slices.ContainsFunc(lines, func(line string) bool { return strings.Contains(line, want) }) {
-			return lines
+		// The sentinel holds no newline, so the whole log answers what a line of it would; the
+		// split is left to the way out.
+		log := g.srv.Log()
+		if strings.Contains(log, want) {
+			return strings.Split(log, "\n")
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the server's log holds no line with %q after %s. Every publish it traced:\n%s",
-				want, traceWait, strings.Join(tracedPublishLines(lines), "\n"))
+				want, traceWait, strings.Join(tracedPublishLines(strings.Split(log, "\n")), "\n"))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-// serverLog is every line the server has logged so far.
-func serverLog(srv *testnats.Server) []string {
-	return strings.Split(srv.Log(), "\n")
 }
 
 // tracedPublish matches the line a tracing server writes for each publish a client sends,

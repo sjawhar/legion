@@ -2,14 +2,11 @@ package bus_test
 
 import (
 	"errors"
-	"io"
 	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -246,16 +243,12 @@ func TestASetProxyIsRemoteReach(t *testing.T) {
 
 // remoteLookingURL reaches the test's own NATS, as the same user, by an address of this machine
 // that is not loopback, which is what a NATS on another machine looks like to the refusal. The
-// test rig's servers listen on loopback alone, so the address is one a forwarder of this test's
-// own holds on that interface, which carries the connection to the server at uri: a connect that
-// the refusal lets through still reaches the NATS the test started, and no test reaches a NATS it
-// did not start.
+// test rig's servers listen on loopback alone, so the address is one a relay of this test's own
+// holds on that interface, which carries the connection to the server at uri: a connect that the
+// refusal lets through still reaches the NATS the test started, and no test reaches a NATS it did
+// not start.
 func remoteLookingURL(t *testing.T, uri string) string {
 	t.Helper()
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		t.Fatalf("read the test server's URL %q: %v", uri, err)
-	}
 	addresses, err := net.InterfaceAddrs()
 	if err != nil {
 		t.Fatalf("list this machine's addresses: %v", err)
@@ -265,57 +258,8 @@ func remoteLookingURL(t *testing.T, uri string) string {
 		if !ok || network.IP.IsLoopback() || network.IP.To4() == nil {
 			continue
 		}
-		parsed.Host = forwardFrom(t, network.IP.String(), parsed.Host)
-		return parsed.String()
+		return startRelayProxyFrom(t, network.IP.String(), uri).url()
 	}
 	t.Skip("no non-loopback IPv4 address on this machine to reach the test server by")
 	return ""
-}
-
-// forwardFrom holds a port of the address host names, which is not loopback, and carries every
-// connection it accepts there to target, until the test ends. It is what a container's published
-// port was: the one server the test started, reachable by an address of this machine that the
-// refusal reads as another machine's.
-func forwardFrom(t *testing.T, host, target string) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		t.Fatalf("listen on %s: %v", host, err)
-	}
-	var mu sync.Mutex
-	var open []net.Conn
-	t.Cleanup(func() {
-		_ = listener.Close()
-		mu.Lock()
-		defer mu.Unlock()
-		for _, conn := range open {
-			_ = conn.Close()
-		}
-		open = nil
-	})
-	go func() {
-		for {
-			client, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			server, err := net.Dial("tcp", target)
-			if err != nil {
-				_ = client.Close()
-				continue
-			}
-			mu.Lock()
-			open = append(open, client, server)
-			mu.Unlock()
-			go func() {
-				_, _ = io.Copy(client, server)
-				_ = client.Close()
-			}()
-			go func() {
-				_, _ = io.Copy(server, client)
-				_ = server.Close()
-			}()
-		}
-	}()
-	return listener.Addr().String()
 }

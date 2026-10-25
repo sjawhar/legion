@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -931,30 +930,12 @@ func closedConnectionIsReplacedOnce(t *testing.T, through func(uri string) []bus
 	unsetNkeyEnvironment(t)
 	srv, uri := testnats.StartConfig(t, "jetstream {}\n", []string{"-js"}, true)
 	const name = "replaced-once"
+	byName := serverConnections(t, srv)
 	// connections is how many connections the server holds under the client's name, which nats.go
 	// sends in its CONNECT, so the observer's own connection is not counted.
 	connections := func() int {
 		t.Helper()
-		response, err := http.Get(srv.MonitorURL() + "/connz")
-		if err != nil {
-			t.Fatalf("read /connz: %v", err)
-		}
-		defer response.Body.Close()
-		var connz struct {
-			Connections []struct {
-				Name string `json:"name"`
-			} `json:"connections"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
-			t.Fatalf("decode /connz: %v", err)
-		}
-		open := 0
-		for _, connection := range connz.Connections {
-			if connection.Name == name {
-				open++
-			}
-		}
-		return open
+		return len(byName()[name])
 	}
 	// settle waits up to within for the server to hold want of the client's connections, and fails
 	// with the count it last read.

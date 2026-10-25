@@ -272,6 +272,7 @@ func (s *Server) stop() {
 	s.mu.Lock()
 	srv := s.srv
 	s.srv = nil
+	s.monitor = ""
 	s.mu.Unlock()
 	if srv == nil {
 		return
@@ -525,9 +526,9 @@ type relay struct {
 }
 
 func newRelay(listener net.Listener, target func() (string, error)) *relay {
-	relay := &relay{listener: listener, target: target, done: make(chan struct{})}
-	go relay.serve()
-	return relay
+	r := &relay{listener: listener, target: target, done: make(chan struct{})}
+	go r.serve()
+	return r
 }
 
 // serve joins each connection the relay accepts to the server, until the relay closes.
@@ -542,22 +543,29 @@ func (r *relay) serve() {
 }
 
 // join copies client and the server's connection into each other until either side ends, then
-// closes both.
+// closes both. One direction runs on this goroutine and the other on one of its own, and whichever
+// ends first closes both connections, which ends the other.
 func (r *relay) join(client net.Conn) {
-	defer client.Close()
 	address, err := r.target()
 	if err != nil {
+		_ = client.Close()
 		return
 	}
 	upstream, err := net.DialTimeout("tcp", address, dialTimeout)
 	if err != nil {
+		_ = client.Close()
 		return
 	}
-	defer upstream.Close()
-	ended := make(chan struct{}, 2)
-	go func() { r.stream(upstream, client); ended <- struct{}{} }()
-	go func() { r.stream(client, upstream); ended <- struct{}{} }()
-	<-ended
+	ended := sync.OnceFunc(func() {
+		_ = upstream.Close()
+		_ = client.Close()
+	})
+	go func() {
+		defer ended()
+		r.stream(upstream, client)
+	}()
+	defer ended()
+	r.stream(client, upstream)
 }
 
 // stream copies src into dst, a frozen relay moving nothing: the read and the write each wait for
@@ -604,10 +612,16 @@ func (r *relay) freeze() func() {
 	r.mu.Unlock()
 	return sync.OnceFunc(func() {
 		r.mu.Lock()
-		if r.gate == gate {
+		owned := r.gate == gate
+		if owned {
 			r.gate = nil
 		}
 		r.mu.Unlock()
+		// A second freeze while this one held the gate shares it: only the thaw that still owns
+		// the gate closes it, so the other returns rather than closing it twice.
+		if !owned {
+			return
+		}
 		close(gate)
 	})
 }

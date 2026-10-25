@@ -125,8 +125,10 @@ func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
 		TraceID:        "trace-publish-across-restart",
 	}
 	publishErr := client.Publish(item)
-	// The restart has to be done before the publish's error is judged: the goroutine that makes
-	// it fails the test itself when the server will not start again.
+	// The restart has to be done before the publish's error is judged. When the server will not
+	// start again, srv.Start fails the test from the goroutine that made it and ends that
+	// goroutine there; the deferred close still releases this one, which then reports the
+	// publish's failure below the start's own, the consequence under the cause.
 	<-restarted
 	if publishErr != nil {
 		t.Fatalf("a JetStream publish during a one-second NATS restart failed: %v", publishErr)
