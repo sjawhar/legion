@@ -2,120 +2,158 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T08:52:00Z",
+  "completed": "2026-10-25T11:05:00Z",
   "rounds": [
+    { "round": 1, "codeHead": "a5e26319624da4107d61115c7058270a0dceb383", "verdict": "pass", "completed": "2026-10-25T05:45:00Z" },
+    { "round": 2, "codeHead": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1", "verdict": "pass", "completed": "2026-10-25T08:52:00Z" },
     {
-      "round": 1,
-      "codeHead": "a5e26319624da4107d61115c7058270a0dceb383",
+      "round": 3,
+      "codeHead": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
+      "testCommit": "the tester's own regression lock sits above that head; see `addedTest`",
       "verdict": "pass",
-      "completed": "2026-10-25T05:45:00Z"
-    },
-    {
-      "round": 2,
-      "codeHead": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
-      "verdict": "pass",
-      "completed": "2026-10-25T08:52:00Z",
-      "what": "The branch's diff changed since round 1 — three code commits answering the review's twelve threads, then a forward merge of main@origin — so this is a full round over the changed surface, not a fingerprint re-check. The two correctness fixes the architect named were each driven by reproducing the defect they fix, and the change's central claim about the API server was moved off a simulation onto a real Kubernetes API server."
+      "completed": "2026-10-25T11:05:00Z",
+      "what": "Two code commits and a second forward merge landed since round 2, and the implementer reports the branch's fingerprint as changed across that merge (a daemon/plugin contract collision with main, 36 → 37), so this is a full round over the changed surface. The round's one correctness change — a sibling role read while the issue has no Sandbox at all — was driven by reproducing the defect it fixes. I then found one invariant of that fix that no test in the package held, and added the lock myself rather than spending a round on it."
     }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2: I re-ran both of this round's proofs that name a production-like surface at my own head build (provision with the branch merged and deleted; `legion start --check-config` on a staged example), and I checked its three negative controls by performing the reverts myself in an out-of-tree copy of the module rather than taking them on trust — each failed exactly as its handoff says, and each test passes again when restored. The one claim of its proof 2 that rested on a simulation (a schema walker that reproduces the API server's pruning) I drove on a real Kubernetes API server instead, which both confirmed its conclusion and corrected one word of it (see proof 2 below). Its fingerprint proof across the forward merge I did not recompute, because the diff is not the one my round 1 verified: new code lands in it, so a fingerprint comparison would answer a question nobody is asking; I tested the changed surface instead. Round 1: I re-ran both of that round's production-like proofs independently and read all 17 hits of its deletion grep."
+    "how": "Round 3: I re-ran both of this round's production-like proofs at my own build of this head — `workspace-init provision` with the branch deleted from the feed, and `legion start --check-config` on an example I staged — and both hold. I checked its manifest proof on a real Kubernetes API server rather than through its schema walker (proof 3 below), which is where this round's controller change lives. Its negative controls for the earlier rounds I had already performed myself in rounds 1 and 2. Its fingerprint proof across the second forward merge I did not recompute: it reports the fingerprint as changed and says why, and a changed fingerprint is a full round, which is what this is. Rounds 1 and 2: both re-ran independently, as those rounds record."
   },
   "failed": 0,
   "failures": [],
+  "addedTest": {
+    "test": "TestAGapReadOfARoleOfAnotherPodThanTheReplacementEndedIsNotDisplaced, packages/daemon/internal/runtime/sandbox/relaunch_test.go",
+    "why": "Not a defect — the code is right — but an invariant of this round's fix that nothing in the package held. The runtime keeps the replaced pod's uid under the Sandbox's name while a migrating launch has deleted the Sandbox and not yet created its replacement, and `evaluate` compares that kept uid with the locator's before calling an end displaced. Dropping the comparison (`stranded = held != \"\"`) leaves the **whole sandbox package green**, measured against a baseline I first made green — the three repository files its tests read by relative path symlinked beside my out-of-tree copy, after which `go test ./internal/runtime/sandbox` is `ok`. Without the comparison, a role recorded in an earlier pod of the same issue that ends on its own inside that gap is read as the daemon's own replacement and resumed uncharged: a death the supervisor never counts and a failing role nothing ever stops. The new test probes exactly that locator inside the gap and requires Gone and not Displaced. It passes at this head and fails with the comparison dropped, naming the pod it was wrongly told was displaced.",
+    "evidence": "`go test ./internal/runtime/sandbox -run TestAGapReadOfARoleOfAnotherPodThanTheReplacementEndedIsNotDisplaced` — PASS at this head; with `held == loc.Sandbox.PodUID` removed from `evaluate`, FAIL: `a role recorded in pod uid-pod-older, read in the gap the replacement of pod uid-pod-old opened: gone, Displaced true …; want Gone and not Displaced`."
+  },
   "proof": [
     {
-      "round": 2,
-      "criterion": "The cutover's two correctness fixes: the replacement Sandbox carries the `legion.dev/displaced-pod` name its predecessor was given, and an init container the daemon's own delete killed is not a failed init.",
-      "surface": "The package's own rig — the real `relaunch`, `verdict` and `Probe` paths against an httptest API server — driven as a defect reproduction rather than as a suite: the fix reverted in an out-of-tree copy of the module, the failure observed, the fix restored, the test green again. This is the same shape as round 1's migration-0051 proof: the hazard reproduced, then shown cured.",
-      "command": "In /tmp/mods/daemon (a copy of packages/daemon at this head): revert `ended.initFailed = initExit != nil && pod.DeletionTimestamp == nil` to `initExit != nil` and run `go test ./internal/runtime/sandbox -run 'TestTheMappingRowByRowInPrecedence|TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape'`; restore; then drop the `displacedAnnotation` copy from `replaceSupersededSandbox` and run the second test; restore and re-run both",
-      "observed": "Without the failed-init fix: `TestTheMappingRowByRowInPrecedence/5 an init container the daemon's own delete killed is no failed init` fails with `initFailed = true, want false` and `Displaced = false, want true`, on a pod whose init container terminated `Error, exit code 137` — the kubelet's SIGKILL of the init container the daemon itself was deleting. That is the cutover defect in the open: every role of such a pod would be read as plain Gone and charged a death, and the architect's point that this lands on the cutover launch of every running issue is what makes it matter. Without the annotation carry: `TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape` fails with `the Sandbox this launch created names \"\" as the pod the daemon replaced, want uid-pod-old`. Both pass at this head.",
-      "headSha": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
-      "negativeControl": "A mutation the implementer did not run: inverting the new guard to `pod.DeletionTimestamp != nil`, so a genuinely failed init in a live pod would read as not failed and a pod whose init keeps failing would be resumed into rather than replaced. Four tests catch it, among them `TestRestartingInitFailureIsGoneForEveryRole`, `TestColdInitFailureReachesSupervisionWithoutWaitingForLauncher` and the row `5 the same init container terminating non-zero in a pod nothing is deleting is a failed init` — so the guard is pinned in both directions, not only in the one the fix moved. (Three further failures in that run — `TestCheckPodRefusesWhatCollidesWithLegionsOwn`, `TestCheckPodHoldsDispatchPublicURLToTheAgentsRule`, `TestTheReclaimParagraphNamesEveryDirectoryTheRendererPutsOnTheIssueVolume` — are an artefact of my out-of-tree copy: each reads a repository file by a relative path that does not exist beside the copy, and each fails the same way with no mutation applied. Checked, not assumed.)"
+      "round": 3,
+      "criterion": "The cutover's displacement window: a sibling role read while the issue has no Sandbox at all is the daemon's own end, not a death.",
+      "surface": "The package's own rig — the real `relaunch`, `evaluate` and `Probe` paths against an httptest API server — driven as a defect reproduction: the fix reverted in an out-of-tree copy, the failure observed, the fix restored, green again.",
+      "command": "In /tmp/mods/daemon (a copy of packages/daemon at this head): drop the `case current == nil: stranded = …` arm from `evaluate` and run `go test ./internal/runtime/sandbox -run 'TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced|TestAReplacementWhoseCreateFailsKeepsTheReplacedPodsRolesDisplaced'`; restore and re-run",
+      "observed": "Without the fix both fail, and they name the two shapes of the window: `the reviewer recorded in the replaced pod, read while no Sandbox of the issue exists: gone, Displaced false (sandbox legion/legion-legion-legion-208 is absent); want Gone and Displaced`, and the same after the replacement's Create was refused — the second being the window a failed Create holds open until the issue's next launch, not the instant a successful one takes. Both pass at this head. Since a Gone delivered leaves the watch, a death read here is a death that cannot be taken back by the annotation arriving a moment later, which is what makes this the cutover's own failure mode rather than a transient.",
+      "headSha": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
+      "negativeControl": "The third of this round's tests, run unmodified: once the replacement carries the name, the record is dropped and a role of the replacement's **own** pod that ends on its own is a death, not a displacement. Dropping the `unstrand` call instead makes `TestTheNameAReplacementKeptForItsGapGoesOnceTheReplacementCarriesIt` fail, so the keeping is bounded at both ends and not merely added."
+    },
+    {
+      "round": 3,
+      "criterion": "1. The rendered pods, this round's controller pod among them, are what a real API server accepts against the pinned Agent Sandbox definition.",
+      "surface": "A real Kubernetes API server, v1.37 (etcd and kube-apiserver from the envtest assets, run in this pod), with the pinned production Agent Sandbox CRD applied and the daemon's own goldens submitted to it — the schema walker's conclusion taken from the thing it reproduces.",
+      "command": "`kubectl apply -f testdata/sandboxes.agents.x-k8s.io.yaml`, then `kubectl create -f` each of `testdata/golden/{worker,controller,controller-resume}.json` under a name of my own, then read each back",
+      "observed": "All three accepted. The issue pod comes back with its six role containers, its two init containers, its disk an `ephemeral.volumeClaimTemplate` with empty metadata, and its Sandbox owning no claim template. The controller's pod comes back with its one `controller` container, **no `initContainers` key at all** — this round's deletion of the emptied init container, which a schema requiring the field would have refused — and its disk the `issue` claim its own Sandbox owns. So the two kinds differ on a real API server exactly where the change says they differ.",
+      "headSha": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
+      "negativeControl": "Round 2's, on the same surface and unchanged since: a label on the issue pod's ephemeral claim template is pruned (201, stored metadata `{}`, with a `warning: 299` header) by a client that sets no field validation and refused outright by a strict one, and `spec.volumeClaimTemplates` on a live Sandbox is refused `volumeClaimTemplates is immutable` — the premise of the cutover's delete-and-create."
+    },
+    {
+      "round": 3,
+      "criterion": "2. An issue whose branch has been merged and deleted starts its agents — re-verified at this head.",
+      "surface": "The real `legion workspace-init provision` binary built from this head, against a real bare remote and a real feed mirror.",
+      "command": "`legion workspace-init provision --issue ACME-1 --repo acme/widgets --default-branch main --root $TMPDIR/p3/root --credential-helper '!true' --feed $TMPDIR/p3/feed` with `refs/heads/legion/ACME-1` deleted from the feed, then `ls -a` of the root",
+      "observed": "Exit 0, `workspace-init: … on legion/ACME-1 from main`, the workspace holding `a.txt` alone, and the root holding `repos` and `workspaces` and nothing else.",
+      "headSha": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
+      "negativeControl": "Round 2's run of the same command with the branch present in the feed put `b.txt` in the workspace; the feed is the only difference between the two."
+    },
+    {
+      "round": 3,
+      "criterion": "5. A deployment cannot keep sessions as files on a disk that dies with its pod, and nothing of the deleted controller subcommand remains.",
+      "surface": "The real `legion start --check-config` and `legion workspace-init` CLIs built from this head.",
+      "command": "`legion start --check-config` on the staged example and on three variants; then `legion workspace-init controller --root /legion` and `legion workspace-init --help`",
+      "observed": "The example exits 0; `pvc` and the omitted key exit 1 with the store message; `postgres` with no `session_dsn_secret` exits 1 naming the key. `workspace-init controller` exits **2** with `unknown subcommand \"controller\"`, and the usage line now reads `legion workspace-init cache|fetch|provision [flags]` — the subcommand this round deleted is gone from the real CLI, not only from the tree.",
+      "headSha": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
+      "negativeControl": "The unmodified example exits 0, and `workspace-init provision` in the same binary runs normally, so the refusal of `controller` is that subcommand's absence and not a broken parser."
     },
     {
       "round": 2,
-      "criterion": "1. The disk carries no labels and the Sandbox owns no claim template — and the cutover's delete-and-create is the only way out of the old shape.",
-      "surface": "A **real Kubernetes API server, v1.37** (etcd and kube-apiserver from the envtest assets, run in this pod under its own token auth) with **the pinned production Agent Sandbox CRD** (`internal/runtime/sandbox/testdata/sandboxes.agents.x-k8s.io.yaml`) applied to it, and the daemon's own rendered Sandbox (`testdata/golden/worker.json`) submitted to it. This replaces a simulation with the thing simulated: until now the pruning claim rested on a schema walker that reproduces the API server's behaviour.",
-      "command": "`kubectl apply -f testdata/sandboxes.agents.x-k8s.io.yaml`; `kubectl create -f testdata/golden/worker.json`; read back `.spec.podTemplate.spec.volumes[0]` and `.spec.volumeClaimTemplates`; POST the same object with labels on the ephemeral claim template's metadata, once through kubectl and once through a client that sets no `fieldValidation` (as the daemon's dynamic client does); `kubectl patch --type=merge` adding `spec.volumeClaimTemplates`; then the cutover sequence — create an old-shape Sandbox owning the `issue` template, send the exact merge patch `suspendDisplacing` sends, delete, and create the new shape carrying the annotation",
-      "observed": "The daemon's rendered Sandbox is accepted unchanged: the pod's one disk comes back as `ephemeral.volumeClaimTemplate` with `metadata: {}`, ReadWriteOnce, the configured class and size, and `.spec.volumeClaimTemplates` is absent. A claim template carrying labels is **pruned**: through a client that sets no field validation the create returns **201** with the stored metadata `{}` — and a `warning: 299 - unknown field \"spec.podTemplate.spec.volumes[0].ephemeral.volumeClaimTemplate.metadata.labels\"` header, so \"without a word\" (the phrase in `podkind.go`'s comment and in round 1's own write-up, which was mine too) is one word too strong; there is a warning, which the daemon does not surface. Adding `volumeClaimTemplates` to a live Sandbox is refused by the CRD's own rule: `The Sandbox … is invalid: spec: Invalid value: volumeClaimTemplates is immutable` — the premise of `replaceSupersededSandbox` confirmed on a real API server rather than read out of the YAML. The cutover sequence runs end to end: the old shape is accepted, the suspension merge patch returns **200** with `{\"legion.dev/displaced-pod\": \"uid-pod-old\"}` and `operatingMode: Suspended` **in the patch's own response** — which is precisely what this round's fix reads, and why `suspendDisplacing` had to return the patched object — and the replacement of the new shape, carrying that annotation and owning no claim template, is accepted.",
+      "criterion": "1. The claim template's metadata, and the immutability the cutover rests on, on a real API server.",
+      "surface": "A real kube-apiserver v1.37 with the pinned Agent Sandbox CRD and the daemon's rendered Sandbox.",
+      "command": "create the golden; POST it again with labels on the ephemeral claim template, once with no `fieldValidation` and once through kubectl; `kubectl patch --type=merge` adding `spec.volumeClaimTemplates`; then the cutover's patch-delete-create sequence",
+      "observed": "The rendered Sandbox is accepted unchanged. A labelled claim template is pruned — 201 with stored metadata `{}` and a `warning: 299` header. `volumeClaimTemplates is immutable` on a live Sandbox. The suspension's merge patch returns 200 carrying `{\"legion.dev/displaced-pod\": \"uid-pod-old\"}` in its own response, which is what the round-1 fix reads, and the replacement carrying that annotation is accepted.",
       "headSha": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
-      "negativeControl": "The same labelled object through kubectl, which sets `fieldValidation=Strict`: a hard refusal, `BadRequest … strict decoding error: unknown field \"spec.podTemplate.spec.volumes[0].ephemeral.volumeClaimTemplate.metadata.labels\"`, and nothing created. So the field is genuinely unknown to the schema under both validation modes, and the difference between pruning and refusal is the client's, not the schema's."
+      "negativeControl": "The same labelled object through kubectl (`fieldValidation=Strict`): a hard `BadRequest … strict decoding error`, nothing created."
     },
     {
       "round": 2,
-      "criterion": "2. An issue whose branch has been merged and deleted starts its agents — re-verified at this head, with the dead sessions directory gone.",
-      "surface": "The real `legion workspace-init provision` binary built from this head, against a real bare remote and a real feed mirror on the issue's own disk.",
-      "command": "`legion workspace-init provision --issue ACME-1 --repo acme/widgets --default-branch main --root $TMPDIR/p2/root --credential-helper '!true' --feed $TMPDIR/p2/feed` with `refs/heads/legion/ACME-1` deleted from the feed, then `ls -a` of the root",
-      "observed": "Exit 0, `workspace-init: … on legion/ACME-1 from main`, the workspace holding `a.txt` alone on an empty commit over `main`. The root holds `repos` and `workspaces` **and nothing else** — the `<root>/sessions` directory I reported as dead state in round 1 is gone from the real command's output, not only from a test (review thread 4369871423).",
+      "criterion": "The round-2 correctness fixes: the replacement carries the displaced-pod name, and an init container the daemon's own delete killed is not a failed init.",
+      "surface": "The package's rig, as a defect reproduction.",
+      "command": "revert each fix in an out-of-tree copy and run the two named tests; restore",
+      "observed": "Without the failed-init guard, the row for an init container the daemon's own delete killed fails `initFailed = true, want false` and `Displaced = false, want true` on a container terminated `Error, exit code 137`. Without the annotation carry, `the Sandbox this launch created names \"\" as the pod the daemon replaced, want uid-pod-old`. Both pass restored.",
       "headSha": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
-      "negativeControl": "The same command with the branch fetched back into the feed put `b.txt` in the workspace — the branch's own commit — so the deleted-branch run read the deletion rather than never looking for a branch."
-    },
-    {
-      "round": 2,
-      "criterion": "5. A deployment cannot keep sessions as files on a disk that dies with its pod — re-verified at this head, and the runtime's own refusal behind it.",
-      "surface": "The real `legion start --check-config` CLI against the example with its token files, App PEMs and kubeconfig staged, and the real `sandbox.New` entry point for the defence the review added behind it.",
-      "command": "`legion start --check-config` on the example and on five variants; then a program calling `sandbox.New` with an otherwise valid `Options` whose `SessionDSNKey` is empty",
-      "observed": "The example exits 0 (`Config OK: project=WIDGETS`); `pvc`, the key omitted entirely and `Postgres` each exit 1 with the one store message; `postgres` with no `session_dsn_secret` exits 1 naming the key; an empty key exits 1 saying it must not be empty. `sandbox.New` with no key refuses before anything else: `sandbox runtime: no session database URL key: the providers Secret's key holding the postgres:// URL every role's Oh My Pi keeps its session in is required …`, so an `Options` built by hand cannot reach a launch either.",
-      "headSha": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
-      "negativeControl": "The unmodified example exits 0, so the loader's refusal is the store's and not a broken fixture; and the same `Options` with the key named but an unpinned image gives the image's refusal instead, so the key check is what fired in the first case and not a blanket rejection."
+      "negativeControl": "Inverting the guard to `pod.DeletionTimestamp != nil` is caught by four tests, including the row asserting the same container terminating non-zero in a pod nothing is deleting **is** a failed init."
     },
     {
       "round": 1,
-      "criterion": "1. No disk outlives a pod. The disk a pod is given is created with it and deleted with it, at the size and on the storage used today, and it is found by its name, which is the pod's with `-issue` after it, and by its pod owner, since Kubernetes keeps no labels on a disk of this kind.",
-      "surface": "A real Kubernetes cluster. The build namespace this worker pod may submit Jobs to admits exactly the volume shape this change renders for an issue pod — a new filesystem generic ephemeral volume of a scratch storage class whose claim template carries no labels or annotations — so I ran a pod declaring the same `spec.volumes[].ephemeral.volumeClaimTemplate` the goldens show, with the namespace's claim counter as the observation Legion's own tests cannot make. The ephemeral volume the goldens render is unchanged this round, so this proof stands at the new head.",
-      "command": "kubectl apply -f (Job infra-80-disk-cc8c2e: gvisor, one 4-CPU container, one ephemeral 20Gi claim template with empty metadata), then `kubectl get pod -o jsonpath='{.items[0].spec.volumes[0]}'`, `kubectl logs`, the namespace's claim counter polled through the pod's life, and `kubectl delete job`",
-      "observed": "The claim counter went 0 → 1 while the pod was still Pending, so the claim is created with the pod and not with the container. The pod's own spec carried the template back unchanged. At first mount the disk held `lost+found` alone, 19.5G free of a 20Gi claim, and took a 16 MiB write. The counter stayed at 1 after the pod reached Completed, so the claim's life is the pod object's, not the container's — which is why Legion's suspend, which deletes the pod, is what deletes the disk. After `kubectl delete job`, the pod was gone at the first poll and the counter was back to 0 at the next, about one second later; `kubectl get jobs,pods` then showed nothing of the run.",
+      "criterion": "1. The disk is created with its pod and deleted with it, at today's size and storage.",
+      "surface": "A real Kubernetes cluster — the build namespace this worker pod may submit Jobs to admits exactly the volume shape this change renders — running a pod that declares the same `ephemeral.volumeClaimTemplate` the issue goldens show, with the namespace's claim counter as the observation Legion's own tests cannot make. The issue pod's volume block is byte-identical from that head to this one, checked with `jj diff --from b650d854 --to @-` over `podkind.go`, `manifest.go` and all three issue goldens, so the measurement carries.",
+      "command": "`kubectl apply -f` the Job, poll `kubectl get resourcequota … persistentvolumeclaims` through the pod's life, read the pod's own `spec.volumes[0]` and its log, then `kubectl delete job`",
+      "observed": "The claim counter went 0 → 1 while the pod was still **Pending**; the disk came up holding `lost+found` alone with 19.5G free and took a 16 MiB write; the counter **stayed at 1 after the pod reached Completed**, so the claim's life is the pod object's and not the container's; and it was back to 0 about **one second** after the pod was deleted.",
       "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
-      "negativeControl": "The same Job with one label on that claim template, submitted server-side with nothing created: refused by the namespace's admission policy naming the rule. Round 2 reached the same conclusion from the pinned CRD on a real API server.",
-      "doesNotSettle": "That the Agent Sandbox controller hands an ephemeral pod volume through to the pod untouched. The live Stage 4a run against b650d854 answered that question in the affirmative — the claim created by `kube-system:ephemeral-volume-controller` and owned by the pod with `controller: true` — and nothing yet shows the disk going with its pod on a real cluster, which the queued rerun is what settles."
+      "negativeControl": "The same Job with one label on that claim template was refused by the namespace's admission policy naming the rule."
     },
     {
       "round": 1,
-      "criterion": "6. Nothing is left behind at the cutover — the upgrade half: an issue_suspend row the running release queued must still run after the daemon is upgraded.",
-      "surface": "A real PostgreSQL 16, brought up as a workload in the cluster and reached by its Service name from this pod, carrying the daemon's own schema and driven by the daemon's own migration runner and its own enqueue path, with the payload bytes produced by `json.Marshal` of `record.IssueSuspend` exactly as the release before this change declares it. Migration 0051 and `record.IssueSuspend` are untouched this round, so this proof stands at the new head.",
-      "command": "Open the database, migrate it, delete the schema_version row for 51 so it stands where a deployment on the running release stands, enqueue the two rows that release writes, decode each with `record.DecodeOutboxPayload`, then run `store.Migrate` again as the upgrade does and decode again",
-      "observed": "At schema 50 the head binary refuses the releasing row — `decode outbox row 1: json: unknown field \"release\"` — the stall the migration exists to prevent, reproduced rather than argued. The upgrade applied exactly 1 migration. Both rows then decode, and every other column of both — attempts 2, next_at, last_error and created_at — is byte-identical before and after, so a row in the middle of its retry backoff keeps it.",
+      "criterion": "6. The upgrade half of the cutover: an issue_suspend row the running release queued must still run after the upgrade.",
+      "surface": "A real PostgreSQL 16 run as a workload in the cluster, carrying the daemon's own schema, driven by the daemon's own migration runner and enqueue path, with the payload bytes `json.Marshal` produces from `record.IssueSuspend` as the previous release declares it. Migration 0051 and that struct are untouched since.",
+      "command": "migrate; delete the schema_version row for 51; enqueue the two rows that release writes, one mid-retry; decode each; `store.Migrate` again; decode again",
+      "observed": "At schema 50 the head binary refuses the releasing row — `json: unknown field \"release\"` — the stall the migration prevents, reproduced. The upgrade applied exactly 1 migration. Both rows then decode, with attempts, next_at, last_error and created_at byte-identical, so a row mid-retry keeps its backoff.",
       "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
-      "negativeControl": "The keeping row, written without the key, decoded before the migration and was left untouched by it — the `payload ? 'release'` guard selects the rows that need it and nothing else."
+      "negativeControl": "The keeping row, written without the key, decoded before the migration and was untouched by it."
     },
     {
       "round": 1,
       "criterion": "5. No code is left that reuses, repairs or inspects a disk from an earlier pod, with the stale git-lock sweep kept for the retry on the same disk.",
-      "surface": "The tree, plus the one runtime surface where a provision can still meet a non-empty disk — the kubelet restarts a failed init container in the same pod (`RestartPolicy: Always`).",
-      "command": "The deletion grep re-run, then `provision` again into a root it had already provisioned after planting this issue's own production failure signature in the clone: `refs/jj/keep/badref` naming a commit the clone does not hold",
-      "observed": "17 hits, each history, a contract note, a deliberate statement that the thing is gone, or a negative assertion in the live proofs. With the planted bad ref, provision exits 1 in 0.98 s with `fatal: bad object refs/jj/keep/badref` — no repair attempted, no hang, no half-success, which is what leaves the pod replaceable.",
+      "surface": "The tree, plus the one runtime surface where a provision can still meet a non-empty disk: the kubelet restarts a failed init container in the same pod.",
+      "command": "the deletion grep, then `provision` into a root it had already provisioned after planting this issue's own production failure signature (`refs/jj/keep/badref`)",
+      "observed": "17 hits, all history or negative assertions. With the planted bad ref, provision exits 1 in 0.98 s with `fatal: bad object refs/jj/keep/badref` — no repair attempted, no hang, which is what leaves the pod replaceable.",
       "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
-      "negativeControl": "With four stale git locks planted instead, the same command removed each by name and exited 0 — the sweep that must stay works, the repair that must be gone is gone."
+      "negativeControl": "With four stale git locks planted instead, the same command removed each by name and exited 0."
+    }
+  ],
+  "coverageInventory": {
+    "question": "For each behaviour this change inverts in the live Stage 4a proof, what covers it without a cluster, what run #1 already covered, and what only a live run can show. Asked by the architect at 10:33Z because the rerun may not happen before the merge.",
+    "provenWithoutACluster": [
+      "The rendered pod's shape survives the API server, not merely a golden: the issue pod's disk is an ephemeral claim template with empty metadata and its Sandbox owns none, accepted unchanged by a real kube-apiserver v1.37 against the pinned CRD, with a labelled template pruned and `volumeClaimTemplates` refused as immutable (round 2 proof, re-run this round with the controller goldens).",
+      "A generic ephemeral claim of this shape is created with its pod, outlives the container, and is reaped about a second after the pod object goes — measured on a real cluster of this deployment, on the same storage class (round 1 proof). This is the Kubernetes mechanism the change rests on; what it does not include is Legion's own pod creating it.",
+      "A deployment cannot configure the file session store, at the loader and again at `sandbox.New` (rounds 2 and 3).",
+      "An issue whose branch was merged and deleted provisions onto the default branch, on the real binary and a real repository (every round).",
+      "**No lost-volume line anywhere in the daemon's log.** This one can be moved out of the live-only group outright: the code that wrote it is deleted, which the deletion grep and its negative control show. A live run can only fail to observe a line nothing can emit; the tree is the stronger evidence, and the live assertion is a belt on braces."
+    ],
+    "coveredByLiveRunOne": [
+      "The Agent Sandbox controller passes a generic ephemeral pod volume through untouched: the claim `<pod>-issue` created by `kube-system:ephemeral-volume-controller`, owned by the pod with `controller: true`, differing from the template only in the defaulted `volumeMode: Filesystem`. I checked the architect's caveat myself: the issue pod's volume block is byte-identical between `b650d854`, the head that ran, and this head — `podkind.go`, `manifest.go` and all three issue goldens — so the observation carries."
+    ],
+    "liveOnlyAndUnproven": [
+      "**The disk actually going when Legion's pod goes.** Both halves are observed — the claim is pod-owned with `controller: true` (run #1) and a pod-owned claim of this shape is reaped about a second after its pod (round 1, real cluster) — and Kubernetes' garbage collector follows exactly that ownership. What no evidence here composes is the two in one run on Legion's own pod. Judge it as a composition of two observed facts rather than an open question, which is weaker than a live run and much stronger than nothing.",
+      "**A re-admitted issue coming back on a disk of its own**, in the sense the check makes: two claim uids compared across a pod replacement. Nothing without a cluster can produce a claim uid. The half that is covered is that the replacement pod is created and provisions its workspace afresh (the relaunch tests, and `workspace-init provision` on the real binary).",
+      "**The orphan sweep taking the swept issue's disk.** Same structure as the first: the sweep deleting the issue's Sandbox and pod is covered by the package's tests; the disk following the pod is the mechanism measured in round 1; the composition is unobserved.",
+      "**A kept pod keeping the same disk** (`kill-launcher`): the package tests cover that a launcher kill does not replace the pod, and the disk's identity follows from the pod not being replaced, but the uid equality itself is live-only."
+    ],
+    "couldBeProvenHereButIsNot": "One, and I closed it rather than report it: the uid comparison in the displacement window's stand-in (see `addedTest`). Nothing else in the seven is reachable here and left unreached."
+  },
+  "findingsNotFailures": [
+    {
+      "what": "`docs/kubernetes.md:1316`, step 9 of the cutover this change writes: `kubectl -n legion get pvc -l legion.dev/project=<PROJECT>`, with the sentence that it \"answers this question with silence whether the cutover worked or not\".",
+      "evidence": "The label's value is the project token, not the project key: `bootreads.go:41` passes `claim.ProjectToken(cfg.Project)` into the runtime, and `claim/token.go` lower-cases and strips non-alphanumerics, so an operator substituting `INFRA` as the upper-case placeholder invites selects nothing — and the page pre-explains that silence as the expected outcome. The same page writes `<project>` lower-case at :1148, :1262 and :2825, and `legion.dev/issue=<KEY>` and `legion.dev/tree=<ROOT ISSUE>` are correctly upper-case (`labelValue`, names.go:273), so the two label families genuinely differ and a blanket sweep would break three working commands. Second, and not in the architect's report: with the **correct** value the command does not answer with silence either — each repository cache's claim template carries `legion.dev/project` (`repocache.go:96,116`) and, under `controller: daemon`, so does the controller's (`podkind.go:304`), so it returns exactly the exception claims step 9 then asks the operator to recognise.",
+      "verdict": "A finding to fix in this pull request, not a round failure, and that judgement is mine as the architect asked at 10:33Z. The step's actual audit instrument is the `jq` over every claim by owner that follows, which carries no label selector and is unaffected; no operator action goes wrong, and the wasted command costs one line. It is a sentence of explanation that is wrong in two ways, which is a fix of one placeholder and one clause, not a test round. I wrote no test for it: a test over documentation prose is the kind of source-text assertion that should not be pinned."
     }
   ],
   "ciAtCodeHead": {
-    "head": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
-    "read": "2026-10-25T08:30:00Z",
+    "head": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
+    "read": "2026-10-25T10:30:00Z",
     "runs": [
-      "Tests run 40176152122 — in progress",
-      "Worker Image run 40176152075 — in progress",
-      "Docs run 40176152141 — queued",
-      "Legion Envoy and Contracts run 40176152234 — queued",
-      "PR Title run 40176254693 — success (run 40176152229 was cancelled and re-run as that one)"
+      "Tests run 40184664328 — queued",
+      "Worker Image run 40184664385 — in progress",
+      "Docs run 40184664358 — queued",
+      "Legion Envoy and Contracts run 40184664408 — queued",
+      "PR Title run 40184899682 — queued"
     ],
-    "note": "Read, not re-run; I waited for no lane. These are the pull request's first runs since the review, because a conflicting pull request starts no `on: pull_request` run at all and the head before the forward merge was never judged. Lint, types and every unit and integration suite are CI's, including the daemon packages this pod cannot run and the daemon tests the spec names as acceptance 3's proof. The one `go test` I ran was the defect reproduction above, on a reverted copy outside the tree, not a lane re-run."
+    "note": "Read, not re-run; I waited for no lane. The previous round's critical finding was the required `lint` lane red at e4f7f42e on a Biome formatter error; the fix is in this round's first commit and this head's lanes are the judge of it. My own regression-lock commit sits above this head, so CI runs again on it; the `Tests` lane is where that commit and the implementer's inherited skills-guard question are both decided. The one `go test` I ran was the defect reproduction and the lock, on a copy outside the tree, not a lane re-run."
   },
-  "notReachedHere": [
-    "The seven inverted Stage 4a per-check assertions — `suspend`, `cleanup-reaps-the-issue`, `issue-suspend-resume`, `re-adopt`, `secrets-old-uid-and-revocation`, `displaced`, `kill-launcher` — are **unrun, not passing**. The live run against b650d854 died at `root-ready` on the marker path before reaching them; that cause is fixed at this head and a rerun is arranged with the deployment owner. Until it reports, nothing in this pull request shows an issue's disk going with its pod on a real cluster.",
-    "Stage 4b has run at no head at all. Its harness no longer asserts behaviour this change replaced, but a harness that compiles is not a harness that has run.",
-    "Acceptance 4 — an agent carrying on from the session database into a replacement pod — needs a Legion daemon against a cluster running the Agent Sandbox controller, which no worker pod can reach.",
-    "Acceptance 3's three cases (a paused issue, an issue handed to a new tree, an issue whose pod dies mid-turn) are daemon-level orchestration the spec itself names daemon tests as the proof of; they run in CI's Tests lane.",
-    "Acceptance 6's cutover and the six named issues — a person's reading of a deployment."
-  ],
   "residualRisks": [
-    "An issue pod's name is stable, so its generic ephemeral claim is always named `<pod>-issue`; a replacement pod created before the predecessor's claim is reaped stays Pending until it is. Measured on a real cluster in round 1: about one second from the pod's deletion to the claim leaving the namespace's quota, against a 120 s boot timeout, with `waitedOut` now printing a Pending pod's events. Accepted as a risk by the architect.",
-    "Every pod start depends on the repository cache; a production check's wake up to fourteen days after the merge may find it swept. The provision itself is cheap — 4.8 s and 148 MB for sjawhar/legion from a local feed, against a 30-minute CloneTimeout."
+    "An issue pod's name is stable, so its ephemeral claim is always `<pod>-issue`; a replacement pod created before the predecessor's claim is reaped stays Pending until it is. Measured at about one second on a real cluster against a 120 s boot timeout, with `waitedOut` printing a Pending pod's events. Accepted as a risk by the architect.",
+    "A daemon that restarts inside the gap a migrating replacement opens has neither the Sandbox nor the runtime's kept name, and reads those roles' ends as deaths. The code says so in `replaceSupersededSandbox`'s own comment; the window is one delete-and-create of the cutover launch, and no test covers a daemon restart inside it because nothing here can restart a daemon mid-launch."
   ],
   "observations": [
-    "Correction to round 1, mine to make: I wrote that a label on the ephemeral claim template is pruned by the API server \"without a word\", repeating `podkind.go`'s comment. On a real API server the create returns 201 with the field dropped **and** a `warning: 299` header naming it, which the daemon's dynamic client receives and does not surface. The conclusion — no labels on the disk, so it is found by name and pod owner — is unchanged.",
-    "The reviewer's `Look at first` line in the pull request body still names `sandbox.go:255-280` as \"the file-session mode the config now refuses is still live in the runtime\", which this round deleted; it is the reviewer's line to rewrite at the head it reviews next, not mine.",
-    "The body's three unproven claims are stated at their real strength — the seven Stage 4a checks as \"unrun, not passing\", Stage 4b as never run, and the pass-through as answered by the first run with the disk's deletion still unshown. I checked each against the architect's instruction and found no line overstating them."
+    "The three repository files the sandbox package's tests read by relative path (`deploy/kubernetes/operator-route/pod.yml`, `packages/contracts/fixtures/dispatch-public-url.json`, `docs/kubernetes.md`) make the package unrunnable from a copy of `packages/daemon` alone. Not a defect — nothing runs it that way but a tester — but it is why my round-2 mutation evidence named a FAIL I could not attribute, and why this round I symlinked them beside the copy before trusting any mutation result.",
+    "Round 1's correction still stands: a label on the ephemeral claim template is pruned **with** a `warning: 299` header the daemon does not surface, so `podkind.go`'s \"without a word\" is one word too strong."
   ]
 }
