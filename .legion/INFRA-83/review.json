@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-83",
+  "completed": "2026-10-25T12:40:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "round": 16,
+  "kind": "full round: the fifth forward merge changed the fingerprint, so the head was judged as new work rather than confirmed",
+  "keyFindings": [],
+  "fingerprint": {
+    "mine": "Computed at both of my own heads with the committed command, after a fetch: 61c46e8da4d5807b6ff74b21d4df2c4246cd6a7d3d657cc3f68451a7bc360bec at my last submitted review's commit_id a54b78268dc7fcccbfc49a7b5045712b800883e1, and b40053c5b2f37a41b50dd35b40a9bab58cf85a73b77a63047d57a46618df6588 at the head. Different, so a full round with the pair again. Retro's two commits are invisible to it by design, since the recipe excludes .legion and docs/solutions, which is why the movement is the merge's alone."
+  },
+  "theMerge": {
+    "commit": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
+    "whatMainDid": "sjawhar/legion#2192 moved the architect skill's whole Wake routing table out of skills/legion-architect/SKILL.md into a new references/wake-routing.md to fit the size guard - the seam I named as a risk in rounds nine to fifteen, closed by main rather than by this branch. This branch had compressed four merge-notice rows of that table, added a merge-waiting row and added the pointer paragraph to references/merge-notices.md.",
+    "resolution": "Both sides survive and the table moved whole. The merged skill keeps main's three-line pointer at :429-433 and carries nothing of the table; the new reference carries every row, this branch's four compressed ones and its merge-waiting row among them, with the pointer paragraph to merge-notices.md above the table where this branch put it. merge-notices.md itself survives with its four anchored sections. I ran the guard rather than reading the links: bun test src/skills-guard.test.ts in packages/pi-legion is 11 pass, 0 fail, 23 expect() calls, and its brokenSkillLinks case validates both the file and the heading of every skill:// anchor, so the merge-notices anchors still resolve from their new home. The generated claude-envoy copies moved with them as a rebuild.",
+    "sizeNowSettled": "skills/legion-architect/SKILL.md is 33,662 bytes against the guard's 51,200, where it was 49,883 before the move. The risk bullet I had carried since round nine - that the next notice kind added to that table would truncate the architect's own skill read - is retired by this merge, and I corrected the bullet rather than leaving a stale number in the record."
+  },
+  "retro": {
+    "commits": "b967b376bb9b1567a4ad98989cccead1ec16d2f6 added docs/solutions/legion/a-record-is-true-when-written-and-read-later-so-pin-each-claim-to-a-command-or-delete-it-INFRA-83.md, and 05cd4b22e34c353bb34a3dad2895bd2bca2b5f94 removed .legion/INFRA-83/ and nothing else. The two handoff commits since have re-created implement.json and test.json, which is expected: the issue came back through implementing after retro, and retro removes the directory again before READY, which would otherwise be refused READY_HEAD_CARRIES_HANDOFFS.",
+    "learningRead": "I read the learning rather than taking its summary. It names the CI line twice, at :50 and :89, and both describe the deletion rather than instructing anyone to write one, so it rightly carries no supersede note under the architect's round-four rule."
+  },
+  "whatIVerifiedMyself": [
+    "Both fingerprints at my own two heads.",
+    "The table move by running the guard that validates every skill:// anchor's file and heading, rather than by reading the links, plus the row census of the merged reference.",
+    "The architect skill's new size, which retires a risk bullet of mine rather than leaving its number to rot.",
+    "Deletion survival after a fifth merge: no instruction anywhere to write, fill, cite or update a pull request body CI line; the retired phrases only inside prompts_test.go's own list; no conflict marker.",
+    "The two record claims below, each measured rather than relayed: the pinned sentence is 187 characters and the guard does name both files my own bullet said nothing held in sync, and the new learning does contain CI-line references though none instructs.",
+    "I read the required checks of the code commit on GitHub myself before approving and carry no verdict or run id forward as what the head holds now: the required set is lint, typecheck, test and pr-title with no branch-protection checks, every required name's newest run at the code commit had completed and succeeded when I read it, nothing there was failed, cancelled or timed out, the only lane still running was the non-required dispatch check, and the compare from that commit to the head I approve returned handoffsOnly true over two files."
+  ],
+  "recordCorrections": {
+    "mine": "Two of my own Not proven / risk bullets were false at this head and are corrected in this round's body edit rather than left for the merger to quote. The architect-skill headroom bullet named 49,883 bytes and one row of headroom, both overtaken by main's move. The duplicated-sentence bullet said no guard holds the two copies in sync, which contradicts itself: the sentence it names is the pinned one, and skills-guard.test.ts names both legion-worker/SKILL.md and references/skip-checks-trailer.md among the five texts it requires to carry it exactly once. What is true and now says so is that the pin holds that one sentence and nothing holds the prose around it. Its character count was 186 and is 187.",
+    "theTesters": "The round-16 tester block and .legion/INFRA-83/test.json say the new learning carries no CI-line reference of any spelling; it carries two, at :50 and :89. The deletion itself survives and neither reference instructs, so the implementation is right and the justification is not. Named here for retro's body pass rather than carried as a finding, since it is the tester's line and the conclusion does not move."
+  },
+  "approval": {
+    "head": "324a245b8cd107087d75393106def47191a0af70",
+    "codeHead": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
+    "why": "No finding stands and both thermonuclear halves returned APPROVE at this head with a body and a verdict line on the first invocation. The fifth forward merge moved a table this branch had edited into a new file and took no row with it; retro's commits are what retro's commits may be; and the largest structural change main has made to a file this branch edits closed a risk this review had carried for seven rounds."
+  },
+  "thermonuclear": {
+    "head": "324a245b8cd107087d75393106def47191a0af70",
+    "deepReview": "APPROVE at 324a245b, body on the first invocation. It censused every row of the table at the merge base, both parents and the merged head, found none dropped, duplicated or reworded, and raised the record inaccuracies carried above - two of them mine, which is the value of asking it to attack the body as well as the diff.",
+    "codeQuality": "APPROVE at 324a245b, body on the first invocation. No findings; it measured the three architect documents against the guard's thresholds, confirmed the bundle is byte-identical to its source, and traced the retained symbols rather than reading a lost caller as dead code.",
+    "perHalf": "Both halves returned a body with a verdict line on their first invocation. Neither needed a re-run."
+  },
+  "fastFollow": [
+    "waitingOnGitHub and routineWait disagreeing by one term with neither doc naming the other; the merge-waiting remedy enumeration omitting the Unmergeable states a person must end; readyMerge's first switch arm duplicating its third; tools.test.ts hardcoding the daemon's note; the Size line's claim to have been re-read at a head it cannot have been; the literal pin forcing a 187-character line in three documents; the CI-line guard's re- lookbehind; neither guard reading docs/solutions; classify.Judge's lost external caller; the readyChecks name; the compare command hand-maintained in two files; a content edit made inside a forward-merge commit being invisible to a parent-against-parent read; and the fingerprint account's command and numbers coming from different runs.",
+    "New this round, for retro's body pass: the tester's no-CI-line-reference claim about the new learning, and the body's remaining present-tense briefing claims the deep-review half lists - the file census, the role-prompt characterisation, and the sentence calling the new timer the only elapsed-time notice, which the stalled-merge path has measured all along."
+  ],
+  "threads": {
+    "onGitHub": 15,
+    "resolved": 15,
+    "answeredByMe": 15,
+    "botThreadsAdjudicated": 0,
+    "note": "Counted at the forge, none unresolved and none awaiting my answer. Rounds twelve to sixteen opened no thread, their findings naming lines that carry no diff row. No bot has opened a thread on #2121."
+  }
+}
