@@ -43,14 +43,21 @@ const REFUSAL: GateEntry = {
 
 /** The Dispatch a record is written to: what each call was given, and what it answers. */
 function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
-  const uploads: Array<{ project: string; name: string; content: string }> = [];
-  const edits: Array<{ id: string; op: string; markdown: string; after?: string }> = [];
+  const uploads: Array<{ project: string; name: string; content: string; actor?: unknown }> = [];
+  const edits: Array<{
+    id: string;
+    op: string;
+    markdown: string;
+    after?: string;
+    actor?: unknown;
+  }> = [];
   const client: RecordClient = {
     projectArtifact: async (project, input) => {
       uploads.push({
         project,
         name: input.name,
         content: "content" in input ? input.content : "",
+        actor: input.actor,
       });
       return answers.projectArtifact
         ? await answers.projectArtifact(project, input)
@@ -58,7 +65,13 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
     },
     docEdit: async (document, input) => {
       for (const op of input.ops)
-        edits.push({ id: document, op: op.op, markdown: op.markdown ?? "", after: op.after });
+        edits.push({
+          id: document,
+          op: op.op,
+          markdown: op.markdown ?? "",
+          after: op.after,
+          actor: input.actor,
+        });
       return answers.docEdit
         ? await answers.docEdit(document, input)
         : { applied: input.ops.length };
@@ -108,6 +121,8 @@ describe("the AskGate decision record", () => {
     expect(await g.write(REFUSAL)).toBeUndefined();
     expect(dispatch.uploads).toHaveLength(1);
     expect(dispatch.uploads[0]?.project).toBe("INFRA");
+    // A bearer caller that names no session of its own is refused ACTOR_KIND by Dispatch.
+    expect(dispatch.uploads[0]?.actor).toEqual({ kind: "session", id: SESSION });
     expect(dispatch.uploads[0]?.name).toBe(DOCUMENT);
     const content = dispatch.uploads[0]?.content ?? "";
     expect(content).toStartWith(`AskGate rule decisions of session ${SESSION}, made on `);
@@ -123,6 +138,7 @@ describe("the AskGate decision record", () => {
         op: "insert",
         after: "end",
         markdown: expect.stringContaining('"rule":null') as unknown as string,
+        actor: { kind: "session", id: SESSION },
       },
     ]);
     expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toHaveLength(1);

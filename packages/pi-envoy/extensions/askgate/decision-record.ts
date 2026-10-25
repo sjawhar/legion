@@ -174,9 +174,13 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
     const write = async (): Promise<string | undefined> => {
       const dispatch = deps.dispatchClient(directory, signal);
       if (dispatch === undefined) return "the session has no Dispatch configuration";
+      // A bearer caller names its own session or Dispatch refuses the write (ACTOR_KIND, "bearer
+      // callers require actor.kind session"); the `dispatch` command names it the same way.
+      const actor = { kind: "session", id: sessionId } as const;
       if (held !== undefined) {
         await dispatch.client.docEdit(await held, {
           ops: [{ op: "insert", markdown: block, after: "end" }],
+          actor,
         });
         return undefined;
       }
@@ -188,6 +192,7 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
             `AskGate rule decisions of session ${sessionId}, made on ${where} (source ` +
             `\`${source}\`). One fenced block per decision follows, each holding one JSON ` +
             `record.\n\n${block}\n`,
+          actor,
         })
         .then((answer) => answer.artifact.id);
       // Held before it answers, so a second decision of the same session appends to this document
