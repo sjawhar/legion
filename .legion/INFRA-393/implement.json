@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-393",
+  "completed": "2026-10-25T20:20:00Z",
+  "proof": [
+    {
+      "criterion": "A setting chooses where Dispatch reaches the model: Bedrock (unchanged for a deployment that sets nothing new) or Azure AI Foundry, with its endpoint and credential as settings",
+      "surface": "real envoy-dispatch binary built from the head, on a Postgres 17.11 + pgvector 0.8.0 database it migrated itself, in the issue pod, with the environment packages/dispatch/e2e/run-server.sh sets plus the embedder settings",
+      "command": "envoy-dispatch settings; boot with no new settings and no AWS region; boot with DISPATCH_EMBEDDER=azure, DISPATCH_AZURE_EMBED_ENDPOINT=<resource>/models, DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE=1000000 and the keyless trio (pod's projected service-account token); curl -H 'Authorization: Bearer e2e-token' http://127.0.0.1:8793/api/v1/search/coverage",
+      "observed": "settings lists DISPATCH_EMBEDDER and every DISPATCH_AZURE_* row; default boot logs 'meaning search unavailable … needs an AWS region' and coverage reports identity/place/model null; Azure boot logs 'meaning search embeds through Azure AI Foundry place=azure credential=keyless' and coverage reports place azure, model embed-v-4-0",
+      "headSha": "97c2901caff2097431db6fe6cc8e0c941a42bbbc",
+      "negativeControl": "DISPATCH_EMBEDDER=azure with no endpoint → exit 1 'DISPATCH_AZURE_EMBED_ENDPOINT is required when DISPATCH_EMBEDDER is azure'; both credential forms → exit 1 'DISPATCH_EMBEDDER=azure takes one credential, and both are set'"
+    },
+    {
+      "criterion": "On Azure it is Cohere Embed v4 at 1536 dimensions with search_document/search_query input types; each place has its own model name, batch size, throttles and token budget",
+      "surface": "same running server against the live Azure deployment; direct calls to the same deployment through the pod's Entra exchange for comparison",
+      "command": "psql: select vector_dims(embedding), model from embeddings; python3 direct.py (stored issue-title vector vs a direct 'document' and a direct 'query' embedding of the same title)",
+      "observed": "every stored vector 1536 wide under identity azure:<host>/embed-v-4-0; cosine 0.999905 to the document embedding and 0.826729 to the query embedding, so input_type is honoured",
+      "headSha": "97c2901caff2097431db6fe6cc8e0c941a42bbbc",
+      "negativeControl": "the same title embedded as document twice → cosine 1.000000"
+    },
+    {
+      "criterion": "Each vector records the model and place that made it; search never compares a query with a vector of another model, and the queue embeds such items again",
+      "surface": "same running server; one comment's row seeded with a random vector recorded as us.cohere.embed-v4:0 before the Azure boot",
+      "command": "boot Azure; read the coverage pass log line and coverage route; psql select model from embeddings",
+      "observed": "coverage pass logged foreignVectorsDropped=1; that comment ended current under the Azure identity with a 1536 vector; coverage current 10 of 10",
+      "headSha": "97c2901caff2097431db6fe6cc8e0c941a42bbbc",
+      "negativeControl": "api test TestSearchNeverRanksAVectorOfAnotherIdentity: a wrong-identity vector more similar to the query than the right one never appears as a meaning hit"
+    },
+    {
+      "criterion": "The server embeds everything after boot, items written before the triggers included, with no person-run command; backfill-embeddings goes; Dispatch reports lacking and failed counts",
+      "surface": "same running server; 1 issue and 1 comment inserted with session_replication_role = replica (no queue row)",
+      "command": "curl …/api/v1/search/coverage | jq -e '.total.items > 0 and .total.current == .total.items and .total.lacking == 0 and .total.failed == 0 and .total.oldest_lacking_seconds == null'",
+      "observed": "first reads current 7 / lacking 3 / oldest 6-8 s, then current 10 / lacking 0 / failed 0 / oldest null within about 6 s; jq prints true; the 3 empty issue specs are not items and are settled with no vector, not dead",
+      "headSha": "97c2901caff2097431db6fe6cc8e0c941a42bbbc",
+      "negativeControl": "envoy-dispatch backfill-embeddings → exit 2 'unknown subcommand \"backfill-embeddings\"; the subcommands are …'"
+    },
+    {
+      "criterion": "A 32,000-character comment or message body is embedded whole",
+      "surface": "same running server; a 32,000-character body (2,000 characters about bread, 30,000 about volcanoes) posted as a comment and as a message through the API",
+      "command": "python3 direct.py (stored vectors vs a direct embedding of the first 2,000 characters alone and of the whole body); GET /api/v1/search?q=hot liquid stone pouring out of a peak",
+      "observed": "both writes 201 and current; cosine 0.585487 to the head alone and 1.000000 to the whole body (7,171 prompt tokens); the query, sharing no word with any item, returned exactly that comment and that message",
+      "headSha": "97c2901caff2097431db6fe6cc8e0c941a42bbbc",
+      "negativeControl": "the head alone embedded twice → cosine 1.000000; the same query on a server whose embedder is down → 0 results"
+    },
+    {
+      "criterion": "When the model service fails, search answers by words and says so, and the write succeeds and is embedded later",
+      "surface": "same server restarted with a wrong Entra client id, then with the right one",
+      "command": "GET /api/v1/search; dispatch search --query irrigation (DISPATCH_URL at the local server); POST /api/v1/issues/LIVE-3/comments; coverage route; restart with the right id",
+      "observed": "degraded: embedder_unavailable; the CLI printed 'Searched by keyword only: meaning search was unavailable for this request.'; the comment POST answered 201 and coverage showed lacking 1, failed 0; after the restart the comment became current and the CLI printed no keyword-only line",
+      "headSha": "97c2901caff2097431db6fe6cc8e0c941a42bbbc",
+      "negativeControl": "with the right client id the same search answered degraded null"
+    },
+    {
+      "criterion": "gcp:Dispatch takes the Azure endpoint and the credential or federation audience and gives them to the Dispatch container",
+      "surface": "the component's Pulumi mock tests and rendered pod goldens; the pod token's claims for the issuer output",
+      "command": "cd packages/envoy/infra && go test ./gcp/... ./provider/... -count=1 (e2fsprogs on PATH for the data-disk tests); decoded this pod's projected token and compared iss with the federated identity's audience",
+      "observed": "ok gcp, ok provider; dispatch-pod-with-azure-key.golden and dispatch-pod-with-azure-federation.golden carry the env, CSI or projected volume; existing goldens unchanged; the live token's iss has the https://container.googleapis.com/v1/projects/<p>/locations/<l>/clusters/<c> form serviceAccountIssuer outputs",
+      "headSha": "97c2901caff2097431db6fe6cc8e0c941a42bbbc",
+      "negativeControl": "refusal table: endpoint without quota, both credential forms, a partial keyless pair, any Azure input without the endpoint each refuse construction and register nothing"
+    },
+    {
+      "criterion": "The proof still holds at the head that merges, after the forward merge of main (#2187 removed the shared secrets-broker bearer the branch had touched)",
+      "surface": "the same real envoy-dispatch binary rebuilt at the merge head, same database, live Azure deployment, keyless",
+      "command": "go test ./cmd/dispatch/... ./internal/dispatch/embed/... ./internal/dispatch/embedqueue/... and infra ./gcp/... ./provider/...; boot Azure; POST a comment; curl …/api/v1/search/coverage | jq -e '.place == \"azure\" and .total.current == .total.items and .total.lacking == 0 and .total.failed == 0 and .total.oldest_lacking_seconds == null'; GET /api/v1/search?q=hot liquid stone pouring out of a peak",
+      "observed": "all tests ok; the new comment became current within one scan (items 12, current 12); jq printed true; the no-shared-word query returned the 2 long bodies with degraded null",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "the same binary with a wrong Entra client id → the same query answered degraded embedder_unavailable with 0 results; fingerprint e9e8efec… → fa755564… (changed, posted on the pull request), so the tester's round runs whole"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/embed/{embed,bedrock,azure,azuretoken,ratelimit}.go and tests, embedtest/embedtest.go",
+    "packages/envoy/cmd/dispatch/{embedder,settings,main,subcommands}.go and tests",
+    "packages/envoy/internal/dispatch/store/migrations/0117_embeddings_pending_since.{up,census}.sql, 0118_drop_embeddings_backfill_progress.{up,census}.sql, store test",
+    "packages/envoy/internal/dispatch/embedqueue/{queue,coverage,canary}.go and tests (queue_index_test.go deleted with pendingStatusQuery)",
+    "packages/envoy/internal/dispatch/api/{search,search_coverage,routes_table,server}.go and tests; internal/dispatch/model/model.go",
+    "packages/contracts/src/dispatch-api.ts, packages/contracts/CHANGELOG.md",
+    "packages/envoy/infra/gcp/{dispatch,dispatch_cloud,dispatch_kube}.go, tests, two new goldens; infra/provider/provider_test.go",
+    "docs: packages/envoy/cmd/dispatch/{README,AGENTS}.md, packages/envoy/{AGENTS,CHANGELOG}.md, packages/envoy/infra/{README,AGENTS}.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/scripts/searchbench.sh, .github/scripts/check-body-embed-limit.sh"
+  ],
+  "trickyParts": [
+    "Census files 0117 and 0118 answer select 0, not the row counts the plan named: a non-zero census refuses the deploy (cmd/dispatch/README.md 'Pre-deploy census'), and neither migration loses or rewrites a value anything reads.",
+    "Azure answers HTTP 500 to an empty input (INFRA-399's tester) and every new issue's spec is an empty document: scanPending settles a text with no non-space character with no model call, the coverage pass settles such a row left dead, and coverage counts only items with text to embed. repairStale still reaches an item whose text became empty with triggers off, so its old vector goes.",
+    "The meaning candidate CTEs now order by the bound $9::vector instead of q.qvec: the old form never used the HNSW index (the old index test ran copied SQL); search_index_test.go now explains the real statement and asserts embeddings_cosine filtered on model.",
+    "The coverage pass takes no lease; every step is idempotent and safe beside another process's pass (two concurrent passes tested). Two processes configured with different embedders keep dropping each other's vectors, which the docs state.",
+    "Live proof ran keyless only: local auth is off on the Azure resource, so the key form is proven by httptest tests alone (as INFRA-393's planner directed)."
+  ],
+  "deviations": [
+    "Plan Decision 10 named census counts; the censuses answer 0 (above).",
+    "Plan Decision 8 extended: texts with nothing to embed are settled, not embedded (the INFRA-399 500 finding; the planner proposed this shape on 2026-10-25).",
+    "search.go's candidates use the bound vector directly to reach the HNSW index (beyond the plan's filter-only change)."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Inputs over about 125,580 tokens are cut silently by the Azure deployment; maxInputChars (32,000 runes, about 7,200 tokens measured) keeps every request far below that."
+  ]
+}
