@@ -3,10 +3,11 @@ import { describe, expect, test } from "bun:test";
 import {
   AGENT_STREAM_LIMITS,
   AGENT_STREAM_TRUNCATION_SUFFIX,
+  AGENT_STREAM_WATCH_TTL_MS,
   type AgentStreamFrame,
 } from "@legion/contracts";
 
-import { AgentStreamPublisher } from "./agent-stream";
+import { AgentStreamPublisher, type AgentStreamSettingsState } from "./agent-stream";
 
 const SUBJECT = "agentstream.s1.frames";
 
@@ -354,6 +355,151 @@ describe("AgentStreamPublisher", () => {
       frame?.kind === "commands" &&
         frame.commands.some((command) => command.name === "after-the-cap")
     ).toBe(false);
+  });
+});
+
+// The live view's header shows what the last `settings` frame says: it must reach a viewer who
+// opens the session after the settings were read, survive a full history and the longest command
+// list, and change only when the session's model or thinking level does.
+describe("the session's settings", () => {
+  const settings: AgentStreamSettingsState = {
+    model: "anthropic/claude-opus-5",
+    models: ["anthropic/claude-opus-5", "openai/gpt-5.5"],
+    reported: true,
+    thinking: { level: "auto", levels: ["off", "auto", "low", "high"] },
+  };
+
+  test("are published only when they change, and only while a viewer is attached", () => {
+    const { advance, published, publisher } = harness();
+    publisher.setSettings(SUBJECT, settings);
+    expect(published).toEqual([]);
+
+    publisher.noteViewer();
+    publisher.setSettings(SUBJECT, settings);
+    publisher.setSettings(SUBJECT, { ...settings, model: "openai/gpt-5.5" });
+    publisher.setSettings(SUBJECT, { ...settings, model: "openai/gpt-5.5" });
+    publisher.setSettings(SUBJECT, { ...settings, model: "openai/gpt-5.5", thinking: null });
+    expect(published).toEqual([
+      {
+        kind: "settings",
+        model: "openai/gpt-5.5",
+        models: ["anthropic/claude-opus-5", "openai/gpt-5.5"],
+        reported: true,
+        seq: 2,
+        thinking: { level: "auto", levels: ["off", "auto", "low", "high"] },
+        v: 1,
+      },
+      {
+        kind: "settings",
+        model: "openai/gpt-5.5",
+        models: ["anthropic/claude-opus-5", "openai/gpt-5.5"],
+        reported: true,
+        seq: 3,
+        thinking: null,
+        v: 1,
+      },
+    ]);
+
+    advance(AGENT_STREAM_WATCH_TTL_MS);
+    publisher.setSettings(SUBJECT, { reported: false });
+    expect(published).toHaveLength(2);
+    // What changed unwatched is what the next viewer is answered with.
+    publisher.noteViewer();
+    expect(publisher.replay("s1").frames).toEqual([
+      { kind: "settings", reported: false, seq: 4, v: 1 },
+    ]);
+  });
+
+  test("name a model exactly as the host does, however long its id", () => {
+    const { published, publisher } = harness();
+    const long = `custom/${"x".repeat(AGENT_STREAM_LIMITS.modelChars * 2)}`;
+    publisher.noteViewer();
+    publisher.setSettings(SUBJECT, { ...settings, model: long, models: [long] });
+
+    expect(published.at(-1)).toMatchObject({ model: long, models: [long] });
+  });
+
+  test("ride in every replay after the history and before the commands, which stay last", () => {
+    const { publisher } = harness();
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    publisher.setCommands(SUBJECT, [{ name: "model", source: "builtin" }]);
+    publisher.setSettings(SUBJECT, settings);
+    publisher.noteViewer();
+
+    const { frames } = publisher.replay("s1");
+    expect(frames.map((frame) => frame.kind).slice(-3)).toEqual([
+      "message",
+      "settings",
+      "commands",
+    ]);
+    expect(frames.at(-2)).toMatchObject(settings);
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+  });
+
+  // A deployment's catalog is a few hundred models; 5,000 ids of about fifty bytes each is the
+  // bound the replay budget is sized for, beside a command list at every cap made of escaped text.
+  test("keep 5,000 models whole beside the longest escaped command list, inside the replay budget", () => {
+    const { published, publisher } = harness();
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    const escaped = "\u0001".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars);
+    const commands = Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+      description: escaped,
+      name: `c-${index}-${"\\".repeat(AGENT_STREAM_LIMITS.commandNameChars - 8)}`.slice(
+        0,
+        AGENT_STREAM_LIMITS.commandNameChars
+      ),
+      source: "extension" as const,
+    }));
+    const models = Array.from(
+      { length: 5_000 },
+      (_, index) =>
+        `provider-${index % 7}/model-${String(index).padStart(5, "0")}-preview-2026-10-25`
+    );
+    publisher.noteViewer();
+    // The commands first, filling the budget alone; the settings then take their room from them.
+    publisher.setCommands(SUBJECT, commands);
+    publisher.setSettings(SUBJECT, { ...settings, models });
+
+    const { frames } = publisher.replay("s1");
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+    const replayedSettings = frames.at(-2);
+    const replayedCommands = frames.at(-1);
+    expect(replayedSettings?.kind === "settings" && replayedSettings.reported).toBe(true);
+    expect(
+      replayedSettings?.kind === "settings" && replayedSettings.reported && replayedSettings.models
+    ).toEqual(models);
+    expect(replayedCommands?.kind).toBe("commands");
+    const listed =
+      replayedCommands?.kind === "commands"
+        ? replayedCommands.commands.map((command) => command.name)
+        : [];
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed).toEqual(commands.slice(0, listed.length).map((command) => command.name));
+    // Whole: the replay carries each frame exactly as the viewer was last sent it.
+    expect(replayedSettings).toEqual(published.findLast((frame) => frame.kind === "settings"));
+    expect(replayedCommands).toEqual(published.findLast((frame) => frame.kind === "commands"));
+  });
+
+  test("go with the conversation when the session is replaced", () => {
+    const { published, publisher } = harness();
+    publisher.setSettings(SUBJECT, settings);
+    publisher.reset();
+    publisher.noteViewer();
+    expect(publisher.replay("s2").frames).toEqual([]);
+
+    // The next session's first reading is news to its viewer, even when it reads the same.
+    publisher.setSettings(SUBJECT, settings);
+    expect(published.map((frame) => frame.kind)).toEqual(["settings"]);
   });
 });
 

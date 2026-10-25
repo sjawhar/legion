@@ -4,6 +4,14 @@
 
 ### Added
 
+- The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
+  and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
+  frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
+  (`provider/id`, absent with no model selected), `models` (every model the session lists as
+  available, never cut or truncated) and `thinking` (`level`, what `/effort` reports, `null` for the
+  model's default, and `levels`, what `/effort` offers; `thinking` is `null` when the model has no
+  adjustable thinking). `AgentStreamSettingsUnreported` (`reported: false`) is a session whose
+  plugin cannot read them from its host. A viewer older than the frame ignores it (INFRA-195).
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared

@@ -6,6 +6,9 @@ import {
   type AgentStreamFrame,
   type AgentStreamPart,
   type AgentStreamReplay,
+  type AgentStreamSettings,
+  type AgentStreamSettingsReported,
+  type AgentStreamSettingsUnreported,
   capAgentStreamText,
   isTypableCommandName,
 } from "@legion/contracts";
@@ -101,6 +104,12 @@ export interface AgentStreamPublisherDeps {
   readonly now: () => number;
 }
 
+/** What a `settings` frame says without its envelope: what the session's host reports of its
+ *  model and thinking level, or that it cannot report them. */
+export type AgentStreamSettingsState =
+  | Omit<AgentStreamSettingsReported, "v" | "kind" | "seq">
+  | Omit<AgentStreamSettingsUnreported, "v" | "kind" | "seq">;
+
 const encoder = new TextEncoder();
 
 /** What a replay's `frames` array costs beyond its frames: its two brackets. Each frame after the
@@ -112,13 +121,22 @@ function jsonBytes(value: unknown): number {
   return encoder.encode(JSON.stringify(value)).length;
 }
 
-/** `provider/model` combined and capped (e.g. `anthropic/claude-opus-5`), or undefined when
- *  either is missing or empty — an empty string still satisfies `typeof x === "string"`, and
- *  combining one anyway would publish a malformed `/claude-opus-5` or `anthropic/`. */
+/** `provider/id` combined (e.g. `anthropic/claude-opus-5`), or undefined when either is missing or
+ *  empty — an empty string still satisfies `typeof x === "string"`, and combining one anyway would
+ *  publish a malformed `/claude-opus-5` or `anthropic/`. Never capped: a settings frame names the
+ *  model a person's pick sends back, so it must be the exact id. */
+export function modelReference(provider: unknown, id: unknown): string | undefined {
+  if (typeof id !== "string" || id === "") return undefined;
+  if (typeof provider !== "string" || provider === "") return undefined;
+  return `${provider}/${id}`;
+}
+
+/** The model an assistant message names, `provider/model` combined and capped. */
 function readModel(message: HostMessage): string | undefined {
-  if (typeof message.model !== "string" || message.model === "") return undefined;
-  if (typeof message.provider !== "string" || message.provider === "") return undefined;
-  return capAgentStreamText(`${message.provider}/${message.model}`, AGENT_STREAM_LIMITS.modelChars);
+  const model = modelReference(message.provider, message.model);
+  return model === undefined
+    ? undefined
+    : capAgentStreamText(model, AGENT_STREAM_LIMITS.modelChars);
 }
 
 function readMessage(raw: unknown): ReadableMessage | null {
@@ -267,10 +285,15 @@ export class AgentStreamPublisher {
   readonly #publishedAt = new Map<string, number>();
   #seq = 0;
   #watchedUntil = 0;
-  /** The slash commands the session takes from Dispatch, as last published; undefined for a
-   *  session whose host cannot run typed input, which publishes none. */
+  /** The slash commands the session takes from Dispatch, capped and each name once, before the
+   *  byte fit; undefined for a session whose host cannot run typed input, which publishes none. */
+  #listedCommands: readonly AgentStreamCommand[] | undefined;
+  /** The host-order prefix of `#listedCommands` that fits the replay, as last published. */
   #commands: readonly AgentStreamCommand[] | undefined;
   #commandsSeq = 0;
+  /** The session's model and thinking level, as last published; undefined until first read. */
+  #settings: AgentStreamSettingsState | undefined;
+  #settingsSeq = 0;
 
   constructor(deps: AgentStreamPublisherDeps) {
     this.#deps = deps;
@@ -295,29 +318,29 @@ export class AgentStreamPublisher {
     this.#settled.clear();
     this.#publishedAt.clear();
     this.#watchedUntil = 0;
+    this.#listedCommands = undefined;
     this.#commands = undefined;
+    this.#settings = undefined;
   }
 
   /**
    * The session's slash commands: kept for every replay, whose last frame they are, and published
    * at once when they differ from the list last kept while a viewer is attached. Each name is
    * capped and kept once, a name a person could not type dropped (`isTypableCommandName`). The
-   * list keeps the host-order prefix whose frame fits the replay's byte budget on its own: the
-   * caps count characters, and a character JSON escapes (`\u0001`) costs six bytes.
+   * list keeps the host-order prefix whose frame fits what the settings frame leaves of the
+   * replay's byte budget (`#fitCommands`): the caps count characters, and a character JSON escapes
+   * (`\u0001`) costs six bytes.
    */
   setCommands(subject: string, commands: readonly AgentStreamCommand[]): void {
-    // Measured as `replay` pays for it: the frame alone in `frames`, under the highest sequence
-    // number it can carry, then each command and the comma before it.
-    const limit = AGENT_STREAM_LIMITS.historyBytes - REPLAY_ARRAY_BYTES;
-    let bytes = jsonBytes(this.#commandsFrame([], this.#seq + 1));
     const seen = new Set<string>();
-    const kept: AgentStreamCommand[] = [];
+    const listed: AgentStreamCommand[] = [];
     for (const command of commands) {
-      if (kept.length >= AGENT_STREAM_LIMITS.commands) break;
+      if (listed.length >= AGENT_STREAM_LIMITS.commands) break;
       const name = command.name;
       if (name.length > AGENT_STREAM_LIMITS.commandNameChars) continue;
       if (!isTypableCommandName(name) || seen.has(name)) continue;
-      const listed: AgentStreamCommand = {
+      seen.add(name);
+      listed.push({
         name,
         source: command.source,
         ...(command.description !== undefined && {
@@ -327,12 +350,56 @@ export class AgentStreamPublisher {
           ),
         }),
         ...(command.terminalOnly === true && { terminalOnly: true as const }),
-      };
-      const cost = jsonBytes(listed) + (kept.length === 0 ? 0 : 1);
+      });
+    }
+    this.#listedCommands = listed;
+    this.#fitCommands(subject);
+  }
+
+  /**
+   * The session's model and thinking level: kept for every replay, whose frame before the commands
+   * it is, and published at once when they differ from what was last kept while a viewer is
+   * attached. Never cut: a replay pays for this frame first, whole, and the commands then keep the
+   * prefix that fits in what is left, so a change here can change the commands frame too.
+   */
+  setSettings(subject: string, settings: AgentStreamSettingsState): void {
+    const kept: AgentStreamSettingsState = settings.reported
+      ? {
+          ...(settings.model !== undefined && { model: settings.model }),
+          models: [...settings.models],
+          reported: true,
+          thinking:
+            settings.thinking === null
+              ? null
+              : { level: settings.thinking.level, levels: [...settings.thinking.levels] },
+        }
+      : { reported: false };
+    if (JSON.stringify(kept) === JSON.stringify(this.#settings)) return;
+    this.#settings = kept;
+    this.#seq += 1;
+    this.#settingsSeq = this.#seq;
+    if (this.watched) this.#deps.publish(subject, JSON.stringify(this.#settingsFrame(kept)));
+    this.#fitCommands(subject);
+  }
+
+  /** Keeps the host-order prefix of the listed commands whose frame fits the replay's byte budget
+   *  after the settings frame, and publishes it when it differs from the list last kept. */
+  #fitCommands(subject: string): void {
+    const listed = this.#listedCommands;
+    if (listed === undefined) return;
+    // Measured as `replay` pays for it: the whole settings frame and the comma after it, then this
+    // frame under the highest sequence number it can carry, then each command and the comma
+    // before it.
+    const settings =
+      this.#settings === undefined ? 0 : jsonBytes(this.#settingsFrame(this.#settings)) + 1;
+    const limit = AGENT_STREAM_LIMITS.historyBytes - REPLAY_ARRAY_BYTES - settings;
+    let bytes = jsonBytes(this.#commandsFrame([], this.#seq + 1));
+    const kept: AgentStreamCommand[] = [];
+    for (const command of listed) {
+      const cost = jsonBytes(command) + (kept.length === 0 ? 0 : 1);
       if (bytes + cost > limit) break;
       bytes += cost;
-      seen.add(name);
-      kept.push(listed);
+      kept.push(command);
     }
     if (JSON.stringify(kept) === JSON.stringify(this.#commands)) return;
     this.#commands = kept;
@@ -346,6 +413,10 @@ export class AgentStreamPublisher {
     seq = this.#commandsSeq
   ): AgentStreamFrame {
     return { commands, kind: "commands", seq, v: AGENT_STREAM_PROTOCOL };
+  }
+
+  #settingsFrame(settings: AgentStreamSettingsState): AgentStreamSettings {
+    return { ...settings, kind: "settings", seq: this.#settingsSeq, v: AGENT_STREAM_PROTOCOL };
   }
 
   /**
@@ -413,22 +484,26 @@ export class AgentStreamPublisher {
     const ordered = [...this.#history.values()].sort((left, right) =>
       left.at === right.at ? left.seq - right.seq : left.at - right.at
     );
-    // The command list rides last and is paid for first, so a full history never crowds it out;
-    // `setCommands` keeps it inside the budget on its own.
-    const commands = this.#commands === undefined ? undefined : this.#commandsFrame(this.#commands);
-    let used = REPLAY_ARRAY_BYTES + (commands === undefined ? 0 : jsonBytes(commands));
+    // The settings and then the command list ride last, in that order, and are paid for first, so
+    // a full history never crowds them out; `#fitCommands` keeps the two inside the budget.
+    const tail: AgentStreamFrame[] = [];
+    if (this.#settings !== undefined) tail.push(this.#settingsFrame(this.#settings));
+    if (this.#commands !== undefined) tail.push(this.#commandsFrame(this.#commands));
+    let used =
+      REPLAY_ARRAY_BYTES +
+      tail.reduce((bytes, frame, index) => bytes + jsonBytes(frame) + (index === 0 ? 0 : 1), 0);
     const kept: AgentStreamFrame[] = [];
     for (let index = ordered.length - 1; index >= 0; index -= 1) {
       const entry = ordered[index];
       if (entry === undefined) continue;
       const frame = frameFor(entry);
-      const separated = kept.length > 0 || commands !== undefined;
+      const separated = kept.length > 0 || tail.length > 0;
       const cost = jsonBytes(frame) + (separated ? 1 : 0);
       if (used + cost > AGENT_STREAM_LIMITS.historyBytes) break;
       used += cost;
       kept.unshift(frame);
     }
-    if (commands !== undefined) kept.push(commands);
+    kept.push(...tail);
     return { frames: kept, session_id: sessionID, v: AGENT_STREAM_PROTOCOL };
   }
 }

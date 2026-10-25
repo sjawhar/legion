@@ -4,6 +4,18 @@
 
 ### Added
 
+- The agent stream reports the model and thinking level the session runs now, so Dispatch's live
+  view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
+  every model the session lists as available, the configured thinking level `/effort` reports
+  (`null` for the model's default) and the levels `/effort` offers (`thinking: null` for a model
+  with no adjustable thinking), read from the live `AgentSession`'s own getters. Ids are never
+  truncated and the list is never cut. A host that cannot be read (no `AgentRegistry` export, no
+  live session under this id, or a missing getter) sends `reported: false`. The session re-reads
+  the getters on every replay and watch, on `turn_start` and `retry_fallback_applied`, and after a
+  person's typed input runs, before its reply is posted, and publishes the frame only when it
+  changed and a viewer is attached; a getter that throws is logged and never blocks the replay
+  answer. A replay ends with the history, the settings, then the commands; the settings frame is
+  paid for first and whole, and the commands keep the prefix that fits what is left (INFRA-195).
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
