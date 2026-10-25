@@ -2,49 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-229",
-  "completed": "2026-10-25T09:40:00Z",
-  "round": 2,
-  "headTested": "a828af781acc30f5918116fc06381300208579e1",
-  "codeHead": "2e7fc8d85bc79e6414a6b08ded391d2869a75f95",
+  "completed": "2026-10-25T08:58:00Z",
+  "round": 3,
+  "headTested": "9a2b0e87c953f439bca9314b3cbfafab31ed1972",
+  "codeHead": "5986a4bd64b2b0c5f0715dee7d9f912c40c33c15",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at a828af7 on this pod's zonky PostgreSQL 16.4 (127.0.0.1:54331) and nats-server v2.10.22: `LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54331/postgres?sslmode=disable' LEGION_E2E_NATS_BIN=/legion/scratch/bin/nats-server bash scripts/e2e/merged-root-waits.sh` -> `merged root waits e2e: PASS in 17s`, seven steps, including step7: `read back over 3s: TEST1CED568AF303-1 is in awaiting_merge on pull request #10843772, pullRequest.state merged — not #10843774` and step4: root done, no slot, production check open on #10843772 at merge-parent, one pr-merged notice over the run, the Dispatch done write taken."
+    "how": "Re-ran the implementer's command with my own sentinel: `TMPDIR=/legion/scratch/tmp LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54331/postgres?sslmode=disable&password=TESTERsentinel3' LEGION_E2E_NATS_BIN=/legion/scratch/bin/nats-server MERGED_ROOT_WAITS_EVIDENCE_DIR=/legion/scratch/tmp/ev-r3 bash scripts/e2e/merged-root-waits.sh` at 9a2b0e8 -> `merged root waits e2e: PASS in 35s`, all seven steps; prerequisites printed `store LEGION_TEST_PG_DSN (set; not printed)`; step 4 printed `the Dispatch stand-in took the close's done write` after its wait; the sentinel appears in 0 of the 4 evidence files (transcript, proof, daemon and nats logs) and 0 times on stdout."
   },
   "failures": [],
   "failed": 0,
-  "round1Failure": {
-    "criterion": "A pull request opened from a waiting merged root's branch erased the merge it waits on, so the root never closed when its last child left.",
-    "resolution": "Fixed in cdbe0414b1e5: pullRequestOpened does not record another pull request from the branch of an issue that awaits its merge while its recorded one is merged. The red test TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding was edited by the implementer: its slots-empty assertion cannot hold inside package workflow, whose rig runs a no-op admission (slots are freed only by admit.releaseDoneSlots, admit.go:695 — I confirmed no slot release exists under internal/workflow). It became the close's own linger_close row, and the slot assertion moved to admit's TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves, which runs the real admission. That was a defect in my assertion, not a weakening; accepted. My live run below checks the slot directly."
-  },
+  "round3Scope": "Review round 1's four findings, fixed in 12bbd6fd (DSN never printed), 42e15f08 (step 4 waits for the Dispatch done write), 5986a4bd (pullRequest.state is z.enum open|merged|closed, claude-envoy bundle regenerated), plus the PR body's new Contract change census. No daemon runtime code changed since a828af7 (the only packages/daemon change is the live test's wait), so round 2's daemon proofs below stand at their head; this round drove the changed surfaces and the census entries a person invokes.",
   "proof": [
     {
-      "criterion": "The root closes only after its last open child is done or parked, and on its own merge: pull requests opened, pushed, closed, reopened or merged from the waiting root's branch do not replace the merge it waits on (round-1 failure).",
-      "surface": "The booted daemon (run, the function legion start calls) through the branch's -tags e2e whole-daemon harness on PostgreSQL 16.4 and nats-server 2.10.22, GitHub pull-request envelopes and Dispatch issue.updated envelopes on ENVOY_NOTIFICATIONS, read back from GET /legion/v1/state and from the shipped legion binary built at this head (`legion state --port <p> --json`). Throwaway driver file, not committed.",
-      "command": "go test -c -tags e2e ./internal/daemon, then LEGION_TEST_PG_DSN=... LEGION_E2E_NATS_URL=nats://127.0.0.1:42222 TESTER_LEGION_BIN=/legion/scratch/bin/legion ./tester-driver.test -test.run '^TestTesterFollowUpPROnMergedRootBranchLive$' -test.v",
-      "observed": "Root merged #3410906 and waits for its child. Follow-up #3410956 opened, then synchronized to a new head, then closed unmerged, then reopened: after each, held over 3s, the root stayed in awaiting_merge on #3410906 state merged. A second follow-up #3410957 opened and merged at merge-second while the child ran: the root kept waiting, pr-merged notices still 1, and `legion state --port 19360 --json` read the root on #3410906 'merged'. Child parked to backlog: root done, status done, slot freed, production check on #3410906 at merge-parent.",
-      "headSha": "a828af781acc30f5918116fc06381300208579e1",
-      "negativeControl": "The same opened-then-park sequence at round 1's head 914ce1e (no guard): `read back after 10s: root phase awaiting_merge status retro slot true pullRequest #14988314 open`, the root never closed."
+      "criterion": "Census: an architect's sign_off through the legion tool's daemon client gets 409 SIGNOFF_CHILD_IN_WORKFLOW with its message while an issue beneath runs, and is accepted once it leaves; the client's strict GET /legion/v1/state parse carries pullRequest.state open, merged and closed.",
+      "surface": "@legion/pi-shared's createLegionDaemonClient (src/daemon-client.ts, the client pi-legion's tools.ts sign_off calls: grant, then signOff) run under bun against the booted daemon (run, through the branch's -tags e2e harness, max_fix_attempts at the production default 4) on PostgreSQL 16.4 and nats-server 2.10.22, with the root architect's real registered session and secret. Throwaway script and driver, not committed.",
+      "command": "bun run /legion/scratch/tmp/census-client.ts (CENSUS_MODE=signoff|state-negative), exec'd by ./tester-census.test -test.run '^TestTesterCensusClientLive$' -test.v",
+      "observed": "client.signOff(TEST70D64F9E7622-1): `LegionDaemonApiError status 409 code SIGNOFF_CHILD_IN_WORKFLOW: TEST70D64F9E7622-1 still has TEST70D64F9E7622-2 beneath it in the workflow; this sign-off changed nothing. Accept TEST70D64F9E7622-1 once the last of them closes, or take one out of the workflow with park_child`; client.state(): root accepting #10845229 state open, child implementing state open. Child parked: client.signOff accepted, root in retro. Root merged and child's PR closed unmerged: client.state() root done #10845229 state merged, child #10845230 state closed.",
+      "headSha": "9a2b0e87c953f439bca9314b3cbfafab31ed1972",
+      "negativeControl": "That live state body with the root's pullRequest.state set to 'draft' -> LegionStateResponse refuses `issues.TEST70D64F9E7622-1.pullRequest.state: Invalid option: expected one of \"open\"|\"merged\"|\"closed\"`; with state deleted (a contract-35 answer) -> refused at the same path."
     },
     {
-      "criterion": "Acceptance is refused while any issue beneath is in the workflow, however deep, naming each; out-of-workflow children hold nothing; a child with nothing beneath is accepted.",
-      "surface": "The same booted daemon, POST /legion/v1/signoff with the architect's real grant, Dispatch issue.updated envelopes, GET /legion/v1/state.",
-      "command": "./tester-driver.test -test.run '^TestTesterDeepTreeAcceptanceLive$' -test.v",
-      "observed": "R > C (accepting) > G (implementing) > H (admitted, todo), plus D (backlog) and E (done) under R: sign_off R 409 naming C, G, H only; sign_off C 409 naming G, H; G parked -> C 409 naming H; H iced -> C 200, in retro; R's parent set to H (a loop R->C->G->H->R) -> sign_off R 409 naming C, answered in 16ms.",
-      "headSha": "a828af781acc30f5918116fc06381300208579e1",
-      "negativeControl": "The same sign-off of C with nothing beneath it in the workflow answered 200, so the 409s are the rule's."
+      "criterion": "Review finding: the live proof never prints its database DSN, whatever credential form it carries.",
+      "surface": "scripts/e2e/merged-root-waits.sh as an operator runs it, its stdout and its kept evidence directory.",
+      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54331/postgres?sslmode=disable&password=TESTERsentinel3' ... bash scripts/e2e/merged-root-waits.sh; grep -rl TESTERsentinel3 /legion/scratch/tmp/ev-r3; grep -c TESTERsentinel3 <stdout>",
+      "observed": "PASS in 35s; `store LEGION_TEST_PG_DSN (set; not printed)`; 0 evidence files and 0 stdout lines carry the sentinel.",
+      "headSha": "9a2b0e87c953f439bca9314b3cbfafab31ed1972",
+      "negativeControl": "The round-1 line's scrubber (914ce1e, merged-root-waits.sh:69) `sed 's#://[^@/]*@#://<credential>@#'` on the same DSN -> 1 line carrying TESTERsentinel3."
     },
     {
-      "criterion": "A merged root with running members stays in awaiting_merge with one notice, a push and a redelivered merge move nothing, it closes the moment the last member leaves, legion state reports open/merged/closed, and a person's Dispatch done still lingers the tree.",
-      "surface": "The same booted daemon and the shipped legion binary against it.",
-      "command": "./tester-driver.test -test.run '^TestTester(WaitingRootBreaks|PersonClosesWaitingRoot)Live$' -test.v",
-      "observed": "Children C, C2 and grandchild G running: root's merge -> awaiting_merge, slot kept, no check, one pr-merged notice naming C, C2, G. Merge redelivered under a new event id and a synchronize past READY's head: root stays, notices 1, no Dispatch write. C parked: waits. C2 merged, C's PR closed unmerged: waits; `legion state --port 35127 --json` read root 'merged', C 'closed', C2 'merged'. G iced: root done, status done, slot freed, check on its own PR at merge-parent, Dispatch done write taken, 1 notice over the run. Person's Dispatch done on a waiting root: root done, check opened, architect suspended.",
+      "criterion": "Round 1's finding stays fixed and the root closes only after its last open child, on its own merge (carried from round 2; no daemon runtime code changed since).",
+      "surface": "The booted daemon through the -tags e2e harness, GitHub and Dispatch envelopes, GET /legion/v1/state, the shipped legion binary.",
+      "command": "./tester-driver.test -test.run '^TestTester(FollowUpPROnMergedRootBranch|DeepTreeAcceptance|WaitingRootBreaks|PersonClosesWaitingRoot)Live$' -test.v",
+      "observed": "Follow-up pull requests opened, pushed, closed, reopened and merged from the waiting root's branch left the root on its own merged pull request; it closed on its own merge when the last child was parked. Deep-tree sign-offs refused naming each running issue beneath, accepted once they left, a parent loop answered in 16ms. A wide wait held with one notice through a redelivered merge and a push past READY; legion state read merged/closed/merged; a person's Dispatch done lingered the tree.",
       "headSha": "a828af781acc30f5918116fc06381300208579e1",
-      "negativeControl": "While the grandchild was still admitted, every 3s window held the root in awaiting_merge; only its departure closed it."
+      "negativeControl": "At 914ce1e (no guard) the opened-then-park sequence left the root in awaiting_merge on the follow-up, open, slot held."
     }
   ],
-  "ciRead": "Code head 2e7fc8d has no runs of its own; head a828af7: Tests 40176403700 queued, Legion Envoy and Contracts 40176403711 queued, Docs 40176403691 in progress, Worker Image 40176403704 pending, PR Title 40176433746 queued (40176403709 cancelled). Not waited for, not rerun.",
+  "ciRead": "Code head 5986a4b: Tests 40177879770 queued, Legion Envoy and Contracts 40177879801 queued, Worker Image 40177879783 pending, Docs 40177879831 success, PR Title runs queued (40177879812 cancelled); head 9a2b0e8: lint in_progress, typecheck and test queued. Not waited for, not rerun.",
   "notes": [
-    "Round-2 diff read: cdbe0414 (the guard and tests), 33a030d4 (live proof step 7), e4013a2d (forward merge of main, CHANGELOGs only), 2e7fc8d8 (script temp dirs under TMPDIR). A full round was run, not a fingerprint re-check.",
+    "The census's two operator scripts (stage3-devbox-workflow.sh, stage4b-sandbox-tree.sh) are edited and not run, as the spec directs; the PR's Not proven / risk line says so.",
+    "Harness note, not a product finding: the e2e harness's workflowConfig leaves max_fix_attempts 0, which the strict state contract refuses (`settings.max_fix_attempts: Too small`); a real config loads 4 by default. My census driver booted with 4.",
     "Carried for the reviewer from round 1: the notice an issue gets on reaching awaiting_merge on an already-merged pull request departs from spec v15 ('told no second time'), accepted by the architect in plan.md v2."
   ]
 }
