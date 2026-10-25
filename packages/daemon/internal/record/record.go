@@ -94,18 +94,30 @@ type Issue struct {
 	// sequence than ClaimSeq is not applied.
 	ClaimedBy string
 	ClaimSeq  int64
-	// WaitFenceSeq is the highest Dispatch event sequence of the issue a wait started from, or a
-	// register_gate read covered, 0 for none. It outlives the wait, a resume and a re-admission: a
-	// hand-back or a question opened at or below it is an act already covered, delivered late, and
-	// starts no wait (WaitFenced).
+	// WaitFenceSeq is the highest Dispatch event sequence of the issue a wait started from, 0 for
+	// none. It outlives the wait, a resume and a re-admission: a hand-back or a question opened at
+	// or below it is an act a wait already covered, delivered late, and starts no wait
+	// (WaitFenced).
 	WaitFenceSeq int64
+	// GateFenceSeq is the highest issue sequence a register_gate read of Dispatch covered, 0 for
+	// none, kept the same way. That read decided the gate alone, so it fences only an event that
+	// would start a wait on the gate (GateFenced): a hand-back while the gate is closed. An
+	// ordinary question the read says nothing about is fenced by WaitFenceSeq alone.
+	GateFenceSeq int64
 }
 
-// WaitFenced says whether a Dispatch event at mark that would start a wait is one a wait or a
-// registration already covered: its sequence is at or below WaitFenceSeq. An event Dispatch gave
-// no sequence is never fenced.
+// WaitFenced says whether a Dispatch event at mark that would start a wait is one a wait already
+// covered: its sequence is at or below WaitFenceSeq. An event Dispatch gave no sequence is never
+// fenced.
 func (i Issue) WaitFenced(mark EventMark) bool {
 	return mark.Seq > 0 && mark.Seq <= i.WaitFenceSeq
+}
+
+// GateFenced says whether a Dispatch event at mark that would start a wait on the design gate is
+// one a registration's read of Dispatch already covered: its sequence is at or below
+// GateFenceSeq.
+func (i Issue) GateFenced(mark EventMark) bool {
+	return mark.Seq > 0 && mark.Seq <= i.GateFenceSeq
 }
 
 // RaiseWaitFence moves WaitFenceSeq up to seq, and reports whether it moved.
@@ -114,6 +126,15 @@ func (i *Issue) RaiseWaitFence(seq int64) bool {
 		return false
 	}
 	i.WaitFenceSeq = seq
+	return true
+}
+
+// RaiseGateFence moves GateFenceSeq up to seq, and reports whether it moved.
+func (i *Issue) RaiseGateFence(seq int64) bool {
+	if seq <= i.GateFenceSeq {
+		return false
+	}
+	i.GateFenceSeq = seq
 	return true
 }
 
@@ -506,20 +527,33 @@ const (
 	CheckNotRun CheckOutcome = "not_run"
 )
 
-// DesignGate records the current document version, the version a human approved, if any, and the
-// changes request the architect has been told of, if any: its document version, the reviewer's
-// reason and the review's place in the issue's Dispatch event log (ToldChangesMark, zero when the
-// read that carried it gave none). A re-read of that same review, by a later registration, the gate
+// DesignGate records the current document version, the version a human approved, if any, with
+// where Dispatch recorded that approval (ApprovedMark, zero when the read that carried it gave
+// none), and the changes request the architect has been told of, if any: its document version, the
+// reviewer's reason and the review's place in the issue's Dispatch event log (ToldChangesMark,
+// zero the same way). A re-read of that same changes request, by a later registration, the gate
 // seed or the boot catch-up, tells the architect nothing new; another review does, even at that
-// version with that reason.
+// version with that reason. An approval clears the told record and a changes request clears the
+// approval, so the two marks never stand together: the one that is set is the gate's newest
+// applied review (classify.LatestReview).
 type DesignGate struct {
 	Issue              string
 	ArtifactID         string
 	LatestVersion      int
 	ApprovedVersion    *int
+	ApprovedMark       EventMark
 	ToldChangesVersion *int
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
+}
+
+// ClosedAsk is an ask of an issue that a person answered or resolved, and where Dispatch recorded
+// that act (Mark, zero when the event carried none). An ask.opened the daemon applies after it
+// starts no wait, since the person has already closed the ask and nothing would answer that wait.
+type ClosedAsk struct {
+	Issue string
+	Ask   string
+	Mark  EventMark
 }
 
 // Slot is an active admission slot.
@@ -631,6 +665,13 @@ type Store interface {
 	// gate and each copy a hand-over carried to a child of its tree.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
+	// RecordClosedAsk records that a person answered or resolved ask on issue, where Dispatch
+	// recorded it. A second record of the same ask keeps the mark the first carried.
+	RecordClosedAsk(ctx context.Context, tx pgx.Tx, closed ClosedAsk) error
+	// AskClosedByPerson says whether a person's close of ask on issue is recorded.
+	AskClosedByPerson(ctx context.Context, tx pgx.Tx, issue, ask string) (bool, error)
+	// ForgetClosedAsks drops every closed-ask row of the issue, which leaves the workflow with it.
+	ForgetClosedAsks(ctx context.Context, tx pgx.Tx, issue string) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error

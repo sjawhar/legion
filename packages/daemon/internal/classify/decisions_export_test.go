@@ -202,15 +202,19 @@ func TestBlockFixAttemptPublishesOnlyOnARedSettlement(t *testing.T) {
 	}
 }
 
+// TestApplyDesignGateEventTracksCurrentVersionApproval: an approval of the latest version opens
+// the gate and keeps its mark, and a newer version closes it and drops that mark with the
+// approval.
 func TestApplyDesignGateEventTracksCurrentVersionApproval(t *testing.T) {
 	gate := record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 2}
-	opened := ApplyDesignGateEvent(gate, DesignGateApproved, 2)
-	if !DesignGateOpen(opened) {
-		t.Fatalf("approved gate = %#v, want open", opened)
+	approved := record.EventMark{Seq: 12}
+	opened := ApplyDesignGateEvent(gate, DesignGateApproved, 2, approved)
+	if !DesignGateOpen(opened) || opened.ApprovedMark != approved {
+		t.Fatalf("approved gate = %#v, want open with the approval's mark", opened)
 	}
-	closed := ApplyDesignGateEvent(opened, DesignGateVersion, 3)
-	if DesignGateOpen(closed) || closed.LatestVersion != 3 {
-		t.Fatalf("new version gate = %#v, want closed at v3", closed)
+	closed := ApplyDesignGateEvent(opened, DesignGateVersion, 3, record.EventMark{})
+	if DesignGateOpen(closed) || closed.LatestVersion != 3 || closed.ApprovedMark != (record.EventMark{}) {
+		t.Fatalf("new version gate = %#v, want closed at v3 with no approval mark", closed)
 	}
 }
 

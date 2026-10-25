@@ -353,22 +353,26 @@ const (
 	DesignGateVersion          DesignGateEventKind = "version"
 )
 
-// ApplyDesignGateEvent updates a registered gate from one artifact observation. Approval opens
-// only when it names the latest known version; a newer document version and changes request close
-// it. An approval and a newer version also clear the changes request the architect was told of,
-// which RecordChangesTold writes when it is told: neither leaves that request standing.
-func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int) record.DesignGate {
+// ApplyDesignGateEvent updates a registered gate from one artifact observation, at mark: where
+// Dispatch recorded the review, zero for a version event and for a read that gave none. Approval
+// opens only when it names the latest known version, and the gate keeps that approval's mark; a
+// newer document version and a changes request close it. An approval and a newer version also
+// clear the changes request the architect was told of, which RecordChangesTold writes when it is
+// told, and a changes request and a newer version clear the approval's mark with the approval:
+// neither review outlives the other on the gate.
+func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int, mark record.EventMark) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
 		gate = clearChangesTold(gate)
+		gate = clearApproved(gate)
 	}
 	switch kind {
 	case DesignGateApproved:
 		approved := version
-		gate.ApprovedVersion = &approved
+		gate.ApprovedVersion, gate.ApprovedMark = &approved, mark
 		gate = clearChangesTold(gate)
 	case DesignGateChangesRequested:
-		gate.ApprovedVersion = nil
+		gate = clearApproved(gate)
 	}
 	return gate
 }
@@ -376,6 +380,44 @@ func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, vers
 func clearChangesTold(gate record.DesignGate) record.DesignGate {
 	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = nil, "", record.EventMark{}
 	return gate
+}
+
+func clearApproved(gate record.DesignGate) record.DesignGate {
+	gate.ApprovedVersion, gate.ApprovedMark = nil, record.EventMark{}
+	return gate
+}
+
+// LatestReview is the review the gate has applied last and the document version it reviewed: the
+// approval it records, else the changes request it records as told. The two never stand together
+// (ApplyDesignGateEvent), so whichever is set is the gate's newest applied review. ok is false
+// when the gate records no review at all.
+func LatestReview(gate record.DesignGate) (record.EventMark, int, bool) {
+	switch {
+	case gate.ApprovedVersion != nil:
+		return gate.ApprovedMark, *gate.ApprovedVersion, true
+	case gate.ToldChangesVersion != nil:
+		return gate.ToldChangesMark, *gate.ToldChangesVersion, true
+	}
+	return record.EventMark{}, 0, false
+}
+
+// StaleReview reports whether a review of version at mark is older than the review the gate has
+// already applied at that version: the person reviewed again after it, so this one changes no gate
+// state and answers no wait. It covers an approval delivered after the changes request that
+// superseded it, and a changes request delivered after a newer approval. A review Dispatch placed
+// neither by sequence nor by time against the recorded one is not stale (record.EventMark.After),
+// which keeps today's behaviour for marks a Dispatch did not give.
+func StaleReview(gate record.DesignGate, version int, mark record.EventMark) bool {
+	recorded, reviewed, ok := LatestReview(gate)
+	return ok && reviewed == version && !mark.After(recorded)
+}
+
+// ReviewAfter reports whether the review the gate has applied at version was recorded after since.
+// A registration whose read of Dispatch began at since is then older than that review: the person
+// acted after the read, and the gate keeps what it already applied.
+func ReviewAfter(gate record.DesignGate, version int, since record.EventMark) bool {
+	recorded, reviewed, ok := LatestReview(gate)
+	return ok && reviewed == version && recorded.After(since)
 }
 
 // DesignGateChangesTold reports whether the gate already records this changes request as one the
