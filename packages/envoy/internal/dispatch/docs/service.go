@@ -827,8 +827,8 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		// bumping it here ends that settlement before it opens a transaction.
 		state.roomGeneration++
 		s.stopSettleTimer(state.settle)
-		// The settlements this room's history counted ended with its generation
-		// (retrySettleLocked counts none that read an older one).
+		// The closed room's settlement failures are not the next room's (see
+		// reserveRoomCloseLocked).
 		state.settleFailures = 0
 		// Quiesce cancels this document's settlement, and its caller empties the database behind
 		// it, so the edit source that settlement would have named goes with it: left here it
@@ -843,6 +843,23 @@ func (s *Service) Quiesce(ctx context.Context) error {
 	})
 	s.waitSettles(ctx)
 	s.waitEvictions(ctx)
+	// While the rooms closed, a browser's reconnect (onLoadDocument), its edit
+	// (creditContentChange) or a committed write (Ledger.creditRooms) can record an edit source on
+	// a record again, and quiescing refuses the settlement that would read it (scheduleSettle), so
+	// that source would hold the record of a document the harness truncates next (unusedLocked).
+	// Once every close and settlement has ended, a record whose room is gone and whose settlement
+	// is neither armed nor running drops it, and goes when nothing else holds it.
+	s.rooms.Range(func(key, value any) bool {
+		room := key.(string)
+		state := value.(*roomState)
+		state.mu.Lock()
+		if !state.released && s.srv.GetDoc(room) == nil && state.settling == 0 && !s.isSettleTimerArmed(state.settle) {
+			state.lastActor = nil
+			state.unsettled = false
+		}
+		s.unlockState(room, state)
+		return true
+	})
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1803,19 +1820,21 @@ type roomCloseReservation struct {
 // and stops its timer.
 //
 // Without the reservation a write could take the slot after its caller's check and before the
-// close, and fork the instance the close retires, which stands behind the durable head. Refused
-// instead (ErrServiceUnavailable), the caller's retry lands on the room that replaces it. The
-// state's lock is not held across the close itself, whose peers' disconnects and persistence
-// flush take it. Its caller holds state.mu.
+// close, and the close would retire the instance under a write in flight on it: the very case its
+// caller's check leaves the room open for (reloadRoomBehindHead defers to a live writer, and
+// closeRoomBehindHead refuses while one runs). Refused instead (ErrServiceUnavailable), the write's
+// retry lands on the room that replaces it. The state's lock is not held across the close itself,
+// whose peers' disconnects and persistence flush take it. Its caller holds state.mu.
 func (s *Service) reserveRoomCloseLocked(room string, state *roomState, live *crdt.Doc) (roomCloseReservation, bool) {
 	if state.reloading || state.released || state.failed != nil || s.srv.GetDoc(room) != live {
 		return roomCloseReservation{}, false
 	}
 	state.reloading = true
 	state.roomGeneration++
-	// The settlements this room's history counted ended with its generation (retrySettleLocked
-	// counts none that read an older one), and the record outlives the close, so the room that
-	// replaces it starts its own history.
+	// The closed room's settlement failures are not the next room's, and the record outlives the
+	// close. retrySettleLocked counts a failure only for the generation its settlement read, and
+	// that moves here; a settlement that reads the generation again after its warm-up
+	// (settleRoomWithin) can still count one against the room that replaces this one.
 	state.settleFailures = 0
 	return roomCloseReservation{
 		room:           room,
@@ -2154,6 +2173,10 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			state.closed = closed
 			if closed && changed {
 				state.roomGeneration++
+				// The closed room's settlement failures are not the next room's (see
+				// reserveRoomCloseLocked): a record kept across the close and a reopen starts
+				// over.
+				state.settleFailures = 0
 				s.stopSettleTimer(state.settle)
 				// Snapshot while the state is locked, then write after unlocking: settlement holds
 				// the document's advisory lock before it takes state.mu, so taking that lock here

@@ -187,10 +187,8 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 }
 
 // forgetLocked takes state, room's, out of the service: a lookup that already found it skips it
-// (lookUpState). An in-flight credit the state still holds is reached through its update's
-// UpdateCredit, which holds the state, so a failed room's eviction (handOverFailedRoomLocked) that
-// forgets the state before that update's append lands loses nothing the append writes. Its caller
-// holds state.mu.
+// (lookUpState). Its one caller, releaseIfUnusedLocked, forgets only a state nothing holds
+// (unusedLocked), so no in-flight credit is on it. Its caller holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)
@@ -206,9 +204,11 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
 // this record. Dropping it outright loses that browser, and with it the credit for the person's
 // next keystroke. Nothing else of this record is handed over: a load refuses a failed room, so no
-// room of its own attached to it, and what the failed room left is the failed room's. A browser
-// the close disconnects is forgotten by its own removeConnection, which finds it under the
-// connection id the service gave it. Its caller holds state.mu.
+// room of its own attached to it, and what the failed room left is the failed room's. An in-flight
+// credit the record still holds is reached through its update's UpdateCredit, which holds the
+// record, so an append that lands after the record went loses nothing it writes. A browser the
+// close disconnects is forgotten by its own removeConnection, which finds it under the connection
+// id the service gave it. Its caller holds state.mu.
 func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	state.released = true
 	if len(state.connected) == 0 {
@@ -322,8 +322,8 @@ func (state *roomState) writeInFlightLocked() bool {
 // editSourceMark is where room's record stood, as to its latest edit source, when a room's load
 // was about to read the document's pending-settlement row: the record then registered, nil for
 // none; how many edit sources it had recorded (creditSeq, which every recorder of one moves:
-// creditContentChange, Ledger.credit, a seed); and whether it held a browser edit whose append
-// has yet to write that row (quiet when it held none).
+// creditContentChange, Ledger.creditRooms, a seed); and whether it held a browser edit whose
+// append has yet to write that row (quiet when it held none).
 type editSourceMark struct {
 	state *roomState
 	seq   uint64
@@ -344,12 +344,15 @@ func (s *Service) markEditSource(room string) editSourceMark {
 
 // rowIsCurrent is whether the pending-settlement row a load read after mark is at least as new as
 // the latest edit source state holds, so the load may take the row's in its place. A committed
-// write writes the row in its transaction and records the source once it commits (Ledger.credit),
-// so a source it recorded by the mark is in the row the load read, and one it recorded after moved
-// creditSeq. A browser edit records its source first (creditContentChange) and writes the row when
-// its append lands, so the row is not current while the record held such an edit at the mark: its
-// credit, its update or its append. A settlement records no source, so neither a running one nor
-// an open write keeps the record's: the settlement whose warm-up runs this very load reads the
+// write writes the row in its transaction and records the source once it commits
+// (Ledger.creditRooms), so a source it recorded by the mark is in the row the load read, and one
+// it recorded after moved creditSeq. A browser edit records its source first (creditContentChange)
+// and writes it to the row when its append lands, so the row is not current while the record held
+// such an edit at the mark: its credit, its update or its append. Two appends write no source:
+// one whose credit a version written without a live write already consumed, and one made with no
+// browser connected. Each keeps the row's earlier source, which the load then takes, as a record
+// made fresh from the row always did. A settlement records no source, so neither a running one
+// nor an open write keeps the record's: the settlement whose warm-up runs this very load reads the
 // row's. A record registered after the mark counts from none. Its caller holds state.mu.
 func (mark editSourceMark) rowIsCurrent(state *roomState) bool {
 	if mark.state != state {

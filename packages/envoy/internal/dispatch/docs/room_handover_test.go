@@ -265,6 +265,10 @@ func TestARoomLoadedOntoAKeptRecordTakesTheStoredEditSource(t *testing.T) {
 	`, artifactID); err != nil {
 		t.Fatalf("record the other process's edit as naming no source: %v", err)
 	}
+	kept, held := service.rooms.Load(artifactID)
+	if !held {
+		t.Fatal("the document holds no record before the close, so nothing here is tested")
+	}
 	if err := service.Evict(context.Background(), artifactID); err != nil {
 		t.Fatalf("evict the document's room: %v", err)
 	}
@@ -273,6 +277,9 @@ func TestARoomLoadedOntoAKeptRecordTakesTheStoredEditSource(t *testing.T) {
 	}
 
 	state := service.room(artifactID)
+	if state != kept.(*roomState) {
+		t.Fatal("the close dropped the record its edit source held, so the reload made a fresh one and nothing here is tested")
+	}
 	state.mu.Lock()
 	lastActor := state.lastActor
 	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice})
@@ -282,6 +289,36 @@ func TestARoomLoadedOntoAKeptRecordTakesTheStoredEditSource(t *testing.T) {
 	}
 	if credit.actor != SettlementActor {
 		t.Fatalf("the settlement would name %+v on its version, want %+v", credit.actor, SettlementActor)
+	}
+}
+
+// A browser that reconnects, an edit that lands or a write that commits while Quiesce closes the
+// rooms records an edit source again, and quiescing refuses the settlement that would read it.
+// Quiesce drops that source once every close and settlement has ended, so the record of a document
+// the browser-test harness truncates next is not held for good.
+func TestQuiesceDropsAnEditSourceRecordedWhileItClosesTheRooms(t *testing.T) {
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	var recorded atomic.Bool
+	service.afterRoomClosed = func(room string) {
+		if room == artifactID && recorded.CompareAndSwap(false, true) {
+			service.recordActor(t, artifactID, alice)
+		}
+	}
+	if err := service.Quiesce(context.Background()); err != nil {
+		t.Fatalf("quiesce the service: %v", err)
+	}
+	if !recorded.Load() {
+		t.Fatal("the quiesce closed no room, so nothing here is tested")
+	}
+	if _, kept := service.rooms.Load(artifactID); kept {
+		t.Fatal("the quiesce left the record of a closed document held by an edit source nothing will settle")
 	}
 }
 
@@ -394,5 +431,39 @@ func TestAForcedCloseKeepsTheFailuresOfTheRoomThatReplacedIt(t *testing.T) {
 				t.Fatalf("the kept record counts %d settlement failures, want the replacement's one: the closed room's two end with it, the replacement's stand", failures)
 			}
 		})
+	}
+}
+
+// An issue's close moves its rooms' generation, as a forced close does, and the record of a room
+// it closes can outlive the close. The failures the closed room's settlements counted end there,
+// so the room of a reopened issue starts its own count, as the room that replaces a force-closed
+// one does.
+func TestAnIssueCloseEndsItsRoomsSettlementFailures(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	state := service.room(artifactID)
+	state.mu.Lock()
+	state.settleFailures = 2
+	state.mu.Unlock()
+
+	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close the document's issue: %v", err)
+	}
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
+
+	state.mu.Lock()
+	failures := state.settleFailures
+	closed := state.closed
+	state.mu.Unlock()
+	if !closed {
+		t.Fatal("the issue's close did not reach the document's record, so nothing here is tested")
+	}
+	if failures != 0 {
+		t.Fatalf("the record counts %d settlement failures after its issue closed, want none: the closed room's end with it", failures)
 	}
 }

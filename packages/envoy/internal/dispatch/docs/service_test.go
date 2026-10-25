@@ -2642,8 +2642,8 @@ func (s *Service) recordActor(t *testing.T, room string, actor model.Actor) {
 		t.Fatalf("commit %s as a pending author: %v", actor.ID, err)
 	}
 	state := s.lockState(room)
-	// Every recorder of an edit source moves creditSeq (creditContentChange, Ledger.credit), which
-	// a room's load reads to tell a source recorded after its row read (editSourceMark).
+	// Every recorder of an edit source moves creditSeq (creditContentChange, Ledger.creditRooms),
+	// which a room's load reads to tell a source recorded after its row read (editSourceMark).
 	state.creditSeq.Add(1)
 	state.lastActor = new(actor)
 	state.unsettled = true

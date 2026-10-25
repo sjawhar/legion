@@ -1159,9 +1159,11 @@
   source the stored document names, none included, unless the record recorded a newer one, so
   another process's edit that several browsers could have made is not credited to whoever edited
   here before; the closed room's settlement failures end with its generation rather than once the
-  close returns, so they never wipe the failures of the room that replaced it; and the
-  browser-test harness's quiesce drops the edit source of the settlement it cancels, so the
-  record of a document it truncates away is not kept for ever.
+  close returns, so they never wipe the failures of the room that replaced it, and an issue's
+  close ends them the same way; and the browser-test harness's quiesce drops the edit source of
+  the settlement it cancels, and once its closes have ended drops any source a reconnect or an
+  edit recorded meanwhile, so the record of a closed document it truncates away is not kept for
+  ever.
 
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while

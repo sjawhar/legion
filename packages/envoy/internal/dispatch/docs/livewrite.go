@@ -91,7 +91,7 @@ type liveWrite struct {
 	// append that recorded each one's latest change, which its pending row names; actor made the
 	// latest content change, and is nil while the transaction has made none.
 	// addedAskBlockIDs is every ask block id a readable operation of this transaction introduced,
-	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.credit,
+	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.creditRooms,
 	// registerAskAuthors) rather than guessed from whichever update's observer happens to render
 	// this write's publish first (LEGION-503). renamedAskBlockIDs is every id one of those
 	// operations' own block-id repair re-minted (registerStampedAskBlocks), excluded from
@@ -100,12 +100,12 @@ type liveWrite struct {
 	// applyLive's own before/after diff cannot otherwise tell a rename from an insertion.
 	// carriedAskAuthors is the author carried forward (registerStampedAskBlocks,
 	// roomState.carriedAskAuthors) for each id in renamedAskBlockIDs that has one, credited at
-	// commit the same way (Ledger.credit, roomState.registerCarriedAskAuthors) rather than
+	// commit the same way (Ledger.creditRooms, roomState.registerCarriedAskAuthors) rather than
 	// written into the room's own bookkeeping as soon as the stamp runs: a write refused after the
 	// stamp but before commit (growth, a later validation failure) must not leave the room
 	// holding a trace of it. applyLive's own defer clears all three maps whenever its one
 	// operation changed the fork but was never recorded - the same guard that drops the fork's
-	// rendering - so a growth-refused edit's own stamp never reaches Ledger.credit. That defer
+	// rendering - so a growth-refused edit's own stamp never reaches Ledger.creditRooms. That defer
 	// runs per applyLive call, so it does not distinguish this call's own stamp from an earlier,
 	// already-recorded call's on the same liveWrite; no production caller invokes ApplyOps or
 	// ReplaceText more than once per Join (every api/ call site joins once per request), so two
@@ -134,9 +134,9 @@ type liveWrite struct {
 // liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
 // update observer credits it to no one: Ledger.Commit credited it when its transaction
 // committed, and registered the ask ids it introduced before this write's publish could reach any
-// observer (Ledger.credit, registerAskAuthors). It carries the write's persistence-suppression
-// slot, which that observer finishes (onLoadDocument). It must remain non-zero sized because ygo
-// compares origins by interface equality.
+// observer (Ledger.creditRooms, registerAskAuthors). It carries the write's
+// persistence-suppression slot, which that observer finishes (onLoadDocument). It must remain
+// non-zero sized because ygo compares origins by interface equality.
 type liveWriteOrigin struct {
 	slot *suppressSlot
 }
