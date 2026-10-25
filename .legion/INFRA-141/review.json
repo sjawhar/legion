@@ -2,69 +2,44 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-25T13:05:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T13:40:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "round": 5,
-  "roundFiveFindingsClosed": [
-    "internal/testnats/nats.go:20 (4df4db34b290): main is merged forward and crypto/rand is aliased crand on this branch's side, so math/rand/v2 keeps the bare name and main's rand.IntN at :537 is untouched; crand.Read draws the secret at :155. typecheck and test are both success at the code head 9ef9fe7505, which is the read that matters since the failure existed only in the merge GitHub builds. The merge cost this pull request nothing else: its own three-dot diff is 37 files, all under packages/envoy, .legion/INFRA-141/ and one workflow line, and both thermonuclear passes compared the pre-merge and post-merge patches and found the alias, its call and its comment the only difference.",
-    "cmd/listener/delivery.go (30c1d1614806): publishNoHolderExceptionOrNak is deleted and the no-interests fanout branch reduced to its logger.Info and ACK with a comment stating the routing complement. Nothing was orphaned: exceptionPublishFailedLine is still live at :251 including the agent give-up, the deployed CloudWatch filter on it (infra/aws/rendering/metricfilters.go:65) still matches, and messagesNAKed still has live producers on the deferral and ordinary retry paths.",
-    "internal/bus/publish_cancel_reconnect_test.go (30c1d1614806): the cancellation during a reconnect wait is pinned two-sidedly - removing the ctx.Done() arm fails it with the subscriber receiving the message while the publish answers nil, and a live-context control requires delivery after the same reconnect. This is the architect's condition for closing it by test rather than by a third unverified check, and it is met for the case it names."
-  ],
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/AGENTS.md:1913",
-      "description": "This round added the sentence 'A fanout delivery that fails to a *live* session still NAKs through its own outcome's exceptionFailureRetries.' That mechanism cannot execute. exceptionFailureRetries is read only at delivery.go:255, inside the exception-publication branch whose guard at :249 is isControlTopic(item.Topic) || outcome.fanoutRefusal; its sole setter at :990 is the generic fanout outcome, which does not set fanoutRefusal, and listenerDeliveryHandler routes both control prefixes elsewhere (:300-306) so a fanout topic is never a control topic. The live retry on that path is retry: retryable at :991 and the final finalize(true) at :1012-1014 - which the very next bullet of the same file already states correctly, so the new sentence is both false and redundant. New this round: the phrase is absent from packages/envoy/AGENTS.md at refs/heads/main, read there rather than from a patch series. It is one sentence, it needs no code change, and the correct mechanism is named above. Raised because this is the class this change has been held to five times, in the file every agent working this repository loads, and because the round that deleted one dead path wrote a new claim attributing behaviour to a different dead field."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/nats.go:630",
-      "description": "The cancellation window is narrowed, not closed, and the body entry that said it was closed is corrected by the reviewer rather than sent back. ensureConnWithContext is a loop whose top returns nil on a connected or draining connection without consulting ctx; its ctx.Done() arm sits only in the select taken when the connection is down but not closed, beside a 10 ms timer that can win Go's random choice when both are ready; and a successful connectWithContext installs and returns nil whatever the context did meanwhile. publishCoreTo then reaches publishConfirmed, which is handed only the deadline and publishes. About one 10 ms tick. The mild end of the class, since the caller has cancelled and so is not told failure and does not retry. Both thermonuclear passes reached this interleaving independently. The architect's ruling - closed only by a test, else recorded - stands, so it stays in Not proven / risk, narrowed."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/delivery.go:990",
-      "description": "The architect asked for a verdict on deliveryOutcome.exceptionFailureRetries rather than an observation. Verdict: pre-existing, not this change's. It is unreachable by the same complement that condemned the deleted helper - sole setter at :990 without fanoutRefusal, guard at :249 - but packages/envoy/cmd/listener/delivery.go read at refs/heads/main carries the identical field, reader, sole setter and routing complement, so the cutover did not make it dead. Recorded in Not proven / risk with its two line references for the architect to route; the merge is not held for it. Both thermonuclear passes independently reached the same provenance."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/publish_cancel_reconnect_test.go",
-      "description": "The cancellation test releases after a 300 ms sleep rather than on a handshake at the wait's entry, so it is a reliable lock on the outage case and not a deterministic proof of every cancellation/reconnect interleaving. Named by the code-quality pass, agreed, and recorded in Not proven / risk beside the residual above."
-    }
-  ],
-  "notFindings": [
-    "File growth: delivery.go 727 -> 1,018 and internal/bus/nats.go 935 -> 1,003. Both thermonuclear passes return CHANGES on this as their only remaining item. It is owned by dispatch://INFRA-49/ask/8262a4d5-bf39-44d9-8bc0-f1b8dbe03437, which names the units; it changes no behaviour, hides no error and breaks no gate, so it is not held against this change. The thermonuclear rubric's 1,000-line bar is its own, not this repository's."
-  ],
+  "important": 0,
+  "minor": 0,
+  "round": 6,
+  "roundSixFindingClosed": "packages/envoy/AGENTS.md (faef510529d0): the sentence attributing a live fanout retry to deliveryOutcome.exceptionFailureRetries is deleted, not rewritten. Verified at this head rather than from the commit subject: grep for exceptionFailureRetries in packages/envoy/AGENTS.md returns 0, the file changes at one line, and a sentence-by-sentence diff of that bullet against its version at 9ef9fe7505 shows exactly one removal and no addition, so no replacement claim appeared elsewhere. The complement was re-derived from the code at this head rather than from the implementer's line numbers: the only two fanoutRefusal: true sites are delivery.go:948 and :968, neither the generic fanout outcome at :990, and listenerDeliveryHandler routes both control prefixes away at :301-305 before the fanout default at :306, so isControlTopic || fanoutRefusal is false for every topic reaching the fanout. The live retry there is retry: retryable at :992 - not :991, which is clearAttempt: retryable; the tester caught that off-by-one in my round-six review and I carry the correction.",
+  "keyFindings": [],
+  "approval": {
+    "head": "APPROVED_HEAD_PLACEHOLDER",
+    "basis": "No finding stands. Every behavioural finding of rounds one to six is closed and was verified in the code by the reviewer at the head that closed it, and this round's diff is docs-only, so the code verified at the round-six head 9ef9fe7505 carries over whole."
+  },
+  "docsOnlyRound": "Between the round-six code head 9ef9fe7505464c4c7ce267d0a0b9a08f3af691dd and this head, four files change: .legion/INFRA-141/implement.json, review.json and test.json, and packages/envoy/AGENTS.md at one line. No .go, .ts, .sh, .yaml or .json line moves outside .legion/. By the role's own carve-out a docs-only diff gets no thermonuclear pair, so none ran this round and the pair's verdicts at c1d45f90 stand.",
   "ciRead": {
-    "codeHead": "9ef9fe7505464c4c7ce267d0a0b9a08f3af691dd",
-    "prHead": "c1d45f9068fd56e3968d92c455f1e1baed4c3e16",
-    "compare": "ahead; the file list was printed and read rather than inferred from an all() over a list that could have been empty: exactly .legion/INFRA-141/implement.json and .legion/INFRA-141/test.json.",
+    "ciHead": "5dab141e81f1f7470ebcf91698a01fd2dba3a76f",
+    "prHead": "713776e540de87fb7bb496e65af81dc7212e267b",
+    "whyThatHead": "GitHub attaches a pull_request run to the branch head at push time, and this push carried both the docs(envoy) commit and the implementer's handoff, so faef510529d0 has no check runs of its own and asking that commit for them returns an empty list. The CI head was taken from the runs list by head_sha, not from a commit.",
+    "compare": "5dab141e...713776e5 is ahead by one file, .legion/INFRA-141/test.json, printed and read rather than inferred from an all() over a list that could have been empty.",
     "requiredChecks": [
       "lint",
       "typecheck",
       "test",
       "pr-title"
     ],
-    "observed": "All four required checks success. envoy-e2e-local success (job 121159268085), read as a step list: step 6 Pull the NATS image the script starts and step 7 Local end-to-end acceptance both completed/success. Every other lane at that commit is success or skipped. This is the first head of this pull request at which the whole required set and the acceptance job are green together. The merge commit 4df4db34b290 has its own runs and is not the evidence."
+    "observed": "All four success. pr-title has five success runs and one cancelled, the cancelled being a superseded run from an earlier body edit, read as a list of runs rather than as a single status. envoy-e2e-local success (job 121176510352), read as a step list: step 6 and step 7 Local end-to-end acceptance both completed/success. build, changes, dispatch-memory, dispatch-multiprocess, envoy-infra-go and envoy-smoke success. envoy-go-race and dispatch were still running and are not required.",
+    "redLanesNotThisChange": "envoy-go (job 121176510292) and broker-multiprocess (job 121176510287) are red, both solely on one inherited compile error: cmd/broker/service_account_scope_test.go:48 and cmd/broker/service_accounts_test.go:46 call startBroker for two returns and variadic strings where cmd/broker/main_test.go:313 declares func startBroker(t *testing.T, options brokerOptions) *brokerProcess. Proven two ways: this pull request changes no file under cmd/broker (zero of its 37 files), and the only FAIL line in envoy-go's whole log is that package; and main itself carries the mismatch, read as contents at refs/heads/main rather than from a patch series. Neither lane is in the base's required set. Tracked as dispatch://INFRA-379 per the architect."
   },
-  "thermonuclear": {
-    "head": "c1d45f9068fd56e3968d92c455f1e1baed4c3e16",
-    "ran": "both passes at the reviewed head",
-    "result": "Both CHANGES. Both confirm the round's three requested items and both reach the reconnect-completion interleaving and the file growth. The security pass alone found the AGENTS.md sentence, which is this round's one finding; the code-quality pass alone named the test's 300 ms timing. Both independently established that exceptionFailureRetries is pre-existing. Every finding recorded here was verified by the reviewer against the code, and every claim about main was read at refs/heads/main rather than from a patch series."
-  },
+  "residualsCarried": [
+    "The cancellation window at the acquisition instant: ensureConnWithContext returns at the top of its loop on IsConnected||IsDraining without consulting ctx, its ctx.Done() arm sits beside a 10 ms timer Go may pick instead, and a successful connectWithContext returns nil whatever the context did, so publishConfirmed sees only a future deadline and publishes. About one tick. The architect ruled it may be closed only by a test rather than by a third unverified check, so it is recorded. The body's Not proven / risk entry is the governing text and supersedes .legion/INFRA-141/implement.json's line that the window does not exist; a handoff is a dated record of what a phase believed and is not rewritten.",
+    "deliveryOutcome.exceptionFailureRetries is unreachable and pre-existing, verified at refs/heads/main; recorded for the architect to route and not held against this change.",
+    "The cancellation test releases after a 300 ms sleep rather than on a handshake, so it is a reliable lock on the outage case and not a deterministic proof of every interleaving.",
+    "The publish route's role-holder read outside sendRequestBudget; the unplaceableDeferrals orphan case, unreachable at a 72-hour MaxAge against a 60 s window; the retired WARN and delivery_status label with no in-repo consumer but possible external dashboards; capability_refused and role_lapsed asserted by no test."
+  ],
+  "fastFollow": "dispatch://INFRA-49/ask/8262a4d5-bf39-44d9-8bc0-f1b8dbe03437 owns the file growth: api.go 1127 -> 1408, delivery.go 727 -> 1018, internal/bus/nats.go 935 -> 1003, with the record machinery, the unplaceable policy and GET /v1/roles/<role>'s 500 for the role-claim race as the units. Both thermonuclear passes point at it; it changes no behaviour, hides no error and breaks no gate, so it did not hold the merge.",
   "threads": {
-    "openedByReviewer": 19,
-    "answeredThisRound": [
-      "PRRT_kwDORFy7ds6wAwgH",
-      "PRRT_kwDORFy7ds6wAwgJ",
-      "PRRT_kwDORFy7ds6wAwgL",
-      "PRRT_kwDORFy7ds6wAwgM"
-    ],
+    "openedByReviewer": 23,
     "unresolvedByReviewer": [],
     "botThreadsAccepted": [],
-    "note": "Every thread is the reviewer's own; no bot opened one. The four the implementer answered since the round-five review each carry one reply this round; none is unresolved, since the cancellation entry was corrected in the body rather than sent back."
+    "note": "Twenty-three threads, every one the reviewer's own; no bot opened one on this pull request. All resolved and all carrying the reviewer's answer, verified in gh api graphql at this head rather than from the body's Threads section."
   }
 }
