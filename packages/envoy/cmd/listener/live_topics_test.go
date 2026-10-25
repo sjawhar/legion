@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -21,7 +23,8 @@ import (
 // its /v1 API and the bus), so the file compiles unchanged at the commit before the change. There
 // TestAServingPortReceivesATopicTheStreamDoesNotStore and
 // TestAListenerReachesASessionAtTheHostItRecorded fail, each with no prompt arriving; at the
-// change's head both pass.
+// change's head both pass. The rest hold what the live topics lane (ENVOY_SUBSCRIBE_ALL_TOPICS=1)
+// must leave as it was, and how it ends a start whose grant refuses it.
 
 // servingPort is a session's fake serve process: an httptest server on 127.0.0.1 that records the
 // text of every prompt the listener POSTs to /session/<id>/prompt_async and answers with status.
@@ -204,4 +207,294 @@ func TestAListenerReachesASessionAtTheHostItRecorded(t *testing.T) {
 	publish(t, connectPublisher(t, uri), item)
 
 	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
+}
+
+// liveLaneEnv is the environment of a listener with the live topics lane on, which reaches a
+// session on its own machine at 127.0.0.1, where the tests' serving ports listen.
+var liveLaneEnv = []string{"ENVOY_SUBSCRIBE_ALL_TOPICS=1", "ENVOY_HOST_BRIDGE=127.0.0.1"}
+
+// liveLaneLine is the line a listener logs once NATS has accepted its live topics subscription.
+const liveLaneLine = "live topics subscribed"
+
+// holdRole registers a session that takes its own messages off the bus, as Oh My Pi does, has it
+// claim role through listener, and subscribes on its agent subject for it, answering each role
+// forward's receipt. It returns the session id and every envelope the session receives there.
+func holdRole(t *testing.T, listener *listenerProcess, uri, role string) (string, <-chan contracts.Envelope) {
+	t.Helper()
+	sessionID := "ses_holder_" + id.New()
+	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	received := make(chan contracts.Envelope, 16)
+	if _, err := conn.Subscribe(contracts.AgentSubject(sessionID), func(msg *natsgo.Msg) {
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err != nil {
+			t.Errorf("decode what %s received: %v", sessionID, err)
+			return
+		}
+		_ = msg.Respond(nil)
+		received <- item
+	}); err != nil {
+		t.Fatalf("subscribe for %s: %v", sessionID, err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the subscription for %s: %v", sessionID, err)
+	}
+	return sessionID, received
+}
+
+// requireOneRoleMessage fails the test unless the holder receives exactly one envelope, the role
+// message on topic carrying message, within the window.
+func requireOneRoleMessage(t *testing.T, received <-chan contracts.Envelope, topic, message string, window time.Duration) {
+	t.Helper()
+	deadline := time.After(window)
+	var got []contracts.Envelope
+	for collecting := true; collecting; {
+		select {
+		case item := <-received:
+			got = append(got, item)
+		case <-deadline:
+			collecting = false
+		}
+	}
+	if len(got) != 1 || got[0].Topic != topic || got[0].PayloadSummary != message {
+		t.Fatalf("the role holder received %+v within %s, want the one message %q on %s", got, window, message, topic)
+	}
+}
+
+// awaitSessionsListed waits up to 10 s for listener's GET /v1/sessions to list each session with
+// its topics, so a delivery through this listener finds them in its caches.
+func (p *listenerProcess) awaitSessionsListed(t *testing.T, sessionIDs ...string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, body := callListener(t, p.port, http.MethodGet, "/v1/sessions", "")
+		var listed []struct {
+			SessionID string   `json:"session_id"`
+			Topics    []string `json:"topics"`
+		}
+		missing := sessionIDs
+		if status == http.StatusOK && json.Unmarshal([]byte(body), &listed) == nil {
+			missing = nil
+			for _, sessionID := range sessionIDs {
+				found := false
+				for _, row := range listed {
+					found = found || (row.SessionID == sessionID && len(row.Topics) > 0)
+				}
+				if !found {
+					missing = append(missing, sessionID)
+				}
+			}
+		}
+		if len(missing) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener on port %d does not list %v within 10s: %d %s", p.port, missing, status, body)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// With the live topics lane on, the listener takes every stored message off the bus twice, once
+// through its durable and once through the live lane, and every role message twice, once through
+// the role lane and once through the live lane. Each still reaches its session once: a topic the
+// stream stores and an inbox message at a serving port, and a role message at its holder.
+func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
+	uri := testnats.URL(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "stored-once", liveLaneEnv...)
+	listener.waitHealthy(t)
+	publisher := connectPublisher(t, uri)
+
+	topic := "notifications.github.acme.repo" + id.New() + ".pr.1"
+	serving := startServingPort(t, "ses_stored_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, listener, serving, "127.0.0.1", topic)
+
+	stored := newEnvelope("github", topic, "pull request 1 was opened")
+	publish(t, publisher, stored)
+	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), stored)
+	serving.noPrompt(t, 2*time.Second)
+
+	inbox := newEnvelope("agent", contracts.AgentSubject(serving.sessionID), "a message for this session alone")
+	inbox.SourceSession = "ses_sender_" + id.New()
+	publish(t, publisher, inbox)
+	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), inbox)
+	serving.noPrompt(t, 2*time.Second)
+
+	role := "stored-once-" + id.New()
+	_, received := holdRole(t, listener, uri, role)
+	postListener(t, listener.port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"a message for whoever holds the role"}`)
+	requireOneRoleMessage(t, received, contracts.RoleTopicPrefix+role, "a message for whoever holds the role", 2*time.Second)
+}
+
+// Two listeners of one machine, as a rolling deploy runs them, both with the live lane on: NATS
+// hands each live message to one of them, so a session receives each event once, and the live
+// lane, in a queue group apart from the role lane's, takes no role message from its holder. The
+// second listener waits on the durable the first holds and never turns healthy, so its live lane
+// is open once it logs so.
+func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	first := startListenerProcess(t, binary, uri, "two-listeners", liveLaneEnv...)
+	first.waitHealthy(t)
+	second := startListenerProcess(t, binary, uri, "two-listeners", liveLaneEnv...)
+	second.WaitForOutput(t, liveLaneLine, "subscribe failed, retrying")
+	first.WaitForOutput(t, liveLaneLine)
+
+	topic := "notifications.team." + id.New()
+	serving := startServingPort(t, "ses_two_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, first, serving, "127.0.0.1", topic)
+	role := "two-listeners-" + id.New()
+	holder, received := holdRole(t, first, uri, role)
+	second.awaitSessionsListed(t, serving.sessionID, holder)
+
+	publisher := connectPublisher(t, uri)
+	sent := map[string]int{}
+	for index := range 3 {
+		item := newEnvelope("agent", topic, fmt.Sprintf("live event %d of 3", index+1))
+		item.SourceSession = "ses_publisher_" + id.New()
+		publish(t, publisher, item)
+		sent[item.Payload] = 0
+	}
+	for range 3 {
+		text := serving.awaitPrompt(t, 2*time.Second)
+		for message := range sent {
+			if strings.Contains(text, message) {
+				sent[message]++
+			}
+		}
+	}
+	serving.noPrompt(t, 2*time.Second)
+	for message, count := range sent {
+		if count != 1 {
+			t.Fatalf("%q reached the session %d times, want once", message, count)
+		}
+	}
+
+	roleMessage := newEnvelope("agent", contracts.RoleTopicPrefix+role, "a message for whoever holds the role")
+	publish(t, publisher, roleMessage)
+	requireOneRoleMessage(t, received, roleMessage.Topic, roleMessage.PayloadSummary, 2*time.Second)
+}
+
+// A delivery the listener refuses on a live topic is reported as every refusal is, on the topic's
+// exceptions lane over core NATS, and the live lane reads that report back like any topic: a
+// session subscribed to the exceptions lane is prompted with it. A report is never itself
+// reported, so the failed delivery of that prompt (the watcher's port answers 500) publishes no
+// second one. The refusal is a btw-mode message (frameDeliveryMode) to a subscriber that
+// advertises no capability.
+func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
+	uri := testnats.URL(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "exception-read-back", liveLaneEnv...)
+	listener.waitHealthy(t)
+
+	topic := "notifications.team." + id.New()
+	refusing := startServingPort(t, "ses_refusing_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, listener, refusing, "127.0.0.1", topic)
+	watcher := startServingPort(t, "ses_watcher_"+id.New(), http.StatusInternalServerError)
+	registerServingSession(t, listener, watcher, "127.0.0.1", bus.ExceptionTopicPrefix+">")
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	exceptions, err := conn.SubscribeSync(bus.ExceptionTopicPrefix + ">")
+	if err != nil {
+		t.Fatalf("subscribe to the exceptions lanes: %v", err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the exceptions subscription: %v", err)
+	}
+
+	item := newEnvelope("agent", topic, "a btw its subscriber cannot take")
+	item.Payload = `{"delivery":{"mode":"btw"}}`
+	publish(t, connectPublisher(t, uri), item)
+
+	text := watcher.awaitPrompt(t, 2*time.Second)
+	if !strings.Contains(text, "Topic: "+bus.ExceptionTopicPrefix+topic) || !strings.Contains(text, "delivery_failed") {
+		t.Fatalf("the watcher's prompt is not the refusal's report on %s:\n%s", bus.ExceptionTopicPrefix+topic, text)
+	}
+	report, err := exceptions.NextMsg(2 * time.Second)
+	if err != nil {
+		t.Fatalf("no report on the exceptions lanes: %v", err)
+	}
+	if report.Subject != bus.ExceptionTopicPrefix+topic {
+		t.Fatalf("the report went to %s, want %s", report.Subject, bus.ExceptionTopicPrefix+topic)
+	}
+	if extra, err := exceptions.NextMsg(2 * time.Second); err == nil {
+		t.Fatalf("a second report on %s: %s", extra.Subject, extra.Data)
+	}
+	refusing.noPrompt(t, time.Second)
+}
+
+// The live lane delivers only an envelope that is valid and names as its topic the subject it
+// arrived on: bytes that are no envelope, an envelope the wire rules refuse (an empty urgency) and
+// an envelope naming a topic other than its subject, which its session also subscribes to, reach
+// no port. Core NATS keeps one publisher's order, so a valid envelope published after them being
+// the first prompt shows they were dropped, not late.
+func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
+	uri := testnats.URL(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "invalid-envelope", liveLaneEnv...)
+	listener.waitHealthy(t)
+
+	topic, other := "notifications.team."+id.New(), "notifications.team."+id.New()
+	serving := startServingPort(t, "ses_invalid_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, listener, serving, "127.0.0.1", topic, other)
+	publisher := connectPublisher(t, uri)
+
+	if err := publisher.Conn.Publish(topic, []byte("not an envelope")); err != nil {
+		t.Fatalf("publish bytes that are no envelope: %v", err)
+	}
+	var wire map[string]any
+	encoded, err := json.Marshal(newEnvelope("agent", topic, "an envelope with an empty urgency"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	wire["urgency"] = ""
+	if encoded, err = json.Marshal(wire); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Conn.Publish(topic, encoded); err != nil {
+		t.Fatalf("publish an envelope the wire rules refuse: %v", err)
+	}
+	if err := publisher.PublishCoreTo(topic, newEnvelope("agent", other, "an envelope naming another topic")); err != nil {
+		t.Fatalf("publish an envelope naming another topic: %v", err)
+	}
+	valid := newEnvelope("agent", topic, "a valid envelope after them")
+	publish(t, publisher, valid)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 2*time.Second), valid)
+	serving.noPrompt(t, time.Second)
+}
+
+// A listener whose NATS user may subscribe to the role lanes and reply inboxes alone, as the
+// shared hub's listener's grant allows, ends its start when told to open the live lane: NATS
+// refuses the subscription, and the listener exits 1 with an ERROR naming the variable that asked
+// for it and the subject, rather than run delivering none of those topics.
+func TestAListenerWhoseGrantRefusesEveryTopicEndsItsStart(t *testing.T) {
+	const machineID = "hub-grant"
+	config := fmt.Sprintf(`jetstream {}
+authorization {
+  users = [ { user: listener, password: listener, permissions: { subscribe: { allow: ["_INBOX.>", %q] } } } ]
+}
+`, contracts.RoleTopicPrefix+"> "+bus.ListenerQueue(machineID))
+	_, uri := testnats.StartImageConfig(t, testnats.Image, config, []string{"-js"}, false)
+	uri = strings.Replace(uri, "nats://", "nats://listener:listener@", 1)
+
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, "ENVOY_SUBSCRIBE_ALL_TOPICS=1")
+	listener.WaitExit(t, "its start")
+	output := listener.Output.String()
+	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("exit code = %d, want 1:\n%s", code, output)
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil || record["level"] != "ERROR" {
+			continue
+		}
+		if strings.Contains(fmt.Sprint(record["msg"]), "ENVOY_SUBSCRIBE_ALL_TOPICS") && record["subject"] == "notifications.>" {
+			return
+		}
+	}
+	t.Fatalf("no ERROR names ENVOY_SUBSCRIBE_ALL_TOPICS and the subject notifications.>:\n%s", output)
 }

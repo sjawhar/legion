@@ -62,16 +62,23 @@ type deliveryMode uint8
 const (
 	coreDelivery deliveryMode = iota
 	durableDelivery
+	// liveDelivery is a message the live lane took off core NATS (liveDeliveryHandler). Like
+	// coreDelivery it is delivered to whoever is there and never retried; unlike it, its envelope
+	// must name the subject it arrived on as its topic.
+	liveDelivery
 )
 
 type deliveryMessage struct {
 	data []byte
 	mode deliveryMode
-	msg  *nats.Msg
+	// msg is the NATS message: set for durableDelivery, which acknowledges it, and liveDelivery,
+	// which reads its subject.
+	msg *nats.Msg
 }
 
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
-// durable JetStream message receives an acknowledgement or retry request.
+// durable JetStream message receives an acknowledgement or retry request. A role-lane or live-lane
+// message is core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
 func (message deliveryMessage) finalize(retry bool) {
 	if message.mode != durableDelivery {
 		return
@@ -94,6 +101,23 @@ func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
 		handler(deliveryMessage{data: msg.Data, mode: coreDelivery})
+	}
+}
+
+// liveDeliveryHandler is the live lane's handler, over every notification topic (main's
+// openLiveTopics). It leaves alone a subject another lane owns, read before anything is decoded
+// and with no line logged, since the live lane receives each of those messages too: a role lane
+// (the role lane arbitrates it) and a subject the stream stores (the durable delivers it, and a
+// role forward travels on its holder's agent subject, which the stream stores, while keeping its
+// role topic). Every other message goes through the delivery handler, whose fanout delivers it to
+// every session on this machine subscribed to its topic.
+func liveDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
+	handler := listenerDeliveryHandler(cfg)
+	return func(msg *nats.Msg) {
+		if strings.HasPrefix(msg.Subject, contracts.RoleTopicPrefix) || bus.StreamCaptures(msg.Subject) {
+			return
+		}
+		handler(deliveryMessage{data: msg.Data, mode: liveDelivery, msg: msg})
 	}
 }
 
@@ -278,6 +302,13 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		if err := item.Validate(); err != nil {
 			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
 			message.finalize(false)
+			return
+		}
+		// The live lane chose this message by its subject, so an envelope naming another topic would
+		// be routed past that choice: to a role lane or an agent's inbox, or to sessions subscribed
+		// to a topic nobody published on.
+		if message.mode == liveDelivery && item.Topic != message.msg.Subject {
+			cfg.logger.Warn("listener live envelope names a topic other than its subject", slog.String("subject", message.msg.Subject), slog.String("topic", item.Topic), slog.String("event_id", item.EventID))
 			return
 		}
 		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})

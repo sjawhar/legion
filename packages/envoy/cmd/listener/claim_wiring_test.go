@@ -27,8 +27,10 @@ func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
 }
 
 // envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel hostname) names
-// where the session process actually runs; it must reach the session entry as Host, kept
-// separate from MachineID (always the registering listener's own machine, never the caller's).
+// where the session process actually runs, which is the address a listener reaches the session's
+// serving port at when no host bridge of its own machine applies. It must reach the session entry
+// as Host, kept separate from MachineID (always the registering listener's own machine, never the
+// caller's), which decides which listener fans a topic out to the session.
 func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID: "ses_z",
@@ -46,7 +48,8 @@ func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 
 func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 	// An older plugin's subscribeBody has no "host" key; sessionEntryFromSubscribe must not
-	// invent one — HostOrMachine is where the fallback to MachineID happens, at read time.
+	// invent one: an empty Host is what sends delivery to its fallback (host.docker.internal on the
+	// listener's own machine, the machine id on another) and display to MachineID (HostOrMachine).
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old", Port: 1}, "example-listener")
 
 	if got.Host != "" {
