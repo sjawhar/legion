@@ -297,4 +297,12 @@ package api
 // 30; main then landed sjawhar/legion#1986 at 30, 31 and 32, LEGION-781 at 33 and INFRA-31 at 34,
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
-const DaemonAPIVersion = 35
+//
+// 36: INFRA-220 -- a worker's environment gains the four LEGION_STALL_* numbers under both
+// runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
+// pane's `-e` pairs and a pod container's `env` carry verbatim), and a Claude Code role's pod
+// worker container gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and
+// CLAUDE_CODE_DISABLE_CRON. Both plugins read the four numbers through
+// `packages/pi-shared/src/stall-limits.ts`, and `@sjawhar/claude-envoy` reads the Claude
+// directory, so the daemon and the image that carries them ship together.
+const DaemonAPIVersion = 36
