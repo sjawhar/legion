@@ -18,7 +18,6 @@ import {
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { refusePosts } from "./sends";
-import { touchHold } from "./touch";
 import { asUser } from "./users";
 
 const session = {
@@ -516,35 +515,59 @@ test("an inline link keeps its line and grows its hit box without covering its n
       range.selectNodeContents(upper);
       const upperText = range.getBoundingClientRect();
       const x = upperText.x + upperText.width / 2;
-      const hitAt = (y: number) => {
-        const node = document.elementFromPoint(x, y);
-        return node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link");
-      };
-      // One pixel below the link's own text - inside the padding, never derived from the
-      // anchor's padded box, which would move with the padding it is there to measure.
+      // One pixel below the link's own text, and one pixel above its bottom edge: both points
+      // are the text's, never the anchor's padded box, which would move with the padding they
+      // are there to measure.
       const probeY = upperText.bottom + 1;
+      // Playwright measures a click `position` from the padding box's top-left corner, so the
+      // points are returned as offsets inside it. That is what makes the lower one
+      // mutation-sensitive: the point stays on the page where it is, and without the padding
+      // the box shrinks above it and no longer receives it.
+      const box = upper.getBoundingClientRect();
+      const style = getComputedStyle(upper);
+      const padTop = box.top + Number.parseFloat(style.borderTopWidth);
+      const padLeft = box.left + Number.parseFloat(style.borderLeftWidth);
       // The composer is a fixed box over the foot of the page: a probe under it reads the
       // composer whatever the link does, so the probe point has to clear it.
       const composer = document.querySelector('[aria-label="Comment composer"]');
       return {
-        inPadding: hitAt(probeY),
+        hitX: x - padLeft,
+        inPaddingY: probeY - padTop,
         // How far the lower link's padding box starts below the upper link's own text.
         // Negative is padding sitting on letters a reader is trying to tap.
         lowerClearance: lower.getBoundingClientRect().y - upperText.bottom,
-        onUpperTextBottom: hitAt(upperText.bottom - 1),
+        onTextBottomY: upperText.bottom - 1 - padTop,
         probeClear:
           x >= 0 &&
           x <= window.innerWidth &&
           probeY >= 0 &&
           probeY <= window.innerHeight &&
           (composer === null || probeY < composer.getBoundingClientRect().top),
-        probeX: x,
-        probeY,
       };
     });
 
-    // A finger at the padded point, which no hit test can speak for: the click is recorded in
-    // the capture phase - before anything on the way can stop it - and not followed.
+    // The same link the measurement took: the seeded one outside the ask cards. Its hit tests
+    // are Playwright's own actionability check rather than an `elementFromPoint` snapshot - a
+    // trial click waits and retries until the link is attached, visible, stable and is what
+    // the action point hits, and then performs no click - bounded so a refusal is prompt.
+    const upperLink = page
+      .locator('main a:not([data-testid^="ask-"] a)')
+      .filter({ hasText: /^Upper line$/ });
+    await expect(upperLink).toHaveCount(1);
+    await upperLink.click({
+      position: { x: line.hitX, y: line.onTextBottomY },
+      timeout: 5_000,
+      trial: true,
+    });
+    await upperLink.click({
+      position: { x: line.hitX, y: line.inPaddingY },
+      timeout: 5_000,
+      trial: true,
+    });
+
+    // A real finger at the padded point, which no hit test can speak for: the click is
+    // recorded in the capture phase - before anything on the way can stop it - and not
+    // followed.
     await page.evaluate(() => {
       document.addEventListener(
         "click",
@@ -557,7 +580,7 @@ test("an inline link keeps its line and grows its hit box without covering its n
         true
       );
     });
-    await touchHold(page, { x: line.probeX, y: line.probeY }, 0);
+    await upperLink.tap({ position: { x: line.hitX, y: line.inPaddingY } });
     const tapped = await page.evaluate(
       () => document.documentElement.dataset.e2eTappedLink ?? "no-click"
     );
@@ -608,21 +631,22 @@ test("an inline link keeps its line and grows its hit box without covering its n
     expect(inline.viewHeight).toBeGreaterThanOrEqual(24);
     // 3. On consecutive lines of one message turn - 16px prose on 24px lines, the tightest
     //    pitch a body reaches - the lower link's padding starts below the upper link's own
-    //    text, so a tap at the bottom of that text opens the upper link.
+    //    text, and the trial click above shows a tap at the bottom of that text is taken by
+    //    the upper link.
     expect(line.lowerClearance).toBeGreaterThanOrEqual(0);
-    expect(line.onUpperTextBottom).toBe("Upper line");
-    // 4. Those probes were taken on screen: the point is inside the viewport and above the
+    // 4. Those points were taken on screen: the point is inside the viewport and above the
     //    composer's fixed box, so what they hit is the turn.
     expect(
       line.probeClear,
       "the turn was left under the fixed comment composer, so the probe measured the composer"
     ).toBe(true);
-    // 5. One pixel below the upper link's own text is still the upper link - this is the check
-    //    that goes red when the three pixels of `.prose a { padding-block }` are gone.
-    expect(line.inPadding).toBe("Upper line");
-    // 6. And a finger there reaches the link, which an `elementFromPoint` probe does not say.
+    // 5. One pixel below the upper link's own text is still inside the upper link's hit box -
+    //    the second trial click above is the check that goes red when the three pixels of
+    //    `.prose a { padding-block }` are gone.
+    // 6. And a finger there reaches the link, which an actionability check does not say.
     expect(tapped).toBe("Upper line");
-    // 7. A tap on the word before a wrapped link stays on the text.
+    // 7. A tap on the word before a wrapped link stays on the text - a claim that nothing is
+    //    there, which a trial click cannot express, so it stays a hand-made hit test.
     expect(measured.onWord).toBe("not-a-link");
     // 8. Two stacked links: the lower edge of the first is the first, and it never reaches the
     //    second.
