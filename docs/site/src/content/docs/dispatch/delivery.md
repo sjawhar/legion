@@ -161,8 +161,12 @@ An events subscription first receives `events_start` with the decimal id it star
 `event` frames with their id and event. A page that has no cursor adopts `events_start.since`, so
 the next subscription resumes without a gap. An agent subscription receives `agent` frames whose
 `event` is `responder`, `replay`, or `frame`; their `data` is the session's JSON. Either kind may
-receive `ended` with `behind` or `dropped`; subscribe that view again at once. An agent refusal is
-terminal for that view (`HUMAN_ONLY`, `SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
+receive `ended` with `behind` or `dropped`; subscribe that view again at once. An events view that
+ends with no `events_start` since it was sent is one Dispatch could not start, which it ends a
+second after each subscription while its database does not answer: subscribe it again after a
+backoff from 1 s, doubling up to 30 s, as after an events `error`, and refresh what the page holds
+once, at the next `events_start`. An agent refusal is terminal for that view (`HUMAN_ONLY`,
+`SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
 
 Reconnect every subscription when the socket closes. A 4001 `max age` close is routine: Dispatch
 chooses an age in [30, 60) minutes, and the page reconnects at once without refreshing. A 1012

@@ -769,10 +769,25 @@ export function useEventFeed({
 
     const stop = liveSocketFor(queryClient).subscribeEvents({
       since: () => (cursor === null ? null : cursor.toString()),
-      onStart: (since) => {
+      onStart: (since, afterGap) => {
         if (cursor === null) {
           cursor = eventPosition(since);
         }
+        if (!afterGap) {
+          return;
+        }
+        // Events may have committed while nothing carried the feed - or, when the first handshake
+        // failed, since the page's own reads - and the resume may not replay them all, so every
+        // query the app holds refreshes, once the feed has started again: refreshing at each send
+        // would refetch everything again and again while Dispatch cannot start it. TanStack
+        // matches all of them when no filter is given. Nothing is excluded: the one query that
+        // looks expensive to refresh, `["block-schema"]` with an infinite `staleTime`, resolves
+        // from a module-level per-session cache (`features/doc/schema.ts`), so its refetch issues
+        // no request.
+        refreshEverything();
+        // The one query that refresh skips: a credential list held at `null` (no broker), which
+        // a server restarted since with a broker configured would now answer with a list.
+        reaskHeldCredentialList(queryClient);
       },
       onEvent: (id, raw) => {
         // The cursor advances before the event is read on purpose: an event this page cannot
@@ -805,21 +820,6 @@ export function useEventFeed({
           console.error("event feed: an event this page cannot read", raw, error);
           refreshEverything();
         }
-      },
-      onSubscribed: (afterGap) => {
-        if (!afterGap) {
-          return;
-        }
-        // Events may have committed while no socket carried the feed - or, when the first
-        // handshake failed, since the page's own reads - and the resume may not replay them all,
-        // so every query the app holds refreshes. TanStack matches all of them when no filter is
-        // given. Nothing is excluded: the one query that looks expensive to refresh,
-        // `["block-schema"]` with an infinite `staleTime`, resolves from a module-level
-        // per-session cache (`features/doc/schema.ts`), so its refetch issues no request.
-        refreshEverything();
-        // The one query that refresh skips: a credential list held at `null` (no broker), which
-        // a server restarted since with a broker configured would now answer with a list.
-        reaskHeldCredentialList(queryClient);
       },
     });
 

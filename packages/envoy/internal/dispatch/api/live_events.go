@@ -165,10 +165,11 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 }
 
 // endEventsAfterFailure ends a subscription whose read failed, with an ended frame (behind), so its
-// page subscribes again from the last id it applied, as the server-sent stream's client reconnected
-// after its stream ended. It waits the relay's own retry first: a page answers an ended frame by
-// subscribing again at once, and a read that keeps failing (a database that does not answer) would
-// otherwise have the page and the subscription take turns as fast as the failure comes back. A
+// page subscribes again from the last id it applied. It waits the relay's own retry first: a page
+// answers the end of a feed that had started by subscribing again at once, and a read that keeps
+// failing (a database that does not answer) would otherwise have the page and the subscription take
+// turns as fast as the failure comes back. An end that comes before the feed's events_start, as
+// every end does while the head cannot be read, the page answers after its own doubling backoff. A
 // subscription whose own context ended (stopped, or its socket closed) sends nothing: that is why
 // its read failed.
 func endEventsAfterFailure(ctx context.Context, stream liveStreamer, sub, what string, err error) {

@@ -870,7 +870,6 @@ test("a human-only refusal shows the view unavailable", async () => {
   liveSocketFor(queryClient).subscribeEvents({
     onEvent: () => undefined,
     onStart: () => undefined,
-    onSubscribed: () => undefined,
     since: () => null,
   });
   const first = sockets.latest();

@@ -219,8 +219,11 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   updates are not reaching this page and offers Reload. `api/event-feed.ts`'s `useEventFeed`
   subscribes the `events` view, starts its cursor from `whoami.event_head` when present, adopts
   `events_start` only when it has no cursor, and maps every event to the query keys it refreshes.
-  After a gap it refreshes the whole cache and re-asks a held credential list; after a rotation it
-  does neither. `features/agent-view/useAgentStream.ts` subscribes each agent view through the
+  After a gap it refreshes the whole cache and re-asks a held credential list, once, at the feed's
+  next `events_start`; after a rotation it does neither. An events subscription Dispatch ends
+  before it started (a database that does not answer ends each a second after it is sent) is sent
+  again after the backoff an events `error` gets, from 1 s doubling to 30 s, rather than at once.
+  `features/agent-view/useAgentStream.ts` subscribes each agent view through the
   same socket and rebuilds its transcript from the session replay. Query keys remain literal arrays
   at their call sites (`["issue", key]`, `["issues", "project", project]`, `["artifact", id]`,
   `["project", project, "artifacts"]`, `["ask-thread", id]`, …), with no key-builder module.

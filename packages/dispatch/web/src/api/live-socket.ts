@@ -103,15 +103,12 @@ export interface EventsHandlers {
    *  it. Read each time the subscription is sent. */
   since(): string | null;
   /** The subscription's `events_start`: the id it starts after, which the feed adopts as its
-   *  cursor when it holds none. */
-  onStart(since: string): void;
+   *  cursor when it holds none. `afterGap` is false on its first start and after a 4001; true when
+   *  events may have been missed since it last started - its socket was lost, a failed attempt
+   *  before the first open included, or Dispatch ended or refused it - however many sends it took
+   *  to start again, so a gap is reported once. */
+  onStart(since: string, afterGap: boolean): void;
   onEvent(id: string, event: unknown): void;
-  /** Called each time the subscription is sent on an open socket, from within `subscribeEvents`
-   *  when one is already open. `afterGap` is false on its first send and after a 4001; true after
-   *  any other loss of the socket, a failed attempt before the first open included, after an
-   *  `ended`, and after Dispatch refused the subscription (an `error` frame, which the page
-   *  answers by sending it again after a backoff), when events may have been missed. */
-  onSubscribed(afterGap: boolean): void;
 }
 
 /** An agent live view's side of its subscription. */
@@ -164,14 +161,18 @@ interface EventsSubscription {
   readonly kind: "events";
   readonly id: string;
   readonly handlers: EventsHandlers;
-  /** Set when events may have been missed since the subscription was last sent: its socket was
-   *  lost, or Dispatch ended or refused it. Cleared by the next send, which reports it
-   *  (`onSubscribed`). */
+  /** Set when events may have been missed since the subscription last started: its socket was
+   *  lost, or Dispatch ended or refused it. Cleared by the next `events_start`, which reports it
+   *  (`onStart`). */
   gap: boolean;
-  /** Dispatch's refusals of it in a row, since it last started (`events_start`): the backoff of
-   *  its next send. */
+  /** Whether Dispatch started it (`events_start`) since it was last sent. An `ended` that follows
+   *  a start is sent again at once; one with no start since the send waits out the backoff a
+   *  refusal does. */
+  started: boolean;
+  /** Dispatch's refusals of it, and its ends with no start between them, in a row since it last
+   *  started: the backoff of its next send. */
   refusals: number;
-  /** Cancels the send a refusal scheduled, while one waits. */
+  /** Cancels the send a refusal or an end scheduled, while one waits. */
   cancelRetry: (() => void) | undefined;
 }
 
@@ -268,9 +269,17 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     if (sub.kind !== "events") return;
     sub.cancelRetry?.();
     sub.cancelRetry = undefined;
-    const afterGap = sub.gap;
-    sub.gap = false;
-    sub.handlers.onSubscribed(afterGap);
+    sub.started = false;
+  };
+
+  /** Sends `sub` again once the backoff of its refusals and ends in a row (`refusals`) is over. */
+  const resendLater = (sub: EventsSubscription) => {
+    sub.cancelRetry?.();
+    sub.cancelRetry = after(jittered(sub.refusals), () => {
+      sub.cancelRetry = undefined;
+      sendSubscribe(sub);
+    });
+    sub.refusals += 1;
   };
 
   /** The subscription `id` names when it is one of `kind`. A frame for one the page already
@@ -345,7 +354,12 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     const sub = subs.get(frame.sub);
     if (sub === undefined) return;
     // Dispatch dropped this one subscription; the socket and every other subscription stay.
-    if (sub.kind === "events") sub.gap = true;
+    if (sub.kind === "events") {
+      sub.gap = true;
+      // One that ended before it started - a database that does not answer ends each a second
+      // after it is sent - waits out the backoff a refusal does rather than going again at once.
+      if (!sub.started) return resendLater(sub);
+    }
     sendSubscribe(sub);
   };
 
@@ -387,15 +401,10 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
         return sub.handlers.onUnavailable(frame.code, frame.message);
       case "events":
         // Dispatch holds no subscription it refused either, but the page never gives the feed up:
-        // it is sent again after a backoff of its own, and that send reports the gap.
+        // it is sent again after a backoff of its own, and its next start reports the gap.
         console.error("live socket: Dispatch refused the event feed", frame);
         sub.gap = true;
-        sub.cancelRetry?.();
-        sub.cancelRetry = after(jittered(sub.refusals), () => {
-          sub.cancelRetry = undefined;
-          sendSubscribe(sub);
-        });
-        sub.refusals += 1;
+        resendLater(sub);
     }
   };
 
@@ -416,7 +425,10 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
         const sub = held(frame.sub, "events");
         if (sub === undefined) return;
         sub.refusals = 0;
-        return sub.handlers.onStart(frame.since);
+        sub.started = true;
+        const afterGap = sub.gap;
+        sub.gap = false;
+        return sub.handlers.onStart(frame.since, afterGap);
       }
       case "event":
         return held(frame.sub, "events")?.handlers.onEvent(frame.id, frame.event);
@@ -658,6 +670,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
         id: newId(),
         handlers,
         gap: false,
+        started: false,
         refusals: 0,
         cancelRetry: undefined,
       };

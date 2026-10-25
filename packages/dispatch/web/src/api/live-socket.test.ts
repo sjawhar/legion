@@ -595,27 +595,31 @@ test("reconnectDelayMs doubles from a 1s base and caps at 30s", () => {
 });
 
 /** An event feed as the page keeps one: it adopts `events_start`'s id while it holds no cursor and
- *  each event's id after that, and records every call the socket makes. */
+ *  each event's id after that, and records every call the socket makes - each start's `afterGap`
+ *  in `gaps`. */
 function eventFeed() {
   let cursor: string | null = null;
   const starts: string[] = [];
+  const gaps: boolean[] = [];
   const events: { id: string; event: unknown }[] = [];
-  const subscribed: boolean[] = [];
   const handlers: EventsHandlers = {
     since: () => cursor,
-    onStart: (since) => {
+    onStart: (since, afterGap) => {
       starts.push(since);
+      gaps.push(afterGap);
       cursor ??= since;
     },
     onEvent: (id, event) => {
       events.push({ id, event });
       cursor = id;
     },
-    onSubscribed: (afterGap) => {
-      subscribed.push(afterGap);
-    },
   };
-  return { handlers, starts, events, subscribed };
+  return { handlers, starts, gaps, events };
+}
+
+/** Dispatch starts the event feed `socket` carries after `since`. */
+function startFeed(socket: FakeLiveSocket, since = "0") {
+  socket.receive({ type: "events_start", sub: socket.subscribed("events").sub, since });
 }
 
 /** An agent live view's handlers, recording every call in order. */
@@ -718,7 +722,8 @@ test("a 4001 reopens at once, keeps state open and resubscribes every kind", asy
       view: { kind: "agent", session_id: SESSION_A },
     });
     expect(again.subscribes()).toHaveLength(3);
-    expect(feed.subscribed).toEqual([false, false]);
+    startFeed(again, "7");
+    expect(feed.gaps).toEqual([false, false]);
     expect(states.filter((state) => state !== "open")).toEqual([]);
   } finally {
     stopStates();
@@ -733,14 +738,16 @@ test("a 1012 reopens at once and reports a gap to the event feed", () => {
   const stop = live.subscribeEvents(feed.handlers);
   try {
     sockets.latest().open();
-    expect(feed.subscribed).toEqual([false]);
+    startFeed(sockets.latest());
+    expect(feed.gaps).toEqual([false]);
 
     sockets.latest().drop(1012);
     expect(live.state().state).toBe("reconnecting");
     expect(sockets.sockets).toHaveLength(2);
     sockets.latest().open();
     expect(live.state()).toMatchObject({ state: "open", since: null });
-    expect(feed.subscribed).toEqual([false, true]);
+    startFeed(sockets.latest());
+    expect(feed.gaps).toEqual([false, true]);
   } finally {
     stop();
   }
@@ -794,7 +801,9 @@ test("an ended frame resubscribes only its subscription", async () => {
     expect(socket.subscribes().slice(before)).toEqual([
       { type: "subscribe", sub: events, view: { kind: "events" }, resume: { since: "9" } },
     ]);
-    expect(feed.subscribed).toEqual([false, true]);
+    // Dispatch carried nothing for it in between, so its next start reports a gap.
+    startFeed(socket, "9");
+    expect(feed.gaps).toEqual([false, true]);
 
     socket.receive({ type: "ended", sub: agentSub, reason: "dropped" });
     expect(socket.subscribes().slice(before + 1)).toEqual([
@@ -866,6 +875,7 @@ test("a socket silent for 45 s while open is replaced", () => {
   try {
     const socket = sockets.latest();
     socket.open();
+    startFeed(socket);
     // The check runs every 15 s, the tab never hidden: at 45 s the socket has been silent exactly
     // as long as it may be.
     jest.advanceTimersByTime(45_000);
@@ -875,7 +885,8 @@ test("a socket silent for 45 s while open is replaced", () => {
     expect(socket.closedWith).toBe(4000);
     expect(sockets.sockets).toHaveLength(2);
     sockets.latest().open();
-    expect(feed.subscribed).toEqual([false, true]);
+    startFeed(sockets.latest());
+    expect(feed.gaps).toEqual([false, true]);
 
     // The server's heartbeat, every 15 s, keeps the new one.
     for (let beat = 0; beat < 8; beat += 1) {
@@ -1035,9 +1046,10 @@ test("a handshake that never finishes is replaced after 45 s, and the event feed
     expect(first.closedWith).toBe(4000);
     expect(live.state().state).toBe("reconnecting");
     expect(sockets.sockets).toHaveLength(2);
-    // The feed's first send follows an attempt that carried nothing, so it reports a gap.
+    // The feed's first start follows an attempt that carried nothing, so it reports a gap.
     sockets.latest().open();
-    expect(feed.subscribed).toEqual([true]);
+    startFeed(sockets.latest());
+    expect(feed.gaps).toEqual([true]);
   } finally {
     stop();
   }
@@ -1065,7 +1077,8 @@ test("going offline closes the socket and shows reconnecting", () => {
     jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(2);
     sockets.latest().open();
-    expect(feed.subscribed).toEqual([false, true]);
+    startFeed(sockets.latest());
+    expect(feed.gaps).toEqual([true]);
 
     // A handshake still out when the network goes is let go the same way.
     sockets.latest().drop(1006);
@@ -1116,7 +1129,8 @@ test("coming online reopens at once", () => {
     expect(sockets.sockets).toHaveLength(attempts + 3);
     sockets.latest().open();
     expect(live.state()).toMatchObject({ state: "open", since: null, stuck: false });
-    expect(feed.subscribed.at(-1)).toBe(true);
+    startFeed(sockets.latest());
+    expect(feed.gaps).toEqual([true]);
 
     // An open socket carrying frames is left alone.
     window.dispatchEvent(new Event("online"));
@@ -1204,8 +1218,8 @@ test("an error frame for the event feed resubscribes it after the socket's backo
       view: { kind: "events" },
       resume: { since: "30" },
     });
-    // Dispatch carried nothing for it in between, so the send reports a gap.
-    expect(feed.subscribed).toEqual([false, true]);
+    // No send reports the gap.
+    expect(feed.gaps).toEqual([false]);
 
     // A second refusal in a row waits twice as long.
     socket.receive(refusal(sub));
@@ -1214,8 +1228,9 @@ test("an error frame for the event feed resubscribes it after the socket's backo
     jest.advanceTimersByTime(1);
     expect(socket.subscribes()).toHaveLength(3);
 
-    // A subscription that starts again resets the wait.
+    // A subscription that starts again reports the gap, once, and resets the wait.
     socket.receive({ type: "events_start", sub, since: "30" });
+    expect(feed.gaps).toEqual([false, true]);
     socket.receive(refusal(sub));
     jest.advanceTimersByTime(1_000);
     expect(socket.subscribes()).toHaveLength(4);
@@ -1238,6 +1253,55 @@ test("an error frame for the event feed resubscribes it after the socket's backo
     expect(sockets.latest().unsubscribes()).toEqual([]);
     jest.advanceTimersByTime(10_000);
     expect(sockets.latest().subscribes()).toHaveLength(1);
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+// While Dispatch cannot start the feed - its database does not answer - it ends each subscription
+// a second after it is sent. An end that follows a start is sent again at once; ends with no start
+// since the last send wait out the same doubling backoff a refusal does. The gap is reported once,
+// when the feed starts again, not at every send.
+test("ended frames with no events_start back off 1 s, 2 s, 4 s and the next start reports the gap once", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  const ended = (sub: string) => ({ type: "ended", sub, reason: "behind" }) as const;
+  try {
+    const socket = sockets.latest();
+    socket.open();
+    const { sub } = socket.subscribed("events");
+    socket.receive({ type: "events_start", sub, since: "30" });
+    expect(feed.gaps).toEqual([false]);
+
+    // The feed had started, so its end is sent again at once.
+    socket.receive(ended(sub));
+    expect(socket.subscribes()).toHaveLength(2);
+
+    for (const [index, wait] of [1_000, 2_000, 4_000].entries()) {
+      socket.receive(ended(sub));
+      jest.advanceTimersByTime(wait - 1);
+      expect(socket.subscribes()).toHaveLength(2 + index);
+      jest.advanceTimersByTime(1);
+      expect(socket.subscribes()).toHaveLength(3 + index);
+    }
+    expect(socket.subscribes().at(-1)).toEqual({
+      type: "subscribe",
+      sub,
+      view: { kind: "events" },
+      resume: { since: "30" },
+    });
+    // No send reported the gap.
+    expect(feed.gaps).toEqual([false]);
+
+    // The start reports it, once, and resets the wait: the next end is sent again at once.
+    socket.receive({ type: "events_start", sub, since: "30" });
+    expect(feed.gaps).toEqual([false, true]);
+    socket.receive(ended(sub));
+    expect(socket.subscribes()).toHaveLength(6);
+    expect(sockets.sockets).toHaveLength(1);
   } finally {
     random.mockRestore();
     stop();

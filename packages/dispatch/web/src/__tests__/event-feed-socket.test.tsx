@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, QueryObserver, useQuery } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -193,7 +193,9 @@ test("a drop resumes from the cursor and refreshes everything", async () => {
       resume: { since: "7" },
     });
     // While no socket carried the feed, events may have committed that its resume does not
-    // replay, so every query the app holds refreshes - not only the ones some list names.
+    // replay, so once it starts again every query the app holds refreshes - not only the ones
+    // some list names.
+    receive(again, { type: "events_start", sub, since: "7" });
     await waitFor(() => expect(fetches).toEqual({ checks: 2, issues: 2 }));
     expect(wholeCache.count()).toBe(1);
   } finally {
@@ -359,7 +361,7 @@ test("repeated gaps cost one refresh plus a trailing one", async () => {
     // proxy queries.
     for (let index = 0; index < 6; index += 1) {
       act(() => sockets.latest().drop(1012));
-      act(() => sockets.latest().open());
+      openFeed();
       await sleep(100);
     }
     expect(sockets.sockets).toHaveLength(7);
@@ -395,11 +397,51 @@ test("the credential list held null is asked again after a gap", async () => {
 
     // A gap is the one moment the server may have restarted, perhaps with a broker configured.
     act(() => sockets.latest().drop(1012));
-    act(() => sockets.latest().open());
+    openFeed();
     await waitFor(() => expect(getCredentialPending).toHaveBeenCalledTimes(2));
   } finally {
     hook?.unmount();
     getCredentialPending.mockRestore();
+  }
+});
+
+// While Dispatch cannot start the feed - its database does not answer - it ends each subscription
+// a second after it is sent. A refresh at each send would refetch every query of every tab for as
+// long as the outage lasts; the page refreshes once, when the feed starts again.
+test("ended frames with no events_start back off and cost one refresh once the feed starts", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const queryClient = newClient({ staleTime: Number.POSITIVE_INFINITY });
+  const wholeCache = countWholeCacheRefreshes(queryClient);
+  // A window shorter than every backoff, so a refresh at each send would show as one each.
+  const hook = renderHook(() => useEventFeed({ wholeCacheRefreshMs: 100 }), {
+    wrapper: wrapperFor(queryClient),
+  });
+  const ended = (sub: string) => ({ type: "ended", sub, reason: "behind" }) as const;
+  try {
+    const { socket, sub } = openFeed("30");
+    receive(socket, ended(sub));
+    expect(socket.subscribes()).toHaveLength(2);
+    for (const [index, wait] of [1_000, 2_000, 4_000].entries()) {
+      receive(socket, ended(sub));
+      act(() => jest.advanceTimersByTime(wait - 1));
+      expect(socket.subscribes()).toHaveLength(2 + index);
+      act(() => jest.advanceTimersByTime(1));
+      expect(socket.subscribes()).toHaveLength(3 + index);
+    }
+    act(() => jest.advanceTimersByTime(1_000));
+    expect(wholeCache.count()).toBe(0);
+
+    receive(socket, { type: "events_start", sub, since: "30" });
+    act(() => jest.advanceTimersByTime(1_000));
+    expect(wholeCache.count()).toBe(1);
+  } finally {
+    // A zero-delay timer left on the fake clock would hang the next test's waitFor.
+    act(() => jest.advanceTimersByTime(1));
+    jest.useRealTimers();
+    hook.unmount();
+    random.mockRestore();
+    wholeCache.restore();
   }
 });
 
@@ -422,7 +464,7 @@ test.each(
     act(() => sockets.latest().fail());
     act(() => reopen());
     await waitFor(() => expect(sockets.sockets).toHaveLength(2), { timeout: 2_000 });
-    act(() => sockets.latest().open());
+    openFeed();
     await waitFor(() => expect(wholeCache.count()).toBe(1));
   } finally {
     hook.unmount();
