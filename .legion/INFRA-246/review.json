@@ -2,42 +2,51 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T13:05:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T14:10:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 0,
+  "important": 0,
+  "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/pi-envoy/AGENTS.md:436, packages/pi-envoy/extensions/envoy.ts:618, :2281",
-      "description": "Three descriptions of the hold model still state the model this round replaced, and one of them states the deleted branch as the rule. (1) packages/pi-envoy/AGENTS.md:436: 'One the listener does not take back is tried again while it is under the host session's own id, which this process heartbeats; under a session it has left it is abandoned to the listener's reaping' - that is exactly the host-dependent branch edit 2 deleted, and the same bullet describes adoption with no same-session requirement ('unless the session the host is then on wants that role, whose hold it is again'), where the code now requires sessionOpen(hold.id) at :2296-2300. This file is the package's engineering guidance and is read by every agent working here, so it tells the next maintainer to restore the branch whose removal is the point of the round. (2) envoy.ts:618 says abandonedHolds holds 'Holds this process gave up under a session it has left', which :2280 ('whatever session it is under') and :2318 (every entry of `failed`) contradict three screens below it: a hand-back that fails under the session this process still runs now lands there too. (3) envoy.ts:2281 says 'the next accepted registration makes it a pending hand-back again', where registerSession re-promotes before issuing the request - the loop at :1601-1604 precedes the client.subscribe call - so it happens at the attempt whether or not the answer arrives; AGENTS.md's own 'any registration of that session by this process, in a pass or not and answered or not' is the accurate statement, so the two documents also disagree. No behaviour is wrong and nothing is hidden: this is documentation. It is carried rather than deferred because the round's stated purpose was an invariant the next reader checks against, the text is newly written this round, and its concrete failure mode is the reintroduction of the branch whose absence closes rounds 5 and 6. Three text edits, no code. If the architect judges an eighth round disproportionate for that, it should say so and the reviewer will approve on its word."
+      "severity": "minor",
+      "file": "packages/pi-envoy/extensions/envoy.test.ts:6828",
+      "description": "The fourth copy of the sentence rounds 7 and 8 corrected: 'takes its holds back at its next accepted registration', where registerSession re-promotes before it issues the request (the loop at :1601-1604 precedes client.subscribe at :1606). Judged Minor and not held for: the two descriptions a maintainer reads before changing this code - the production comment at envoy.ts:615-622 and packages/pi-envoy/AGENTS.md:436 - now both state it correctly, so a test comment cannot outrank them, and the change it could invite (moving the promotion behind acceptance) costs at most one registration interval rather than a role. The reviewer's own sweep missed it, because it grepped the old hold model's phrases and not this one."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/scripts/stall-fixture.ts:28-36, packages/pi-envoy/scripts/smoke-registration-stall.sh:235-237,377",
+      "description": "The smoke's 'accepted registrations' is an attempt ordinal, not an acceptance count: the fixture increments its counter and logs `registration <n>` before the request is issued, and last_registration reports the highest such number. With the third post wedged, a run that logs seven has had at most six accepted. Judged Minor because the arm's load-bearing observations are read from the listener rather than the fixture log - the session still listed 365 s past the wedge, and last_seen advanced - and recorded in the PR body's Not proven / risk so the permanent record is accurate rather than the script silently relabelled after the fact."
+    },
+    {
+      "severity": "minor",
+      "file": "the pull request body's Look at first paragraph",
+      "description": "Stale at this head: it named the three descriptions as defects, which round 8 fixed. It is the reviewer's own line and was rewritten with this approval to point at settleEndedHolds and the margin check instead."
     }
   ],
-  "roundSevenVerified": [
-    "settleEndedHolds(wanted, live) at envoy.ts:2285 takes no host; one caller at :2358 passes two arguments. The captured host is not representable.",
-    "The failed loop abandons unconditionally at :2318, so nothing it writes can be adopted later.",
-    "Adoption is gated on sessionOpen(hold.id) at :2296-2300 and reads neither claimedRoleTopic nor holdUnconfirmed, so the loop no longer reads a variable it writes.",
-    "abandonedHolds is keyed ${topic}@${id} with every reader following: registerSession selects by hold.id and re-promotes under the same key (:1601-1604), observeAbandonedHold looks up and updates by that key (:1871-1893), and the claimed-branch cleanup sweeps every entry of the topic (:1950-1955). The collision it fixes - two failed hand-backs of one role under two sessions, one dropped - is a defect none of the six previous rounds named.",
-    "The writers of claimedRoleSessionID are still :1966, :2005, :2302 and supersedes still has its two sources (:2382, :2394), so the recorded residual at :1957-1966 is narrowed, not widened, and round 7 adds no path."
+  "roundEightVerified": [
+    "The product delta is empty, measured rather than read: envoy.ts with comment lines stripped hashes to 8e2c02446be26a00 at both the round-7 code head 1363aa8f and this head while the raw files differ, the round-8 delta has zero +/- lines that are not comments, and envoy.test.ts is byte-identical at 5c6d522c5f9b1209. Round 7's verification of the code therefore carries over whole.",
+    "The correction went up, not down: AGENTS.md's accurate 'in a pass or not and answered or not' is unchanged and the two comments moved to meet it, which is the direction a diff stat cannot show.",
+    "AGENTS.md:436 carries both clauses - adoption only while the hold's session is open, read at that moment, and abandonment of every failed hand-back whatever session it is under - with nothing in the paragraph conditioning either on a captured host.",
+    "A sweep of every .md and .ts outside node_modules for the old model's own phrases ('under the host session's own id', 'whose hold it is again', 'tried again while') returns one hit before this round, the AGENTS.md bullet, and none after it: there is no fourth copy of the deleted branch anywhere in the repository."
   ],
   "ciRead": {
-    "codeHead": "1363aa8f50571be6128fcc0b4ec202804e2fc158",
+    "codeHead": "8af013ebda1adbf1073d072e715076fb3e7e7e40",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "all four completed success at the code head. The compare was read as a whole rather than through a boolean: status ahead, ahead_by 2, files present, count 2, exactly .legion/INFRA-246/implement.json and test.json - an `all(startswith(...))` over a missing or capped file list answers true, so the count and the names are the read. broker-multiprocess is failure there and is not required; the reviewer established that it cannot be this branch's from the branch's own delta, 0 files changed under packages/envoy/cmd/broker and packages/envoy/internal/broker, which needs no read of main (dispatch://INFRA-379). pi-legion is green again at this head.",
-    "reviewedHead": "the head this round's handoff push makes"
+    "verdict": "all four completed success at the code head. The compare was read as a record, not a boolean: status ahead, ahead_by 2, files present, count 2, exactly .legion/INFRA-246/implement.json and test.json. The Legion Envoy and Contracts lane is red there, failing envoy-go and broker-multiprocess on cmd/broker/service_account_scope_test.go; neither check is required, and the reviewer established from this branch's own delta that it cannot be ours - packages/envoy changes are cmd/listener/delivery.go, cmd/listener/main.go and internal/session/claim.go, with nothing under cmd/broker or internal/broker (dispatch://INFRA-379).",
+    "approvedHead": "the head this round's handoff push made"
   },
   "threads": {
-    "openedByReviewer": 19,
-    "reviewerRepliesPosted": 19,
-    "unresolvedAtThisHead": 0,
+    "openedByReviewer": 21,
+    "reviewerRepliesPosted": 21,
+    "unresolvedAtApproval": 0,
     "botThreadsAccepted": []
   },
   "thermonuclear": {
-    "head": "d7f2c746",
-    "scope": "the whole pull request, weighted to the round-7 delta 07a84828..d7f2c746",
-    "deepReview": "APPROVE - no correctness or security finding; each of the three invariants checked, the round-6 path reported closed and the recorded residual not widened",
-    "codeQuality": "APPROVE - 1 P3, the hold-lifecycle descriptions",
-    "adjudication": "The P3 was verified in the files and carried as this round's one finding. Nothing declined."
-  }
+    "head": "3e887976",
+    "deepReview": "APPROVE - one Low, the smoke's registration count, non-blocking",
+    "codeQuality": "APPROVE - two P3s",
+    "adjudication": "All three verified in the files and answered as Minor, none deferred silently: one recorded in the risk list, one reported to the architect as its call, one fixed by the reviewer in its own line."
+  },
+  "extractionAsk": "dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355 is open and unanswered by a person as of this approval (read on the issue, which lists it under Open asks). It carries the serialQueue extraction with the traps this issue paid for: three readers each finding one missed fence site, the topic-only discriminator that drops the bookkeeping a refusal needs, the session-id discriminator that would restore exactly the case a skip exists for, and a restored hold becoming a previousSessionID the listener honours against a live holder."
 }
