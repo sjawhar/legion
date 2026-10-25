@@ -80,6 +80,27 @@ func TestPutProjectDefaultAssigneeRefusesUnknownProjectAndLogin(t *testing.T) {
 	}
 }
 
+// A body that names no assignee at all is refused and stores nothing: only an explicit null
+// clears a default. The create route reads an absent assignee and a null one differently, and the
+// contract's ProjectDefaultAssigneeInput requires the field, so a PUT of `{}` must not wipe the
+// person a project's unowned work lands on.
+func TestPutProjectDefaultAssigneeRefusesABodyWithoutAssignee(t *testing.T) {
+	handler := newTestHandler(t)
+	createDefaultAssigneeProject(t, handler, "CORE", "Core")
+	putDefaultAssignee(t, handler, "CORE", "bob")
+
+	absent := dispatchRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/default-assignee",
+		map[string]any{}, "alice")
+	if absent.Code != http.StatusBadRequest {
+		t.Fatalf("a body without assignee: status=%d body=%s, want 400", absent.Code, absent.Body.String())
+	}
+	list := dispatchRequest(t, handler, http.MethodGet, "/api/v1/settings/project-default-assignees", nil, "alice")
+	defaults := decodeBody[[]projectDefaultAssigneeRow](t, list)
+	if len(defaults) != 1 || defaults[0].Project != "CORE" || defaults[0].Assignee == nil || *defaults[0].Assignee != "bob" {
+		t.Fatalf("a refused put changed the stored default: %#v, want CORE/bob", defaults)
+	}
+}
+
 // The list route answers every project that names a default, by key, and an empty list — never
 // null — when none does.
 func TestListProjectDefaultAssigneesOrdersByProjectKey(t *testing.T) {
