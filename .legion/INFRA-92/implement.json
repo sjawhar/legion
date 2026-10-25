@@ -2,31 +2,52 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T11:40:00Z",
-  "round": "an identity rewrite only, on the architect's instruction: this branch's code commit 39175757c326 was authored by the review App, and no line of content changes in this round",
+  "completed": "2026-10-25T12:35:00Z",
+  "round": "the reviewer's third changes-requested round at a89f88d315cd: one defect with two faces and one remedy — the retry's suppression test asked an exception's type where only its origin matters",
   "proof": [
     {
-      "criterion": "Every commit of this branch above main carries the right App in both columns, and the rewrite that achieved it changed no content.",
-      "surface": "The branch itself, in the issue workspace and then at origin: `jj log` over `main@origin..@` for the identities, and the unchanged-diff fingerprint of `skill://legion-worker/references/conflicts-and-rewrites.md` for the content.",
-      "command": "jj log -r 'main@origin..@' -T 'commit_id ++ author.email() ++ committer.email()'; the fingerprint command of that reference at the tip before and after; the guard `descendants(39175757c326) ~ ::@`; `jj metaedit --update-author -r 39175757c326`",
-      "observed": "Before: 39175757c326 author legion-reviewer[bot], committer legion-implementer[bot] — the one mismatch on the branch. The guard printed nothing, so nothing outside this chain descended from it. After `jj metaedit --update-author` and its rebase of two descendants, the commit is d4de531733a9 with legion-implementer[bot] in both columns, and a template over every commit of `main@origin..@` that prints a line only where author and committer differ printed nothing at all. Each handoff commit still carries its own role's App: the planner's, the tester's and the reviewer's are legion-reviewer[bot], every code commit and every implement handoff legion-implementer[bot]. Fingerprint before aef279e370c6ed9b6aefa03bff53781f94e61b4c440c21c1c8d9c9a7d4ce33fe, after the same value — the content is provably identical.",
-      "headSha": "the rewritten head, pushed with --allow-backwards; see the PR comment for the pair of tips",
-      "negativeControl": "The fingerprint is the control for the content: it is taken over the branch's whole diff against its fork point with only `.legion/` and `docs/solutions/` left out, so any line that had moved would change it. The identity audit is its own control in the other direction — it reads every commit of the branch, not the one rewritten, and would have printed any other mismatch."
+      "criterion": "A listener answer that is not JSON no longer costs the session its role: the failure is queued and a heartbeat takes the role back.",
+      "surface": "The committed dist/envoy-channel.js against a real nats-server and a real Envoy listener, with a proxy answering the first POST /v1/roles/set with an HTML body and a 200 — the shape a proxy's 502 page takes, which the real client parses at packages/envoy-client/src/transport.ts:395.",
+      "command": "a throwaway probe (not in the tree) built from the round-two probe, its proxy given an html-200 refusal shape",
+      "observed": "The session stayed alive and logged `envoy-channel: could not restore the role (JSON Parse error: Unrecognized token '<'); the next heartbeat retries` — the queue taken, and the line no longer blaming the role file — and the listener then named the session holder, with the record kept.",
+      "headSha": "301288e631cb",
+      "negativeControl": "The same case in the same run against the previous head's bundle (`jj file show -r d4de531733a9 packages/claude-envoy/dist/envoy-channel.js`): it logged `could not restore the role from <…>/roles/role-round2-0006.json (JSON Parse error: Unrecognized token '<'); the session starts without one`, blaming a file that was good, and after eight heartbeats the holder was still empty. That is the defect, reproduced, and the fix beside it."
+    },
+    {
+      "criterion": "A role file that cannot be read no longer starves the interests reconciliation, and bytes that will never parse still suppress the retry.",
+      "surface": "The package's own suite driving a real `startChannelSession` against the harness's fakes.",
+      "command": "cd packages/claude-envoy && bun test",
+      "observed": "191 pass, 0 fail. Three rows carry this round: a listener answer that is not JSON at startup, where a later heartbeat takes the role back; a role file of truncated JSON, where the role is never claimed over five heartbeats and exactly one stderr line names the file; and a directory where the role record should be, where the session still adopts the topic the registry lists on a heartbeat after the startup interests read failed — the behaviour `tests/envoy-channel-registry.test.ts:328-365` pins for a resumed session.",
+      "headSha": "301288e631cb",
+      "negativeControl": "Read against the previous head: the first row fails there (a SyntaxError was never queued) and the third fails there too (an EISDIR threw out of every tick, so the reconciliation never ran); the second passes there, and is the row that keeps the suppression from being lost while the other two are fixed."
+    },
+    {
+      "criterion": "The plugin still registers the name a person gave the session, follows a rename, and falls back for an unnamed one.",
+      "surface": "The committed bundles against a real nats-server and a real Envoy listener, every title read back through GET /v1/sessions.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh",
+      "observed": "PASS: 'eeny meeny', then 'miny moe' after the UserPromptSubmit payload, then 'probe-project smoke-ti' with no name, and the dispatch stamp holding 'miny moe'.",
+      "headSha": "301288e631cb",
+      "negativeControl": "The script's own last case: main@origin's bundle registered the fallback and not the chosen name."
     }
   ],
   "reviewFindings": [
-    "No finding of the reviewer is open; this round answers the tester's record defect alone. The three round-two findings and their interaction are in the head already (39175757c326, now d4de531733a9)."
+    "1 (blocking) — fixed. `readPersistedRole` is the only place that knows an error came from the file's own bytes, so it is where the decision now lives: it throws `UnparseableRoleRecordError` for bytes that do not parse, answers `undefined` for ENOENT, and propagates every other failure unchanged. The startup catch tests for that one outcome and queues everything else — a listener answer that is not JSON, a schema miss, an EACCES, any transient error — and its line no longer names the role file except where the file is really at fault.",
+    "2 (blocking) — fixed in the same move. `transferRole` is best-effort: the queue stays set (it clears only after `restoreRole` resolves), the failure is reported once per failure run, and the heartbeat goes on to `syncRegisteredInterests()`. Doing it inside `transferRole` covers its second caller, `adoptHandoff`, as well. The doc comment says why the role may fail where the interests read may not: the role has a queue of its own and the session works without it; the interests read has no queue and needs the tick.",
+    "Thread PRRT_kwDORFy7ds6wAVT4, which the reviewer unresolved because its classification half was these two findings, is answered and resolved at this head. The other eight stay resolved."
   ],
   "filesChanged": [
-    "none — no line of content changed in this round; the only change is the author of one commit and the commit ids its rewrite moved"
+    "packages/claude-envoy/src/session-identity.ts — `UnparseableRoleRecordError`, and `readPersistedRole` reading and parsing as two steps so the origin of a failure is known",
+    "packages/claude-envoy/src/envoy-channel-server.ts — the startup catch tests that outcome rather than an exception type; `transferRole` is best-effort and reports once per failure run",
+    "packages/claude-envoy/tests/envoy-channel-handoff.test.ts — three behaviour rows: a non-JSON listener answer recovered, truncated local bytes never retried, an unreadable record not starving the interests",
+    "packages/claude-envoy/dist/ — rebuilt"
   ],
   "trickyParts": [
-    "The cause is the empty working-copy commit a previous role's push left behind: splitting it keeps that commit's author and takes the splitter as committer, which is how a code commit came to say the review App wrote it. `handoff_complete` refuses a handoff carried by another App's commit, so every handoff on this branch is clean; nothing checks a code commit, which is why this reached a push. Before this rewrite I moved off the reviewer-authored empty commit with `jj new @-` so the same thing could not happen again in this round.",
-    "The rewrite's head is a code push, so it carries no `skip-checks: true` line. The rebased handoff commit beneath it still carries its own, which is correct: GitHub reads the trailer on the pushed head alone."
+    "The `instanceof` test was sound for what it tested and wrong about where it was applied: `restoreRole` is a file read *and* a listener call, and the real client parses the listener's answer, so `SyntaxError` and `ZodError` reach the same catch from two origins. Moving the decision into `readPersistedRole` is what makes the test mean what it says; the fix removes a branch rather than adding one.",
+    "The startup catch sets `roleTransferFailureReported` itself when it queues, so the first heartbeat's retry does not repeat a line the operator has already read."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "A guard that covers the handoff commit but not the code commit reads as covering both. `handoff_complete` checks the authoring App of the commit carrying the handoff, which is why five rounds of handoffs are clean, and nothing checks the App of a code commit at all; the pre-push identity check in `skill://legion-worker/references/default-branch-check.md` is the only thing that would have caught this, and it is a step a role performs rather than a gate. This goes in the retro learning with the rest, together with the rule it rests on: the working-copy commit found at a turn's start can carry the previous role's author."
+    "The known gVisor flake showed again in this round: `queryTmux is bounded even by a tmux that ignores SIGTERM` failed two of six full runs here, at 5115 ms and 5138 ms, and passed the other four. It is the Bun `spawnSync` timeout settled as a retro learning; no row of this change is involved."
   ]
 }
