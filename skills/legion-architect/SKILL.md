@@ -341,8 +341,11 @@ notice with an `APPROVED` review is the cue. Read the evidence against every acc
 spec and the plan: the tester's handoff (`.legion/<issue>/test.json` at the approved head), the PR
 body's `E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of that head by SHA
 (`gh api repos/<o>/<r>/pulls/<n>/reviews`), and, for a parent, that every child is `done`
-(section 3). Accept only when scope is fully met, integration evidence is current, corrective work
-is complete, review is clean, and no necessary work was silently deferred. Post the acceptance as a
+(section 3). Read the reviewer's own prose commits here too (`gh pr view <n> --json commits`, the
+ones the review App authored): its text had no reader but itself, and this is that reader. Reading
+them is no new round. Accept only when scope is fully met, integration evidence is current,
+corrective work is complete, review is clean, and no necessary work was silently deferred. Post the
+acceptance as a
 `dispatch comment` explicit about that evidence, then accept with `sign_off`, which runs only in
 `accepting` (refused `SIGNOFF_OUTSIDE_ACCEPTING` elsewhere) and moves the issue to `retro` with the
 status `retro`:
@@ -400,20 +403,21 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    and one that needs a decision is a `dispatch ask`.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
-touches anything outside `docs/solutions/` and the issue's `.legion/<issue>/`, or a
-conflict-resolution merge whose fingerprint
+touches anything outside `docs/solutions/` and the issue's `.legion/<issue>/`, or a forward merge
+of the base whose fingerprint
 (the unchanged-diff check, `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's. What does not: retro's
-`docs/solutions/` commit and its removal of `.legion/<issue>/`, and a merge forced by a GitHub-reported conflict whose fingerprint
-is unchanged. For that merge, the worker holding the issue's phase moves it back to `implementing`
-with `request_backward_move`, and the daemon runs the phases from there: the implementer merges
-the bookmark forward with the
+`docs/solutions/` commit and its removal of `.legion/<issue>/`, a prose-only commit of the
+reviewer's own pushed before the approval that ends its round, and a forward merge whose
+fingerprint is unchanged. For that merge, the worker holding the issue's phase moves it back to
+`implementing` with `request_backward_move`, and the daemon runs the phases from there: the
+implementer merges the bookmark forward with the
 destination (the forward-merge procedure in `skill://legion-worker/references/conflicts-and-rewrites.md` — `jj new legion/<KEY> <destination>`,
 never a rebase, since a rebase rewrites every descendant of the chain's fork point, including
 another tree's branch stacked on it), pushes it as every role pushes (`jj git push`; a genuine
 fast-forward, and a code push, so no `skip-checks: true` line), and posts the before/after fingerprints; the tester re-runs the bare gates only;
 the reviewer confirms and approves the new head by SHA (or continues its round if it had not
 approved); the daemon carries the issue on through your acceptance and retro to the merger, whose new READY packet the daemon posts.
-This merge happens only when GitHub reports `CONFLICTING`
+Above the approved head this merge happens only when GitHub reports `CONFLICTING`
 (`gh pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
 wake — `phase-finished`, `catch-up`, `checks-red`, `review-stuck` — because a `CONFLICTING`
 PR gets no CI and no wake announces it. The moment you see it, tell the worker holding the issue's

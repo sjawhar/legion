@@ -133,13 +133,13 @@ and the tester's proof below are both this proof.
   tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
   `.legion/<issue>/test.json`, and only when the issue's acceptance criteria call for it — never
-  re-pasted into the PR body each round. After a conflict-forced rebase, compute the
+  re-pasted into the PR body each round. After a forward merge, compute the
   fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the head your `E2E` line
   names and at the new head. Equal: re-run only the
   bare gates — the repository's CI green at the new head and its smoke check — and change the
   `E2E` line's head to the new SHA with
-  `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
+  `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`. The
   real-surface verification is not repeated. Different: a full test round.
 - **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
   implementing round, after its own proof and before it completes that round, when the diff

@@ -138,6 +138,32 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   neither done, in progress, nor an open ask is dropped work, and the lead has its owner record it
   at once (INFRA-140). Agents sat on blockers outside Dispatch and dropped work, and leads did not
   catch it.
+- The reviewer fixes a prose-only finding itself — wording, a count, a tense, a citation — in its
+  own commit on the pull request and lists it in its review, and sends the work back only for a
+  finding that touches code or behaviour (INFRA-140). On one issue, six of nine review rounds were
+  one- or two-line prose fixes, each costing a full implement-test-review cycle. The reviewer
+  pushes that commit before it submits the round's review and approves the head the push made: a
+  change pushed above an approved head leaves the approval standing for nothing and the round goes
+  stuck (`classify.ApprovalStands`, `workflow`'s `stuckApprovedOtherCode`, and the cases "the
+  approval, then a code push" and "a push since the approved head changed code, then an approval
+  of the head" in `workflow/review_test.go`). The daemon moves nothing for such a push and counts
+  no fix attempt or round, but it sends nothing back for a red at a head the review App pushed
+  (`PlannedRed`), so the reviewer reads that head's checks itself. The architect reads the
+  reviewer's prose commits at its acceptance, which is no new round: the reviewer's own text had
+  no other reader. `legion-worker`, `merge-gate.md`, `legion-architect` and the reviewer's role
+  prompt say the same.
+- The base is merged forward only when the pull request conflicts, when the incoming change
+  touches files the pull request touches, when the change needs something that exists only on the
+  base, or after a retarget (INFRA-140). One tree merged main forward five times in a day, four of
+  them needlessly, and each merge cost a full round. Before racing another tree on shared files, a
+  role asks that tree on Envoy when its next push lands. After any forward merge the branch is
+  built and its proof run again at the merge head, since a merge with no text conflict can still
+  break it: one tree's merge changed a function's arity under the branch's own callers. Whether
+  the merge needs a new tester round is judged per file: the exemption holds only when the
+  resolution changes no line the pull request itself changed, which is what the unchanged-diff
+  fingerprint measures. The operation is named a forward merge throughout, never a rebase, and the
+  PR comment's format is now `forward merge <old> → <new>; fingerprint <before> → <after>;
+  unchanged|changed`, the tester's line `forward-merge re-check <old> → <new>: …`.
 
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and

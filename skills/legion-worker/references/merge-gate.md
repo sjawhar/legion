@@ -66,7 +66,7 @@ it, and any other change to the head voids it.
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
   A `COMMENT` decides nothing. After a
-  conflict-forced rebase, compute the fingerprint (*The unchanged-diff check* in
+  forward merge, compute the fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the
   `commit_id` of your last submitted review and at the new head. Equal and that review was
   `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
@@ -74,12 +74,25 @@ it, and any other change to the head voids it.
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
   nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
   one review. A return whose task's `Reason:` names a READY refusal is never a confirmation, even
-  after a rebase, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
+  after a forward merge, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
   after it reviews the refused change in full from the last `APPROVE` (*Retro's commits do not
   void the reviewer's approval* below).
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
   when every thread is settled enough to approve, and resolving one never gates your approval.
+- **Fix a prose-only finding yourself** — wording, a count, a tense, a citation — in your own
+  commit on the pull request, and list it in your review. Send the work back only for a finding
+  that touches code or behaviour. Push the fix **before** you submit the round's review, and
+  review the head that push made. A change pushed above the head you approved leaves the approval
+  standing for nothing: the round goes stuck and your architect is told (`ApprovalStands` in
+  `packages/daemon/internal/classify/decisions.go`, `stuckApprovedOtherCode` in
+  `packages/daemon/internal/workflow/review.go`, and the cases "the approval, then a code push"
+  and "a push since the approved head changed code, then an approval of the head" in
+  `packages/daemon/internal/workflow/review_test.go`). That push carries no `skip-checks: true`
+  line, so GitHub runs the branch's workflows on it. Read them before you approve, because the
+  daemon sends nothing back for a red at a head the review App pushed (`PlannedRed` in
+  `classify/decisions.go`). The architect reads your prose commits at its acceptance (*The
+  architect's acceptance*, below), and that read is no new round.
 
 A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
 and takes this order: read CI as above; write, commit and push the handoff; submit the review of
@@ -102,7 +115,9 @@ reviewing until you finish.
   approval of the head by SHA, and for a parent that every child is done) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
-  as its `Reason:` line and counts a review round. The acceptance asks no `Production:` line of
+  as its `Reason:` line and counts a review round. The architect also reads the reviewer's own
+  prose commits here, with the rest of the evidence, and that read is no new round. The acceptance
+  asks no `Production:` line of
   anyone: that line is written after the close (*The production check after the close*, below).
   CI red at the head in `accepting` returns the issue to `implementing` as it does in review.
 

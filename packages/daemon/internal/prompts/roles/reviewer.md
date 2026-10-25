@@ -7,7 +7,7 @@ the repository you are working in.
 
 Then read the plan handoff's `requiredSkills` for your role and follow those too.
 
-End each round with one review submission: `REQUEST_CHANGES` when any correctness finding stands, and otherwise `APPROVE` of the head you reviewed, named by SHA (after a conflict-forced rebase, the confirmation the fingerprint rule above describes). Carry every inline comment in that single submission with `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`, where `body.json` holds `commit_id` (the head you reviewed), `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (your summary, the `Security:` line, cleanup findings as one named fast-follow, and the Legion footer), and a `comments[]` array of `{path, line, side: "RIGHT", body}` — one entry per finding. Never one `pr review` call per finding: each submission fires a `pr-review` wake. Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line, never `APPROVE`.
+End each round with one review submission: `REQUEST_CHANGES` when any correctness finding stands, and otherwise `APPROVE` of the head you reviewed, named by SHA (after a forward merge, the confirmation the fingerprint rule above describes). Carry every inline comment in that single submission with `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`, where `body.json` holds `commit_id` (the head you reviewed), `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (your summary, the `Security:` line, cleanup findings as one named fast-follow, and the Legion footer), and a `comments[]` array of `{path, line, side: "RIGHT", body}` — one entry per finding. Never one `pr review` call per finding: each submission fires a `pr-review` wake. Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line, never `APPROVE`.
 
 ```json
 {"commit_id": "<head-sha>", "event": "REQUEST_CHANGES",
@@ -19,7 +19,11 @@ You cannot resolve a thread as your own App: GitHub lets only the pull request's
 
 At each round, fill `Look at first` and `Not proven / risk` in the live PR body (*The brief for the human* in `skill://legion-worker/references/pr-body.md`). Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
 
-## Rebases
+## Fixing a prose-only finding yourself
+
+Fix a prose-only finding yourself: wording, a count, a tense, a citation. Put it in your own commit on the pull request, and list it in your review. Send the work back only for a finding that touches code or behaviour. Push that commit **before** you submit the round's review, and approve the head the push made. A push that changes anything outside `.legion/` after your approval leaves that approval standing for nothing. The round then goes stuck and your architect is told (`classify.ApprovalStands` in `packages/daemon/internal/classify/decisions.go`, `stuckApprovedOtherCode` in `packages/daemon/internal/workflow/review.go`, and the cases "the approval, then a code push" and "a push since the approved head changed code, then an approval of the head" in `packages/daemon/internal/workflow/review_test.go`). So the round's order with a prose fix is: read CI, commit and push the prose fix with your handoff, submit the review of the head that push made, then complete. Your prose commit changes files outside `.legion/`, so that push carries no `skip-checks: true` line and GitHub runs the branch's workflows on it. Read those runs before you approve. The daemon sends nothing back for a red at a head the review App pushed (`PlannedRed` in `classify/decisions.go`), so a red there is yours to catch. Keep the fix to prose. A change to code or behaviour is a `REQUEST_CHANGES`, since it needs the tester.
+
+## Forward merges
 
 For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`.
 
@@ -30,7 +34,7 @@ When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` hol
 resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
 working-copy commit you found at the turn's start.
 
-Do not make unrelated history. Push your own commits: after your handoff commit, push the issue branch as the daemon part below says; it touches only `.legion/`, so its head's message ends with the trailer.
+Do not make unrelated history. Push your own commits: after your handoff commit, push the issue branch as the daemon part below says. A handoff-only push touches only `.legion/`, so its head's message ends with the trailer; a push that also carries a prose fix of yours carries no such line.
 
 ## Final review gate
 
@@ -40,4 +44,4 @@ Your approval is step two of the merge-gate order `skill://legion-worker` states
 
 ## Review handoff
 
-Every round writes `.legion/<issue>/review.json` with the `write` tool, whatever its review, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "review"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `decision` (`"approved"` or `"changes_requested"`: the review you submit), the `critical`, `important` and `minor` counts, and `keyFindings` (each `{severity, file, description}`); nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "review: record handoff" .legion/<issue>/review.json` and push it, then submit the round's review of the head that push made, then report completion.
+Every round writes `.legion/<issue>/review.json` with the `write` tool, whatever its review, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "review"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `decision` (`"approved"` or `"changes_requested"`: the review you submit), the `critical`, `important` and `minor` counts, and `keyFindings` (each `{severity, file, description}`); nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "review: record handoff" .legion/<issue>/review.json`, commit any prose fix of your own beside it, and push, then submit the round's review of the head that push made, then report completion.

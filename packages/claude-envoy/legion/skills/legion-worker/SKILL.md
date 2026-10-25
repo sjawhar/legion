@@ -83,8 +83,8 @@ Deployment instructions, when present, are the operator's standing rules for thi
 required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
 the merge credential. They override this skill's defaults where they conflict, except four rules
 they never override: no deferrals (*PR body, review, and the merge gate*, below); bringing the base
-into the branch only on a real conflict or a retarget
-(`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the
+into the branch only on a conflict, a change to its files, a need only the base meets, or a
+retarget (`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the
 implementer's own proof on a production-like surface at the head that merges, an applied simplify
 head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`,
 `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the
@@ -295,23 +295,23 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   answers a review, before its completion, for the threads it answered and for the bot threads the
   reviewer names to it as accepted (the review App cannot resolve one):
   `skill://legion-worker/references/review-threads.md`.
-- **No deferrals.** A finding that changes
-  behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
-  or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
+- **No deferrals.** A finding that changes behaviour, hides an error, or breaks a gate is fixed in
+  this pull request; naming, duplication or wording cleanup goes in the one `Fast-follow:` line.
+- **The reviewer fixes a prose-only finding itself** (wording, a count, a tense, a citation) in its
+  own commit, pushed before its review. Code or behaviour goes back:
+  `skill://legion-worker/references/merge-gate.md`.
 - **The implementer pushes, then completes; it never waits for, watches or polls CI**, and never
   sleeps in a loop: `skill://legion-worker/references/pr-body.md` (*Never waiting on CI*).
 - **A red CI job** that failed on its own is re-run with
   `gh run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
-- **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
-  forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
-  afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
+- **Merge the base forward only** on a conflict, a change to its files, a need only the base meets,
+  or a retarget, never as a rebase: `skill://legion-worker/references/conflicts-and-rewrites.md`.
 - **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
   → the architect's acceptance → retro → the merger's READY → the merge, which closes the issue →
-  the implementer's production check, after the close. On READY's acceptance the daemon submits
-  the merge of the head READY named, unless the answer's note begins `MANUAL_MERGE_REQUIRED:`,
-  where a person merges it; no role runs `gh pr merge`, and the repository's required reviews and
-  checks decide when it lands (`skill://legion-worker/references/merge-gate.md`). The reviewer's
-  submissions, the acceptance, retro's commit, READY, the daemon's submission, and the check follow the same reference.
+  the implementer's production check, after the close. On READY's acceptance the daemon submits the
+  merge of the head READY named, unless the answer's note begins `MANUAL_MERGE_REQUIRED:`, where a
+  person merges it; no role runs `gh pr merge`, and the repository's required reviews and checks
+  decide when it lands. Every step of it: `skill://legion-worker/references/merge-gate.md`.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
   complete the phase: `skill://legion-worker/references/pr-body.md`.
 
@@ -435,13 +435,13 @@ open gets one reminder (two when the first is answered with the tool call writte
 do not complete again on a reminder when your first completion was accepted — it stands, and a
 second is refused because the issue has already left your phase.
 
-This publishes your phase's completion to the architect's role and clears the daemon's
-record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
-invent a different completion protocol — this is the whole contract.
+This publishes your phase's completion to the architect's role and clears the daemon's record of
+this issue's active phase. Do not add pipeline labels, run a controller loop, or invent a different
+completion protocol — this is the whole contract.
 
-A reviewer's phase ends with its completion, not with its review; the order of a review round
-(the read of the code commit's checks on GitHub; the handoff push; the review of the head that
-push made; then the completion) is in `skill://legion-worker/references/merge-gate.md`.
+A reviewer's phase ends with its completion, not with its review. A round's order (read CI, push
+the handoff with any prose fix of its own, review that head, complete) is in
+`skill://legion-worker/references/merge-gate.md`.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to
 the run whose task you took, and answers with what it found. What each answer carries, and what to
