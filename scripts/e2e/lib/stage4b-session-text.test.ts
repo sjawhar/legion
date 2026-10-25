@@ -449,13 +449,16 @@ collect_transcripts || echo "collect_transcripts failed $?"`,
     expect(r.code).toBe(0);
     expect(r.stdout).toBe("collect_transcripts failed 1\n");
     const out = join(r.out, "transcripts");
-    expect(readdirSync(out).sort()).toEqual([
+    expect(readdirSync(out).sort()).toEqual(["controller", "pods"]);
+    expect(readdirSync(join(out, "pods")).sort()).toEqual([
       "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_a.jsonl",
       "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_b.jsonl",
-      "controller",
     ]);
     expect(
-      readFileSync(join(out, "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_b.jsonl"), "utf8")
+      readFileSync(
+        join(out, "pods", "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_b.jsonl"),
+        "utf8"
+      )
     ).toBe("SESSION-BYTES-b\n");
     expect(readFileSync(join(out, "controller", "-home", "c.jsonl"), "utf8")).toBe("controller\n");
     expect(r.stderr).toContain(`the session key ${pod}/x/y.jsonl would be written as `);
@@ -475,16 +478,79 @@ collect_transcripts && echo copied`,
     expect(r.stderr).toBe("");
   });
 
+  // A pod writes its own session rows, so it can key one <pod_sessions_dir>/controller, which derives
+  // to `controller`, the name of the harness's own directory for the operator's controller. The
+  // pods' sessions have a directory of their own, so that row is a pod's file there and the
+  // controller's directory still gets the controller's sessions, whatever a pod names its rows.
+  test("a pod's key that derives to a name of the harness's own stays among the pods' sessions", () => {
+    const r = run(
+      `pod_sessions_dir=${sessions} evidence="$OUT" profile_agent="$OUT.profile"
+mkdir -p "$profile_agent/sessions/-home"
+printf 'controller\\n' >"$profile_agent/sessions/-home/c.jsonl"
+collect_transcripts && echo copied`,
+      {
+        [`${sessions}/controller`]: "POD-BYTES-controller\n",
+        [`${sessions}/daemon-controller`]: "POD-BYTES-daemon-controller\n",
+      }
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("copied\n");
+    expect(r.stderr).toBe("");
+    const out = join(r.out, "transcripts");
+    expect(readdirSync(out).sort()).toEqual(["controller", "pods"]);
+    expect(readFileSync(join(out, "pods", "controller"), "utf8")).toBe("POD-BYTES-controller\n");
+    expect(readFileSync(join(out, "pods", "daemon-controller"), "utf8")).toBe(
+      "POD-BYTES-daemon-controller\n"
+    );
+    expect(readdirSync(join(out, "controller"))).toEqual(["-home"]);
+    expect(readFileSync(join(out, "controller", "-home", "c.jsonl"), "utf8")).toBe("controller\n");
+  });
+
+  // The controller's sessions live in the run's profile, which the teardown removes, so a copy of
+  // them that fails, its directory's creation or the copy itself, fails the call as a pod's session
+  // left out does, naming the controller's directory, and the pods' sessions are still copied.
+  test.each([
+    [
+      "its directory cannot be made",
+      `mkdir -p "$OUT/transcripts" && printf 'in the way\\n' >"$OUT/transcripts/controller"`,
+    ],
+    [
+      "a session in it cannot be copied",
+      `mkdir -p "$OUT/transcripts/controller" && printf 'in the way\\n' >"$OUT/transcripts/controller/-home"`,
+    ],
+    ["a session of it cannot be read", `chmod 000 "$profile_agent/sessions/-home/c.jsonl"`],
+  ])("a controller's copy where %s fails, after copying the pods' sessions", (_, prepare) => {
+    const pod = `${sessions}/-legion-workspaces-sjawhar-legion-smoke-legsmoke-1`;
+    const r = run(
+      `pod_sessions_dir=${sessions} evidence="$OUT" profile_agent="$OUT.profile"
+mkdir -p "$profile_agent/sessions/-home"
+printf 'controller\\n' >"$profile_agent/sessions/-home/c.jsonl"
+${prepare}
+collect_transcripts || echo "collect_transcripts failed $?"`,
+      { [`${pod}/a.jsonl`]: "SESSION-BYTES-a\n" }
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("collect_transcripts failed 1\n");
+    expect(r.stderr).toContain(
+      `the operator's controller's sessions in ${r.out}.profile/sessions could not all be copied into ${r.out}/transcripts/controller`
+    );
+    const pods = join(r.out, "transcripts", "pods");
+    expect(
+      readFileSync(join(pods, "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_a.jsonl"), "utf8")
+    ).toBe("SESSION-BYTES-a\n");
+  });
+
   // teardownRun runs the script's own cleanup, as the EXIT trap of a run whose checkpoints all
   // passed (ok set), with the real collect_transcripts over SESSION_COPY, the stand-in for the
   // database copy, and the rest of the teardown stubbed; the run took no lock, so the cluster's
-  // teardown is not reached.
-  function teardownRun(sessionCopy: string) {
+  // teardown is not reached. PREPARE, given the evidence directory, readies it before the run.
+  function teardownRun(sessionCopy: string, prepare?: (evidence: string) => void) {
     const at = mkdtempSync(join(dir, "teardown."));
     const evidence = join(at, "evidence");
     const profile = join(at, "profile");
     mkdirSync(join(profile, "sessions"), { recursive: true });
     writeFileSync(join(profile, "sessions", "c.jsonl"), "controller\n");
+    prepare?.(evidence);
     const ran = Bun.spawnSync(
       [
         "bash",
@@ -510,18 +576,18 @@ exit 0`,
     const stdout = ran.stdout.toString();
     // cleanup's ERR trap reports a teardown command that fails, a helper left unstubbed included.
     expect(stdout).not.toContain("cleanup warning:");
-    return { code: ran.exitCode, stdout, evidence };
+    return { code: ran.exitCode, stdout, evidence, profile };
   }
 
   test("a copy that leaves a session out fails the run's teardown check transcripts", () => {
     const r = teardownRun(`session_copy() {
-  [ "$1 $2" = "${sessions}/ $evidence/transcripts" ] || return 9
+  [ "$1 $2" = "${sessions}/ $evidence/transcripts/pods" ] || return 9
   echo "the session key ${sessions}/x/y.jsonl would be written as x_y.jsonl in $2, as would the key ${sessions}/x_y.jsonl; neither is copied" >&2
   return 1
 }`);
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(
-      `CHECK transcripts: FAIL: the pods' sessions could not all be copied from the session database ${container} into ${r.evidence}/transcripts`
+      `CHECK transcripts: FAIL: the run's sessions could not all be copied into ${r.evidence}/transcripts before the teardown removes them, the pods' from the session database ${container} and the operator's controller's from the run's profile`
     );
     expect(r.stdout).toContain(
       "stage 4b e2e: FAIL (check transcripts, in the teardown after check controller)"
@@ -535,10 +601,34 @@ exit 0`,
     );
   });
 
+  test("a controller's copy that fails fails the run's teardown check transcripts", () => {
+    const r = teardownRun(
+      `session_copy() { [ "$1 $2" = "${sessions}/ $evidence/transcripts/pods" ]; }`,
+      (evidence) => {
+        mkdirSync(join(evidence, "transcripts"), { recursive: true });
+        writeFileSync(join(evidence, "transcripts", "controller"), "in the way\n");
+      }
+    );
+    expect(r.code).toBe(1);
+    const named = r.stdout.indexOf(
+      `the operator's controller's sessions in ${r.profile}/sessions could not all be copied into ${r.evidence}/transcripts/controller`
+    );
+    expect(named).toBeGreaterThanOrEqual(0);
+    expect(named).toBeLessThan(r.stdout.indexOf("CHECK transcripts: FAIL"));
+    expect(r.stdout).toContain(
+      "stage 4b e2e: FAIL (check transcripts, in the teardown after check controller)"
+    );
+  });
+
   test("a copy that leaves nothing out leaves a passed run's teardown clean", () => {
-    const r = teardownRun(`session_copy() { [ "$1 $2" = "${sessions}/ $evidence/transcripts" ]; }`);
+    const r = teardownRun(
+      `session_copy() { [ "$1 $2" = "${sessions}/ $evidence/transcripts/pods" ]; }`
+    );
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("FAIL");
+    expect(readFileSync(join(r.evidence, "transcripts", "controller", "c.jsonl"), "utf8")).toBe(
+      "controller\n"
+    );
   });
 });
 

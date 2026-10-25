@@ -494,7 +494,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 				}
 				ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeSuspended})
 			}
-			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping its volume",
+			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping the Sandbox",
 				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree, "operatingMode", s.mode())
 			relabelled, err := r.patch(ctx, s, ops...)
 			if apierrors.IsInvalid(err) && time.Now().Before(deadline) {

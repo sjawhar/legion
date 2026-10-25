@@ -1121,19 +1121,21 @@ pair_settled() {
   done
 }
 # record_pair keeps the reviewer's session, the sessions of the subagents it started (every session
-# keyed under its stem), and each agent's dispatch under $evidence/review-pair, once.
+# keyed under its stem), and each agent's dispatch under $evidence/review-pair, once. Its callers
+# read its status (tree-reviewed fails on it), and errexit is off inside a function called that
+# way, so every write returns on failure: a file it could not write must not leave it recorded.
 record_pair() {
   local text agent stem
   [ -z "$pair_recorded" ] || return 0
   text=$(pair_text) || return 1
   stem=$(basename "$pair_session" .jsonl)
-  mkdir -p "$evidence/review-pair/$stem"
-  printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl"
+  mkdir -p "$evidence/review-pair/$stem" || return 1
+  printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl" || return 1
   session_copy "${pair_session%.jsonl}/" "$evidence/review-pair/$stem" || return 1
   for agent in $pair_agents; do
-    pair_dispatch "$agent" <<<"$text" >"$evidence/review-pair/$agent.json"
+    pair_dispatch "$agent" <<<"$text" >"$evidence/review-pair/$agent.json" || return 1
   done
-  printf '%s\n' "$stem" >"$evidence/review-pair/session-stem"
+  printf '%s\n' "$stem" >"$evidence/review-pair/session-stem" || return 1
   pair_recorded=1
 }
 # reviewer_decision CHANGES writes `approve` to $work/review-decision once the review App has
@@ -2545,20 +2547,25 @@ remove_run_branches() {
   return 0
 }
 # collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: every
-# pod's, from the session database, each at the name session_copy derives from its key under
-# pod_sessions_dir, <cwd dir>_<file> (a pod already gone, a child's included), and the operator's
-# controller's, which lives in the run's own profile on this machine and goes with that profile at
-# teardown (transcripts/controller). It runs before the teardown removes the database's container,
-# so a pod's session it does not copy is gone for good: it fails when session_copy left any out (a
-# key refused or unreadable, each named on stderr) or could not list them, after copying every
-# other session and the controller's all the same, and cleanup makes that the teardown check
-# `transcripts`, never a note a passing run reads past.
+# pod's, from the session database, into transcripts/pods, each at the name session_copy derives
+# from its key under pod_sessions_dir, <cwd dir>_<file> (a pod already gone, a child's included),
+# and the operator's controller's, which lives in the run's own profile on this machine and goes
+# with that profile at teardown, into transcripts/controller. The pods' names come from keys a pod
+# writes, so they get a directory of their own: no key can derive a name the harness itself writes
+# beside them (controller, daemon-controller, any added later), where a reserved-name list would
+# hold only until the next one. It runs before the teardown removes the database's container and
+# the profile, so a session it does not copy is gone for good: it fails when session_copy left any
+# out (a key refused or unreadable, each named on stderr) or could not list them, or when the
+# controller's sessions could not be copied, after copying everything else all the same, and
+# cleanup makes that the teardown check `transcripts`, never a note a passing run reads past.
 collect_transcripts() {
   local copied=1
-  session_copy "$pod_sessions_dir/" "$evidence/transcripts" || copied=
+  session_copy "$pod_sessions_dir/" "$evidence/transcripts/pods" || copied=
   if [ -d "$profile_agent/sessions" ]; then
-    mkdir -p "$evidence/transcripts/controller"
-    cp -R "$profile_agent/sessions/." "$evidence/transcripts/controller/"
+    if ! { mkdir -p -- "$evidence/transcripts/controller" && cp -R -- "$profile_agent/sessions/." "$evidence/transcripts/controller/"; }; then
+      echo "the operator's controller's sessions in $profile_agent/sessions could not all be copied into $evidence/transcripts/controller" >&2
+      copied=
+    fi
   fi
   [ -n "$copied" ]
 }
@@ -2583,7 +2590,7 @@ cleanup() {
   [ -z "$block_tree" ] || set_status "$block_tree" "done"
   if ! collect_transcripts; then
     teardown_failed+="${teardown_failed:+, }transcripts"
-    echo "CHECK transcripts: FAIL: the pods' sessions could not all be copied from the session database $session_db_container into $evidence/transcripts before the teardown removes it (the lines above name each key left out, or why none could be listed)"
+    echo "CHECK transcripts: FAIL: the run's sessions could not all be copied into $evidence/transcripts before the teardown removes them, the pods' from the session database $session_db_container and the operator's controller's from the run's profile (the lines above name each session left out, or why none could be listed or copied)"
   fi
   stop_tree "$watch_pid"
   stop_tree "$events_pid"
@@ -5645,13 +5652,17 @@ jq -e '.wrong == []' <<<"$up" >/dev/null || fail "the daemon logged a liveness l
 note "negative control: after line $up_mark of the daemon log, for $watched s with $launched_session holding the role, neither line"
 claim=$(claim_by_token "$controller_token")
 pod=$(jq -r .locator.sandbox.name <<<"$claim")
-# Its sessions are the session database's under its session file's directory, each at the name
-# session_copy derives from its key there, a subagent's <stem>/<id>.jsonl as <stem>_<id>.jsonl.
+# Its sessions are the session database's under its session file's directory, copied into
+# transcripts/daemon-controller, a directory of the harness's own beside transcripts/pods (see
+# collect_transcripts), each at the name session_copy derives from its key there, a subagent's
+# <stem>/<id>.jsonl as <stem>_<id>.jsonl. A copy that fails, its directory's creation included
+# (session_copy makes it), is a note and not this checkpoint's failure: the controller's pod keeps
+# its sessions under pod_sessions_dir like every pod, so collect_transcripts copies the same
+# sessions into transcripts/pods at teardown, and fails the run's teardown check if it cannot.
 launched_file=$(jq -r '.sessionFile // ""' <<<"$claim")
 launched_dir=$(dirname "$launched_file")
-mkdir -p "$evidence/transcripts/daemon-controller"
 { [ -n "$launched_file" ] && session_copy "$launched_dir/" "$evidence/transcripts/daemon-controller/$(basename "$launched_dir")"; } ||
-  note "the sessions of the controller the daemon launched could not be copied from the session database (its claim records session file '$launched_file')"
+  note "the sessions of the controller the daemon launched could not be copied from the session database into $evidence/transcripts/daemon-controller (its claim records session file '$launched_file'); collect_transcripts copies them into $evidence/transcripts/pods at teardown"
 if [ -n "$skip_controller" ]; then
   note "STAGE4B_SKIP_CONTROLLER: the daemon-launched controller's GitHub credential is not checked"
 else

@@ -183,19 +183,22 @@ func overlaps(a, b string) bool {
 	return a == b || under(a, b) || under(b, a)
 }
 
-// legionClaim reports whether claim is named as the volume claims Legion's Sandboxes make or made
-// are: an issue's or the controller's (IssueClaimName, `issue-legion-…`), a repository cache's
-// (cacheClaimName, `cache-legion-…`), or a tree's from the earlier layout legion-v10.0.0 kept
-// (`tree-legion-…`, every clone, workspace and session file of a tree). Every pod mounting such a
-// claim would read and write that workspace or that cache, so an operator volume naming one is
-// refused.
+// legionClaim reports whether claim is named as the volume claims Legion's pods and Sandboxes make
+// or made are: an issue pod's own disk, the generic ephemeral volume the kubelet names for its pod
+// and its volume (`legion-…-issue`, diskSource); the controller's, which its Sandbox still owns
+// (IssueClaimName, `issue-legion-…`); a repository cache's (cacheClaimName, `cache-legion-…`); or a
+// tree's from the earlier layout legion-v10.0.0 kept (`tree-legion-…`, every clone, workspace and
+// session file of a tree). Every pod mounting such a claim would read and write that workspace or
+// that cache, so an operator volume naming one is refused. The pod's own disk is named the other
+// way round from the Sandbox-owned claims — the volume's name is the suffix, not the prefix — so it
+// needs a rule of its own rather than a fourth prefix.
 func legionClaim(claim string) bool {
 	for _, prefix := range []string{issueVolume + "-legion-", cacheVolume + "-legion-", "tree-legion-"} {
 		if strings.HasPrefix(claim, prefix) {
 			return true
 		}
 	}
-	return false
+	return strings.HasPrefix(claim, "legion-") && strings.HasSuffix(claim, "-"+issueVolume)
 }
 
 // dashboardURL is whether value is a DISPATCH_PUBLIC_URL boot lets through: a rule narrower than

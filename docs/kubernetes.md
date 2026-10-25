@@ -915,9 +915,11 @@ the ServiceAccount `runtime.kubernetes.pod.service_account` names, which is what
 signs in as — and the login's rights in the database. Those rights are the ones `postgres` needs
 too: Oh My Pi creates and migrates `omp_session_files` and `omp_session_files_parts` in the
 `public` schema when it starts, so the login needs `USAGE, CREATE ON SCHEMA public` beside the
-database, or it must own the schema. `legion sessions import` and `legion sessions mark-lost` are
-unchanged and keep `--dsn-file`: they run on an operator's machine, where there is no launcher and
-no proxy, so the operator supplies a connection URL that machine can reach.
+database, or it must own the schema. `legion sessions import` is unchanged and keeps `--dsn-file`:
+it runs on an operator's machine, where there is no launcher and no proxy, so the operator supplies
+a connection URL that machine can reach. `legion sessions mark-lost` is gone with the lost disk it
+marked (INFRA-80), and nothing replaces it: a pod's disk dies with the pod, so no session of an
+earlier pod is ever waiting to be marked.
 
 ### Copying file sessions before turning it on
 
@@ -1404,9 +1406,12 @@ loader refuses a `runtime.kubernetes` block that does not name a store that keep
 database, with that store's key — for a deployment today `session_store: postgres` and
 `session_dsn_secret` — so the deployment's `legion.yaml` names both, and the providers Secret
 holds that key, before this release boots at all ([Selecting the store](#selecting-the-store)). A
-deployment still on the file store copies its sessions into the table first ([Copying file
-sessions before turning it on](#copying-file-sessions-before-turning-it-on)); a sessions table
-behind is a deployment every issue's next launch fails on, not something the cutover repairs.
+deployment still on the file store copies its sessions into the table first — but only one on
+`legion-v10.0.0` can: a deployment on `legion-v10.1.0` to `legion-v10.2.x` has **no copy path at
+all**, and its switch is a drain at a pushed boundary with every tree closed and the sessions on
+those volumes lost ([Copying file sessions before turning it
+on](#copying-file-sessions-before-turning-it-on)). A sessions table behind is a deployment every
+issue's next launch fails on, not something the cutover repairs.
 
 **Every running issue is pushed and stopped while the earlier daemon still runs, because the first
 boot of this release cuts over every live claim by itself.** This release raises the daemon's

@@ -1179,14 +1179,17 @@ tree 3 out, printing `CHECK <checkpoint>: SKIPPED (…)` for each of the three,
 so a development run can reach a later checkpoint while a defect of the controller's own is unfixed; it also skips the GitHub credential check in `controller` and the one in `daemon-controller-liveness`'s phase 1, so a run with it proves neither controller's gh. `STAGE4B_EVIDENCE_DIR`
 keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the transcript, the
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
-every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
-controller's, and under `transcripts/daemon-controller/` the controller the daemon launched in
-`daemon-controller-liveness`), the interest samples, the audit files and the negative controls. The
-tree pods' transcripts are copied from the session database before the teardown removes it, each
-at a name derived from its session key, so no key places a file outside `transcripts/`; a key the
-copy refuses (its name empty, `.` or `..`, shared with another key, or resolving outside the
-directory) or cannot read is named, never its bytes, and skipped while every other session is
-still copied, and any key left out fails the teardown check `transcripts`. What the
+every agent transcript (the pods' under `transcripts/pods/`, the operator's controller's under
+`transcripts/controller/`, and under `transcripts/daemon-controller/` the controller the daemon
+launched in `daemon-controller-liveness`, whose sessions are also among the pods'), the interest
+samples, the audit files and the negative controls. The pods' transcripts are copied from the
+session database before the teardown removes it, each at a name derived from its session key, so
+no key places a file outside `transcripts/pods/`; that directory holds the pods' sessions alone, so
+no key a pod writes can take a name the harness writes beside it (`controller`, `daemon-controller`).
+A key the copy refuses (its name empty, `.` or `..`, shared with another key, or resolving outside
+the directory) or cannot read is named, never its bytes, and skipped while every other session is
+still copied, and any key left out fails the teardown check `transcripts`, as does a failure to copy
+the operator's controller's sessions out of the run's profile before the teardown removes it. What the
 run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
 `stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
 on whether the controller could have failed that check for want of a model key; or
