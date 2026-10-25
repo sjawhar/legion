@@ -74,7 +74,7 @@ func TestConcurrentApprovesOfAMachineLoginDecideItOnce(t *testing.T) {
 				answers <- answer{err: err}
 				return
 			}
-			request.Header.Set("Authorization", "Bearer "+testUIToken)
+			request.Header.Set("Authorization", "Bearer "+ts.uiToken)
 			request.Header.Set("Content-Type", "application/json")
 			resp, err := http.DefaultClient.Do(request)
 			if err != nil {

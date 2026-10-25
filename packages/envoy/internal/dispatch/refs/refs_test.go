@@ -328,3 +328,68 @@ func TestReferencedByIncludesArtifactSources(t *testing.T) {
 		t.Fatalf("referenced by = %#v; want %#v", got, want)
 	}
 }
+
+// A database a newer build has written to can hold an edge whose other end is a node kind this
+// build does not know. That edge is invisible here: a read in either direction lists every edge
+// it can address and skips the rest, a node cited only by such an edge reads as empty rather than
+// failing, and the count beside it agrees with the list behind it.
+func TestGraphReadsSkipANodeKindThisBuildCannotAddress(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fixture transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceProject(t, tx, "OPS")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	createReferenceIssue(t, tx, "OPS-1", "OPS")
+	commentID := createReferenceComment(t, tx, "CORE-1")
+	insertReference(t, tx, "comment", commentID, "issue", "CORE-1")
+	insertReference(t, tx, "future", "x#y", "issue", "CORE-1")
+	insertReference(t, tx, "comment", commentID, "future", "x#y")
+	insertReference(t, tx, "future", "x#y", "issue", "OPS-1")
+
+	incoming, err := Edges(ctx, tx, Query{Direction: "in", Kind: "issue", ID: "CORE-1", Kinds: []string{"mentions"}})
+	if err != nil {
+		t.Errorf("read CORE-1 backlinks: %v", err)
+	} else if len(incoming) != 1 || incoming[0].Kind != "mentions" || incoming[0].Direction != "in" || incoming[0].Node.Kind != "comment" || incoming[0].Node.ID != commentID {
+		t.Errorf("CORE-1 backlinks = %#v; want only the mention from comment %q", incoming, commentID)
+	}
+
+	outgoing, err := Edges(ctx, tx, Query{Direction: "out", Kind: "comment", ID: commentID})
+	if err != nil {
+		t.Errorf("read comment links: %v", err)
+	} else if len(outgoing) != 1 || outgoing[0].Kind != "mentions" || outgoing[0].Direction != "out" || outgoing[0].Node.Kind != "issue" || outgoing[0].Node.ID != "CORE-1" {
+		t.Errorf("comment links = %#v; want only the mention of CORE-1", outgoing)
+	}
+
+	unknownOnly, err := Edges(ctx, tx, Query{Direction: "in", Kind: "issue", ID: "OPS-1"})
+	if err != nil {
+		t.Errorf("read OPS-1 backlinks: %v", err)
+	} else if unknownOnly == nil || len(unknownOnly) != 0 {
+		t.Errorf("OPS-1 backlinks = %#v; want an empty list", unknownOnly)
+	}
+
+	counts, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, nil)
+	if err != nil {
+		t.Errorf("count issue backlinks: %v", err)
+	} else if want := map[string]int{"CORE-1": 1}; !reflect.DeepEqual(counts, want) {
+		t.Errorf("issue backlink counts = %v; want %v", counts, want)
+	}
+	// Every ask read passes AskBacklinkExclusions, so this is the count each ask card and the
+	// Inbox show: the comment's mention stays and the unknown-kind row stays out.
+	askCounts, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, AskBacklinkExclusions)
+	if err != nil {
+		t.Errorf("count issue backlinks with the ask exclusions: %v", err)
+	} else if want := map[string]int{"CORE-1": 1}; !reflect.DeepEqual(askCounts, want) {
+		t.Errorf("issue backlink counts with the ask exclusions = %v; want %v", askCounts, want)
+	}
+	excluded, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, []string{"mentions"})
+	if err != nil {
+		t.Errorf("count issue backlinks excluding mentions: %v", err)
+	} else if len(excluded) != 0 {
+		t.Errorf("issue backlink counts excluding mentions = %v; want none", excluded)
+	}
+}
