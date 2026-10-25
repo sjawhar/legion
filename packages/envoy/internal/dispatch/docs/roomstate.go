@@ -203,20 +203,41 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // provider/websocket/inject.go), and a browser registers as it is authorized, before its room is
 // loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
 // this record. Dropping it outright loses that browser, and with it the credit for the person's
-// next keystroke. Nothing else of this record is handed over: a load refuses a failed room, so no
-// room of its own attached to it, and what the failed room left is the failed room's. An in-flight
-// credit the record still holds is reached through its update's UpdateCredit, which holds the
-// record, so an append that lands after the record went loses nothing it writes. A browser the
-// close disconnects is forgotten by its own removeConnection, which finds it under the connection
-// id the service gave it. Its caller holds state.mu.
+// next keystroke. A load refuses a failed room, so no room of its own attached to this record,
+// and what the failed room left is the failed room's, except the
+// updates its persistence has not taken yet. Those are carried, with the counts that hold the
+// record for them: a failed room's update is dropped while the room is failed
+// (StoreUpdateContext), but ygo's stranded persistence can hand one on after the eviction has
+// cleared that failure, and a class the successor does not hold is an append stored with no
+// credit at all - the author of that keystroke is then on no version and in no pending row. An
+// in-flight credit the record still holds is reached through its update's UpdateCredit, which
+// holds the record, so an append that lands after the record went loses nothing it writes. A
+// browser the close disconnects is forgotten by its own removeConnection, which finds it under
+// the connection id the service gave it. Its caller holds state.mu.
 func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	state.released = true
-	if len(state.connected) == 0 {
+	if len(state.connected) == 0 && len(state.updateClasses) == 0 {
 		s.rooms.CompareAndDelete(room, state)
 		return
 	}
 	successor := newRoomState()
 	maps.Copy(successor.connected, state.connected)
+	// Only the updates still waiting for the room's persistence move, with the appends they
+	// count. An append already in flight finishes on the record that counted it
+	// (finishDurableAppend takes the record consumeUpdateClass answered), so its count stays
+	// where it is.
+	carried := int64(0)
+	for _, class := range state.updateClasses {
+		if class.durable {
+			carried++
+		}
+	}
+	successor.updateClasses = state.updateClasses
+	successor.pendingUpdates = state.pendingUpdates
+	successor.durableAppends.Store(carried)
+	state.updateClasses = nil
+	state.pendingUpdates = 0
+	state.durableAppends.Add(-carried)
 	s.rooms.CompareAndSwap(room, state, successor)
 }
 

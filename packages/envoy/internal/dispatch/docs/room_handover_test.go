@@ -467,3 +467,51 @@ func TestAnIssueCloseEndsItsRoomsSettlementFailures(t *testing.T) {
 		t.Fatalf("the record counts %d settlement failures after its issue closed, want none: the closed room's end with it", failures)
 	}
 }
+
+// A failed room's record is replaced, and the updates its persistence has not taken yet go to the
+// record registered in its place, with the appends they count. ygo hands such an update on through
+// its stranded persistence, which can run after the eviction has cleared the failure, and the
+// service drops it only while the room is failed (StoreUpdateContext). An update whose class the
+// record no longer holds is appended with no credit at all, so the person who typed it is on no
+// version and in no pending row - the loss this issue is about, on the one path that outlives the
+// record.
+func TestAFailedRoomsUnstoredUpdatesGoToTheRecordThatReplacesIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+
+	update := []byte("bob's update")
+	credit := &UpdateCredit{}
+	service.recordUpdateClass(artifactID, update, documentUpdateClass{contentChanged: true, durable: true, credit: credit})
+	state := service.room(artifactID)
+	state.mu.Lock()
+	service.handOverFailedRoomLocked(artifactID, state)
+	state.mu.Unlock()
+
+	successor := service.room(artifactID)
+	if successor == state {
+		t.Fatal("the failed room's record was kept, so nothing here is tested")
+	}
+	class, counted, found := service.consumeUpdateClass(artifactID, update)
+	if !found {
+		t.Fatal("the update the failed room had not stored is unknown to the record that replaced it: its append is credited to nobody")
+	}
+	if class.credit != credit {
+		t.Fatal("the carried update lost the credit its observer recorded")
+	}
+	if counted != successor {
+		t.Fatal("the carried update was counted on another record than the one that holds it")
+	}
+	service.finishDurableAppend(artifactID, counted)
+	successor.mu.Lock()
+	appends := successor.durableAppends.Load()
+	pending := successor.pendingUpdates
+	successor.mu.Unlock()
+	if appends != 0 || pending != 0 {
+		t.Fatalf("the record that replaced the failed room counts %d appends and %d pending updates once the carried append finished, want none", appends, pending)
+	}
+}
