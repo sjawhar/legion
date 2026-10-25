@@ -2,32 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-266",
-  "completed": "2026-10-25T09:05:00Z",
-  "round": 1,
-  "reviewedHead": "87ae4f4864d2eaf4823e3eb14266e4989561e0e7",
-  "codeHead": "98ac7624699e4d7221e9fc7a54aca39418613553",
+  "completed": "2026-10-25T09:40:00Z",
+  "round": 2,
+  "reviewedHead": "fff29c747ea2894e685960c93416a6759b89442a",
+  "codeHead": "69bed70c74a43d6de78d9dbf3da14d39d11591e1",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/settings/ProjectsSection.tsx:58",
-      "description": "One shared, unguarded mutation for every row: after a pick the controlled select snaps back to the stored value while the PUT is pending and stays enabled, so a second pick sends a second PUT concurrently (reviewer's probe: value 'alice@example.com', disabled=false after picking bob; PUT calls [bob, carol] both in flight). The server applies whichever commits last, so the project's default can end as the choice the person replaced, and that default decides who later unowned issues go to. Fix as useIssueFieldWrite.ts does (per-project ordered write, newest choice wins, pending choice shown) or disable that row's control and show the pending choice until the write settles; the unit test should assert the displayed value, not only the PUT arguments and a refetch count."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/settings/ProjectsSection.tsx:64",
-      "description": "While the defaults read is pending or has failed, `defaults.data ?? []` renders every project as Unassigned with the control enabled (reviewer's probe with a rejected read: value '', disabled=false, beside the load error). An unknown is shown as a known 'no default'. Render no value and keep the control disabled until defaults.isSuccess; the e2e row's `ops` toHaveValue('') then only proves something once the read has answered."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/dispatch/references/asks.md:7",
-      "description": "'an issue is unassigned only when its project names no default assignee either' is false: an explicit null create, a reassign to nobody, and every issue created before the default was set are unassigned with a default configured. Agent-facing guidance; same overstatement in the Settings sentence at ProjectsSection.tsx:141-143 ('reaches that person for every one of its issues': a person's own create, an owned token's or an assigned parent's still win). Reword both to the default being the last fallback for a new issue created with nobody named."
+      "file": "packages/dispatch/web/src/features/settings/ProjectsSection.tsx:264",
+      "description": "The per-row serialiser lives in component state (the guard at :262, the queued pick at :264), but the mutation's hook-level onSettled (:279-284) still runs after the row unmounts and sends that instance's queued pick. A Settings page opened again while a save is out has a fresh guard and sends its own pick concurrently. Reviewer's probe (throwaway unit test, deleted): stored none, pick bob (PUT held), pick carol (queued), unmount, mount again on the same QueryClient, pick dave (sent at once and answered), then bob answered late. PUT order [bob, dave, carol]: the server stores carol, but the person's last pick was dave. Keep the in-flight flag and the newest queued pick per project outside the component (module or QueryClient scope), so a remounted row queues behind the save already out and shows its pending pick. Add a held-save, navigate-away-and-back, pick-again regression row."
     }
   ],
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title. CI head 98ac7624699e (only .legion/ changed since, compare true): typecheck success, pr-title success, lint in_progress, test queued at the read. Not approved, so not waited on.",
-  "thermonuclear": "Pair run once at 87ae4f48: deep review CHANGES (the mutation-ordering finding, the asks.md overstatement; no security finding); code quality CHANGES (the same ordering finding, the unknown-as-Unassigned rendering, a unit test that pins wiring). Both UI findings confirmed by a throwaway probe test run in packages/dispatch, then deleted.",
-  "contractCensus": "Not required: additive only (two new routes, a new DispatchEvent arm, a nullable column); no existing field removed, renamed or made required, and no existing route gains a refusal."
+  "round1Threads": {
+    "PRRT_kwDORFy7ds6v_sz1": "accepted: fixed in bf2e0861c2e6 (unread defaults render disabled Loading/Unavailable)",
+    "PRRT_kwDORFy7ds6v_sz2": "accepted: fixed in bf2e0861c2e6 for a mounted row; the remount case is this round's new finding",
+    "PRRT_kwDORFy7ds6v_sz3": "accepted: fixed in 69bed70c74a4 (asks.md and the Settings sentence)"
+  },
+  "architectQuestion": "Last known defaults kept editable beside a failed refetch: not a finding. The PUT sets an absolute value, so a pick never depends on the shown baseline, and the shown value is the server's last answer, not an invented one.",
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title. CI head 69bed70c74a4 (only .legion/ changed since, compare true): lint in_progress; typecheck, test and pr-title queued at the read. Not approved, so not waited on.",
+  "thermonuclear": "Pair at fff29c74. Deep review: CHANGES, the remount race (no security finding). Code quality: no structural finding, then CHANGES on the same remount race as a correctness follow-up. Reviewer reproduced it with a throwaway unit test.",
+  "contractCensus": "Not required: additive only, unchanged since round 1."
 }
