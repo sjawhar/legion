@@ -4,6 +4,8 @@
 
 ### Added
 
+- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships (INFRA-140).
+
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the

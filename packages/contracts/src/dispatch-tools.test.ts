@@ -1055,6 +1055,10 @@ describe("dispatchToolSpecs", () => {
       "Never create an issue to park a question: the question is an ask on the issue it concerns.",
     ],
     [
+      "dispatch_doc_edit",
+      "The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own.",
+    ],
+    [
       "dispatch_issue",
       "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it.",
     ],
