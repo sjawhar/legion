@@ -435,8 +435,9 @@ func TestRenderEscapesImageDelimiters(t *testing.T) {
 	}
 }
 
-// A linked image is written inside its link's syntax, each title and destination spelled as a
-// text link's, and reads back with its link and link title (INFRA-190).
+// A linked image is written inside its link's syntax, its title spelled as a text link's and its
+// link, held decoded, escaped so it reads back as it is, and reads back with its link and link
+// title (INFRA-190).
 func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
 	image := func(title, link, linkTitle any) *Node {
 		return &Node{Type: "image", Attrs: Attrs{"src": "i.png", "alt": "x", "title": title, "link": link, "linkTitle": linkTitle}}
@@ -462,6 +463,15 @@ func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
 		{"a destination needing angle brackets", paragraph(image(nil, "https://u.com/a (b)", nil)), "[![x](i.png)](<https://u.com/a (b)>)\n"},
 		{"quotes and backslashes in titles", paragraph(image(`say "hi"`, "https://u.com", `a\b`)), `[![x](i.png "say \"hi\"")](https://u.com "a\\b")` + "\n"},
 		{"a table cell with a pipe in the link", inCell(image(nil, "https://u.com/a|b", "c|d")), "| h |\n| --- |\n| [![x](i.png)](https://u.com/a\\|b \"c\\|d\") |\n"},
+		{"an ampersand opening a character reference", paragraph(image(nil, "https://u.com/?a=1&amp;b=2", nil)), "[![x](i.png)](https://u.com/?a=1\\&amp;b=2)\n"},
+		{"an ampersand opening none", paragraph(image(nil, "https://u.com/?a=1&b=2", nil)), "[![x](i.png)](https://u.com/?a=1&b=2)\n"},
+		{"an asterisk", paragraph(image(nil, "https://u.com/a*b", nil)), "[![x](i.png)](https://u.com/a*b)\n"},
+		{"an unbalanced closing parenthesis", paragraph(image(nil, "https://u.com/)x", nil)), "[![x](i.png)](<https://u.com/)x>)\n"},
+		{"backslashes before punctuation, a letter and the end", paragraph(image(nil, `https://u.com/a\*b\c\`, nil)), "[![x](i.png)](https://u.com/a\\\\*b\\c\\\\)\n"},
+		{"angle brackets", paragraph(image(nil, "<https://u.com/<a>>", nil)), "[![x](i.png)](\\<https://u.com/\\<a\\>\\>)\n"},
+		{"spaces and angle brackets", paragraph(image(nil, "https://u.com/a b<c>", nil)), "[![x](i.png)](<https://u.com/a b\\<c\\>>)\n"},
+		{"control characters", paragraph(image(nil, "https://u.com/a\tb\nc", nil)), "[![x](i.png)](https://u.com/a&#9;b&#10;c)\n"},
+		{"a table cell with a pipe, a backslash and a character reference in the link", inCell(image(nil, `https://u.com/a\|b&amp;c`, nil)), "| h |\n| --- |\n| [![x](i.png)](https://u.com/a\\\\\\|b\\&amp;c) |\n"},
 		{"after text ending in !", paragraph(&Node{Type: "text", Text: "wow!"}, image(nil, "https://u.com", nil)), "wow\\![![x](i.png)](https://u.com)\n"},
 		{"after bold text ending in !", paragraph(&Node{Type: "text", Text: "wow!", Marks: []Mark{{Type: "strong", Attrs: Attrs{"marker": "*"}}}}, image(nil, "https://u.com", nil)), "**wow!**[![x](i.png)](https://u.com)\n"},
 	} {

@@ -412,12 +412,25 @@ test("an unlinked picture sits in no link in the live editor, a past version and
   }
 });
 
-// N2: a picture linked to a `javascript:` address draws no link and runs nothing on any click.
+// N2: a picture linked to a `javascript:` address draws no link and runs nothing on any click,
+// whether the address is spelled plainly or with a character reference, an escape or mixed case:
+// every view checks the scheme of the address the markdown names, decoded.
 test("a picture linked to a javascript: address draws no link and runs nothing in the live editor, a past version and a comment", async ({
   browser,
 }) => {
+  // Five spellings, each clicked twice in three views from a fresh load: thirty page loads.
+  test.setTimeout(180_000);
   await createProject({ key: "CORE", name: "Core" });
-  const unsafe = `[![x](${badge})](javascript:window.__pwned=1)`;
+  const addresses = [
+    ["x", "javascript:window.__pwned=1"],
+    ["x-entity", "javascript&#58;window.__pwned=1"],
+    ["x-escape", "javascript\\:window.__pwned=1"],
+    ["x-case", "JaVaScRiPt:window.__pwned=1"],
+    ["x-hex", "&#x6A;avascript:window.__pwned=1"],
+  ] as const;
+  const unsafe = addresses
+    .map(([name, address]) => `[![${name}](${badge})](${address})`)
+    .join("\n\n");
   const issue = await createIssue(
     {
       project: "CORE",
@@ -445,16 +458,18 @@ test("a picture linked to a javascript: address draws no link and runs nothing i
       }
     };
 
-    await expectInert(async () => {
-      await openSpec(page, issue.key, "Below the picture.");
-      return documentEditor(page).getByRole("img", { name: "x" });
-    });
-    await expectInert(async () =>
-      (await openVersion(page, issue.key, 1)).getByRole("img", { name: "x" })
-    );
-    await expectInert(async () =>
-      (await openConversation(page, issue.key)).getByRole("img", { name: "x" })
-    );
+    for (const [name] of addresses) {
+      await expectInert(async () => {
+        await openSpec(page, issue.key, "Below the picture.");
+        return documentEditor(page).getByRole("img", { exact: true, name });
+      });
+      await expectInert(async () =>
+        (await openVersion(page, issue.key, 1)).getByRole("img", { exact: true, name })
+      );
+      await expectInert(async () =>
+        (await openConversation(page, issue.key)).getByRole("img", { exact: true, name })
+      );
+    }
   } finally {
     await alice.close();
   }

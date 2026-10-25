@@ -142,6 +142,23 @@ test("the image's DOM carries the link as data attributes and an anchor only whe
     expect(unsafe.getAttribute("data-link")).toBe("javascript:alert(1)");
     expect(unsafe.hasAttribute("link")).toBe(false);
 
+    // A `javascript:` address spelled with a character reference, an escape, mixed case, or a
+    // leading or inner tab or line feed is read as the address it names, whose scheme the
+    // sanitizer refuses: no anchor.
+    for (const [written, link] of [
+      ["javascript&#58;window.__pwned=1", "javascript:window.__pwned=1"],
+      ["javascript\\:window.__pwned=1", "javascript:window.__pwned=1"],
+      ["JaVaScRiPt:window.__pwned=1", "JaVaScRiPt:window.__pwned=1"],
+      ["&#x6A;avascript:window.__pwned=1", "javascript:window.__pwned=1"],
+      ["&#9;javascript:window.__pwned=1", "\tjavascript:window.__pwned=1"],
+      ["java&#10;script:window.__pwned=1", "java\nscript:window.__pwned=1"],
+    ] as const) {
+      const encoded = render(`[![x](i.png)](${written})\n`);
+      expect(encoded.nodeName).toBe("IMG");
+      expect(encoded.getAttribute("data-link")).toBe(link);
+      expect(encoded.querySelector("a")).toBeNull();
+    }
+
     const dispatch = render("[![x](i.png)](dispatch://KEY-1)\n");
     expect(dispatch.nodeName).toBe("A");
     expect(dispatch.getAttribute("data-dispatch-href")).toBe("dispatch://KEY-1");

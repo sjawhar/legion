@@ -362,6 +362,35 @@ describe("Dispatch pictures", () => {
       view.unmount();
     }
   });
+
+  test("a picture linked to a javascript: address spelled with a reference, an escape or mixed case is drawn with no link", async () => {
+    const variants = [
+      ["entity", "javascript&#58;window.__pwned=1"],
+      ["escape", "javascript\\:window.__pwned=1"],
+      ["case", "JaVaScRiPt:window.__pwned=1"],
+      ["hex", "&#x6A;avascript:window.__pwned=1"],
+    ] as const;
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={variants
+            .map(([name, written]) => `[![${name}](https://example.com/a.png)](${written})`)
+            .join("\n\n")}
+        />
+      )
+    );
+
+    try {
+      for (const [name] of variants) {
+        const image = await within(view.container).findByRole("img", { name });
+        expect(image.closest("a")).toBeNull();
+      }
+      expect(view.container.querySelector("a")).toBeNull();
+      expect(view.container.innerHTML.toLowerCase()).not.toContain('href="javascript');
+    } finally {
+      view.unmount();
+    }
+  });
 });
 
 test("renders a typed callout body through the server schema", async () => {

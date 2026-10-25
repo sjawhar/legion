@@ -793,6 +793,40 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 	return href
 }
 
+// escapeDecodedLinkDestination writes a destination held decoded - a linked image's link, whose
+// character references and backslash escapes Parse read - so that goldmark and the browser
+// editor's parser read it back as it is: a backslash before ASCII punctuation or at the end, an
+// angle bracket, a pipe in a table cell and an ampersand that would open a character reference are
+// escaped, and a control character, which no destination holds as written, is a numeric character
+// reference. One holding a space or a parenthesis is written in angle brackets, as a text link's.
+func escapeDecodedLinkDestination(link string, escapePipes bool) string {
+	var written strings.Builder
+	written.Grow(len(link) + 2)
+	angle := strings.ContainsAny(link, " ()")
+	if angle {
+		written.WriteByte('<')
+	}
+	for index := range len(link) {
+		char := link[index]
+		switch {
+		case char == '\\' && (index+1 == len(link) || isASCIIPunctuation(link[index+1])):
+			written.WriteByte('\\')
+		case char == '<' || char == '>' || (char == '|' && escapePipes):
+			written.WriteByte('\\')
+		case char == '&' && characterReference.MatchString(link[index:]):
+			written.WriteByte('\\')
+		case char < ' ' || char == 0x7f:
+			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
+			continue
+		}
+		written.WriteByte(char)
+	}
+	if angle {
+		written.WriteByte('>')
+	}
+	return written.String()
+}
+
 func titleSuffix(title string, escapePipes bool) string {
 	if title == "" {
 		return ""

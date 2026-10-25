@@ -355,6 +355,40 @@ test("a picture with an unsafe link draws no anchor", () => {
   expect(linkOf(dispatch.dom).getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md?v=1");
 });
 
+/** The image `markdown`'s first paragraph opens with, as the editor reads it. */
+function parsedPicture(markdown: string): ProseMirrorNode {
+  const image = proof.parseMarkdown(markdown).firstChild?.firstChild;
+  if (image?.type.name !== "image") throw new Error(`no image opens ${markdown}`);
+  return image;
+}
+
+test("a picture linked to a javascript: address spelled with a reference, an escape or mixed case draws no anchor", () => {
+  for (const written of [
+    "javascript&#58;window.__pwned=1",
+    "javascript\\:window.__pwned=1",
+    "JaVaScRiPt:window.__pwned=1",
+    "&#x6A;avascript:window.__pwned=1",
+  ]) {
+    const external = linkedView(
+      parsedPicture(`[![x](https://example.invalid/badge.svg)](${written})\n`)
+    );
+    expect(external.dom.tagName).toBe("IMG");
+    expect(external.dom.getAttribute("data-link")?.toLowerCase()).toBe(
+      "javascript:window.__pwned=1"
+    );
+    expect(external.dom.closest("a")).toBeNull();
+    expect(clickPrevented(external.dom)).toBe(false);
+
+    const dispatch = linkedView(
+      parsedPicture(`[![x](dispatch://CORE-1/artifact/notes-md@v1)](${written})\n`)
+    );
+    expect(dispatch.dom.tagName).toBe("SPAN");
+    expect(dispatch.dom.querySelector("a")).toBeNull();
+    pictureOf(dispatch.dom).dispatchEvent(new Event("error"));
+    expect(linkOf(dispatch.dom).getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md?v=1");
+  }
+});
+
 test("an unlinked picture of the editor's own schema is drawn as before", () => {
   const external = linkedView(linkedPicture("https://example.invalid/logo.png", "", "logo"));
   expect(external.dom.tagName).toBe("IMG");

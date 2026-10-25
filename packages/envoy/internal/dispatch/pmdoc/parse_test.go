@@ -156,6 +156,56 @@ func TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt(t *testing.T) {
 	}
 }
 
+// A destination's escapes and character references are decoded in one pass, as the browser
+// editor's parser decodes them: an escaped `&` opens no reference, a reference wants its `;`, and
+// a number naming a control character is U+FFFD. An image's source is read the same way.
+func TestParseDecodesALinkedImagesLinkInOnePassAsTheEditorReadsIt(t *testing.T) {
+	for _, test := range []struct{ markdown, src, link string }{
+		{"[![x](i.png)](https://u.com/?a=1\\&amp;b=2)\n", "i.png", "https://u.com/?a=1&amp;b=2"},
+		{"[![x](i.png)](https://u.com/?a=1&copy=2&amp;b=3)\n", "i.png", "https://u.com/?a=1&copy=2&b=3"},
+		{"[![x](i.png)](https://u.com/&ampx;&#1;&#X41;)\n", "i.png", "https://u.com/&ampx;\uFFFDA"},
+		{"[![x](i\\&amp;&copy=.png)](u)\n", "i&amp;&copy=.png", "u"},
+		{"| h |\n| - |\n| [![x](i.png)](https://u.com/a\\|b\\\\\\|c&amp;d) |\n", "i.png", "https://u.com/a|b\\|c&d"},
+	} {
+		got, err := Parse(test.markdown)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", test.markdown, err)
+			continue
+		}
+		var image *Node
+		Walk(got, func(node *Node) bool {
+			if node.Type == "image" {
+				image = node
+			}
+			return image == nil
+		})
+		if image == nil || image.Attrs["src"] != test.src || image.Attrs["link"] != test.link {
+			t.Errorf("Parse(%q) image = %v, want src %q and link %q", test.markdown, image, test.src, test.link)
+		}
+	}
+}
+
+// A link to a `javascript:` address spelled with a character reference, an escape or mixed case
+// is stored as the address it names, so every view checks the scheme the browser would follow and
+// draws no link to it (linked-image.ts in @legion/proof-editor).
+func TestParseStoresAnEncodedJavascriptLinkAsTheAddressItNames(t *testing.T) {
+	for _, test := range []struct{ markdown, link string }{
+		{"[![x](i.png)](javascript&#58;window.__pwned=1)\n", "javascript:window.__pwned=1"},
+		{"[![x](i.png)](javascript\\:window.__pwned=1)\n", "javascript:window.__pwned=1"},
+		{"[![x](i.png)](JaVaScRiPt:window.__pwned=1)\n", "JaVaScRiPt:window.__pwned=1"},
+		{"[![x](i.png)](&#x6A;avascript:window.__pwned=1)\n", "javascript:window.__pwned=1"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", test.markdown, err)
+			continue
+		}
+		if image := got.Children[0].Children[0]; image.Type != "image" || image.Attrs["link"] != test.link {
+			t.Errorf("ParseForWrite(%q) = %v, want an image linked to %q", test.markdown, image, test.link)
+		}
+	}
+}
+
 // The browser editor's parser matches a reference to its definition by the labels as written,
 // before their character references are decoded, and a label is stored and written decoded, so a
 // reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
