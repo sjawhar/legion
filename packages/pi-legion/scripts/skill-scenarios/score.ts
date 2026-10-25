@@ -1151,14 +1151,16 @@ function refusalBlocks(
   }));
   const logged = new Set<number>();
   for (const call of calls) {
-    // The commands of the call the CLI logged: every one but `--help`, and a `--dry-run` only when
-    // its argument check refused it. A usage refusal (`dispatch: …`) is logged too, under tool
-    // `dispatch` when the CLI could not name the command, so the ledger line and the printed
-    // refusal are one refusal and match here.
+    // The commands of the call the CLI logged: every one but a `--help` that printed help, and a
+    // `--dry-run` only when its argument check refused it. The CLI checks a command's name before
+    // its flags, so a help call of an unknown command is refused and logged like any usage
+    // refusal. A usage refusal (`dispatch: …`) is logged under tool `dispatch` when the CLI could
+    // not name the command, so the ledger line and the printed refusal are one refusal and match
+    // here.
     const candidates = ops.flatMap((op, place) =>
       op.kind === "dispatch" &&
       op.step.id === call.step.id &&
-      op.call.flag("help") === undefined &&
+      (op.call.flag("help") === undefined || op.refusal !== undefined) &&
       (op.call.flag("dry-run") === undefined || op.refusal !== undefined)
         ? [
             {
@@ -1339,11 +1341,13 @@ function taskNames(step: Step, own: Outcome | undefined): string[] {
 /** What a spec-only check came to before the spec write whose assistant message is entry `before`:
  * its tasks' reports, or why it does not count. Every task the call started must have ended
  * `completed` with a report that is not empty, in an entry before the write. A report counts only
- * from Oh My Pi's own delivery of it: the call's own result (an envelope, or else a blocking result's
- * `details.results` entry), a `wait` tool's result, or an `async-result` message. An envelope in any
- * other tool's output (a `bash` that prints a file, a `read`) or any other message is text, never a
- * report: an agent can print a completed envelope while its task still runs. A report that arrives
- * after the write is no report for it. A task call the tool failed (`isError`) checked nothing. */
+ * from Oh My Pi's structured task delivery: a blocking task call's own `details.results`, or the
+ * `details.jobs` entry of a `wait` result or `async-result` message whose job is that task. A
+ * blocking result's envelope is read only when Oh My Pi recorded no `details.results`. A `wait` that
+ * returned a message, or an async delivery of another job, delivers text and never a task's end.
+ * A report body is opaque: no envelope inside it counts as another task's report. A report that
+ * arrives after the write is no report for it. A task call the tool failed (`isError`) checked
+ * nothing. */
 function checkOutcome(
   entries: SessionEntry[],
   step: Step,
@@ -1355,26 +1359,8 @@ function checkOutcome(
   if (own.failed)
     return { problem: `the task call failed: ${own.text.trim().split("\n")[0] ?? ""}` };
   const ended: { name: string; status: string; report: string; index: number }[] = [];
-  for (const [index, entry] of entries.entries()) {
-    if (index <= step.index) continue;
-    const text =
-      index === own.index
-        ? own.text
-        : entry.type === "custom_message" && entry.customType === "async-result"
-          ? strings(entry.content).join("")
-          : entry.message?.role === "toolResult" && entry.message.toolName === "wait"
-            ? (entry.message.content ?? []).map((part) => part.text ?? "").join("")
-            : "";
-    for (const [, attributes = "", body = ""] of text.matchAll(TASK_RESULT))
-      ended.push({
-        name: attribute(attributes, "id") ?? "",
-        status: attribute(attributes, "status") ?? "no status",
-        report: reportOf(body),
-        index,
-      });
-  }
   const results = field(own.details, "results");
-  if (!ended.some((end) => end.index === own.index) && Array.isArray(results))
+  if (Array.isArray(results) && results.length > 0)
     for (const result of results) {
       const output = field(result, "output");
       ended.push({
@@ -1384,6 +1370,41 @@ function checkOutcome(
         index: own.index,
       });
     }
+  else {
+    const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>\s*$/.exec(own.text);
+    if (envelope !== null)
+      ended.push({
+        name: attribute(envelope[1] ?? "", "id") ?? "",
+        status: attribute(envelope[1] ?? "", "status") ?? "no status",
+        report: reportOf(envelope[2] ?? ""),
+        index: own.index,
+      });
+  }
+  for (const [index, entry] of entries.entries()) {
+    if (index <= step.index || index === own.index) continue;
+    const details =
+      entry.type === "custom_message" && entry.customType === "async-result"
+        ? entry.details
+        : entry.message?.role === "toolResult" && entry.message.toolName === "wait"
+          ? entry.message.details
+          : undefined;
+    const jobs = field(details, "jobs");
+    if (!Array.isArray(jobs)) continue;
+    for (const job of jobs) {
+      if (field(job, "type") !== "task") continue;
+      const name = field(job, "id") ?? field(job, "jobId") ?? field(job, "agentId");
+      const status = field(job, "status");
+      if (typeof name !== "string" || typeof status !== "string") continue;
+      const resultText = field(job, "resultText");
+      const text = typeof resultText === "string" ? resultText : strings(entry.content).join("");
+      const envelope = new RegExp(
+        `^\\s*(?:<system-notice>\\s*Background job ${escaped(name)} has completed\\.[^\\n]*\\n)?\\s*<task-result\\b([^>]*)>([\\s\\S]*)<\\/task-result>\\s*(?:<\\/system-notice>\\s*)?$`
+      ).exec(text);
+      const body =
+        envelope !== null && attribute(envelope[1] ?? "", "id") === name ? (envelope[2] ?? "") : "";
+      ended.push({ name, status, report: reportOf(body), index });
+    }
+  }
   const names = taskNames(step, own);
   if (names.length === 0)
     return { problem: "the call names no task, and no task's report arrived" };
