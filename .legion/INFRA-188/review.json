@@ -2,67 +2,53 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-188",
-  "completed": "2026-10-25T06:18:00Z",
-  "round": 2,
-  "reviewedHead": "a14f3fdf1c412cf3e608d7fe4d6cbc2e407885b3",
-  "codeHead": "b079634292d959fa692e7e65bb46640765734b03",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T06:40:00Z",
+  "round": 3,
+  "codeHead": "af1e1b816584b68ab5f342b3a3d6a4249cc5c7fd",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 1,
-  "keyFindings": [
+  "minor": 0,
+  "keyFindings": [],
+  "roundTwoFindingAnswered": {
+    "file": "packages/contracts/src/dispatch-tools.test.ts:553",
+    "state": "fixed at af1e1b816584",
+    "evidence": "The test is now named \"dispatch_issue_update takes the four priority buckets and null, and refuses a rank field\", which is what its body asserts: the four buckets and null accepted (:556-558), six malformed priorities refused (:562-564), and `{ issue, rank: \"a0\" }` refused under strict (:565). The `before`/`after` acceptance the old name claimed is asserted where it lives, at :471-473 and :492, so the rename orphans no coverage. The corrective commit touched nothing else."
+  },
+  "adjudicated": [
     {
       "severity": "minor",
-      "file": "packages/contracts/src/dispatch-tools.test.ts:553",
-      "description": "The only thing standing at this head, and one string. The test is named \"dispatch_issue_update takes the four priority buckets and null, and moves by neighbour, never by a rank field\", but its body (:554-566) asserts the four priority buckets, their refusals, and that `{ issue, rank: \"a0\" }` is refused under strict — nothing in it exercises `before`/`after` acceptance, which lives in the accepted-rows test at :468-473. The cost is concrete: someone pruning those rows leaves a suite that still claims \"moves by neighbour\" and no longer checks it. Name it for what it asserts and leave the reasoning to the comment at :549-552, which is already accurate. Round 1 left this on the Fast-follow line; the architect ruled it is not deferred, so it is this round's finding."
+      "file": "skills/dispatch/references/issues.md:46",
+      "description": "The deep-review pass read \"The move rides along with any other change in the same call, and a closed issue takes it.\" as implying a closed issue takes the move beside any other field, which the server refuses (packages/envoy/internal/dispatch/api/issue_patch.go:210-215 answers 409 ISSUE_CLOSED for `--before X --priority 1` on a closed issue). Judged not a defect: \"it\" names the move, which is exactly what a closed issue takes, and the closed-issue allowance is stated in full three sections above at :40 and again in the tool description the same agent reads (packages/contracts/src/dispatch-tools.ts:417-419). The refusal is loud and atomic — the PATCH rolls back and nothing is written — so no behaviour is changed, no error hidden and no gate broken. The tester drove both halves at b079634292d9: a closed fixture took `--after` and `--before`, and `--priority 3` on the same closed issue was refused ISSUE_CLOSED."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/dispatch-tools.ts:124, :145-147, :168-170",
+      "description": "The code-quality pass recorded that the updatable-field list lives in three production places this change had to edit together, considered a derived predicate table and rejected it itself, because the per-field checks genuinely differ and a table would hide those shape assumptions. Agreed, and recorded rather than requested."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/dispatch/references/issues.md:13",
+      "description": "The code-quality pass noted the move command is spelled out at :13 and again at :46, 33 lines apart. Not requested: :13 tells an agent that is not the keeper where to send a reorder and names the one command in the same breath, which is the shape of every other bullet in that list, and :46 is the reference entry. Prose only."
     }
   ],
-  "roundOneFindingsAnswered": [
-    {
-      "file": "skills/dispatch/references/issues.md:40",
-      "state": "fixed at b079634292d9",
-      "evidence": "The line now reads \"A closed issue takes only a board move (`--before` / `--after`), `components`, a reopening status, and an external-links write that adds no link.\", matching the tool description at packages/contracts/src/dispatch-tools.ts:417-419 and the server's own rule at packages/envoy/internal/dispatch/api/issue_patch.go:202-216. No text under skills/ or docs/ names `rank` as a field an agent sets."
-    },
-    {
-      "file": "packages/contracts/src/dispatch-tools.ts:399-402",
-      "state": "fixed at b079634292d9",
-      "evidence": "The spec's example is now `{ issue: \"DSP-1\", priority: 1, before: \"DSP-2\" }` — the move riding along with another change, which is the shape the tool's own text promises. It is schema-valid under the assertion that covers every example (packages/contracts/src/dispatch-tools.test.ts:298) and survives render-then-parse (packages/envoy-client/src/__tests__/dispatch-command.test.ts:49-54). The three committed claude-envoy bundles carry it."
-    },
-    {
-      "file": "packages/envoy-client/src/__tests__/dispatch-execute.test.ts:2898-2902",
-      "state": "fixed at b079634292d9",
-      "evidence": "`await run({ before: \"\" })` now asserts the PATCH carries `rank: { before: \"\" }`, with the reason in a comment: the tool sends the empty value so the server answers `rank neighbor must name another issue` (packages/envoy/internal/dispatch/api/issue_rank.go), and a falsy or trimming guard would drop the key and turn that refusal into a silent no-move."
-    }
-  ],
-  "declined": [
-    {
-      "file": "packages/contracts/src/dispatch-tools.ts:399-402",
-      "description": "The deep-review pass rated it a Low finding that the new example shows a board move on every `issue-update` refusal while a refusal prints no description (packages/envoy-client/src/tool-input-errors.ts:16-30), so the keeper caveat at :424-425 reaches only `--help` readers, and skills/dispatch/references/issues.md:12 tells most agents never to reorder. Not asked for: its remediation (an example that stays off the board) undoes round 1's finding, since packages/contracts/AGENTS.md:62 exists so the example shows the argument shape, and its alternative (the caveat on the argument descriptions) reaches only the surface that already carries it. Recorded on the pull request's Not proven / risk line as a stated residue instead. The code-quality pass weighed the same swap and requested no change."
-    },
-    {
-      "file": "packages/envoy-client/src/dispatch-execute.ts:2945-2952",
-      "description": "The code-quality pass asked that the printed move read `rank.after`/`rank.before` rather than the locals, and that the deliberate top-down inversion be stated in the comment at :2883-2884. Declined: the locals and the sent object are built from the same two values eleven lines apart with nothing between them that can diverge, the inversion is pinned by the executor test's expected text, and the README documents the printed form (packages/envoy-client/README.md:360-362)."
-    },
-    {
-      "file": "packages/contracts/src/dispatch-api.ts:2060",
-      "description": "Round 1's declined narrowing of `IssueRankInput` stands declined: it is the shared Dispatch wire shape generated into Go and read by the server, and the executor is its only producer, guarded on `undefined` rather than falsiness and locked by two assertions."
-    }
-  ],
+  "declinedStanding": "Round 1's and round 2's three declined items produced no new evidence in this pass and stay declined: narrowing IssueRankInput (packages/contracts/src/dispatch-api.ts:2060), deriving the printed move from rank.after/rank.before (packages/envoy-client/src/dispatch-execute.ts:2945-2952), and changing the spec example because a refusal prints it without the description's keeper caveat, which stands on the pull request's Not proven / risk line as a stated residue.",
   "ciRead": {
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
     "source": "repos/sjawhar/legion/rules/branches/main required_status_checks; branch protection carries none",
-    "ciHead": "b079634292d959fa692e7e65bb46640765734b03",
+    "ciHead": "af1e1b816584b68ab5f342b3a3d6a4249cc5c7fd",
     "onlyLegionAbove": true,
-    "observed": "At 2026-10-25T06:15Z: typecheck success, pr-title success, lint in_progress, test in_progress; envoy-go-race in_progress, and its round-1 red at 066ac315a446 did not recur. No required check is red. Approval was not reached this round, so none was waited for: a request for changes stands whatever CI says."
+    "observed": "Every required check completed success at the code head, read from repos/sjawhar/legion/commits/af1e1b816584/check-runs before the approval; the compare af1e1b816584...<approved head> shows only .legion/ above it. The exact per-check states are quoted in the approval and in the pull request body's CI line."
   },
   "thermonuclear": {
-    "head": "b079634292d959fa692e7e65bb46640765734b03",
-    "deepReview": "Verdict: APPROVE at b0796342, 0 blocking. Two Low findings: the example's reach into every refusal (declined above) and the pull request body's stale risk bullets, which the reviewer owns and rewrote at this round. One hardening item, Security[authz] with no exploit path: the board move carries no authorization of its own, and the merge base published the equivalent raw PATCH, so no privilege widened.",
-    "codeQuality": "Verdict: APPROVE at b0796342, none blocking. Ranked: the stale body lines (reviewer's, rewritten), the test name carried above as this round's finding, the printed-move derivation (declined above), and a weighing of the replaced example that requested no change."
+    "head": "af1e1b816584b68ab5f342b3a3d6a4249cc5c7fd",
+    "deepReview": "Verdict: APPROVE at af1e1b81, 0 blocking. One Minor (the closed-issue ride-along clause, adjudicated above as not a defect) and one hardening item, Security[authz] with no exploit path and no new privilege: the board move inherits the issue PATCH's own authorization with no role or ownership check (packages/envoy/internal/dispatch/api/routes_table.go:85, issue_patch.go:249-256), and the merge base documented the same write as a raw PATCH. It also found two citation slips in the pull request body, both corrected at this round.",
+    "codeQuality": "Verdict: APPROVE at af1e1b81, no findings. It confirmed the rename matches its body, that the generated claude-envoy bundles and the one real skill mirror are byte-consistent with their sources, that no dangling link survives the anchor rename, and that the corrected admission rule matches the daemon; two non-blocking observations are recorded above."
   },
   "verifiedOnTheForge": {
-    "threads": "Four review threads on sjawhar/legion#2174, none resolved (gh api graphql reviewThreads). Three are round 1's inline findings, all mine, all answered on the thread at this round with b079634292d9 named as the commit that fixed each, and all three accepted for the implementer to resolve as the pull request's author: PRRT_kwDORFy7ds6v-1K8 (skills/dispatch/references/issues.md), PRRT_kwDORFy7ds6v-1K- (packages/contracts/src/dispatch-tools.ts), PRRT_kwDORFy7ds6v-1K_ (packages/envoy-client/src/__tests__/dispatch-execute.test.ts). The fourth, PRRT_kwDORFy7ds6v-8JH, is this round's finding and stays open until the rename lands. No bot opened a thread here. The review was submitted with a thread count read before its own inline comments existed; the submitted body was corrected in place to this.",
-    "e2eLines": "Both present in the pull request body at this head: E2E (implementer) and E2E (tester), the tester's naming its round-2 run at b079634292d9.",
-    "compare": "gh api repos/sjawhar/legion/compare/b079634292d9...a14f3fdf1c41 prints true: every path above the code head is under .legion/."
-  }
+    "threads": "Four review threads on sjawhar/legion#2174, all four resolved by the implementer as the pull request's author: round 1's three, which I answered and accepted at round 2 by node id, and round 2's own finding PRRT_kwDORFy7ds6v-8JH. No bot opened a thread here, and none stands.",
+    "e2eLines": "Both present in the pull request body: E2E (implementer) and E2E (tester), each carrying a round-3 block driven live against production Dispatch at the code head af1e1b816584.",
+    "bodyCorrections": "Two citation slips the deep-review pass found were corrected at this round: my own risk bullet cited the merge base's raw-PATCH line as issues.md:46 where it is :45 at 116821ebfebc, and the Size line read 24 files changed, +611/−62 where GitHub reports 23 files, +628/−61 for this pull request."
+  },
+  "mergeGate": "Approved at the head this handoff's push makes, named by SHA in the submitted review. The acceptance is the architect's from here; retro's docs/solutions commits and its removal of .legion/INFRA-188/ do not void this approval."
 }
