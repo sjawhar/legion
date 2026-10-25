@@ -4,6 +4,14 @@
 
 ### Added
 
+- `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413) with `DOCUMENT_TOO_LARGE_CLOSE_REASON`
+  (`DOC_TOO_LARGE`), and `DOCUMENT_BUSY_CLOSE_CODE` (4503) with `DOCUMENT_BUSY_CLOSE_REASON`
+  (`DOC_BUSY`), the two closes the document websocket refuses a browser's update with, generated
+  into Go beside `DOCUMENT_SCHEMA_CLOSE_CODE`. 4413 is permanent — the update would take the
+  document past the size or element bound every server write obeys, so the dashboard drops the
+  refused edit and re-reads the document rather than reconnecting into the same refusal. 4503 is
+  transient — the memory budget over the documents Dispatch holds open is full and nothing can be
+  closed, so the dashboard keeps the edit and the provider's own backoff retries it (INFRA-179).
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

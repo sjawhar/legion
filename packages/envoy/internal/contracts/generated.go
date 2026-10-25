@@ -218,6 +218,17 @@ const ProjectNameMax = 80
 const DocumentSchemaCloseCode = 4409
 const DocumentSchemaCloseReason = "DOC_SCHEMA"
 
+// DocumentTooLargeCloseCode and DocumentTooLargeCloseReason close the one browser whose update
+// would grow a document past the document bound; DocumentBusyCloseCode and DocumentBusyCloseReason
+// close a browser the room-memory budget has no room for, and the one whose update would grow a
+// document while that budget is full. Generated from DOCUMENT_TOO_LARGE_CLOSE_CODE,
+// DOCUMENT_TOO_LARGE_CLOSE_REASON, DOCUMENT_BUSY_CLOSE_CODE and DOCUMENT_BUSY_CLOSE_REASON in
+// packages/contracts so the server's closes and the dashboard's reading of them cannot drift apart.
+const DocumentTooLargeCloseCode = 4413
+const DocumentTooLargeCloseReason = "DOC_TOO_LARGE"
+const DocumentBusyCloseCode = 4503
+const DocumentBusyCloseReason = "DOC_BUSY"
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

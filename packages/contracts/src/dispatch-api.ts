@@ -2339,6 +2339,37 @@ export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
  *  `contracts.DocumentSchemaCloseReason`. */
 export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
 
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) refuses one browser's update with when
+ * applying it would grow the document past the size bound every server write obeys
+ * (`pmdoc.MaxDocumentBytes`) or past the element bound (`pmdoc.MaxDocumentElements`): the update is
+ * neither stored nor relayed, and that one browser is closed with this code and
+ * `DOCUMENT_TOO_LARGE_CLOSE_REASON`. It is in the 4400-4499 band collaborative servers publish as
+ * permanent, so the dashboard acts on the close — it drops the refused edit and re-reads the
+ * document — instead of reconnecting into the same refusal. Generated into Go as
+ * `contracts.DocumentTooLargeCloseCode`.
+ */
+export const DOCUMENT_TOO_LARGE_CLOSE_CODE = 4413;
+
+/** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE`. Generated into
+ *  Go as `contracts.DocumentTooLargeCloseReason`. */
+export const DOCUMENT_TOO_LARGE_CLOSE_REASON = "DOC_TOO_LARGE";
+
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) refuses with when the memory budget over
+ * the documents it holds open is full and no room can be closed: a browser asking for one more
+ * document is closed with it before any room is made, and an update that would grow a document
+ * already open is closed with it too, while an update that shrinks one still applies. It is in the
+ * 4500-4599 band collaborative servers publish as transient, so the dashboard keeps the edit it
+ * could not send and lets the provider's own backoff retry. Generated into Go as
+ * `contracts.DocumentBusyCloseCode`.
+ */
+export const DOCUMENT_BUSY_CLOSE_CODE = 4503;
+
+/** The reason the document websocket closes with `DOCUMENT_BUSY_CLOSE_CODE`. Generated into Go as
+ *  `contracts.DocumentBusyCloseReason`. */
+export const DOCUMENT_BUSY_CLOSE_REASON = "DOC_BUSY";
+
 export interface ArtifactRebuildReport {
   readonly head: number;
   readonly removed_checkpoints: number;
