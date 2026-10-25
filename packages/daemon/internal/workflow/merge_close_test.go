@@ -474,7 +474,9 @@ func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {
 // A merged root can stand in awaiting_merge for days, and a pull request opened from its branch in
 // that time is new work, not the change the root waits to close on: GitHub has already merged that
 // one and never sends the merge again. The root still closes on that merge when its last child
-// leaves, its production check reading pull request #42 at merge.
+// leaves, its production check reading pull request #42 at merge. The tree's slot is admission's,
+// freed at phase done, and is asserted in admit's
+// TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves.
 func TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding(t *testing.T) {
 	rig := seedMergedRoot(t, record.Issue{Key: "LEGION-209", Phase: phase.Implementing, Status: "in_progress"})
 	rig.apply("follow-up-opened", intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 99, Branch: "legion/LEGION-208", HeadSHA: "follow-up",
@@ -486,9 +488,7 @@ func TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding(t *testing
 	if check := productionCheck(t, rig.pool, "LEGION-208"); check == nil || !check.Open() || check.Number != 42 || check.MergeSHA != "merge" {
 		t.Fatalf("the root's production check = %+v, want it open on pull request #42 at merge", check)
 	}
-	if got := slottedIssues(t, rig.pool); len(got) != 0 {
-		t.Fatalf("slots = %v, want the closed tree's freed", got)
-	}
+	assertOutboxCount(t, rig.pool, "linger_close", 1)
 }
 
 // mergedRootRig is a root whose pull request merged while its tree still ran: the pool it was

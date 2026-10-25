@@ -83,7 +83,8 @@ func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T
 // here the architect parking each. That close lingers the tree and opens the root's production
 // check, whose first look its implementer reports, since the tree's close waits for an open check
 // (the workflow's check tests). Nothing is left mid-run by then, so the linger's end hands no child
-// over, and the slot the tree held is released.
+// over, and the slot the tree held is released. A pull request opened from the root's branch while
+// it waits is new work and leaves the merge it waits on standing.
 func TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves(t *testing.T) {
 	pool, admission, engine := seedFinishingTree(t)
 	if result, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 1, MergeSHA: "merge-1"}, engine, admission); err != nil || result.Refusal != nil {
@@ -98,6 +99,18 @@ func TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves(t *testing.T) 
 			t.Fatalf("%s after its root's merge = %#v, want it untouched in %s's tree", key, got, finishedRoot)
 		}
 	}
+	if result, err := intake.ApplyFact(context.Background(), pool, "github", "follow-up-opened", intake.PullRequestOpened{Repo: "acme/widgets", Number: 2, Branch: "legion/LEGION-1", HeadSHA: "follow-up", UpdatedAt: fixedNow.Add(time.Hour)}, engine, admission); err != nil || result.Refusal != nil {
+		t.Fatalf("open a follow-up pull request from %s's branch = %+v, %v", finishedRoot, result.Refusal, err)
+	}
+	if got := issue(t, pool, finishedRoot); got.Phase != phase.AwaitingMerge {
+		t.Fatalf("the merged root once a follow-up pull request opened = %#v, want it still awaiting its merge", got)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		pr, err := record.NewStore().PullRequest(context.Background(), tx, finishedRoot)
+		if err != nil || pr == nil || pr.Number != 1 || pr.State != record.PullRequestMerged {
+			t.Fatalf("the root's pull request once a follow-up opened = %+v, %v, want #1 merged", pr, err)
+		}
+	})
 
 	// Every member but the last leaves the root waiting. The released child that has not started a
 	// phase holds the close up as much as a working one: it is in the workflow, and it will run, so
@@ -117,6 +130,12 @@ func TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves(t *testing.T) 
 		t.Fatalf("the root once its last open child left = %#v, want it done and lingering", got)
 	}
 	assertSlots(t, pool, nil)
+	inTx(t, pool, func(tx pgx.Tx) {
+		check, err := record.NewStore().ProductionCheck(context.Background(), tx, finishedRoot)
+		if err != nil || check == nil || !check.Open() || check.Number != 1 || check.MergeSHA != "merge-1" {
+			t.Fatalf("the root's production check = %+v, %v, want it open on pull request #1 at merge-1", check, err)
+		}
+	})
 	if result, err := intake.ApplyFact(context.Background(), pool, "api", "check-pass", intake.CheckReport{Issue: finishedRoot, Look: 1, Verdict: "pass", Summary: "driven"}, engine, admission); err != nil || result.Refusal != nil {
 		t.Fatalf("report %s's production check = %+v, %v", finishedRoot, result.Refusal, err)
 	}

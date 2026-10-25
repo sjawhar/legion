@@ -26,7 +26,9 @@ import (
 // synchronize reports - is judged as a synchronize to that head would be
 // (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one it leaves the
 // counted attempt. A new generation deletes a pull request that is not open, and all of them with
-// it.
+// it. An issue that waits to close on its recorded merge (awaitsMerge) keeps that merge: GitHub
+// never sends the merge again, so a pull request opened from its branch is not recorded, while an
+// issue set back to todo reruns and its branch's new pull request replaces the merged one.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || issue == nil {
@@ -45,6 +47,11 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	// on different bases, are not modelled, and this fence can then keep the earlier one, whose
 	// close still tells the architect.
 	if recorded != nil && classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+		return intake.Result{}, nil
+	}
+	if recorded != nil && recorded.State == record.PullRequestMerged && recorded.Number != fact.Number && awaitsMerge(*issue) {
+		e.logOnCommit(ctx, "workflow: a pull request opened from a branch whose issue waits to close on its merge is not recorded",
+			"issue", issue.Key, "merged", recorded.Number, "opened", fact.Number)
 		return intake.Result{}, nil
 	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
