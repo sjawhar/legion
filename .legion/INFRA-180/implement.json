@@ -2,42 +2,56 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-180",
-  "completed": "2026-10-25T19:21:00Z",
-  "round": 10,
+  "completed": "2026-10-25T19:30:00Z",
+  "round": 11,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
-  "headSha": "cc604381a4bd1d1221118b142ed7cce2d4a9c8a2",
-  "whatThisRoundIs": "A second red CI check that was not this change, and nothing else — a different flaky test from the one that sent round 9 back. No product line changed, no code was written, and no head was pushed by this round: the head is still the third retro's removal commit. This handoff commit is the only thing that moves, and it puts .legion/INFRA-180/ back on the head, which the retro after the architect's acceptance removes again in its single commit.",
+  "headSha": "4cbc967e4232c2e75a76bd2bdb80423398bb7603",
+  "whatThisRoundIs": "A second forward merge and nothing else. GitHub computed the previous head e07b0430b776 mergeable=false / dirty at 19:22:02Z and compare/main...e07b0430b776 put it 10 commits behind merge base 83f6320140ec, so main@origin at 7af60a22b33f was merged into the issue bookmark in one commit, never a rebase. No product line changed. The code stays closed on the architect's ruling and every Fast-follow item stays recorded.",
   "proof": [
     {
-      "criterion": "The red is not this change: it is a lock-file race in the Go daemon's workspace package, which this pull request does not touch, and it cleared on the one re-run the round is allowed.",
-      "surface": "GitHub's own job log, run record and check-runs for the head, and the branch's file list against the base it merged.",
-      "command": "gh run view --repo sjawhar/legion --job 121227540688 --log-failed; jj -R \"$LEGION_WORKSPACE\" diff --from 83f6320140ec --to cc604381a4bd1d1221118b142ed7cce2d4a9c8a2 --name-only; gh run view 40212825565 --repo sjawhar/legion --json status,conclusion,attempt,headSha,updatedAt; gh api repos/sjawhar/legion/commits/cc604381a4bd1d1221118b142ed7cce2d4a9c8a2/check-runs",
-      "observed": "Attempt 1 of run 40212825565, job 121227540688, failed TestFetchKeepsAFeedAfterGitGC/killed_during_repack at packages/daemon/internal/workspace/fetch_test.go:1101: 'foreignFeed after git gc = \"it holds packed-refs.lock, which no fetch writes\", <nil>; want the feed trusted' — workspace-init's feed-trust check reading a packed-refs.lock that the test's own killed git gc left behind, a lock-file race rather than a wrong delivery, and a different test from round 9's TestAReleasedNoticeRunsOnItsLaneWhenTheReleaseCommits in internal/daemon. The branch's 7 files against 83f6320140ec are the Envoy Slack normalizer, its two test files, two documents and the generated bundle copy, with no packages/daemon path at all (grep -c of that prefix over the list is 0). Attempt 2 of the same run records status=completed conclusion=success attempt=2 head=cc604381a4bd updatedAt=2026-10-25T17:50:45Z, its test job started 17:33:33Z and completed 17:50:45Z success, and the head's own check-runs read lint success (16:59:00Z), typecheck success (16:43:13Z), pr-title success (16:41:07Z) and test success (17:50:45Z). Every other workflow at this head was already success: Legion Envoy and Contracts 40212825539, Docs 40212825454, Worker Image 40212825428, PR Title 40212825494.",
-      "headSha": "cc604381a4bd1d1221118b142ed7cce2d4a9c8a2",
-      "negativeControl": "The re-run was of the failed job alone, on the same head and the same code: nothing was changed to make it pass, so a reproducible failure would have failed again. One re-run only; a second failure on this head would have been reported to the architect rather than retried. The two readings above are independent of each other — the run's own record and the commit's check-runs — and both report what happened rather than what was asked for, each with its own completion time."
+      "criterion": "The forward merge changed no line of the approved diff, and the branch's own package came through the merge intact even though main's #2189 touches it.",
+      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md at both heads, GitHub's computed mergeability and compare endpoints, and the merged working copy itself.",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at <head> e07b0430b7766e38a05336425e7caa367fa3384c and then 4cbc967e4232c2e75a76bd2bdb80423398bb7603; gh api repos/sjawhar/legion/pulls/2166; gh api repos/sjawhar/legion/compare/main...<head>; grep -c 'TestSlackAttachmentWordsReachTheStream\\|func streamEnvelopes' packages/envoy/internal/integration/webhook_redelivery_test.go",
+      "observed": "89c45be1c41e0714fafc282853c0a06d01d3ec4eb35c1e5d90734756d8aee6b8 at both heads — unchanged, and the same figure this branch has carried since the first merge. One path conflicted, packages/envoy/CHANGELOG.md, where this branch's ### Fixed entry is kept whole and first and main's new entry follows it, nothing of either side touched. #2189, 'test(envoy): run the NATS test server in the test process', touches this change's own package and merged with no conflict: both TestSlackAttachmentWordsReachTheStream and streamEnvelopes are intact (grep count 2). After the push GitHub reports the pull request mergeable=true, state=blocked, head 4cbc967e4232. Posted as the required comment, https://github.com/sjawhar/legion/pull/2166#issuecomment-6402134704.",
+      "headSha": "4cbc967e4232c2e75a76bd2bdb80423398bb7603",
+      "negativeControl": "The first attempt at this merge was botched in the working copy — a resolution script read the conflict's other shape and a jj restore left the change divergent — and nothing of it was pushed: the two divergent commits were abandoned, the merge was made again from the bookmark, and the fingerprint above is computed on the commit that was actually pushed. A conflict that could not be resolved without changing the product would have been reported to the architect instead of carried inside the merge commit."
     },
     {
-      "criterion": "The product evidence of the change is unchanged by this round, since no line of it moved.",
-      "surface": "The pull request's own record at this head, and the branch's diff against the base it merged.",
-      "command": "jj -R \"$LEGION_WORKSPACE\" diff --from 621ea16a91dd4476e88ee6f61b3424ed0418835a --to cc604381a4bd1d1221118b142ed7cce2d4a9c8a2 --stat '~.legion'; gh api repos/sjawhar/legion/pulls/2166 --jq .body",
-      "observed": "0 files changed between the previous retro head and this one outside .legion/. The E2E (implementer) and E2E (tester) lines stand as written at 77f73e55e29b, f3c3d411a87c, ce39bc6b7f9c and 621ea16a91dd, each with its surface, command, observation, head and negative control; the unchanged-diff fingerprint 89c45be1c41e0714fafc282853c0a06d01d3ec4eb35c1e5d90734756d8aee6b8 holds from the pre-merge tip through this head; and acceptance 2 is proven on the merged production code by run 40176669854 at f3c3d411a87c, whose envoy-go job completed success.",
-      "headSha": "cc604381a4bd1d1221118b142ed7cce2d4a9c8a2",
-      "negativeControl": "No commit of this round touches any file outside .legion/INFRA-180/, so the fingerprint and both proofs are the ones the tester and reviewer already verified at this head."
+      "criterion": "Acceptance 2 — a signed Slack message whose words are in an attachment reaching the NATS stream — now runs on an issue pod, on the merged production code.",
+      "surface": "The integration package's own test binary, which since main's #2189 starts its NATS server in the test process rather than in a container.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/integration/ -count=1 -run TestSlackAttachmentWordsReachTheStream -v",
+      "observed": "--- PASS: TestSlackAttachmentWordsReachTheStream (0.35s), ok github.com/sjawhar/envoy/internal/integration 0.370s, at this head. Through every earlier round of this pull request that lane needed a container runtime the pod does not have and was provable only in CI; the merge retires that limit, and the test is now green both here and in CI (run 40176669854's envoy-go at f3c3d411a87c, run 40205954172's envoy-go and envoy-go-race at 621ea16a91dd).",
+      "headSha": "4cbc967e4232c2e75a76bd2bdb80423398bb7603",
+      "negativeControl": "The same command on this pod before the merge could not run at all: the lane's NATS server needed Docker or Podman, neither of which exists here, which is why every round before this one cited CI for it."
+    },
+    {
+      "criterion": "The bare gates pass at the merge head, which is what an unchanged fingerprint calls for.",
+      "surface": "The repository's own local checks for the changed paths, in the merged workspace.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && gofmt -l . && go vet ./internal/contracts/ ./internal/integration/ && go test ./internal/contracts/ ./internal/webhook/ -count=1",
+      "observed": "gofmt no output, go vet clean over both packages, and both test packages ok. The round 6 and 7 product proofs stand at their own heads and are cited there; nothing of the product moved, so they are not repeated.",
+      "headSha": "4cbc967e4232c2e75a76bd2bdb80423398bb7603",
+      "negativeControl": "The merge brought 37 new files and 134 modified ones from main into the workspace, so a build or vet break from that content would have shown here rather than first in CI."
     }
   ],
-  "filesChanged": [],
+  "filesChanged": [
+    "packages/envoy/CHANGELOG.md — the one conflicting path, resolved by keeping this branch's ### Fixed entry whole and first with main's new entry after it. No other file was edited in the merge commit; everything else it carries is main's own content."
+  ],
   "trickyParts": [
-    "Two distinct daemon-suite tests have now failed on this branch within an hour, round 9's in internal/daemon and this one in internal/workspace. Both are on dispatch://INFRA-400, which the architect rescoped to name two tests; the class is a daemon test asserting something a loaded runner can move, and neither is this change's.",
-    "The turn that diagnosed the red ended without completing and without a handoff: a completion while the red stands is sent back, and a handoff commit would have put .legion/INFRA-180/ back on the head for no reason while the verdict was still red."
+    "jj presents a conflict in either direction: the first merge showed this branch's side as a diff with + lines and main's as literal text, this one the other way round. A resolution script that assumes one shape silently drops a side — mine did, and the recovery was to abandon the unpushed divergent commits and merge again from the bookmark rather than to patch the file.",
+    "A bookmark names one commit, not its ancestry: `\"main\"@origin ~ ::(legion/INFRA-180@origin)` can only return main's tip, so it shows one commit where the forge shows ten. Use `::\"main\"@origin ~ ::(…)` and check it against gh api compare before concluding a set is empty — the architect's correction of its own earlier inference."
   ],
   "deviations": [
     "None this round: no product line changed. Every deviation the earlier rounds recorded stands as it was, each with the architect's ruling as its authority, and spec version 16 is approved."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The architect ruled that this pull request does not wait on a daemon-suite fix: its own package has been green at every head, and the only thing between the branch and the merge was a job settling."
+    "main's #2189 retires the standing limit of this pull request: the integration lane no longer needs a container runtime, so acceptance 2 is provable on an issue pod. The handoffs of every earlier round record that limit as it then stood.",
+    "GitHub reports the head 1 commit behind main immediately after the push, mergeable=true — main moves faster than a round, and only a computed mergeable=false is a reason to merge again."
   ],
   "localChecks": [
-    "No local check was run and none was due: this round changed no file. The head's own checks are GitHub's, read from two independent records above — the run 40212825565 attempt 2 record and the commit's check-runs — with lint, typecheck, test and pr-title all completed/success at cc604381a4bd."
+    "cd packages/envoy && gofmt -l . — no output",
+    "cd packages/envoy && go vet ./internal/contracts/ ./internal/integration/ — clean",
+    "cd packages/envoy && go test ./internal/contracts/ ./internal/webhook/ -count=1 — both ok at the merge head",
+    "cd packages/envoy && go test ./internal/integration/ -count=1 -run TestSlackAttachmentWordsReachTheStream -v — PASS, the lane now running in-process"
   ]
 }
