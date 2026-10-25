@@ -13965,6 +13965,7 @@ function dispatchToolSchema(spec, z2, opts) {
   return spec.validation === undefined ? z2.object(shape, schemaOptions) : z2.refineObject(shape, spec.validation.check, spec.validation.refusal ?? spec.validation.message, schemaOptions);
 }
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
+var BOARD_NEIGHBOUR_REFUSAL = "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
@@ -14120,8 +14121,8 @@ var dispatchToolSpecs = [
       blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle.").optional(),
       components: componentsArgument(z2).optional(),
       repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again.").optional(),
-      before: z2.string().describe("Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.").optional(),
-      after: z2.string().describe("Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.").optional()
+      before: z2.string().describe(`Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`).optional(),
+      after: z2.string().describe(`Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`).optional()
     }),
     validation: {
       check: (value) => issueUpdateProblem(value) === undefined,
@@ -17928,6 +17929,10 @@ async function executeDispatchTool(input) {
       const linked = before.external_links.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url2) => !linked.includes(url2)) ?? [];
       const sentLinks = requestedLinks === undefined ? undefined : requestedLinks.length === 0 ? [] : [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))];
+      const rank = rankBefore === undefined && rankAfter === undefined ? undefined : {
+        ...rankBefore === undefined ? {} : { before: rankBefore },
+        ...rankAfter === undefined ? {} : { after: rankAfter }
+      };
       let after;
       try {
         after = await client.updateIssue(issueKey, {
@@ -17941,12 +17946,7 @@ async function executeDispatchTool(input) {
           ...components === undefined ? {} : { components },
           ...repo2 === undefined ? {} : { repo: repo2 === "" ? null : repo2 },
           ...sentLinks === undefined ? {} : { external_links: sentLinks },
-          ...rankBefore === undefined && rankAfter === undefined ? {} : {
-            rank: {
-              ...rankBefore === undefined ? {} : { before: rankBefore },
-              ...rankAfter === undefined ? {} : { after: rankAfter }
-            }
-          },
+          ...rank === undefined ? {} : { rank },
           actor
         });
       } catch (error48) {
@@ -17968,7 +17968,7 @@ async function executeDispatchTool(input) {
         ...title === undefined ? [] : [`title "${after.title}"`],
         ...labels === undefined ? [] : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`],
         ...priority === undefined ? [] : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`],
-        ...rankBefore === undefined && rankAfter === undefined ? [] : [
+        ...rank === undefined ? [] : [
           `rank -> ${[
             ...rankAfter === undefined ? [] : [`after ${rankAfter}`],
             ...rankBefore === undefined ? [] : [`before ${rankBefore}`]

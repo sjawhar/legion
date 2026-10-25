@@ -2880,6 +2880,15 @@ export async function executeDispatchTool(
           : requestedLinks.length === 0
             ? []
             : [...before.external_links, ...newLinks.map((url) => ({ url }))];
+      // A rank with neither neighbour is not a no-op: the server ranks the issue last in its
+      // project. So an ordinary update sends no rank key at all.
+      const rank =
+        rankBefore === undefined && rankAfter === undefined
+          ? undefined
+          : {
+              ...(rankBefore === undefined ? {} : { before: rankBefore }),
+              ...(rankAfter === undefined ? {} : { after: rankAfter }),
+            };
       let after: Advised<Issue>;
       try {
         after = await client.updateIssue(issueKey, {
@@ -2893,16 +2902,7 @@ export async function executeDispatchTool(
           ...(components === undefined ? {} : { components }),
           ...(repo === undefined ? {} : { repo: repo === "" ? null : repo }),
           ...(sentLinks === undefined ? {} : { external_links: sentLinks }),
-          // A rank with neither neighbour is not a no-op: the server ranks the issue last in its
-          // project. So an ordinary update sends no rank key at all.
-          ...(rankBefore === undefined && rankAfter === undefined
-            ? {}
-            : {
-                rank: {
-                  ...(rankBefore === undefined ? {} : { before: rankBefore }),
-                  ...(rankAfter === undefined ? {} : { after: rankAfter }),
-                },
-              }),
+          ...(rank === undefined ? {} : { rank }),
           actor,
         });
       } catch (error) {
@@ -2942,7 +2942,7 @@ export async function executeDispatchTool(
         ...(priority === undefined
           ? []
           : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
-        ...(rankBefore === undefined && rankAfter === undefined
+        ...(rank === undefined
           ? []
           : [
               `rank -> ${[

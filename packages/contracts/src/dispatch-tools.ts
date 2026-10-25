@@ -47,6 +47,9 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 const ISSUE_REFERENCE =
   "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 
+const BOARD_NEIGHBOUR_REFUSAL =
+  "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
+
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
@@ -479,13 +482,13 @@ export const dispatchToolSpecs = [
       before: z
         .string()
         .describe(
-          "Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order."
+          `Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
         )
         .optional(),
       after: z
         .string()
         .describe(
-          "Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order."
+          `Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
         )
         .optional(),
     }),
