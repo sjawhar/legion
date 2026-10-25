@@ -1,6 +1,6 @@
 // Oh My Pi's native modules for the tests that run the real binary under a fresh HOME
-// (omp-harness.ts's ompRoot). Oh My Pi extracts them from its own binary into
-// .omp/natives/<version> under any HOME that lacks them, about 354 MiB at the pin, and has no
+// (omp-harness.ts's ompRoot). Oh My Pi extracts the one its CPU needs from its own binary into
+// .omp/natives/<version> under any HOME that lacks it, about 111 MiB at the pin, and has no
 // setting for that directory short of XDG_DATA_HOME, which moves its whole profile. Each HOME's
 // natives are instead hardlinks to one copy per binary under the user's cache directory.
 //
@@ -55,13 +55,15 @@ function nativesCacheRoot(): string {
  * content. The first process to ask fills it under an exclusive lock on its own lock file, so of
  * the processes that ask at once, Go test binaries included, one runs the binary and the rest wait
  * and find it filled. The binary extracts into a staging HOME, and its natives directory is renamed
- * into place whole once it holds every file the binary embeds at its embedded size, so a directory
- * that exists is complete. A staging directory the lock's holder finds is a dead filler's, which it
- * removes.
+ * into place whole once every file in it is one the binary embeds, at its embedded size, so a
+ * directory that exists is complete. A staging directory the lock's holder finds is a dead
+ * filler's, which it removes.
  *
- * Oh My Pi writes the embedded files one after another, and when a later write fails (a full disk)
- * it loads one it did write and still exits 0; a cache missing the other would have every later
- * HOME extract it. The check against the embedded list is what refuses that fill.
+ * A fill that writes nothing, or a file short of its embedded size (a full disk), is refused rather
+ * than cached, since every later HOME takes its natives from this copy. Which natives a binary
+ * extracts is its own choice — the pin writes only the variant the CPU runs, earlier binaries wrote
+ * every variant they embed — so the check reads what was extracted rather than demanding each
+ * embedded name.
  */
 export async function fillNativesCache(root: string, binary: string): Promise<string> {
   const { digest, embedded } = await readBinary(binary);
@@ -104,16 +106,21 @@ export async function fillNativesCache(root: string, binary: string): Promise<st
         extracted.set(path.basename(file), info.size);
         await chmod(file, 0o500);
       }
-      for (const name of [...embedded.keys()].sort()) {
-        const size = extracted.get(name);
+      if (extracted.size === 0) {
+        throw new Error(
+          `${binary} extracted no native under ${natives} (a write failed, as on a full disk), so nothing is cached`
+        );
+      }
+      for (const name of [...extracted.keys()].sort()) {
+        const size = embedded.get(name);
         if (size === undefined) {
           throw new Error(
-            `${binary} embeds ${name}, but its extraction under ${natives} lacks it (a write failed, as on a full disk), so nothing is cached`
+            `${binary} extracted ${name} under ${natives}, which it embeds no native of that name for, so nothing is cached`
           );
         }
-        if (size !== embedded.get(name)) {
+        if (size !== extracted.get(name)) {
           throw new Error(
-            `${binary} embeds ${name} at ${embedded.get(name)} bytes, but extracted it at ${size} under ${natives}, so nothing is cached`
+            `${binary} embeds ${name} at ${size} bytes, but extracted it at ${extracted.get(name)} under ${natives}, so nothing is cached`
           );
         }
       }
