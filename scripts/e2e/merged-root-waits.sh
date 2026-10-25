@@ -17,8 +17,10 @@
 # starts none, so the tester can re-run it wherever one is. The broker is the run's own: a
 # nats-server from LEGION_E2E_NATS_BIN, or the pinned one this script installs with `go install`
 # into a GOBIN of its own, started with JetStream on a port of the run's own and stopped on any
-# exit. MERGED_ROOT_WAITS_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) keeps the
-# transcript, the nats-server's log and the daemon's own.
+# exit. MERGED_ROOT_WAITS_EVIDENCE_DIR (default a fresh directory under TMPDIR, or /tmp when it is
+# unset, kept and printed) keeps the transcript, the nats-server's log and the daemon's own; the
+# run's work directory, the driver binary among it, is under TMPDIR too, since a pod's own disk is
+# small and its TMPDIR names the issue's volume.
 set -euo pipefail
 
 # The nats-server the run installs when the caller names none: the 2.10 line the daemon's own NATS
@@ -26,13 +28,13 @@ set -euo pipefail
 nats_version=v2.10.22
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-evidence=${MERGED_ROOT_WAITS_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-merged-root-waits-evidence.XXXXXXXX)}
+evidence=${MERGED_ROOT_WAITS_EVIDENCE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/legion-e2e-merged-root-waits-evidence.XXXXXXXX")}
 mkdir -p "$evidence"
 # shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
 . "$root/scripts/e2e/lib/transcript.sh"
 transcript_to "$evidence/transcript.log"
 
-work=$(mktemp -d "/tmp/legion-e2e-merged-root-waits.$$.XXXXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/legion-e2e-merged-root-waits.$$.XXXXXXXX")
 driver=$work/merged-root-waits.test
 nats_pid=''
 port_nats=''
