@@ -2,10 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T16:36:15Z",
+  "completed": "2026-10-25T16:45:23Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
+  "codeHead": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
   "proof": [
+    {
+      "criterion": "Round 4: the trap paragraph, the recovery paragraph and the INFRA-232 bullet agree on where the measured stops landed and on what evidence; A1-A8 hold",
+      "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=355ffe8e9ae9e76d2918e995b8fe1d6df3417eac\" -H \"Accept: application/vnd.github.raw\"; plan section 4 checks; grep -c 'inside the create' on the page; diff -U0 base head | awk -f hunks3.awk (hunks2 ranges plus 3276-3282)",
+      "observed": "pushed page identical to the checked working copy; A1 0; A2 1 x7; A3 date 4; A4 abe1b4cf...; A6 no NONCOMMENT, old-closing 0, old-listing 1; A7 0; A8 0; 'inside the create' 0; A5 six hunks all ok; diff from 3f864ba1 two hunks (3221, 3303)",
+      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+      "negativeControl": "at 3f864ba1: 'inside the create' 2 (bullet 3304 and 3307), recovery paragraph 'during the create'"
+    },
+    {
+      "criterion": "Round 4 reader probe: the three excerpts no longer contradict each other",
+      "surface": "fresh scout subagents, each given only the trap paragraph, the recovery paragraph and the INFRA-232 bullet",
+      "command": "Q1 where the 0.33/0.35 s stops landed and on what evidence; Q2 when the measured SIGKILL landed and what shows it; Q3 which runs leave a Job without printing its name; agree or disagree each",
+      "observed": "head: agree on all three, quoting 'Nothing those runs printed shows when a stop landed' and 'landed before the name printed'",
+      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+      "negativeControl": "3f864ba1: Q1 'disagree ... The bullet says \"two that landed inside the create deleted the Job it had made by the label\" and gives no evidence for that placement'"
+    },
+    {
+      "criterion": "A9, round 4: no private name enters the change",
+      "surface": "the repository at the head, the round's added lines, the live PR body",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over the round's added lines and the PR body before the PATCH",
+      "observed": "check-private-names exit 0; sweep 0 literal, 0 whole-word for each",
+      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+      "negativeControl": "a scratch file holding the reachability label gives literal 1 (same script, round 1)"
+    },
     {
       "criterion": "Round 3: the recovery delete removes the late-stored Job only once stored; the closing comment states the measured exits and names what the trap can miss, a failed clean-up step included; full-diff sweep fixes; A1-A8 hold",
       "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
@@ -98,12 +122,13 @@
     "The docs edit was written by the implementer directly rather than by a deep-worker subagent: one prose file, with the plan's draft text and checks, where the wording is the deliverable.",
     "The refusal is quoted with its rule message elided as well as the policy name, since the rule message contains the compute class's name as a word and the sweep counts it.",
     "Round 2: P1 was not re-run; the sequence block is byte-identical to 97e9883b's, where P1 and its control ran, and the architect ruled that no stop is re-measured.",
-    "Round 3: P1 was not re-run; no command of the block changed (comment-stripped block cmp-identical to base), and the architect ruled that no stop is re-measured."
+    "Round 3: P1 was not re-run; no command of the block changed (comment-stripped block cmp-identical to base), and the architect ruled that no stop is re-measured.",
+    "Round 4: the INFRA-232 evidence bullet's two stop placements (base 3278-3282) changed, outside the plan's A5 ranges, under the architect's round-3 ruling that a further sweep finding is fixed in the same round; P1 not re-run (no command changed)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
-  "round": 3,
-  "roundReason": "Sent back from retro a second time. The architect ruled to fix two clauses: the recovery delete 'removes its Job' for the late-stored create, and the closing comment's list of exceptions, which left out a failed clean-up step. The architect also asked for a sweep of every sentence the PR wrote or changed against its evidence.",
-  "previousCodeHead": "feda29facc745cd103d31bed0fc57979aaf08017",
+  "round": 4,
+  "roundReason": "Tester's round-3 failure: round 3's trap sentence (the 0.33/0.35 s stops' placement is not shown by what they printed) contradicted the unchanged INFRA-232 bullet ('two that landed inside the create', 'kill -KILL that landed inside the create'); secondary: the recovery paragraph's 'SIGKILL ... during the create' left out a SIGKILL after the answer and before the name printed.",
+  "previousCodeHead": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
   "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body)."
 }
