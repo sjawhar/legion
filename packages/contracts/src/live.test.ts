@@ -341,12 +341,12 @@ test("the page's frames carry every key of their types, and the socket reads eac
   expect(keysOf(unsubscribe)).toEqual(sorted(CLIENT_FRAME_KEYS.unsubscribe));
 });
 
-test("a socket ends at an age between thirty minutes and an hour, with a close code of its own", () => {
+// The values themselves, not a range: the server, the page and the e2e probe read these, and a
+// change to any of them is a change to the wire both sides must ship together.
+test("a socket ends at an age between thirty minutes and an hour, closing 4001, and holds 64 subscriptions", () => {
   expect(LIVE_SOCKET_MIN_AGE_MS).toBe(30 * 60 * 1000);
   expect(LIVE_SOCKET_MAX_AGE_MS).toBe(60 * 60 * 1000);
   // An application code, apart from 4000, the page's own close of a silent socket.
-  expect(LIVE_SOCKET_MAX_AGE_CLOSE).toBeGreaterThan(4000);
-  expect(LIVE_SOCKET_MAX_AGE_CLOSE).toBeLessThan(5000);
-  expect(Number.isInteger(LIVE_SOCKET_MAX_SUBSCRIPTIONS)).toBe(true);
-  expect(LIVE_SOCKET_MAX_SUBSCRIPTIONS).toBeGreaterThan(0);
+  expect(LIVE_SOCKET_MAX_AGE_CLOSE).toBe(4001);
+  expect(LIVE_SOCKET_MAX_SUBSCRIPTIONS).toBe(64);
 });

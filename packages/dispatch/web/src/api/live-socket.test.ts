@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
-import type { AgentStreamFrame } from "@legion/contracts";
+import { type AgentStreamFrame, LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts";
 import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
@@ -698,7 +698,7 @@ test("a 4001 reopens at once, keeps state open and resubscribes every kind", asy
     const agentSub = agentSubscription(socket, SESSION_A).sub;
     socket.receive({ type: "events_start", sub: events, since: "7" });
 
-    socket.drop(4001);
+    socket.drop(LIVE_SOCKET_MAX_AGE_CLOSE);
     // No backoff, and nothing for a pill or the freshness row to show.
     expect(sockets.sockets).toHaveLength(2);
     expect(live.state()).toMatchObject({ state: "open", since: null, stuck: false });
@@ -730,6 +730,53 @@ test("a 4001 reopens at once, keeps state open and resubscribes every kind", asy
     stopAgent();
     stopFeed();
     unsubscribe();
+  }
+});
+
+// A rotation shows nothing only while the socket it opens connects. A reopen that fails is a loss
+// like any other: the page reads `reconnecting`, the pill shows, and the feed's next start reports
+// the gap, since events may have committed while no socket carried it.
+test("a 4001 whose reopen fails reads reconnecting, shows the pill and reports a gap at the next start", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const shared = liveSocketFor(client);
+  const feed = eventFeed();
+  const stopFeed = shared.subscribeEvents(feed.handlers);
+  const pill = renderHook(() => useLiveSocketPill(), {
+    wrapper: ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children),
+  });
+  try {
+    const socket = sockets.latest();
+    act(() => socket.open());
+    act(() => startFeed(socket, "7"));
+    expect(pill.result.current).toBe("none");
+
+    act(() => socket.drop(LIVE_SOCKET_MAX_AGE_CLOSE));
+    expect(sockets.sockets).toHaveLength(2);
+    expect(shared.state().state).toBe("open");
+    expect(pill.result.current).toBe("none");
+
+    // The rotation's own socket fails its handshake.
+    act(() => sockets.latest().drop(1006));
+    expect(shared.state().state).toBe("reconnecting");
+    expect(pill.result.current).toBe("reconnecting");
+
+    act(() => jest.advanceTimersByTime(reconnectDelayMs(0) * 2));
+    expect(sockets.sockets).toHaveLength(3);
+    const again = sockets.latest();
+    act(() => again.open());
+    expect(again.subscribed("events").resume).toEqual({ since: "7" });
+    act(() => startFeed(again, "7"));
+    expect(feed.gaps).toEqual([false, true]);
+    expect(pill.result.current).toBe("none");
+  } finally {
+    pill.unmount();
+    stopFeed();
+    shared.close();
+    client.clear();
+    random.mockRestore();
   }
 });
 
