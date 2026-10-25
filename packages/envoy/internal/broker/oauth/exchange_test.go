@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -377,9 +379,15 @@ func TestASubjectTokenSignedWithASharedSecretIsRefused(t *testing.T) {
 // polled for its token pair.
 func (f *exchangeFixture) devBoxToken(t *testing.T, key *ecdsa.PrivateKey, person string) string {
 	t.Helper()
+	return f.devBoxTokenOf(t, key, person, f.newCredential(t))
+}
+
+// devBoxTokenOf is devBoxToken for a login whose approval minted the launcher credential named.
+func (f *exchangeFixture) devBoxTokenOf(t *testing.T, key *ecdsa.PrivateKey, person, credential string) string {
+	t.Helper()
 	deviceCode, userCode := f.authorize(t, key)
 	if err := f.provider.ApproveDevice(context.Background(), userCode, true,
-		map[string]any{"operator": person, "credential_id": f.newCredential(t)}); err != nil {
+		map[string]any{"operator": person, "credential_id": credential}); err != nil {
 		t.Fatalf("ApproveDevice: %v", err)
 	}
 	status, body := f.poll(t, deviceCode, key)
@@ -407,6 +415,174 @@ func TestADevBoxSessionExchangesItsMachineToken(t *testing.T) {
 	}
 	if answer.Thumbprint != thumbprint(t, key) {
 		t.Errorf("Introspect answered thumbprint %q, want the machine's own key %q", answer.Thumbprint, thumbprint(t, key))
+	}
+}
+
+// tokenAnswer is a token endpoint answer read off a goroutine, where a test may not fail.
+type tokenAnswer struct {
+	status int
+	body   map[string]any
+	err    error
+}
+
+// postToken posts form to the token endpoint at tokenURL with the DPoP proof already signed, for a
+// goroutine to run: it fails nothing itself and answers what came back.
+func postToken(tokenURL string, form url.Values, proof string) tokenAnswer {
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return tokenAnswer{err: err}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("DPoP", proof)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return tokenAnswer{err: err}
+	}
+	defer resp.Body.Close()
+	answer := tokenAnswer{status: resp.StatusCode}
+	answer.err = json.NewDecoder(resp.Body).Decode(&answer.body)
+	return answer
+}
+
+// waitForBlocked returns once a backend running a statement matching like waits on a lock that
+// blocker holds, failing after ten seconds. Matching on the blocker, not only the statement,
+// keeps a test of another package sharing the database from answering for this one.
+func waitForBlocked(t *testing.T, pool *pgxpool.Pool, blocker uint32, like string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		if err := pool.QueryRow(context.Background(), `select count(*) from pg_stat_activity
+			where wait_event_type = 'Lock' and $1 = any(pg_blocking_pids(pid)) and query like $2`, int32(blocker), like).Scan(&waiting); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no statement matching %s waited on a lock backend %d holds", like, blocker)
+}
+
+// waitForWaiting returns once backend pid waits on a lock in a statement matching like, failing
+// at once if the operation running there returns first, and after ten seconds.
+func waitForWaiting(t *testing.T, pool *pgxpool.Pool, pid uint32, like string, returned <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-returned:
+			t.Fatalf("the operation returned (%v) before it waited on a lock in a statement matching %s", err, like)
+		default:
+		}
+		var waiting int
+		if err := pool.QueryRow(context.Background(), `select count(*) from pg_stat_activity
+			where pid = $1 and wait_event_type = 'Lock' and query like $2`, int32(pid), like).Scan(&waiting); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("backend %d never waited on a lock in a statement matching %s", pid, like)
+}
+
+// TestAMachineExchangeHoldsItsCredentialAgainstARevoke: an exchange of a machine access token
+// holds its launcher credential's row from before its token is issued until it commits, so a
+// revoke arriving in between waits for it and then ends the exchanged token with the rest. Without
+// the lock the revoke would commit first, ending only the rows it could see, and the exchanged
+// token stored after it would introspect live for its whole lifetime.
+//
+// The exchange is held between its lock and its commit by a share lock on oauth_access_tokens,
+// which lets its plain read of the subject token through and stops its insert of the new one. The
+// revoke is enroll.RevokeReusedCredential, the revoke that runs in a caller's transaction: it
+// takes the credential's row first and ends its tokens as enroll.Service.RevokeCredential does.
+func TestAMachineExchangeHoldsItsCredentialAgainstARevoke(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	ctx := context.Background()
+	key := newKey(t)
+	credential := f.newCredential(t)
+	machineToken := f.devBoxTokenOf(t, key, person, credential)
+
+	holder, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(ctx)
+	if _, err := holder.Exec(ctx, `lock table oauth_access_tokens in share mode`); err != nil {
+		t.Fatalf("hold oauth_access_tokens: %v", err)
+	}
+	form := exchangeForm(machineToken, oauthwire.SubjectTokenTypeAccessToken, "ada-devbox")
+	proof := dpopProof(t, key, f.url+"/token")
+	exchanged := make(chan tokenAnswer, 1)
+	go func() { exchanged <- postToken(f.url+"/token", form, proof) }()
+	waitForBlocked(t, f.pool, holder.Conn().PgConn().PID(), "insert into oauth_access_tokens%")
+
+	pids, revoked := make(chan uint32, 1), make(chan error, 1)
+	go func() {
+		tx, err := f.pool.Begin(ctx)
+		if err != nil {
+			close(pids)
+			revoked <- err
+			return
+		}
+		defer tx.Rollback(ctx)
+		pids <- tx.Conn().PgConn().PID()
+		if err := enroll.RevokeReusedCredential(ctx, tx, credential); err != nil {
+			revoked <- err
+			return
+		}
+		revoked <- tx.Commit(ctx)
+	}()
+	pid, ok := <-pids
+	if !ok {
+		t.Fatalf("begin the revoke: %v", <-revoked)
+	}
+	waitForWaiting(t, f.pool, pid, "%from launcher_credentials%", revoked)
+
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatalf("release oauth_access_tokens: %v", err)
+	}
+	answer := <-exchanged
+	if answer.err != nil {
+		t.Fatalf("the exchange: %v", answer.err)
+	}
+	token := accessTokenOf(t, answer.status, answer.body)
+	if err := <-revoked; err != nil {
+		t.Fatalf("the revoke: %v", err)
+	}
+
+	if got, err := f.provider.Introspect(ctx, token); err != nil || got.Active {
+		t.Fatalf("Introspect of the token exchanged as the machine was revoked = %+v, %v, want it not live", got, err)
+	}
+	var named, active int
+	if err := f.pool.QueryRow(ctx, `select count(*), count(*) filter (where active) from oauth_access_tokens where credential_id = $1`, credential).Scan(&named, &active); err != nil {
+		t.Fatal(err)
+	}
+	if named != 2 || active != 0 {
+		t.Fatalf("access tokens naming the revoked credential = %d, %d of them active; want the machine's and the exchanged one, neither active", named, active)
+	}
+}
+
+// TestAMachineExchangeOfAnEndedCredentialIsRefused: a machine access token whose row is still
+// active, but whose launcher credential has lapsed, is refused invalid_grant by the exchange's
+// credential check, and no token is stored for it.
+func TestAMachineExchangeOfAnEndedCredentialIsRefused(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	credential := f.newCredential(t)
+	machineToken := f.devBoxTokenOf(t, key, person, credential)
+	if _, err := f.pool.Exec(context.Background(), `update launcher_credentials set expires_at = now() - interval '1 minute' where id = $1`, credential); err != nil {
+		t.Fatal(err)
+	}
+	before := f.count(t, "oauth_access_tokens")
+	status, body := f.exchange(t, exchangeForm(machineToken, oauthwire.SubjectTokenTypeAccessToken, "ada-devbox"), key)
+	if status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("an exchange of a lapsed machine login's token = %d %v, want 400 invalid_grant", status, body)
+	}
+	if after := f.count(t, "oauth_access_tokens"); after != before {
+		t.Fatalf("access tokens after the refused exchange = %d, want the %d there were", after, before)
 	}
 }
 

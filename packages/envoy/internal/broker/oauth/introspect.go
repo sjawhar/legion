@@ -2,7 +2,7 @@ package oauth
 
 import (
 	"context"
-	"net/http"
+	"errors"
 	"strings"
 
 	"authelia.com/provider/oauth2"
@@ -57,14 +57,15 @@ type Introspection struct {
 // library takes oauth2.AccessToken only as a hint and falls through to the refresh-token store
 // when the access lookup misses, so the kind it reports finding is checked here rather than
 // trusted to the hint. An error is returned only where the broker itself failed — a storage
-// outage — because answering that as "not live" would both deny a sound token and hide the outage.
+// outage, or a row it could not decode — because answering that as "not live" would both deny a
+// sound token and hide the outage; notLive is how the two are told apart.
 func (p *Provider) Introspect(ctx context.Context, token string) (Introspection, error) {
 	kind, request, err := p.oauth.IntrospectToken(ctx, token, oauth2.AccessToken, oauthstore.NewExchangeSession())
 	if err != nil {
-		if oauth2.ErrorToRFC6749Error(err).CodeField >= http.StatusInternalServerError {
-			return Introspection{}, err
+		if notLive(err) {
+			return Introspection{}, nil
 		}
-		return Introspection{}, nil
+		return Introspection{}, err
 	}
 	if kind != oauth2.AccessToken {
 		return Introspection{}, nil
@@ -86,4 +87,37 @@ func (p *Provider) Introspect(ctx context.Context, token string) (Introspection,
 	answer.ProjectScope, _ = session.Extra[ClaimProjectScope].(string)
 	answer.Project, _ = session.Extra[ClaimProject].(string)
 	return answer, nil
+}
+
+// notLiveCauses are the library's own sentinels for a token it found wanting: a string with no
+// signature to look up (oauth2.ErrNotFound, which the library wraps itself), a row the store
+// answers revoked (oauth2.ErrInactiveToken), a token past its expiry, and one whose bytes do not
+// check against the secret. errors.Is matches an *oauth2.RFC6749Error on its error code and
+// status, and each of these has its own.
+var notLiveCauses = []error{
+	oauth2.ErrNotFound, oauth2.ErrInactiveToken, oauth2.ErrTokenExpired,
+	oauth2.ErrInvalidTokenFormat, oauth2.ErrTokenSignatureMismatch,
+}
+
+// notLive reports whether err, an IntrospectToken failure, is the library deciding the token is
+// not live, rather than the broker failing to read it.
+//
+// The library's status cannot tell them apart: it wraps every failed read of a token's row, a lost
+// connection or a row that does not decode alike, in oauth2.ErrRequestUnauthorized, a 401, the
+// same error it answers a revoked token with. So the failure is told apart by its cause. It is not
+// live when the chain holds one of notLiveCauses, or when it is the library's own
+// ErrRequestUnauthorized wrapping nothing at all: the store answers a row it does not have
+// oauth2.ErrNotFound and nothing else does (oauthstore's hydrate keeps the sentinel out of a row
+// it cannot decode), the library takes that as "not mine" from every introspector, and
+// IntrospectToken then answers that bare error. Anything else wraps an error of the store's own —
+// a read that failed, or a row it could not decode — and is the broker's failure, never a
+// confident "not live": a cause this does not recognise is answered as an outage rather than as a
+// negative.
+func notLive(err error) bool {
+	for _, cause := range notLiveCauses {
+		if errors.Is(err, cause) {
+			return true
+		}
+	}
+	return errors.Is(err, oauth2.ErrRequestUnauthorized) && errors.Unwrap(oauth2.ErrorToRFC6749Error(err)) == nil
 }

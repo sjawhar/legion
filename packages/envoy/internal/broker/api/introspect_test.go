@@ -1,6 +1,7 @@
 // introspect_test.go drives POST /v1/oauth/introspect against the real broker (brokertest's rig,
 // which runs the OAuth provider): a token the broker just issued reads back live, with what the
-// broker knows about it, and a string it never issued reads back as simply not live.
+// broker knows about it, a string it never issued and a token it revoked read back as simply not
+// live, and a token it cannot read for a storage outage is refused 503 rather than answered.
 package api_test
 
 import (
@@ -76,6 +77,53 @@ func TestIntrospectionAnswersALiveTokenAndAnUnknownOne(t *testing.T) {
 	}
 	if answer != (wireIntrospection{}) {
 		t.Fatalf("an unknown token's answer = %+v, want nothing but active false", answer)
+	}
+}
+
+// TestIntrospectionAnswersARevokedTokenAsNotLive: once a person revokes the machine, its access
+// token reads back as simply not live, a 200 like an unknown token's, not as the broker's failure.
+func TestIntrospectionAnswersARevokedTokenAsNotLive(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	_, tok, credentialID := approvedLogin(t, rig)
+	if status, body := rig.UI(t, http.MethodPost, "/v1/launcher-credentials/"+credentialID+"/revoke-by-approver", map[string]any{"approver": rig.Operator}); status != http.StatusOK {
+		t.Fatalf("revoke = %d: %s", status, body)
+	}
+	status, answer := introspect(t, rig, tok.AccessToken, rig.UIToken)
+	if status != http.StatusOK || answer != (wireIntrospection{}) {
+		t.Fatalf("introspecting a revoked token = %d %+v, want 200 and nothing but active false", status, answer)
+	}
+}
+
+// TestIntrospectionAnswersAStorageOutage503: a live token the broker cannot read back, because
+// its storage is gone, is refused 503 DATABASE_UNAVAILABLE. The library wraps a failed read in a
+// 401-coded error, the same it answers a revoked token with, so answering by that status would
+// tell a resource server a sound token is not valid when the truth is the broker could not tell.
+func TestIntrospectionAnswersAStorageOutage503(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	_, tok, _ := approvedLogin(t, rig)
+	if status, answer := introspect(t, rig, tok.AccessToken, rig.UIToken); status != http.StatusOK || !answer.Active {
+		t.Fatalf("introspecting a live token = %d %+v, want 200 and active", status, answer)
+	}
+
+	rig.Store.Close()
+	form := url.Values{"token": {tok.AccessToken}}
+	request, err := http.NewRequest(http.MethodPost, rig.URL+"/v1/oauth/introspect", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Authorization", "Bearer "+rig.UIToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /v1/oauth/introspect: %v", err)
+	}
+	defer response.Body.Close()
+	var refusal wireError
+	if err := json.NewDecoder(response.Body).Decode(&refusal); err != nil {
+		t.Fatalf("decode the answer: %v", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || refusal.Code != "DATABASE_UNAVAILABLE" {
+		t.Fatalf("introspecting a live token with the store closed = %d %+v, want 503 DATABASE_UNAVAILABLE, not a confident negative", response.StatusCode, refusal)
 	}
 }
 

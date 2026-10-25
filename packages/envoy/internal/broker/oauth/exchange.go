@@ -235,8 +235,9 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 // The whole request runs in one transaction (oauthstore.TxFrom carries it), because the broker's
 // own step writes: the session name it claims and the token it is claimed for must land together
 // or not at all. The machine access-token subject type takes its decision here, between the
-// library validating the request and the library building the answer; the two JWT types took
-// theirs during validation, through Store.ExchangeSubject. The claim on the session name is made
+// library validating the request and the library building the answer, and then holds its launcher
+// credential's row (liveCredential) until the token commits; the two JWT types took their
+// decision during validation, through Store.ExchangeSubject. The claim on the session name is made
 // for every type once the library has built the answer, because that is when the issued token's
 // expiry is set, and the claim must not end before the token it is made for.
 func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +269,10 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.GetRequestForm().Get(FormSubjectTokenType) == tokenTypeAccessToken {
 		if _, err := p.decide(txCtx, request, session.GetSubjectToken()); err != nil {
+			p.writeError(ctx, w, request, err)
+			return
+		}
+		if err := p.liveCredential(txCtx, session.GetSubjectToken()); err != nil {
 			p.writeError(ctx, w, request, err)
 			return
 		}
@@ -404,6 +409,29 @@ func (p *Provider) claimSession(ctx context.Context, session *oauthstore.Exchang
 			return oauth2.ErrInvalidGrant.WithHintf("The session name '%s' belongs to another identity: one the broker's configuration fixes it for, or one that has written under it within the last %d days. Ask under a name of your own.",
 				name, int(oauthstore.SessionRetention/(24*time.Hour))).WithWrap(err).WithDebugError(err)
 		}
+		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	return nil
+}
+
+// liveCredential holds the launcher credential a machine access token names
+// (oauthstore.LockCredential) in the exchange's transaction, until the exchanged token commits,
+// and refuses an exchange whose credential is revoked or past its expiry invalid_grant, as the
+// device login's own grants refuse a login that has ended.
+//
+// The library validated the subject token with a plain read of its row, which a revoke can
+// deactivate a moment later; the exchanged token names the same credential (its session is read
+// out of the subject token's row), so without the lock the token could commit after the revoke
+// had ended the credential's tokens and stay live for its whole lifetime. With it, the revoke
+// either commits first and the exchange is refused, or waits and then ends the exchanged token
+// with the rest.
+func (p *Provider) liveCredential(ctx context.Context, subjectToken map[string]any) error {
+	credential, _ := subjectToken[oauthwire.ExtraCredentialID].(string)
+	err := oauthstore.LockCredential(ctx, credential)
+	if errors.Is(err, oauthstore.ErrCredentialEnded) {
+		return oauth2.ErrInvalidGrant.WithHint("The machine login the subject token belongs to has ended.").WithWrap(err).WithDebugError(err)
+	}
+	if err != nil {
 		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
 	}
 	return nil
