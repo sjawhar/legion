@@ -2,21 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T08:13:00Z",
+  "completed": "2026-10-25T08:37:00Z",
   "decision": "changes_requested",
-  "round": 2,
-  "reviewedCodeHead": "dd2fb2b41ecf03ec2af96a23bf75b5fb65b3ef23",
+  "round": 3,
+  "reviewedCodeHead": "29ebf098c578",
   "critical": 0,
-  "important": 0,
-  "minor": 1,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/log_url_test.go:23",
-      "description": "captureDefaultSlog points the process's default slog at a JSON handler over a bare bytes.Buffer, and decodeRecords (:32) and the credential loop (:101) read it with no lock. Bus clients that earlier tests closed still write through the default: nats.go v1.50.0 close() queues DisconnectedErrCB and ClosedCB on its async dispatcher and returns without waiting (nats.go:5892-5910), and the bus's ClosedCB logs `envoy nats connection closed` (internal/bus/connect.go:126-127). The test's own comment at :79-80 expects such writers. A write that runs during a read is a data race, and envoy-go-race runs ./internal/bus/ under -race (.github/workflows/envoy-and-contracts.yaml:971), so the test can fail at random in a lane that every change under packages/envoy runs. Fix: a mutex-guarded writer with a guarded snapshot, as busLogs does in package bus_test (internal/bus/restart_test.go:186-201). TestAConsumerNotActiveReportIsAWarning (internal/bus/async_error_test.go:23-25), which the helper's comment names as its model, captures the log the same way and should use the same helper."
+      "severity": "important",
+      "file": "packages/envoy/internal/bus/remote_nats_test.go:56,89,118",
+      "description": "Round 2's change to the remote-NATS refusal (internal/bus/reach.go:48, natsURLWithoutUserinfo, 2281e62aabbc) broke three existing tests that this PR did not update: TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines, TestDialRefusesANATSServerThatIsNotThisMachines and TestConnectRefusesANATSServerThatIsNotThisMachines. Each one asserts that the refusal contains `remote`, a testnats URL that carries user:password, verbatim. They failed in envoy-go-race at dd2fb2b41ecf (run 40173085050, job 121111427588; remote_nats_test.go:56, :89, :118: `refusal \"bus: refusing a NATS server that is not this machine's: nats://10.1.1.85:32771 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)\" does not name ... the server ***10.1.1.85:32771`). The production code is unchanged since then, and remote_nats_test.go is unchanged at this head, so the next envoy-go and envoy-go-race runs will fail the same way. Fix: assert that the refusal names the address without userinfo, keep the override assertion, and assert that neither the user nor the password is present. Keep the redaction."
     }
   ],
-  "roundOneFindings": "All four verified fixed and accepted, with a reply on each thread: PRRT_kwDORFy7ds6v_JF6 (2281e62aabbc, natsURLWithoutUserinfo at all three sites), PRRT_kwDORFy7ds6v_JF8 (4d392e33d148, each ConsumerInfo under nats.Context, plus 91f61c5c20bc's silent return when the shutdown cancels a rebuild), PRRT_kwDORFy7ds6v_JF- (8076e90e855c, the generation-bound callback), PRRT_kwDORFy7ds6v_JF_ (8076e90e855c, the comment). The implementer had already resolved all four.",
-  "ci": "Code head dd2fb2b41ecf (compare to d29ce4b7: only .legion/ changed), read 08:12Z: the required lint, typecheck, test and pr-title are success. envoy-go-race is in progress; envoy-go, envoy-smoke and envoy-e2e-local are queued. envoy-go and envoy-go-race at c939145e were cancelled, so this change's A1-A3 tests have not yet passed in CI at any head. Criterion A1 needs that run, so approval waits for it.",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at d29ce4b7: both returned CHANGES on the unguarded log capture, and both verified all four round-1 fixes with no production finding. The deep review dropped one candidate: a slow failed Rewatch reporting a later generation's stop. The code defines a failed repair as reporting the outstanding stop when it fails, and that report is a real failure, not an invented minute."
+  "roundTwoFindings": "PRRT_kwDORFy7ds6v_jdd (the unguarded log capture) is fixed in 29ebf098c578 and accepted, with a reply on the thread.",
+  "ci": "Code head 29ebf098c578 (compare to 5cda7902: only .legion/ changed), read 08:29Z: every job queued except Docs (success) and Worker Image (in progress). At dd2fb2b41ecf, envoy-go-race failed on the three remote_nats tests above, and envoy-go, envoy-smoke, envoy-infra-go, dispatch and pi-legion were cancelled. A request for changes does not wait on CI.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 5cda7902: both CHANGES on the remote_nats assertions alone. Their repository-wide consumer search (packages/envoy, packages/daemon, scripts, docs, CI) found no other test or consumer that depends on the old URL rendering, the old watcher-stopped ERROR level or the health body. The round's test-helper delta is sound."
 }
