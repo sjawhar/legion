@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-95",
-  "completed": "2026-10-25T03:09:08Z",
+  "completed": "2026-10-25T03:25:15Z",
   "proof": [
     {
       "criterion": "At the fix's own head the row gives the same answer every time: --repeat-each=30 passes thirty of thirty, paired with the same command at the commit before the fix where it fails at least once (spec, Acceptance).",
@@ -50,6 +50,7 @@
     "packages/dispatch/web/src/styles.css - comment only: the note above .prose a records the measured pitch of every .prose call site below 1280px. No declaration changed."
   ],
   "trickyParts": [
+    "This round changed nothing: it exists because CI was red at ca2875394721511568b0f03a1586bfa7adad5e21 on the required check `test`, and the red was not this change's. Attempt 1 of the Tests run (https://github.com/sjawhar/legion/actions/runs/40150732207) failed in the Go daemon's notice lane - TestAReheldNoticeIsPublishedByItsLaneWithoutASweep/a_copy_due_after_the_re-send_delay, packages/daemon/internal/notify/notice_exceptions_test.go:185, 'timed out waiting for the lane armed its wait for the re-send delay', a 60 s timeout in a package this change does not touch. The failed jobs were re-run once (gh run rerun 40150732207 --failed); attempt 2 is green at the same code head 8bd43a9218fa8f5bc5ba0c15fd733c945fffcd4c (test, lint, typecheck all success), and the pull request's checks settled 8 passed, 0 failed, 14 skipped at that head, the dispatch browser job among the passes. No file changed between the two attempts, no commit was pushed to shake the verdict loose, and the code head is still 8bd43a92.",
     "The browser harness is on the issue volume at /legion/harness (setup.sh is idempotent; env.sh gives each LEGION_ROLE its own five ports and its own database, and exports PATH for psql, LD_LIBRARY_PATH, PLAYWRIGHT_BROWSERS_PATH, GOCACHE, GOMODCACHE and TMPDIR). Re-run setup.sh and source env.sh; nothing of it is under $LEGION_WORKSPACE. Postgres 17 with pgvector listens on 127.0.0.1:55432 for the whole pod.",
     "The harness needs two builds the plan did not name: packages/contracts must be built (bun run build) because e2e/agent-view.e2e.ts imports it as values through Node resolution, and packages/envoy's cmd/dispatch is prebuilt so Playwright's 60 s webServer window is not spent on a cold Go build.",
     "The probe offset is one pixel below the upper link's own text and no more: the lower link's padded box starts two pixels below that text, so +1 is inside the upper link's padding and +2 is already the lower link's. The offset is computed from the text rect every run, never from the anchor's padded box, which would move with the padding it measures.",
