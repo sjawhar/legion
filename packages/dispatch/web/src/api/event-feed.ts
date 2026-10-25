@@ -701,14 +701,15 @@ export function useEventFeed({
 
   useEffect(() => {
     // The greatest event id the page has seen, which the subscription resumes after; never
-    // lowered. It starts at the sign-in check's `event_head`: AuthGate mounts the app, and so
-    // every read the page makes, only once that answer is in, so those reads hold every event at
-    // or below it, and the first subscription replays exactly what committed since, which each
-    // event's own invalidation refreshes. It is read once, here: a later check names a head no
-    // read of the page was made after. A server older than the field names none, and the feed
-    // adopts where Dispatch starts it (`events_start`).
-    const eventHead = queryClient.getQueryData<AuthenticatedUser>(["whoami"])?.event_head;
-    let cursor = eventHead === undefined ? null : eventPosition(eventHead);
+    // lowered. It starts at the sign-in check's `event_head`, which every answer carries:
+    // AuthGate mounts the app, and so every read the page makes, only once that answer is in, so
+    // those reads hold every event at or below it, and the first subscription replays exactly
+    // what committed since, which each event's own invalidation refreshes. It is read once,
+    // here: a later check names a head no read of the page was made after. The cursor is null
+    // only where there is no answer to read it from - no page of the app, which mounts under
+    // that answer - and the feed then adopts where Dispatch starts it (`events_start`).
+    const signedIn = queryClient.getQueryData<AuthenticatedUser>(["whoami"]);
+    let cursor = signedIn === undefined ? null : eventPosition(signedIn.event_head);
     let flush: number | undefined;
     // `pendingAll` is the whole-cache entry of the pending set: it means "something changed
     // that no key can be derived from", and it subsumes every individual key already queued.

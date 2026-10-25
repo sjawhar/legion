@@ -67,7 +67,7 @@ function renderPage(
   if (login === null) {
     whoAmI.mockImplementation(() => Promise.withResolvers<never>().promise);
   } else {
-    whoAmI.mockResolvedValue({ kind: "user", login });
+    whoAmI.mockResolvedValue({ event_head: "0", kind: "user", login });
   }
 
   const listProjects = spyOn(api, "listProjects").mockResolvedValue(projects);

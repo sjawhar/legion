@@ -123,7 +123,7 @@ function mockDispatch({
   putAgentState: Mock<typeof api.putAgentState>;
 }): void {
   spies.push(
-    spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
+    spyOn(api, "whoAmI").mockResolvedValue({ event_head: "0", kind: "user", login: "sami" }),
     spyOn(api, "listAgents").mockResolvedValue(agents),
     spyOn(api, "listAgentMessages").mockResolvedValue(messages),
     spyOn(api, "getMyAgentState").mockResolvedValue(agentState),
@@ -139,7 +139,7 @@ function renderPage(queryClient: QueryClient, session: string, sidebar = false):
   return render(
     <MemoryRouter initialEntries={[`/agents/${session}/live`]}>
       <QueryClientProvider client={queryClient}>
-        {sidebar ? <Sidebar user={{ kind: "user", login: "sami" }} /> : null}
+        {sidebar ? <Sidebar user={{ event_head: "0", kind: "user", login: "sami" }} /> : null}
         <Routes>
           <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
         </Routes>

@@ -83,7 +83,7 @@ function setViewport(width: number): void {
 
 function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0): void {
   setViewport(width);
-  api.whoAmI = async () => ({ kind: "user", login: "alice" });
+  api.whoAmI = async () => ({ event_head: "0", kind: "user", login: "alice" });
   api.listMyReplies = async (query) => ({
     limit: query.limit,
     offset: 0,

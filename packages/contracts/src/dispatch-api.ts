@@ -1990,9 +1990,11 @@ export interface AuthenticatedUser {
   readonly login: string;
   /** The decimal id of the newest event when Dispatch answered. Every read the page makes after
    *  this answer holds every event at or below it, so the event feed resumes from it on its first
-   *  subscription and replays exactly what committed since. Absent from a server older than this
-   *  field (a deploy's overlap), where the feed starts at the server's head as before. */
-  readonly event_head?: string;
+   *  subscription and replays exactly what committed since. Always answered: a server that cannot
+   *  read the head answers `503 EVENT_HEAD_UNAVAILABLE` rather than a whoami without one, and a
+   *  server older than the field serves no `/ws/live` either, so no page of this release ever
+   *  reads one of its answers. */
+  readonly event_head: string;
 }
 
 export interface UserIssueState {

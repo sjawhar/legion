@@ -138,7 +138,7 @@ export function renderProofDocument({
               owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={onVersionChange}
               showDiff={next.showDiff ?? showDiff}
-              user={{ kind: "user", login: "alice" }}
+              user={{ event_head: "0", kind: "user", login: "alice" }}
               version={next.version ?? version}
             />
             <RefPreviewHost />

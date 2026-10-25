@@ -2038,7 +2038,11 @@ test("a document ask links its project and document page", async () => {
       thread: { answers: [], edits: [], followers: [], replies: [] },
     },
   ]);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // A document has no assignee, so the Inbox lists its question under the Unassigned filter
   // rather than in the reader's own default list.

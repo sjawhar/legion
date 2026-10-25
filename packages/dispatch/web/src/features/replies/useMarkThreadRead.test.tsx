@@ -43,7 +43,11 @@ function renderThread(set: MyRepliesResponse, props: { at: string | undefined; t
       queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
     },
   });
-  queryClient.setQueryData(whoAmIQuery().queryKey, { kind: "user", login: "alice" });
+  queryClient.setQueryData(whoAmIQuery().queryKey, {
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   queryClient.setQueryData(myRepliesOwnerQuery({ issue: "CORE-1" }).queryKey, set);
   const wrap = (node: ReactNode) => (
     <QueryClientProvider client={queryClient}>{node}</QueryClientProvider>

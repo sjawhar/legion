@@ -24,7 +24,11 @@ let getInbox: Mock<typeof api.getInbox>;
 let getCredentialPending: Mock<typeof api.getCredentialPending>;
 beforeEach(() => {
   window.localStorage.clear();
-  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   getCredentialPending = spyOn(api, "getCredentialPending")
     .mockResolvedValueOnce(null)

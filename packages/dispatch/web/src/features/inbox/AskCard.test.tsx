@@ -17,7 +17,11 @@ let whoAmI: Mock<typeof api.whoAmI>;
 let getReferences: Mock<typeof api.getReferences>;
 
 beforeEach(() => {
-  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
     node: { id: "ask-1", kind: "ask" },

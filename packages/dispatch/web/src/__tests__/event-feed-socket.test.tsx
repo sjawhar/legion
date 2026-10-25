@@ -129,12 +129,10 @@ function rotate(): FakeLiveSocket {
   return next;
 }
 
-/** The sign-in check's answer as AuthGate holds it when the app mounts. */
-function signIn(queryClient: QueryClient, eventHead?: string): void {
-  const user: AuthenticatedUser =
-    eventHead === undefined
-      ? { kind: "user", login: "alice" }
-      : { kind: "user", login: "alice", event_head: eventHead };
+/** The sign-in check's answer as AuthGate holds it when the app mounts. Every answer carries an
+ *  event head; `"0"` is an empty log, which the feed resumes from as it does any other. */
+function signIn(queryClient: QueryClient, eventHead = "0"): void {
+  const user: AuthenticatedUser = { event_head: eventHead, kind: "user", login: "alice" };
   queryClient.setQueryData(["whoami"], user);
 }
 
@@ -530,9 +528,10 @@ test("a later sign-in check does not move the start point", () => {
   }
 });
 
-test("with no event head the first subscription names no start point", () => {
+// W14. Every answer carries a head, so there is no page that subscribes without one: an empty
+// log answers "0", which the feed resumes from, and Dispatch replays the whole log to it.
+test("an empty log's head is resumed from like any other", () => {
   const queryClient = newClient();
-  // A server older than `event_head`, during a deploy's overlap.
   signIn(queryClient);
   const hook = renderHook(() => useEventFeed(), { wrapper: wrapperFor(queryClient) });
   try {
@@ -543,10 +542,11 @@ test("with no event head the first subscription names no start point", () => {
       type: "subscribe",
       sub,
       view: { kind: "events" },
+      resume: { since: "0" },
     });
-    // Dispatch starts the feed at its head, which the page adopts.
-    receive(socket, { type: "events_start", sub, since: "77" });
-    expect(rotate().subscribed("events").resume).toEqual({ since: "77" });
+    // A start Dispatch clamped to its own head leaves the cursor where the page put it.
+    receive(socket, { type: "events_start", sub, since: "0" });
+    expect(rotate().subscribed("events").resume).toEqual({ since: "0" });
   } finally {
     hook.unmount();
   }

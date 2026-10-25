@@ -70,7 +70,11 @@ test("human users manage repository project mappings from the settings route", a
   };
   const other: RepoProject = { ...mapping, default: true, repo: "owner/other" };
   const server = mappingServer([mapping, other]);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -178,7 +182,11 @@ test("a delayed mapping response does not undo a newer default the page has read
     repo,
   });
   const server = mappingServer([row("owner/repo", false), row("owner/other", true)]);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -242,7 +250,11 @@ test("a delayed mapping response does not undo a newer default the page has read
 });
 
 test("repository settings retries a failed mapping query", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -291,7 +303,11 @@ test("repository settings retries a failed mapping query", async () => {
 test("a human creates a project from Settings and it appears in the mappings selector", async () => {
   const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" };
   const created: Project = { created_at: "2026-09-10T00:00:00Z", key: "QA", name: "Quality" };
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -351,7 +367,11 @@ test("a human creates a project from Settings and it appears in the mappings sel
 
 test("creating a project with a taken key shows the server's error inline", async () => {
   const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" };
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -413,7 +433,11 @@ const architectureSource: ArchitectureSource = {
 };
 
 test("a human adds an architecture source and the verified row appears", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -475,7 +499,11 @@ test("a human adds an architecture source and the verified row appears", async (
 });
 
 test("a failed architecture source access check shows the server's reason inline", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
