@@ -2,10 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T16:06:23Z",
+  "completed": "2026-10-25T16:36:15Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "feda29facc745cd103d31bed0fc57979aaf08017",
+  "codeHead": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
   "proof": [
+    {
+      "criterion": "Round 3: the recovery delete removes the late-stored Job only once stored; the closing comment states the measured exits and names what the trap can miss, a failed clean-up step included; full-diff sweep fixes; A1-A8 hold",
+      "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=3f864ba10cddca4711714a9dc0ee9470a089a0ee\" -H \"Accept: application/vnd.github.raw\"; plan section 4 checks; grep -cF 'removes that Job once the server has stored it' on the recovery paragraph; grep -cF 'while the create was in flight, 0.33'; cmp of code.sh output against base; hunks2.awk",
+      "observed": "pushed page identical to the checked working copy; A1 0; A2 1 x7; 'in flight, 0.33' 0; A3 date 4; A4 abe1b4cf... and comment-stripped block cmp-identical to base; A6 no NONCOMMENT, old-closing 0, old-listing 1; A7 0; A8 0; recovery 'once the server has stored it' 1, no line over 100; A5 five hunks ok; diff from feda29fa four hunks (3131, 3160, 3178, 3216)",
+      "headSha": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
+      "negativeControl": "at feda29fa: recovery paragraph says 'removes its Job' with no condition (once-stored 0); the closing comment lists 'a SIGKILL or a create ...' only"
+    },
+    {
+      "criterion": "Round 3 reader probes: a reader no longer takes the workload as gone after a failed clean-up step, nor a single immediate label delete as removing a late-stored Job",
+      "surface": "fresh scout subagents, each given only the named text and a run's output",
+      "command": "(a) closing comment + output with 'cleanup: the Job's delete failed', 'cleanup: the Service is still there', 'sequence: exit 1': is the workload gone? (b) recovery paragraph alone, late-stored create, one immediate label delete: does it remove the Job whenever run? (c) trap + recovery paragraphs + empty delete 2 s after the run: removed or proven none, done?",
+      "observed": "head: (a) 'No ... can miss it ... on a clean-up step that fails, which it prints'; (b) 'No ... removes that Job once the server has stored it'; (c) 'Not known ... an empty listing shows only that no such Job was stored by the time the listing ran'",
+      "headSha": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
+      "negativeControl": "(a) base comment: 'Yes ... However it ends, the trap above removes the workload, short of a SIGKILL'; (b) feda29fa recovery paragraph: 'Not stated ... says without any condition that ... removes its Job'; (c) base paragraphs: 'Not known', read as pointing to there being no Job"
+    },
+    {
+      "criterion": "A9, round 3: no private name enters the change",
+      "surface": "the repository at the head, the round's added lines, the live PR body",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over the round's added lines and the PR body before the PATCH",
+      "observed": "check-private-names exit 0 (5005 files); sweep 0 literal, 0 whole-word for each",
+      "headSha": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
+      "negativeControl": "a scratch file holding the reachability label gives literal 1 (same script, round 1)"
+    },
     {
       "criterion": "Round 2: the page states that no wait was measured and that an empty re-list shows only that no such Job was stored by the time it ran; no sentence says the closing comment does not cover the case; the recovery paragraph names the late-stored create beside the SIGKILL; A1-A8 still hold",
       "surface": "docs/kubernetes.md as a role reads it, fetched from GitHub at the pushed head from this issue's role container",
@@ -73,11 +97,13 @@
   "deviations": [
     "The docs edit was written by the implementer directly rather than by a deep-worker subagent: one prose file, with the plan's draft text and checks, where the wording is the deliverable.",
     "The refusal is quoted with its rule message elided as well as the policy name, since the rule message contains the compute class's name as a word and the sweep counts it.",
-    "Round 2: P1 was not re-run; the sequence block is byte-identical to 97e9883b's, where P1 and its control ran, and the architect ruled that no stop is re-measured."
+    "Round 2: P1 was not re-run; the sequence block is byte-identical to 97e9883b's, where P1 and its control ran, and the architect ruled that no stop is re-measured.",
+    "Round 3: P1 was not re-run; no command of the block changed (comment-stripped block cmp-identical to base), and the architect ruled that no stop is re-measured."
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
-  "round": 2,
-  "roundReason": "Sent back from retro: the architect ruled to fix three sentences in this pull request (docs/kubernetes.md 3178-3180 no wait measured / empty re-list; 3171-3173 closing comment names the case; 3216-3220 recovery paragraph names the late-stored create).",
-  "previousCodeHead": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453"
+  "round": 3,
+  "roundReason": "Sent back from retro a second time. The architect ruled to fix two clauses: the recovery delete 'removes its Job' for the late-stored create, and the closing comment's list of exceptions, which left out a failed clean-up step. The architect also asked for a sweep of every sentence the PR wrote or changed against its evidence.",
+  "previousCodeHead": "feda29facc745cd103d31bed0fc57979aaf08017",
+  "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body)."
 }
