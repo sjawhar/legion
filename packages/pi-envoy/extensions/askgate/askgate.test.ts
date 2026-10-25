@@ -1491,6 +1491,10 @@ console.log(JSON.stringify(args, null, 2));
     expect(joined?.block).toBe(true);
     expect(joined?.reason).toContain("send that `dispatch comment` again on its own:");
     expect(joined?.reason).not.toContain("Here ");
+    // The reason describes what the gate reads now, not the old one-command rule.
+    expect(joined?.reason).not.toContain("is the whole bash call");
+    expect(joined?.reason).toContain("cannot know the text it would send");
+    expect(joined?.reason).toContain("a variable set to a literal earlier in the call");
     expect(g.entries.map((e) => [e.toolCallId, e.tool, e.outcome, e.decision])).toEqual([
       ["abs", "dispatch_message", "verdict", "allow"],
       ["rel", "dispatch_comment", "verdict", "allow"],
