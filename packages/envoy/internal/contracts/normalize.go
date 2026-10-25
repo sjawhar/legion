@@ -1104,11 +1104,16 @@ func slackEventSlice(event, message map[string]any, key string) []any {
 // Slack renders them; fallback is last because it is the plain-text copy of the rest.
 var slackDisplayFields = []string{"pretext", "author_name", "title", "text", "value", "footer", "fallback"}
 
+// slackOwnTextEntities resolves the three entities Slack escapes in a message's own text, in one
+// left-to-right pass, so that a rich_text segment's unescaped copy of those same words reads as
+// the copy it is.
+var slackOwnTextEntities = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">")
+
 // slackDeliveredText is every word a Slack message delivers: its own text, then each display
 // string its attachments and its blocks carry that is not a repeat of one already delivered, a
 // line apiece. An app posts its words there as often as in the message's own text, and a deleted
-// message delivers none. A message that carries words of its own has its rich_text blocks left
-// unread: they are the client's structured copy of those same words.
+// message delivers none. A rich_text block that only repeats the message's own words is left
+// unread: it is the Slack client's structured copy of them.
 func slackDeliveredText(body map[string]any) string {
 	event := mapValue(body["event"])
 	if stringValue(event["subtype"]) == "message_deleted" {
@@ -1116,7 +1121,10 @@ func slackDeliveredText(body map[string]any) string {
 	}
 	message := slackMessage(event)
 	own := slackEventString(event, message, "text")
-	walk := slackTextWalk{skipRichText: strings.TrimSpace(own) != ""}
+	var walk slackTextWalk
+	if strings.TrimSpace(own) != "" {
+		walk.own = slackOwnTextEntities.Replace(own)
+	}
 	walk.take(own)
 	walk.walk(slackEventSlice(event, message, "attachments"))
 	walk.walk(slackEventSlice(event, message, "blocks"))
@@ -1132,10 +1140,11 @@ type slackTextWalk struct {
 	// attachment's fields and a block's nested text is delivered once. It is built as pieces
 	// arrive, so a message with no display strings allocates no set.
 	taken map[string]struct{}
-	// skipRichText leaves a rich_text block tree unread, which is what a message that carries
-	// words of its own wants: the tree is the Slack client's structured copy of those words,
-	// split per segment and with & < > unescaped, so reading it delivers a near-duplicate line.
-	skipRichText bool
+	// own is the message's own text with Slack's entities resolved, kept only when that text
+	// holds a word at all. It is what a rich_text object is measured against before the walk
+	// reads it, and it is read for nothing else: it never removes a piece already taken and
+	// never bears on a piece gathered elsewhere in the message.
+	own string
 }
 
 // full reports that the text has run past what an envelope carries. It bounds the work the walk
@@ -1168,15 +1177,18 @@ func (w *slackTextWalk) take(piece string) {
 // walk reads an object through the one key order slackWalkKeys gives it, taking a string under a
 // display name and descending into every value that is not a string, so that a block's nested
 // text reaches the output in the place the object shows it. An array is descended in index order.
-// rich_text is the only kind name the walk recognises, and only to skip the whole object when
-// skipRichText is set.
+// rich_text is the only kind name the walk recognises, and only to skip the whole object — taking
+// nothing, descending nothing — when the object says nothing the message's own text does not say
+// already. The Slack client's structured copy of a person's words satisfies that by construction,
+// since it is built from those words; an app's own rich text, which Slack tells app authors to
+// post beside a short text field, does not, and so is read like any other block.
 func (w *slackTextWalk) walk(value any) {
 	if w.full() {
 		return
 	}
 	switch node := value.(type) {
 	case map[string]any:
-		if w.skipRichText && stringValue(node["type"]) == "rich_text" {
+		if w.own != "" && stringValue(node["type"]) == "rich_text" && slackOwnWordsOnly(node, w.own) {
 			return
 		}
 		for _, key := range slackWalkKeys(node) {
@@ -1197,6 +1209,33 @@ func (w *slackTextWalk) walk(value any) {
 			}
 		}
 	}
+}
+
+// slackOwnWordsOnly reports that every display string anywhere in value either holds no word or
+// is already held by own, the message's own text with Slack's entities resolved. It walks value
+// through slackWalkKeys, as the walk itself does, so the names a display string can sit under are
+// the one list, and it stops at the first string own does not hold. It reads nothing but value
+// and own.
+func slackOwnWordsOnly(value any, own string) bool {
+	switch node := value.(type) {
+	case map[string]any:
+		for _, key := range slackWalkKeys(node) {
+			if text, isString := node[key].(string); isString {
+				if strings.TrimSpace(text) != "" && !strings.Contains(own, text) {
+					return false
+				}
+			} else if !slackOwnWordsOnly(node[key], own) {
+				return false
+			}
+		}
+	case []any:
+		for _, item := range node {
+			if !slackOwnWordsOnly(item, own) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // slackWalkKeys is the order an object's keys are read in: the display names it carries, ranked as
