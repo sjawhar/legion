@@ -39,6 +39,8 @@
 import { createRequire } from "node:module";
 import { connect } from "nats";
 
+import { readAgentReplay } from "./agent-replay";
+
 const [command, ...args] = process.argv.slice(2);
 
 function refuse(message: string): never {
@@ -288,111 +290,68 @@ async function count(): Promise<void> {
     const shown = Object.fromEntries(
       bodies.map((body) => [body, messages.filter((text) => text.includes(body)).length])
     );
-    return { shown, tagged: await taggedUserTurns(page, session) };
+    return { shown, tagged: await taggedUserTurns(page, base, session) };
   });
   process.stdout.write(`${JSON.stringify(counts)}\n`);
 }
 
 /** The user messages in the replay the session's agent view serves a page that opens, which
  * pi-envoy tagged as delivering a Dispatch message: [{"id": <Dispatch message id>, "text"}].
- * Read through the live socket, so the page and this read are served the same ring. */
+ * Read through the live socket, in the page as its person, so the page and this read are served
+ * the same ring. A session with an empty replay, a view Dispatch refused or ended, and a session
+ * that never answered each end the read with an error saying which (`readAgentReplay`). */
 async function taggedUserTurns(
   page: PageLike,
+  base: string,
   session: string
 ): Promise<{ id: string; text: string }[]> {
-  return page.evaluate((sessionID) => {
-    const result = Promise.withResolvers<{ id: string; text: string }[]>();
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${location.host}/ws/live`);
-    const sub = "dispatch-user-turns";
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      socket.close(1000);
-      result.reject(new Error("the live socket did not send the session replay within 30s"));
-    }, 30_000);
-    socket.addEventListener("open", () => {
-      socket.send(
-        JSON.stringify({
-          sub,
-          type: "subscribe",
-          view: { kind: "agent", session_id: sessionID },
-        })
-      );
-    });
-    socket.addEventListener("message", (message) => {
-      let frame: unknown;
-      try {
-        frame = JSON.parse(String(message.data));
-      } catch {
-        return;
-      }
-      if (
-        settled ||
-        typeof frame !== "object" ||
-        frame === null ||
-        !("type" in frame) ||
-        frame.type !== "agent" ||
-        !("sub" in frame) ||
-        frame.sub !== sub ||
-        !("event" in frame) ||
-        frame.event !== "replay" ||
-        !("data" in frame) ||
-        typeof frame.data !== "object" ||
-        frame.data === null ||
-        !("frames" in frame.data) ||
-        !Array.isArray(frame.data.frames)
-      ) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      socket.close(1000);
-      result.resolve(
-        frame.data.frames.flatMap((entry) =>
-          typeof entry !== "object" ||
-          entry === null ||
-          !("kind" in entry) ||
-          entry.kind !== "message" ||
-          !("message" in entry) ||
-          typeof entry.message !== "object" ||
-          entry.message === null ||
-          !("role" in entry.message) ||
-          entry.message.role !== "user" ||
-          !("dispatchMessageId" in entry.message) ||
-          typeof entry.message.dispatchMessageId !== "string" ||
-          !("parts" in entry.message) ||
-          !Array.isArray(entry.message.parts)
-            ? []
-            : [
-                {
-                  id: entry.message.dispatchMessageId,
-                  text: entry.message.parts
-                    .filter(
-                      (part): part is { text?: string; type: string } =>
-                        typeof part === "object" &&
-                        part !== null &&
-                        "type" in part &&
-                        part.type === "text"
-                    )
-                    .map((part) => part.text ?? "")
-                    .join("\n"),
-                },
-              ]
-        )
-      );
-    });
-    socket.addEventListener("close", (event) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      result.reject(
-        new Error(`the live socket closed before its replay (${event.code} ${event.reason})`)
-      );
-    });
-    return result.promise;
-  }, session);
+  const socket = new URL("/ws/live", base);
+  socket.protocol = socket.protocol === "https:" ? "wss:" : "ws:";
+  const replay = await page.evaluate(readAgentReplay, {
+    emptyAfterMs: 5_000,
+    sessionId: session,
+    timeoutMs: 30_000,
+    url: socket.href,
+  });
+  if (
+    typeof replay !== "object" ||
+    replay === null ||
+    !("frames" in replay) ||
+    !Array.isArray(replay.frames)
+  ) {
+    throw new Error(`the session's replay holds no frames: ${JSON.stringify(replay)}`);
+  }
+  return replay.frames.flatMap((entry: unknown) =>
+    typeof entry !== "object" ||
+    entry === null ||
+    !("kind" in entry) ||
+    entry.kind !== "message" ||
+    !("message" in entry) ||
+    typeof entry.message !== "object" ||
+    entry.message === null ||
+    !("role" in entry.message) ||
+    entry.message.role !== "user" ||
+    !("dispatchMessageId" in entry.message) ||
+    typeof entry.message.dispatchMessageId !== "string" ||
+    !("parts" in entry.message) ||
+    !Array.isArray(entry.message.parts)
+      ? []
+      : [
+          {
+            id: entry.message.dispatchMessageId,
+            text: entry.message.parts
+              .filter(
+                (part: unknown): part is { text?: string; type: string } =>
+                  typeof part === "object" &&
+                  part !== null &&
+                  "type" in part &&
+                  part.type === "text"
+              )
+              .map((part: { text?: string }) => part.text ?? "")
+              .join("\n"),
+          },
+        ]
+  );
 }
 
 async function envelope(): Promise<void> {

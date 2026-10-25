@@ -180,6 +180,81 @@ test("the live event probe subscribes again from its cursor when Dispatch ends t
   ]);
 });
 
+// A redial resumes after the cursor, so Dispatch replays nothing at or below it; a duplicate that
+// arrives anyway (an older frame on the socket, or a replay after a redial) is noted, not written as
+// an event, so the audits that count the event lines count it once, and it never moves the cursor
+// back.
+test("the live event probe writes a duplicate once and never lowers its cursor", async () => {
+  const subscriptions: unknown[] = [];
+  const event = (id: number, extra: object = {}) =>
+    JSON.stringify({
+      event: { id, type: "issue.updated", ...extra },
+      id: String(id),
+      sub: "events",
+      type: "event",
+    });
+  const server = Bun.serve({
+    fetch(request, srv) {
+      if (new URL(request.url).pathname !== "/ws/live")
+        return new Response("not found", { status: 404 });
+      return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
+    },
+    hostname: "127.0.0.1",
+    port: 0,
+    websocket: {
+      message(socket, raw) {
+        subscriptions.push(JSON.parse(String(raw)));
+        if (subscriptions.length === 1) {
+          socket.send(JSON.stringify({ since: "5", sub: "events", type: "events_start" }));
+          socket.send(event(6));
+          socket.send(event(7));
+          // An older event after a newer one: written once, and the resume stays at 7.
+          socket.send(event(6));
+          socket.close(1012, "service restart");
+          return;
+        }
+        socket.send(JSON.stringify({ since: "7", sub: "events", type: "events_start" }));
+        // The redial's replay repeats the last event before the next.
+        socket.send(event(7));
+        socket.send(event(8, { note: "needle" }));
+      },
+    },
+  });
+  servers.push(server);
+
+  const result = await run(
+    "--url",
+    `http://127.0.0.1:${server.port}`,
+    "--user",
+    "alice@example.com",
+    "--until",
+    "needle",
+    "--timeout",
+    "5"
+  );
+
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(subscriptions).toEqual([
+    { sub: "events", type: "subscribe", view: { kind: "events" } },
+    { resume: { since: "7" }, sub: "events", type: "subscribe", view: { kind: "events" } },
+  ]);
+  expect(result.stdout).toEqual([
+    { event: { id: 6, type: "issue.updated" } },
+    { event: { id: 7, type: "issue.updated" } },
+    { duplicate: "6" },
+    { close: 1012, reason: "service restart" },
+    { resubscribed: "7" },
+    { duplicate: "7" },
+    { event: { id: 8, note: "needle", type: "issue.updated" } },
+  ]);
+  // What the stage proofs' audits count: each event's line, once.
+  const counted = result.stdout.flatMap((line) =>
+    typeof line === "object" && line !== null && "event" in line ? [line.event] : []
+  );
+  expect(counted).toHaveLength(3);
+});
+
 test("the live event probe prints Dispatch's refusal of the feed and exits 1", async () => {
   const server = Bun.serve({
     fetch(request, srv) {

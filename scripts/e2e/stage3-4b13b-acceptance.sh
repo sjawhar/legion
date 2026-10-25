@@ -395,8 +395,8 @@ production_audit() {
   if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
   bearer=$work/production-dispatch-bearer
   (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
-  # A refusal of the feed is printed on stderr; the replay's close and resubscribe lines carry no
-  # event and are not counted.
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once.
   bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
     --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
     >"$work/production-events.jsonl" || true

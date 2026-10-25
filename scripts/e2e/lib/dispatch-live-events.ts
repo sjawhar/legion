@@ -289,7 +289,15 @@ async function watch(options: Options): Promise<boolean> {
       }
       const event = asEventFrame(frame);
       if (event === undefined) return;
-      cursor = eventID(event.id, "event.id");
+      const id = eventID(event.id, "event.id");
+      // The cursor only rises: an event at or below it was written already (an older frame, or a
+      // redial's replay), so it is noted rather than written again, and the audits that count the
+      // event lines count it once.
+      if (cursor !== null && BigInt(id) <= BigInt(cursor)) {
+        write({ duplicate: id });
+        return;
+      }
+      cursor = id;
       const rendered = JSON.stringify(event.event);
       write({ event: event.event });
       if (options.until !== undefined && rendered.includes(options.until)) stop(true);
