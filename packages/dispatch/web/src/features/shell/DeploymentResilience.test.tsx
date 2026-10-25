@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { REQUEST_DEADLINE_MS } from "../../api/client";
 import * as markdownEngine from "../refs/markdown-engine";
 import {
   DeploymentResilience,
@@ -352,8 +353,11 @@ test("shows a reloadable update notice when focused after the running index chun
 
     const notice = await screen.findByRole("status", { name: "A new version is available" });
     expect(notice.textContent).toContain("A new version is available - Reload");
-    expect(fetch).toHaveBeenCalledWith("/healthz", { cache: "no-store" });
-    expect(fetch).toHaveBeenCalledWith("/", { cache: "no-store" });
+    expect(fetch).toHaveBeenCalledWith("/healthz", {
+      cache: "no-store",
+      signal: expect.any(AbortSignal),
+    });
+    expect(fetch).toHaveBeenCalledWith("/", { cache: "no-store", signal: expect.any(AbortSignal) });
 
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(reload).toHaveBeenCalledTimes(1);
@@ -398,6 +402,87 @@ test("waits one minute before checking for another deployment on focus", async (
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
   } finally {
     fetch.mockRestore();
+    dateNow.mockRestore();
+    currentScript.remove();
+    view.unmount();
+  }
+});
+
+// A check Dispatch never answers would hold one of the browser's few connections to it for good,
+// as an unbounded read did (INFRA-258): each of its two requests is given up at the read deadline,
+// the index's body included, and the check then reports nothing.
+test("a deployment check Dispatch does not answer is given up at the read deadline", async () => {
+  const currentScript = document.createElement("script");
+  currentScript.type = "application/json";
+  currentScript.src = "/assets/index-current.js";
+  document.head.append(currentScript);
+  let now = 100_000;
+  const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+  const deadlines: { controller: AbortController; ms: number }[] = [];
+  const timeout = spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+    const controller = new AbortController();
+    deadlines.push({ controller, ms });
+    return controller.signal;
+  });
+  const signals: (AbortSignal | null | undefined)[] = [];
+  function stalled(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    signals.push(init?.signal);
+    if (input === "/healthz" && signals.length > 1) {
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }
+    const signal = init?.signal;
+    // The index answers its headers at once, with a body that never ends.
+    if (input === "/") {
+      return Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(body) {
+              body.enqueue(new TextEncoder().encode('<script src="/assets/index-'));
+              signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
+            },
+          }),
+          { status: 200 }
+        )
+      );
+    }
+    const { promise, reject } = Promise.withResolvers<Response>();
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    return promise;
+  }
+  stalled.preconnect = () => {};
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(stalled);
+  const view = render(<DeploymentResilience />);
+
+  try {
+    // The health check gets no answer: given up at the deadline, the check ends there.
+    fireEvent.focus(window);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(deadlines.map(({ ms }) => ms)).toEqual([REQUEST_DEADLINE_MS]);
+    expect(signals[0]).toBe(deadlines[0]?.controller.signal);
+    deadlines[0]?.controller.abort(new DOMException("timed out", "TimeoutError"));
+    const healthGivenUp = Promise.withResolvers<void>();
+    setTimeout(healthGivenUp.resolve, 0);
+    await healthGivenUp.promise;
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // The index answers its headers and stalls in its body: given up at its own deadline.
+    now += 60_000;
+    fireEvent.focus(window);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    expect(deadlines.map(({ ms }) => ms)).toEqual([
+      REQUEST_DEADLINE_MS,
+      REQUEST_DEADLINE_MS,
+      REQUEST_DEADLINE_MS,
+    ]);
+    expect(signals[2]).toBe(deadlines[2]?.controller.signal);
+    deadlines[2]?.controller.abort(new DOMException("timed out", "TimeoutError"));
+    const indexGivenUp = Promise.withResolvers<void>();
+    setTimeout(indexGivenUp.resolve, 0);
+    await indexGivenUp.promise;
+    expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+  } finally {
+    fetch.mockRestore();
+    timeout.mockRestore();
     dateNow.mockRestore();
     currentScript.remove();
     view.unmount();

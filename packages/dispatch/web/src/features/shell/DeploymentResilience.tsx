@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
+import { REQUEST_DEADLINE_MS } from "../../api/client";
 import {
   borderStrong,
   card,
@@ -67,13 +68,21 @@ function newestIndexAsset(html: string): string | undefined {
   return undefined;
 }
 
+// Each request is held to the read deadline, its body included, so a check Dispatch never answers
+// gives up rather than holding one of the browser's few connections to it for good (INFRA-258).
 async function deploymentChanged(): Promise<boolean> {
-  const health = await fetch("/healthz", { cache: "no-store" });
+  const health = await fetch("/healthz", {
+    cache: "no-store",
+    signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
+  });
   if (!health.ok) {
     return false;
   }
 
-  const index = await fetch("/", { cache: "no-store" });
+  const index = await fetch("/", {
+    cache: "no-store",
+    signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
+  });
   if (!index.ok) {
     return false;
   }
