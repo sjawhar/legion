@@ -2,62 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-184",
-  "completed": "2026-10-25T07:25:00Z",
+  "completed": "2026-10-25T08:10:00Z",
   "proof": [
     {
-      "criterion": "Review round 2, item 1. The claim's label walk must cost the field and never the claim: it ran unbounded, on the request context, between the claim's event and its COMMIT.",
-      "surface": "The Go test as the repository runs it, against a real Postgres 17 with pgvector, driving the claim route through the handler.",
-      "command": "`cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/api/ -run 'Claim' -count=1`, covering the new `TestClaimSurvivesAHangingLegionLabelWalk` and the existing `TestClaimSurvivesAFailingLegionLabelWalk`.",
-      "observed": "With `legionManagedStatusSQL` swapped for `select count(*) > 0 from (select pg_sleep(5)) slow where $1 <> ''` — ten times the 500 ms bound — the claim answers 200, the body carries the claim, `legion_managed_status` is absent from the raw JSON, the issue read back through `GET /api/v1/issues/{key}` still holds the claim, and the release that follows is served rather than blocked behind the row. Three changes make that true: the walk runs before `writeIssueClaim`, so nothing at all sits between `appendEvent` and `tx.Commit`; it runs on `context.WithoutCancel(ctx)`, so a cancellation cannot skip its savepoint's rollback; and its savepoint sets `statement_timeout = '500ms'` and restores the default before release, the shape `writeAdvice` uses on the same predicate.",
-      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
-      "negativeControl": "The reviewer's own measurement of the previous head stands as the before: at `347d8432fb17` the same walk took no bound and ran on the request context. Within this round the control is the sibling test `TestClaimSurvivesAFailingLegionLabelWalk`, which forces a statement error rather than a hang and asserts the same invariant, and the unlabelled rows of `TestClaimAnswersWhoOwnsTheIssuesStatus`, which show the field answered `false` rather than omitted when the walk succeeds — so the omission is the failure path and not the default."
+      "criterion": "Review round 3, item 1. Three comments stated the causality backwards: they said a fatal advice failure drops the suggestions a creation had already computed and persisted. It does not, and the sentence an agent reads to learn what the server does must say the true reason.",
+      "surface": "The code the comments describe, read at the lines the reviewer named: `issue_create.go`, `asks.go`, and the three places the sentence appears.",
+      "command": "`sed -n '398,412p' packages/envoy/internal/dispatch/api/issue_create.go` and `sed -n '294,305p' packages/envoy/internal/dispatch/api/asks.go`, read before the thread landed; then the three edits.",
+      "observed": "`issue_create.go` calls `computeAndPersistSuggestions` only inside `if advice != nil`, after the advice is built, so a fatal advice failure there meant the suggestions were never computed and no row was ever written — the tolerance this change adds is worth more than the old sentence claimed, not less. The 'already computed and persisted' framing belongs to the ask path, where `asks.go` computes them first and falls back to `withRawAdvice(ask, suggestionsOnlyAdvice{…})`, the fallback `TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails` guards. All three places now say that: `packages/envoy/AGENTS.md`, the doc comment on `legionManagedStatusAdvice` (`write_advice.go`), and the comment on `TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails` (`write_advice_test.go`), with the ask path named in `AGENTS.md` as the contrast so the two are not confused again.",
+      "headSha": "284f41267c3a9230266e94de1cd2b33655363d06",
+      "negativeControl": "The reading was checked against the code before the reviewer's thread posted and reported to it in those terms; the reviewer's own thread then cited the same two call sites independently. No behaviour changed: the whole `internal/dispatch/api` and `model` suites pass unchanged, and the acceptance criteria answer exactly as they did at the previous head."
     },
     {
-      "criterion": "Review round 2, item 2. The advice path must survive the same failure instead of dropping the whole advice — and, on an issue creation, the suggestions already computed and persisted with it.",
-      "surface": "The Go test as the repository runs it, through the message route with the package's failing-advice rig armed on the walk's query name.",
-      "command": "`cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/api/ -run 'Advice' -count=1`, covering the new `TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails`.",
-      "observed": "With `newFailingAdviceHandler(t, \"legion_managed_status\", 0)` arming that query to fail, a session's write on a triage issue still answers advice carrying `issue_status: triage`, `session_writes_since_human: 2` and the one `your_open_asks` entry, with `legion_managed_status` absent from the raw JSON. `legionManagedStatusAdvice` takes a savepoint of its own inside the advice savepoint — a failed statement aborts the transaction it ran in, so run directly it would have taken the `statement_timeout` reset and the release with it and dropped the advice anyway — logs once through `logAdviceError`, and returns nil.",
-      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
-      "negativeControl": "The two queries before it keep their fatal behaviour, and the package's existing tests prove it unchanged: `TestWriteAdviceFailureDoesNotAbortWrite` and `TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails` both arm `session_writes_since_human` and still expect the whole advice dropped, and both pass. So the new tolerance is the walk's alone."
+      "criterion": "Review round 3, item 2. `TestClaimSurvivesAFailingLegionLabelWalk` inlined the raw-JSON decode that `rawClaimFields`, added in the same round, already does.",
+      "surface": "The Go test as the repository runs it, against a real Postgres 17 with pgvector.",
+      "command": "`cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/api/... ./internal/dispatch/model/... -count=1`.",
+      "observed": "The six inlined lines are one `rawClaimFields(t, claimed)` call, the helper its sibling `TestClaimSurvivesAHangingLegionLabelWalk` already uses; `json` stays imported for the file's other decodes. Both claim-walk tests still pass, and the whole package is green in 592 s.",
+      "headSha": "284f41267c3a9230266e94de1cd2b33655363d06",
+      "negativeControl": "The assertion is unchanged in meaning — the field must be absent rather than false — and the helper is what makes that distinction; the suite would fail if the swap had turned it into a typed decode, which cannot tell an omitted field from a stored `false`."
     },
     {
-      "criterion": "Review round 2, items 3 and 4. Two statements this pull request made false in the file agents read to find code, and the unrecorded constraint the test's SQL swap depends on.",
-      "surface": "`packages/envoy/AGENTS.md` and `packages/envoy/internal/dispatch/api/issue_claim_test.go`, read at the lines the reviewer named.",
-      "command": "`grep -c 'Both answer the issue' packages/envoy/AGENTS.md` and `grep -o 'Both answer [^.]*\\.' packages/envoy/AGENTS.md`; the advice paragraph read at `:404-420`.",
-      "observed": "`Both answer the issue` is gone (count 0); the claim paragraph now reads `Both answer \\`claimAnswer\\`: the issue flat, with \\`legion_managed_status\\` … beside it, omitted when that walk failed or timed out, which costs the field and never the claim.` The advice paragraph cites `internal/dispatch/api/issue_parent.go` for `legionManagedStatus` and names `claimLegionManagedStatus` in `issue_claim.go` as the claim-side wrapper, and states the new failure behaviour: the two session-scoped queries drop the advice, the walk omits its own field alone. The SQL swap in `TestClaimSurvivesAFailingLegionLabelWalk` now carries the sentence naming what it depends on — nothing in `internal/dispatch/api` calls `t.Parallel` — and why `server.adviceQueryHook` is not used instead: it fires from `computeWriteAdvice` and never reaches `claimWrite`.",
-      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
-      "negativeControl": "The claim paragraph is one very long line carrying many other statements; `git diff` of `AGENTS.md` shows the only change inside it is the final sentence, so nothing else in it moved."
-    },
-    {
-      "criterion": "The four acceptance criteria of spec version 6 still hold at this head, which is what the round may not break.",
-      "surface": "The `dispatch` command an agent runs (this branch's CLI), against `packages/dispatch/e2e/run-server.sh` servers on a real Postgres 17 with pgvector: port 8777 built from this head, port 8778 built from 7bf2759c6e17.",
+      "criterion": "The four acceptance criteria of spec version 6 still hold at this head, which is what a prose round may not break.",
+      "surface": "The `dispatch` command an agent runs (this branch's CLI), against `packages/dispatch/e2e/run-server.sh` servers on a real Postgres 17 with pgvector: port 8777 built from this head, port 8778 built from 7bf2759c6e17. The pod was replaced between rounds, so the whole rig — the Debian Postgres and pgvector unpacked without root, the base tree, both servers and the CLI — was rebuilt from scratch before this run.",
       "command": "`bash /tmp/infra-184/prove.sh`.",
       "observed": "36 assertions, 0 failures: A1's sixth post of three sessions recorded `session_writes_since_human: 2` with no cadence line; A2's own sixth post still printed the stop line; A3's claim and release on `legion`, `Legion` and a child of a labelled parent named `issue-update` nowhere, and the triage comments on the labelled issue and the labelled parent's child printed no triage line with `issue_status=triage legion_managed_status=true` recorded; A4's no-artifact `doc-edit` minted spec v2 and reached the same document as `--artifact spec`.",
-      "headSha": "77dd5bebe32ea6cf6a7707131b28352b1bf40bd3",
-      "negativeControl": "Each criterion ran with its own control, including the pre-change server for A1 and the labelled triage issue on it for A3's triage half; the whole `internal/dispatch/api` (658 s) and `model` Go packages are green, `gofmt`/`go vet`/`go build ./...` clean, and `claude-envoy`'s `check-dist` matches a fresh build (this round changed no TypeScript, so no bundle moved)."
+      "headSha": "284f41267c3a9230266e94de1cd2b33655363d06",
+      "negativeControl": "Each criterion ran with its own control, including the rebuilt pre-change server for A1 and for A3's triage half; `gofmt`/`go vet`/`go build ./...` are clean and the whole `internal/dispatch/api` (592 s) and `model` packages green at this head."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/issue_claim.go — the walk runs before `writeIssueClaim`, on `context.WithoutCancel(ctx)`, inside a savepoint that sets and restores `statement_timeout = '500ms'`; both comments narrowed to say that a statement's failure is never the claim's, that cancellation and connection loss were not statement failures, and what now covers them",
-    "packages/envoy/internal/dispatch/api/issue_claim_test.go — `TestClaimSurvivesAHangingLegionLabelWalk`, the `rawClaimFields` helper, and the sentence beside the SQL swap naming the `t.Parallel` constraint and why `adviceQueryHook` is not the seam here",
-    "packages/envoy/internal/dispatch/api/write_advice.go — `legionManagedStatusAdvice`: the walk's failure leaves the field nil, logs once and returns the advice assembled; `computeWriteAdvice` takes the route for that log line",
-    "packages/envoy/internal/dispatch/api/write_advice_test.go — `TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails`",
-    "packages/envoy/AGENTS.md — the helper's home, the claim routes' answer shape, and the per-query failure behaviour"
+    "packages/envoy/AGENTS.md — what a fatal advice failure costs a creation, and the ask path named as the contrast",
+    "packages/envoy/internal/dispatch/api/write_advice.go — the same correction in `legionManagedStatusAdvice`'s doc comment",
+    "packages/envoy/internal/dispatch/api/write_advice_test.go — the same correction in the test's comment",
+    "packages/envoy/internal/dispatch/api/issue_claim_test.go — the inlined raw-JSON decode replaced by `rawClaimFields`"
   ],
   "trickyParts": [
-    "The reviewer asked for a deterministic test that cancels the request context inside the walk and then asserts the claim committed. After the architect's stronger fix that assertion is not constructible, and not because the package lacks a seam: the walk now runs before `writeIssueClaim`, so a cancellation landing in it means no claim has been written yet — pgx refuses every later statement on a done context, so the claim is simply never written and there is none to have lost. The hazard the reviewer named is closed by the move rather than made testable by it. What is left to prove is that a walk which hangs cannot cost the claim or hold the row, and `TestClaimSurvivesAHangingLegionLabelWalk` proves exactly that, with no Go timer raced against the database and no assertion on elapsed time. A first draft of this round did race a `time.AfterFunc` and poll `pg_stat_activity`; it was replaced for that reason, which is the test the reviewer said it did not want.",
-    "`legionManagedStatusAdvice` needs its own savepoint inside the advice savepoint. Logging the error and carrying on is not enough on the advice savepoint itself: a failed statement aborts the transaction it ran in, so the `set local statement_timeout = default` and the release that `writeAdvice` runs after `computeWriteAdvice` would both fail and the advice would be dropped anyway. `SET LOCAL` holds across a savepoint opened under it, so the 500 ms bound still covers the walk.",
-    "`context.WithoutCancel` is only safe because the statement timeout bounds the walk: detaching from cancellation without a bound would be the worse of the two faults, not a fix for either."
+    "Nothing in this round changes behaviour: three comments and one test-local refactor. The suites and the criteria were re-run anyway because the pod had been replaced and the rig rebuilt, so 'unchanged' is measured at this head rather than carried over from the last one."
   ],
   "deviations": [
-    "Item 1's test is not the shape the reviewer specified, for the reason in trickyParts: the move makes 'cancel inside the walk, assert the claim committed' an assertion about a claim that was never written. Reported to the reviewer and the architect before this round completed, with the argument against the package rather than as a preference.",
     "The committed plan records departure 2, \"a fourth wrong text, out of scope here\", which spec versions 5 and 6 overturned; the spec is the current scope.",
     "The Go suite's Postgres is initialised with `--locale-provider=icu --icu-locale=en-US` rather than the plan's `--locale=C`, because the api package's rank test refuses a byte-order database (rank_test.go:317)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The same predicate now has two failure policies, and they differ because the writes they sit beside differ: on the claim path a failure costs the field and the claim stands, on the advice path a failure costs the field and the rest of the advice stands. Both are 'the field alone', which is what `issue_parent.go`'s doc comment already says of an advisory answer.",
-    "Decided, not open (the architect ruled at 2026-10-25T04:28Z): no route gate on the triage walk. The rule that stands is the spec's — resolve the answer where the issue is in triage.",
-    "`legion_managed_status` is absent in four distinct cases now: a write past triage, a non-session actor, a failed advice walk, and a failed or timed-out claim walk. Every reader compares it `=== true`; a `=== false` would be wrong in all four."
+    "Refused by the architect and recorded rather than deferred, so no one re-opens them as findings: moving the claim-side walk onto the pool (it would read the answer without the issue's row held, which is the property the design asks for) and collapsing the two savepoint wrappers into one (tidiness over correct, tested code in the function this issue took three review rounds to settle). Neither is implemented and neither is filed.",
+    "`legion_managed_status` is absent in four distinct cases: a write past triage, a non-session actor, a failed advice walk, and a failed or timed-out claim walk. Every reader compares it `=== true`.",
+    "The same predicate carries two failure policies, and they differ because what sits beside them differs: on the claim path a failure costs the field and the claim stands; on the advice path a failure costs the field and the rest of the advice stands."
   ]
 }
