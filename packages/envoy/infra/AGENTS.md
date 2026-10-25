@@ -125,20 +125,27 @@ versions. Never add the module to the root `go.work`.
   `gcp:Dispatch` follows the same shape: `NewDispatch` refuses a seed in its own name first
   (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
   string input the component carries (`gcp.dispatchSeededInput`, one row each in
-  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret`,
-  `natsSeedSecret` and `agentSecretsTokenSecret` are checked for a seed once they resolve, before
-  any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
-  `TestConstructRefusesASeedInADispatchInput`); the two credentials `tailnetAuthKey` and
+  `TestDispatchRefusesAnNKeySeedInAPlainInput`, `azureFederationAudience` among them);
+  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `agentSecretsTokenSecret`, and the
+  Azure embedder's Pulumi inputs `azureEmbedEndpoint`, `azureEmbedDeployment`,
+  `azureEmbedKeySecret`, `azureTenantId` and `azureClientId` are checked for a seed once they
+  resolve, before any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `TestConstructRefusesASeedInADispatchInput`, `TestConstructRefusesASeedInAnAzureInput`); the two
+  credentials `tailnetAuthKey` and
   `signInClientSecret` are also refused blank or whitespace-only then, through the one rule both
   run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since neither
   can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker token
   (`agentSecretsTokenSecret`, a Secret Manager resource path read through a second
-  SecretProviderClass, with its own per-secret accessor member) and the GitHub App key
+  SecretProviderClass, with its own per-secret accessor member), the Azure embedder's key
+  (`azureEmbedKeySecret`, the same shape under `<hostname>-azure-embed-key`; the keyless form takes
+  only a tenant and a client id, and its token is projected into the pod) and the GitHub App key
   (`appPrivateKeySecretName` and `appPrivateKeySecretKey`, a Kubernetes Secret GKE SecretSync
   creates at run time, which the component never parses, creates or waits on) enter by reference,
   so their values never enter the component or Pulumi state
-  (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`); the GitHub App's four inputs come together,
-  each missing one named (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
+  (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`,
+  `TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm`); the GitHub App's four inputs come
+  together, each missing one named, and the Azure inputs come with `azureEmbedEndpoint`, its quota
+  and exactly one credential form (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
   inside the `ApplyT` that renders the listener container's environment, where core's `Env`
   refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
   `natsUrl`, each a `core.InputError` naming it, wrapped with the component's type and name and
