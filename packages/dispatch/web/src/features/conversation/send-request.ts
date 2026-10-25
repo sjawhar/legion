@@ -60,7 +60,7 @@ export interface SentRequest {
   /** The key that names this send to Dispatch where its route takes one - a message to one
    *  session (`idempotency_key`) - so that a repeat of the request is that one message there.
    *  Minted when Send builds the request, and kept by a Retry that sends the same message
-   *  (`sendKeyFor`). */
+   *  (`requestFor`). */
   readonly sendKey: string;
 }
 
@@ -177,14 +177,12 @@ function agentMessage({
   return { body: plan.body, delivery: plan.delivery ?? inheritedDelivery, ...reply };
 }
 
-/** The key `next` goes under. A Retry that sends the refused send's message again - the same
- *  session, body, mode and reply - keeps the refused send's key: the refusal may follow a request
- *  Dispatch did act on, and the key is how Dispatch answers the repeat with that message rather
- *  than making a second. Anything else is another message, under a key of its own. */
-export function sendKeyFor(
-  refused: SentRequest | undefined,
-  next: Omit<SentRequest, "sendKey">
-): string {
+/** The key `next` goes under once its draft or address differs from the refused send's. A message
+ *  to the same session that is still the refused send's message on the wire - the same body, mode
+ *  and reply - keeps the refused send's key: the refusal may follow a request Dispatch did act on,
+ *  and the key is how Dispatch answers the repeat with that message rather than making a second.
+ *  Anything else is another message, under a key of its own. */
+function sendKeyFor(refused: SentRequest | undefined, next: Omit<SentRequest, "sendKey">): string {
   if (
     refused?.owner.kind !== "session" ||
     next.owner.kind !== "session" ||
@@ -199,6 +197,38 @@ export function sendKeyFor(
     before.in_reply_to === after.in_reply_to
     ? refused.sendKey
     : newSendKey();
+}
+
+/** Whether `next` is the refused send unedited: the same draft - its text, accepted mentions and a
+ *  suggestion's replacement, and an ask's fields - to the same place, in the same kind. */
+function unedited(refused: SentRequest, next: Omit<SentRequest, "sendKey">): boolean {
+  return (
+    refused.kind === next.kind &&
+    JSON.stringify(refused.owner) === JSON.stringify(next.owner) &&
+    refused.anchor?.artifact === next.anchor?.artifact &&
+    refused.anchor?.mark_id === next.anchor?.mark_id &&
+    refused.replyTo?.id === next.replyTo?.id &&
+    refused.edit?.id === next.edit?.id &&
+    refused.draft.body === next.draft.body &&
+    refused.draft.replacement === next.draft.replacement &&
+    JSON.stringify(refused.draft.mentions) === JSON.stringify(next.draft.mentions) &&
+    (next.kind !== "ask" || JSON.stringify(refused.ask) === JSON.stringify(next.ask))
+  );
+}
+
+/**
+ * What Send or Retry sends, given `refused`, the request of the refusal it replaces, if any. A
+ * Retry of a draft the reader has not edited is the refused request itself, as it was sent - its
+ * mode, picked or plain, and its key - whichever surface made it and whichever presses Retry, so a
+ * message the live view sent in a mode it picked never goes out again in the Agents row's mode
+ * under a key of its own. An edited draft is a request of its own (`sendKeyFor`).
+ */
+export function requestFor(
+  refused: SentRequest | undefined,
+  next: Omit<SentRequest, "sendKey">
+): SentRequest {
+  if (refused !== undefined && unedited(refused, next)) return refused;
+  return { ...next, sendKey: sendKeyFor(refused, next) };
 }
 
 /** Waits `ms`, and says whether it waited the whole of it: `false` once `signal` aborts, at once. */
@@ -218,8 +248,8 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
 }
 
 /** A keyed send to a session that stopped trying before Dispatch confirmed it: the reader pressed
- *  Stop trying, or left what held the send. Not Dispatch's refusal: the message may have reached
- *  it, and a Retry under the same key is answered with that message rather than a second one. */
+ *  Stop trying. Not Dispatch's refusal: the message may have reached it, and a Retry under the same
+ *  key is answered with that message rather than a second one. */
 export class SendStoppedError extends Error {
   constructor() {
     super(

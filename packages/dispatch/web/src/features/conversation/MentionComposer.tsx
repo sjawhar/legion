@@ -76,10 +76,10 @@ import {
   deliveryPlan,
   KEYED_SEND_LATE_TEXT,
   mentionText,
+  requestFor,
   SEND_DEADLINE_MS,
   SendStoppedError,
   type SentRequest,
-  sendKeyFor,
   survivingMentions,
 } from "./send-request";
 import { useAgents } from "./useAgents";
@@ -781,8 +781,9 @@ export function MentionComposer({
     setConfirmingDiscard(false);
   };
   /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
-   *  task may not have rendered yet, and every prop and setting that addresses or shapes it, under
-   *  the key `sendKeyFor` gives it beside `refused`, the request of the refusal it replaces. */
+   *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
+   *  for a Retry of a draft the reader has not edited, `refused`, the refusal's own request, as it
+   *  was sent (`requestFor`). */
   const sentRequest = (refused: SentRequest | undefined): SentRequest => {
     const request = {
       anchor,
@@ -801,7 +802,7 @@ export function MentionComposer({
       plainDelivery: plainMode,
       replyTo,
     } satisfies Omit<SentRequest, "sendKey">;
-    return { ...request, sendKey: sendKeyFor(refused, request) };
+    return requestFor(refused, request);
   };
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const effectiveTargets: readonly string[] =

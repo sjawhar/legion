@@ -3004,15 +3004,16 @@ function backToAgents(): void {
 
 /** The app with Planner's live view open, both lazy pages loaded once on the real clock, so every
  *  move between them on the fake clock that follows renders at once. A message to a session is
- *  answered 503 until a test says otherwise: Dispatch is down. */
-async function renderPlannerLiveView() {
-  const page = renderAgents();
+ *  answered 503 until a test says otherwise: Dispatch is down. `listedAgents` are the live
+ *  sessions, Planner among them. */
+async function renderPlannerLiveView(listedAgents: Agent[] = agents) {
+  const page = renderAgents({ listedAgents });
   page.createAgentMessage.mockRejectedValue(
     new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
   );
   await screen.findByRole("region", { name: "Agents" });
   openLiveView("Planner");
-  await screen.findByPlaceholderText(/delivered as Aside/);
+  await screen.findByRole("combobox", { name: "Delivery mode" });
   return page;
 }
 
@@ -3139,6 +3140,77 @@ test("the session's Agents row shows a live-view send, refuses its own Send, and
     expect(
       new Set(page.createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
     ).toBe(1);
+    expect(field.value).toBe("");
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A message the live view sent in a mode the reader picked is that message, whoever retries it:
+// the Agents row's Retry of the untouched draft sends the held request as it was - its body, the
+// picked mode and its key - and not the row's own plain mode under a key of its own, which would
+// reach the session a second time as a different message. An edit makes it a message of its own.
+test("the Agents row's Retry of a live-view send re-sends it as it was; an edit sends a new one", async () => {
+  const both: Agent = { ...agents[0], capabilities: ["aside", "steer"] };
+  const page = await renderPlannerLiveView([both, agents[1]]);
+  const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
+  await waitFor(() => expect(mode.value).toBe("steer"));
+  fireEvent.change(mode, { target: { value: "aside" } });
+  await screen.findByPlaceholderText(/delivered as Aside/);
+  jest.useFakeTimers();
+
+  try {
+    await sendFromLiveView("Status please");
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    const pressed = page.createAgentMessage.mock.calls[0]?.[1];
+    expect(pressed).toEqual({
+      body: "Status please",
+      delivery: "aside",
+      idempotency_key: expect.any(String),
+    });
+
+    await act(async () => backToAgents());
+    const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
+    await act(async () => expand(planner, "Planner"));
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    expect(field.value).toBe("Status please");
+
+    // Untouched: the held request, as it was. Dispatch refuses it this time, which ends it.
+    page.createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
+    );
+    await act(async () => {
+      fireEvent.click(within(planner).getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
+    expect(page.createAgentMessage.mock.calls[5]?.[1]).toEqual(pressed);
+    expect(within(planner).getByText("Couldn't send — Dispatch refused the message")).toBeTruthy();
+
+    // Edited: another message, in the row's own mode, under a key of its own.
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please, now"));
+    fireEvent.change(field, { target: { value: "Status please, now" } });
+    await act(async () => {
+      fireEvent.click(within(planner).getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(7);
+    expect(page.createAgentMessage.mock.calls[6]?.[1]).toEqual({
+      body: "Status please, now",
+      delivery: "steer",
+      idempotency_key: expect.any(String),
+    });
+    expect(page.createAgentMessage.mock.calls[6]?.[1].idempotency_key).not.toBe(
+      pressed?.idempotency_key
+    );
     expect(field.value).toBe("");
   } finally {
     jest.advanceTimersByTime(1);

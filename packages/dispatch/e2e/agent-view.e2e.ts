@@ -988,7 +988,11 @@ test("sending a message from the live view while scrolled back takes the reader 
     const input = page.getByTestId("agent-composer").locator("textarea");
     await input.fill("try the other branch");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect(page.getByText("try the other branch")).toBeVisible();
+    // The transcript's own turn, not the held line above it, which shows while the send is out.
+    await expect(
+      page.getByTestId("agent-thread").getByText("try the other branch", { exact: true })
+    ).toBeVisible();
+    await expect(page.getByTestId("agent-send-held")).toHaveCount(0);
     await expectNewestTurnAboveComposer(page);
     await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
 
