@@ -104,11 +104,13 @@ func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 	// that served the original call already paid for it - so the fleet's whole metadata traffic
 	// is the sending pod's bucket times the replica count, whichever pod was asked.
 	//
-	// The fan-out deliberately does not ride r's context, which is cancelled as soon as the
-	// answer is written and which a caller that hangs up mid-reread cancels earlier still: the
-	// local reread has already succeeded and its answer stands, so that caller must not be able
-	// to stop the other pods from learning of it. The handler answers 200 whatever the fan-out
-	// does, since nothing about it changes what this pod now serves.
+	// The fan-out deliberately drops r's cancellation, which fires as soon as the answer is
+	// written and which a caller that hangs up mid-reread fires earlier still: the local reread
+	// has already succeeded and its answer stands, so that caller must not be able to stop the
+	// other pods from learning of it. It keeps every value on the request's context, as this
+	// repository's other detached work does (context.WithoutCancel): only the cancellation is in
+	// the way. The handler answers 200 whatever the fan-out does, since nothing about it changes
+	// what this pod now serves.
 	//
 	// Only this public route notifies; the call is deliberately not inside
 	// policy.Current.RefreshOne. RefreshOne's other caller is the miss path in
@@ -116,7 +118,7 @@ func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 	// heals a new secret on first use; fanning that out would spend every peer a store read for
 	// a name that peer may never be asked for.
 	if s.deps.NotifyReread != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), notifyRereadTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), notifyRereadTimeout)
 		defer cancel()
 		s.deps.NotifyReread(ctx, name)
 	}

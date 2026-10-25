@@ -9,8 +9,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -167,14 +165,11 @@ func (ts *testServer) newSessionEnrollment(t *testing.T, runtimeID, operator str
 	return id, key
 }
 
-func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	return key
-}
+// newSigningKey is brokertest.NewSigningKey, under the name every test file of this package
+// calls it by: one P-256 key helper for the whole repository, kept in the package that already
+// owns the broker's test rig. It is a variable rather than a wrapper function so that a failure
+// inside it is still reported against the caller's line, as that helper's own t.Helper makes it.
+var newSigningKey = brokertest.NewSigningKey
 
 // --- HTTP helpers ---
 

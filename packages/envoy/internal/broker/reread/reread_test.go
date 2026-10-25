@@ -32,7 +32,7 @@ func listener(t *testing.T, sender string) (*store.Store, <-chan string) {
 	if err != nil {
 		t.Fatalf("open the test database: %v", err)
 	}
-	t.Cleanup(st.Pool.Close)
+	t.Cleanup(st.Close)
 
 	refreshed := make(chan string, 4)
 	listening := make(chan struct{})

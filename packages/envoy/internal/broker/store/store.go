@@ -34,8 +34,9 @@ type Store struct {
 	Pool *pgxpool.Pool
 
 	// mu guards listen, the one-connection pool Listener opens on first use, so two callers
-	// cannot open two of them.
+	// cannot open two of them, and closed, so a dial after Close opens no pool nobody closes.
 	mu     sync.Mutex
+	closed bool
 	listen *pgxpool.Pool
 }
 
@@ -124,10 +125,16 @@ func (s *Store) Listener(ctx context.Context) (*pgx.Conn, error) {
 	return conn.Hijack(), nil
 }
 
+// ErrClosed is a listener asked for after the store was closed.
+var ErrClosed = errors.New("store is closed")
+
 // listenerPool opens the listener pool on first use, under mu for the whole check-and-open.
 func (s *Store) listenerPool() (*pgxpool.Pool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrClosed
+	}
 	if s.listen != nil {
 		return s.listen, nil
 	}
@@ -145,6 +152,28 @@ func (s *Store) listenerPool() (*pgxpool.Pool, error) {
 	}
 	s.listen = opened
 	return opened, nil
+}
+
+// Close releases every connection the store holds: the listener pool first, then the shared one.
+// A pool nobody closes is a pool whose health-check goroutine runs for the life of the process,
+// so a store that ever dialled a listener leaks one goroutine - and the Postgres connection a
+// redial is holding - unless its listener pool goes with it. A later dial is refused with
+// ErrClosed rather than opening a pool this Close can no longer reach, and a second Close is a
+// no-op, for the caller whose own teardown and a test's both run.
+func (s *Store) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	listen := s.listen
+	s.listen = nil
+	s.mu.Unlock()
+	if listen != nil {
+		listen.Close()
+	}
+	s.Pool.Close()
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

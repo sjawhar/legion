@@ -3,13 +3,11 @@
 package brokertest
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
-	"io"
 	"net"
 	"net/http"
 	"testing"
@@ -111,34 +109,7 @@ func NewClient(t *testing.T, publicURL, addr string) *Client {
 // asserts no status itself: a caller does that, so a mismatch names the actual body.
 func (c *Client) Req(t *testing.T, method, path string, headers map[string]string, body any) (int, []byte) {
 	t.Helper()
-	var reader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			t.Fatalf("marshal request body: %v", err)
-		}
-		reader = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, c.PublicURL+path, reader)
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s (at %s): %v", method, path, c.Addr, err)
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response body of %s %s (at %s): %v", method, path, c.Addr, err)
-	}
-	return resp.StatusCode, respBody
+	return request(t, c.http, c.PublicURL, method, path, headers, body, " (at "+c.Addr+")")
 }
 
 // UI is Req with the bearer every human/operator-facing route requires: the token Dispatch's own
@@ -231,32 +202,7 @@ func (c *Client) DeviceLogin(t *testing.T, key *ecdsa.PrivateKey, person, host s
 // approval minted.
 func (c *Client) ApproveMachineLogin(t *testing.T, person, code string) (credentialID string) {
 	t.Helper()
-	status, body := c.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/machine-logins/lookup (at %s) = %d: %s", c.Addr, status, body)
-	}
-	var looked struct {
-		RecordID string `json:"record_id"`
-		State    string `json:"state"`
-	}
-	if err := json.Unmarshal(body, &looked); err != nil || looked.State != "pending" || looked.RecordID == "" {
-		t.Fatalf("POST /v1/machine-logins/lookup (at %s) answered %s (%v), want a pending record", c.Addr, body, err)
-	}
-	status, body = c.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"approver": person, "code": code})
-	if status != http.StatusOK {
-		t.Fatalf("approve %s's machine login (at %s) = %d: %s", person, c.Addr, status, body)
-	}
-	var decided struct {
-		State        string  `json:"state"`
-		CredentialID *string `json:"credential_id"`
-	}
-	if err := json.Unmarshal(body, &decided); err != nil || decided.State != "approved" ||
-		decided.CredentialID == nil || *decided.CredentialID == "" {
-		t.Fatalf("approve %s's machine login (at %s) answered %s (%v), want state approved and a credential id",
-			person, c.Addr, body, err)
-	}
-	return *decided.CredentialID
+	return decideMachineLogin(t, c.UI, person, code, true, " (at "+c.Addr+")")
 }
 
 // DeviceToken exchanges an approved device code for the machine's token pair, over a DPoP

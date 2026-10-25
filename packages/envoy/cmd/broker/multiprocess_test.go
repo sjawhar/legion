@@ -41,7 +41,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -68,11 +67,6 @@ const (
 	multiprocessSecret      = "AUTO_READ_TOKEN"
 	multiprocessSecretSlug  = "auto-read-token"
 	multiprocessSecretValue = "auto-read-token-v1"
-	// multiprocessKMSKey is the key the fake secrets file says every secret is encrypted with. It
-	// must be exactly productionEnv's BROKER_SECRETS_KMS_KEY_ARN, which every broker here is
-	// started with: the policy loader refuses a secret on any other key, so a mismatch shows up
-	// as the fixture's one secret never being served.
-	multiprocessKMSKey = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 	// multiprocessNewOwner is who a retag narrows multiprocessSecret to: a person no session
 	// here is, so once the retag is in force the owner's own session is "another person's
 	// session" to the policy and is answered with an approval request to this person rather
@@ -91,9 +85,14 @@ const migrateTimeout = 2 * time.Minute
 // A row that retags the secret writes this same function's output with another owner, so what it
 // writes differs from what the processes booted on in the owner tag and nothing else — which is
 // what a retag in the real store is.
+//
+// Its prefix and its key are main_test.go's own constants, the ones productionEnv starts every
+// broker here with: the policy loader refuses a secret under another prefix or on another key, a
+// refusal that would show up as nothing but this one secret never being served, so the fixture
+// and the configuration name one value rather than two that must agree.
 func fakeSecretsJSON(owner string) string {
 	return `{"secrets": [
-		{"name": "example/agent-secrets/` + multiprocessSecretSlug + `", "kms_key_id": "` + multiprocessKMSKey + `", "tags": {"owner": "` + owner + `", "tier": "agent"}, "value": "` + multiprocessSecretValue + `"}
+		{"name": "` + testSecretsPrefix + multiprocessSecretSlug + `", "kms_key_id": "` + testSecretsKMSKeyARN + `", "tags": {"owner": "` + owner + `", "tier": "agent"}, "value": "` + multiprocessSecretValue + `"}
 	]}`
 }
 
@@ -717,8 +716,7 @@ func TestTwoBrokers(t *testing.T) {
 		// would say it without knowing it.
 		storetest.AwaitLockWaiters(t, watch, holder, 1)
 
-		solo.Process.Signal(t, syscall.SIGTERM)
-		signalled := time.Now()
+		signalled := solo.Process.Terminate(t)
 
 		// Inside the drain, readiness fails. Polled because the signal handler flips the flag on
 		// a goroutine of its own; every turn is a real request on a connection of its own.
@@ -786,8 +784,7 @@ func TestTwoBrokers(t *testing.T) {
 			t.Fatalf("GET /v1/settings at the control broker %s before its signal = %d %s; want 200",
 				control.Process.Addr, status, body)
 		}
-		control.Process.Signal(t, syscall.SIGTERM)
-		controlSignalled := time.Now()
+		controlSignalled := control.Process.Terminate(t)
 		for {
 			status, body, err := freshRequest(control.Process.Addr, "/v1/settings")
 			if err != nil {

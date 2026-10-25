@@ -6,9 +6,7 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
-	"io"
 	"maps"
 	"net"
 	"net/http"
@@ -18,25 +16,37 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 )
 
 // testUIToken is the UI bearer every broker these tests start is configured with.
 const testUIToken = "test-token-0123456789abcdef0123456789abcdef"
+
+// testSecretsPrefix and testSecretsKMSKeyARN are the name prefix every agent secret sits under
+// and the key every one of them is encrypted with, as productionEnv configures every broker
+// these tests start (BROKER_SECRETS_PREFIX, BROKER_SECRETS_KMS_KEY_ARN). A fake secrets file a
+// test writes names its secrets under this prefix and on this key, through these constants and
+// not a literal of its own (multiprocess_test.go's fakeSecretsJSON): the policy loader refuses a
+// secret under another prefix or on another key, which shows up as nothing but a secret never
+// served, and one constant per fact is what leaves no second value to drift from this one.
+const (
+	testSecretsPrefix    = "example/agent-secrets/"
+	testSecretsKMSKeyARN = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+)
 
 // productionEnv is the configuration every broker needs besides its addresses and database: the
 // namespace it serves and the key every secret there is on.
 var productionEnv = []string{
 	"BROKER_UI_TOKEN=" + testUIToken,
 	"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
-	"BROKER_SECRETS_PREFIX=example/agent-secrets/",
-	"BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+	"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
+	"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
 }
 
 func TestPortZeroPublicURLRefusedInProduction(t *testing.T) {
@@ -270,39 +280,18 @@ type brokerOptions struct {
 	NoWaitForListening bool
 }
 
-// brokerProcess is a broker binary a test started and is driving: its bound address, its whole
-// log, and the child itself, so a row can signal it and read the code it exited with.
+// brokerProcess is a broker binary a test started and is driving: cmdtest's process — its whole
+// log, its SIGTERM and the code it exited with, as cmd/dispatch's and cmd/listener's own
+// shutdown rows drive theirs — plus the one thing that is the broker's alone, the address it
+// logged that it bound.
 type brokerProcess struct {
-	// Cmd is the running child.
-	Cmd *exec.Cmd
+	*cmdtest.Process
 	// Addr is the address its "broker listening" line named, and Boot its log up to that line.
 	// Both stay empty until AwaitListening has answered, which startBroker does itself unless
 	// NoWaitForListening was asked for.
 	Addr string
 	Boot string
-
-	// mu guards log, which a goroutine of this process's own appends every line of its stderr to
-	// for the whole of its life. Draining to the end rather than only as far as the listening
-	// line is what lets Log answer while the child is still running, and it is also what keeps a
-	// chatty child running at all: a child whose pipe nobody reads blocks in its own write once
-	// the pipe's buffer fills.
-	mu  sync.Mutex
-	log strings.Builder
-
-	// listening carries the listening line's address and the log up to it, once and only once;
-	// drained closes when that goroutine has read the stderr pipe to its end.
-	listening chan bound
-	drained   chan struct{}
-
-	// exited closes once Wait has answered, and exitErr is what it answered. Wait runs on a
-	// goroutine of its own and only after drained, because os/exec closes the pipe as soon as it
-	// sees the child exit, which would cut the log short.
-	exited  chan struct{}
-	exitErr error
 }
-
-// bound is what the reader goroutine reports when it sees the "broker listening" line.
-type bound struct{ addr, boot string }
 
 // startBroker starts the broker binary with productionEnv and options.Env, waits for its
 // "broker listening" line unless options.NoWaitForListening says not to, and stops it with
@@ -315,34 +304,16 @@ func startBroker(t *testing.T, options brokerOptions) *brokerProcess {
 	}
 	cmd := exec.Command(binary)
 	cmd.Env = append(append(os.Environ(), productionEnv...), options.Env...)
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	p := &brokerProcess{
-		Cmd:       cmd,
-		listening: make(chan bound, 1),
-		drained:   make(chan struct{}),
-		exited:    make(chan struct{}),
-	}
-	go p.read(stderr)
-	go func() {
-		// Only once the pipe has been read to its end, which is os/exec's own rule about Wait and
-		// the pipes it hands out.
-		<-p.drained
-		p.exitErr = cmd.Wait()
-		close(p.exited)
-	}()
+	p := &brokerProcess{Process: cmdtest.Start(t, "broker", cmd)}
+	// Cleanups run last-registered-first, so this one — registered after cmdtest.Start's own —
+	// asks the broker to stop and waits its whole stop budget out before cmdtest's cleanup kills
+	// the child. The signal's own error is dropped because a process that has already exited is
+	// nothing for a teardown to fail on.
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-p.exited:
+		case <-p.Exited:
 		case <-time.After(stopTimeout):
-			_ = cmd.Process.Kill()
-			<-p.exited
 		}
 	})
 	if !options.NoWaitForListening {
@@ -351,76 +322,85 @@ func startBroker(t *testing.T, options brokerOptions) *brokerProcess {
 	return p
 }
 
-// read appends every line the broker logs to the process's log and reports the first
-// "broker listening" line — the bind fix's whole point: a real bind is reported once,
-// synchronously, only after Listen has already succeeded.
-func (p *brokerProcess) read(stderr io.Reader) {
-	defer close(p.drained)
-	announced := false
-	scanner := bufio.NewScanner(stderr)
-	for scanner.Scan() {
-		line := scanner.Text()
-		p.mu.Lock()
-		p.log.WriteString(line)
-		p.log.WriteString("\n")
-		soFar := p.log.String()
-		p.mu.Unlock()
-		if announced || !strings.Contains(line, "broker listening") {
-			continue
-		}
-		if m := addrLogPattern.FindStringSubmatch(line); m != nil {
-			announced = true
-			p.listening <- bound{addr: m[1], boot: soFar}
-		}
-	}
+// Log is everything the broker has logged so far, safe to read while it is still running. Its
+// output goes to a buffer os/exec's own copier drains to the end, which is what lets Log answer
+// mid-run and what keeps a chatty child running at all: a child whose pipe nobody reads blocks in
+// its own write once the pipe's buffer fills.
+func (p *brokerProcess) Log() string {
+	return p.Output.String()
 }
 
-// Log is everything the broker has logged so far, safe to read while it is still running.
-func (p *brokerProcess) Log() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.log.String()
-}
+// listeningPoll is how often AwaitListening looks for the broker's listening line. The line is
+// logged synchronously, only after Listen has already succeeded — the bind fix's whole point —
+// so this is how soon a test reads the bind, never how soon the broker makes it.
+const listeningPoll = 20 * time.Millisecond
 
 // AwaitListening waits up to within for the broker's "broker listening" line and records the
 // address it names in Addr and the log up to it in Boot. It fails t when the broker exits without
 // ever logging that line, and when within passes with no such line.
 func (p *brokerProcess) AwaitListening(t *testing.T, within time.Duration) {
 	t.Helper()
-	select {
-	case b := <-p.listening:
-		p.Addr, p.Boot = b.addr, b.boot
-	case <-p.drained:
-		// The line and the end of the pipe can both be ready at once, and select would then pick
-		// between them at random, so a broker that logged its address and exited straight after
-		// is read here rather than called a failure.
-		select {
-		case b := <-p.listening:
-			p.Addr, p.Boot = b.addr, b.boot
-		default:
-			t.Fatalf("the broker exited without ever logging %q:\n%s", "broker listening", p.Log())
+	deadline := time.Now().Add(within)
+	for {
+		if addr, boot, ok := listeningIn(p.Log()); ok {
+			p.Addr, p.Boot = addr, boot
+			return
 		}
-	case <-time.After(within):
-		t.Fatalf("no %q line within %s:\n%s", "broker listening", within, p.Log())
+		select {
+		case <-p.Exited:
+			// Read the log once more rather than judging an exited broker by the read taken
+			// before the exit: everything it wrote is in the buffer by the time Exited closes, so
+			// a broker that logged its address and exited straight after is read here, where it
+			// did bind, instead of being failed for the exit.
+			if addr, boot, ok := listeningIn(p.Log()); ok {
+				p.Addr, p.Boot = addr, boot
+				return
+			}
+			t.Fatalf("the broker exited without ever logging %q:\n%s", "broker listening", p.Log())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q line within %s:\n%s", "broker listening", within, p.Log())
+		}
+		time.Sleep(listeningPoll)
 	}
 }
 
-// Signal sends sig to the broker, as a kubelet sends SIGTERM to a pod it is stopping.
-func (p *brokerProcess) Signal(t *testing.T, sig os.Signal) {
-	t.Helper()
-	if err := p.Cmd.Process.Signal(sig); err != nil {
-		t.Fatalf("signal the broker at %s with %s: %v", p.Addr, sig, err)
+// listeningIn finds the broker's first "broker listening" line in log and answers the address it
+// names and the log up to the end of that line, which is the boot log: everything the broker
+// logged before it was serving.
+//
+// Only a line a newline closes counts. This reads a buffer the child's output is still being
+// copied into, and half a listening line would hand addrLogPattern half an address — 127.0.0.1:4
+// for a broker bound to port 41337 — and call it the one it bound.
+func listeningIn(log string) (addr, boot string, ok bool) {
+	complete := strings.LastIndexByte(log, '\n') + 1
+	for offset := 0; offset < complete; {
+		end := offset + strings.IndexByte(log[offset:], '\n') + 1
+		line := log[offset:end]
+		if strings.Contains(line, "broker listening") {
+			if m := addrLogPattern.FindStringSubmatch(line); m != nil {
+				return m[1], log[:end], true
+			}
+		}
+		offset = end
 	}
+	return "", "", false
 }
 
-// AwaitExit waits up to within for the broker to exit and answers what Wait answered: nil for a
-// clean exit, an *exec.ExitError naming the code otherwise. It fails t when the broker is still
-// running after within.
+// AwaitExit waits up to within for the broker to exit and answers what its exit was: nil for a
+// clean one, an *exec.ExitError naming the code otherwise, which is what Wait itself answers. It
+// fails t when the broker is still running after within. The bound is its caller's rather than
+// cmdtest.WaitExit's fixed thirty seconds, because a broker's stop budget is its whole drain plus
+// its shutdown, which the drain row gives ninety.
 func (p *brokerProcess) AwaitExit(t *testing.T, within time.Duration) error {
 	t.Helper()
 	select {
-	case <-p.exited:
-		return p.exitErr
+	case <-p.Exited:
+		if p.Cmd.ProcessState.Success() {
+			return nil
+		}
+		return &exec.ExitError{ProcessState: p.Cmd.ProcessState}
 	case <-time.After(within):
 		t.Fatalf("the broker at %s was still running %s after it was asked to stop:\n%s", p.Addr, within, p.Log())
 		return nil
