@@ -534,6 +534,40 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
+test.skipIf(omp === undefined && !onActions)(
+  "a real tool call between reminders puts the count back to zero, so the architect of a working worker is not told",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const pane = await stallPane(
+      omp,
+      [
+        [{ type: "text", text: "Pushed." }],
+        [{ type: "text", text: "Still pushing." }],
+        // The timer's reminder is answered with a real tool call: the worker is working.
+        [{ type: "tool_use", name: "bash", input: { command: "echo ran" } }],
+        [{ type: "text", text: "Ran the check." }],
+        [{ type: "text", text: "Nothing new." }],
+        [{ type: "text", text: "WAITING: CI on the pull request." }],
+      ],
+      {
+        env: {
+          LEGION_STALL_REMINDER_MS: "500",
+          LEGION_STALL_ARCHITECT_AFTER: "3",
+          LEGION_STALL_WAITING_MS: "600000",
+        },
+        quietMs: 4_000,
+      }
+    );
+
+    expect(pane.turns()).toHaveLength(6);
+    // Two reminders, the tool call putting the count back to zero, then two more: never three
+    // unanswered in a row, so the threshold is never reached.
+    expect(stallCounts(await pane.phaseEntries())).toEqual([0, 1, 2, 0, 1, 2]);
+    expect(pane.publishes()).toEqual([]);
+  },
+  120_000
+);
+
 /** The daemon's state with STALL-2 moved past implementing: the reviewer works it now, so no
  * reminder is the implementer's to get. */
 const MOVED_ON = {
