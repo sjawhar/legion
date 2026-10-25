@@ -8,7 +8,7 @@ import {
   createIssue,
   createProject,
   createProjectDocument,
-  disconnectAllStreams,
+  disconnectLiveSockets,
   getAsk,
   getInbox,
   getIssue,
@@ -1114,7 +1114,7 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
     await page.evaluate(() =>
       document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
     );
-    await disconnectAllStreams();
+    await disconnectLiveSockets();
     await refreshed;
     await page.evaluate(() => {
       const frames = Promise.withResolvers<void>();

@@ -37,19 +37,15 @@ type deliverySubscription struct {
 }
 
 // Subscribe answers one subscribe frame on conn, and reports whether conn's sub now follows the
-// frame's view. A view the matching GET route would refuse is an INVALID_QUERY error frame naming
-// the sub, a malformed view or a resume seq that is not a decimal change position INVALID_FRAME,
-// and a sub id conn already holds is then left as it was. Otherwise conn's sub follows the view
-// from now on: it is answered a snapshot, or, on a resume, the delta against the revisions the page
-// holds (a snapshot when the page applied nothing since before the oldest kept change,
-// OldestChangeSeq() - 1), and later only the deltas. While delivery is not configured the sub is
-// told DELIVERY_NOT_CONFIGURED once and stays open, and the settings' first save answers its
-// snapshot. A sub id conn already holds is replaced.
+// frame's view. The socket has refused a frame with no sub (subscribeLive). A view the matching GET
+// route would refuse is an INVALID_QUERY error frame naming the sub, a malformed view or a resume
+// seq that is not a decimal change position INVALID_FRAME, and a sub id conn already holds is then
+// left as it was. Otherwise conn's sub follows the view from now on: it is answered a snapshot, or,
+// on a resume, the delta against the revisions the page holds (a snapshot when the page applied
+// nothing since before the oldest kept change, OldestChangeSeq() - 1), and later only the deltas.
+// While delivery is not configured the sub is told DELIVERY_NOT_CONFIGURED once and stays open,
+// and the settings' first save answers its snapshot. A sub id conn already holds is replaced.
 func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscription) bool {
-	if frame.Sub == "" {
-		conn.Send(liveRefusal("", "INVALID_FRAME", "a subscribe frame names its sub"))
-		return false
-	}
 	spec, refusal := parseDeliveryLiveView(frame.View)
 	if refusal != nil {
 		refusal.Sub = frame.Sub

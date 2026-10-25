@@ -796,7 +796,8 @@ export function useEventFeed({
         if (position !== null && (cursor === null || position > cursor)) {
           cursor = position;
         }
-        const type = (raw as { type?: unknown } | null)?.type;
+        const type =
+          typeof raw === "object" && raw !== null && "type" in raw ? raw.type : undefined;
         // `Object.hasOwn`, not `in`: `knownEventTypes` inherits `Object.prototype`, so `in` reads
         // an event named `constructor` or `toString` as a known type and reads it as an event.
         if (typeof type !== "string" || !Object.hasOwn(knownEventTypes, type)) {

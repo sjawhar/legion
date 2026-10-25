@@ -68,8 +68,8 @@ import type {
   ReplyTarget,
 } from "./composer-model";
 import { MODE_LABELS, plainDelivery } from "./delivery";
-import { stoppable } from "./held-sends";
 import { ReplyQuote } from "./ReplyQuote";
+import { StopTryingButton } from "./StopTryingButton";
 import {
   DELIVERY_COMMANDS,
   type DeliveryPlan,
@@ -1328,16 +1328,7 @@ export function MentionComposer({
           ? KEYED_SEND_LATE_TEXT
           : `Still sending — the server has not answered in ${SEND_DEADLINE_MS / 1000} seconds. The draft stays here until it does.`}
       </p>
-      {stoppable(outgoing.held) || outgoing.held?.stopping === true ? (
-        <RefusableButton
-          busy={outgoing.held?.stopping === true ? "Stopping…" : undefined}
-          look="secondary-compact"
-          onPress={outgoing.stop}
-          refusal={null}
-        >
-          Stop trying
-        </RefusableButton>
-      ) : null}
+      <StopTryingButton held={outgoing.held} onStop={outgoing.stop} />
     </div>
   ) : null;
   const form = (

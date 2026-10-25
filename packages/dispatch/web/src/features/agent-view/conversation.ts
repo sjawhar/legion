@@ -89,7 +89,10 @@ function isCommand(command: unknown): command is AgentStreamCommand {
  * throw takes the whole page to the route's error screen — on every load, because the session's
  * ring serves the same frame again. A frame that does not check out is dropped instead.
  */
-export function isRenderableFrame(frame: AgentStreamFrame): boolean {
+export function isRenderableFrame(value: unknown): value is AgentStreamFrame {
+  if (typeof value !== "object" || value === null) return false;
+  // Read as the frame it claims to be; every field below is checked before anything trusts it.
+  const frame = value as AgentStreamFrame;
   if (frame.v !== 1 || typeof frame.seq !== "number") return false;
   if (frame.kind === "tool-result") {
     const { result } = frame;
@@ -117,6 +120,8 @@ export function isRenderableFrame(frame: AgentStreamFrame): boolean {
   if (message.model !== undefined && typeof message.model !== "string") return false;
   if (!Array.isArray(message.parts)) return false;
   return message.parts.every((part) => {
+    // A JSON null or primitive in the list is no part at all.
+    if (typeof part !== "object" || part === null) return false;
     if (part.type === "text") return typeof part.text === "string";
     // Text is the only part a user message may carry. assistant-ui throws
     // "Unsupported user message part type: reasoning" on the others, exactly as it does for a
@@ -134,7 +139,7 @@ export function isRenderableFrame(frame: AgentStreamFrame): boolean {
   });
 }
 
-export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): AgentConversation {
+export function applyFrame(state: AgentConversation, frame: unknown): AgentConversation {
   if (!isRenderableFrame(frame)) return state;
   if (frame.kind === "tool-result") {
     const key = `t:${frame.result.toolCallId}`;
@@ -180,7 +185,7 @@ export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): A
 
 export function applyFrames(
   state: AgentConversation,
-  frames: readonly AgentStreamFrame[]
+  frames: readonly unknown[]
 ): AgentConversation {
   return frames.reduce(applyFrame, state);
 }

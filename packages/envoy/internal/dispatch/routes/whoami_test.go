@@ -57,13 +57,6 @@ func storeRouter(t *testing.T, database *store.Store) http.Handler {
 	return handler
 }
 
-// whoamiAnswer is what GET /auth/whoami answers a signed-in person.
-type whoamiAnswer struct {
-	Kind      string `json:"kind"`
-	Login     string `json:"login"`
-	EventHead string `json:"event_head"`
-}
-
 // askWhoami answers GET /auth/whoami as alice@d.example, failing the test unless it answers 200.
 func askWhoami(t *testing.T, handler http.Handler) whoamiAnswer {
 	t.Helper()

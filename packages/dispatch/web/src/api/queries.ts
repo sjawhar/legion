@@ -173,11 +173,23 @@ const LIVE = {
   staleTime: Number.POSITIVE_INFINITY,
 } as const;
 
+/** The body each delivery view's kind is answered with: the GET route's it mirrors. */
+interface DeliveryLiveBodies {
+  readonly timeline: DeliveryTimelineResponse;
+  readonly measures: DeliveryMeasuresResponse;
+  readonly pipeline: DeliveryPipelineResponse;
+}
+
 /** The live view's answer, which is the body of the GET route its kind mirrors. */
-function subscribeLive<B>(context: QueryFunctionContext, view: DeliveryLiveView): Promise<B> {
-  // The socket answers each view with its own route's body (packages/contracts DeliveryLiveView),
-  // which the kind the caller passes names; the frame carries the union.
-  return liveSocketFor(context.client).subscribe(context.queryKey, view) as Promise<B>;
+function subscribeLive<V extends DeliveryLiveView>(
+  context: QueryFunctionContext,
+  view: V
+): Promise<DeliveryLiveBodies[V["kind"]]> {
+  // The socket answers each view with its own route's body (packages/contracts DeliveryLiveView);
+  // the frame carries the union, and the view's kind names the member.
+  return liveSocketFor(context.client).subscribe(context.queryKey, view) as Promise<
+    DeliveryLiveBodies[V["kind"]]
+  >;
 }
 
 /** The delivery timeline, live: the window, the search and every facet, applied by Dispatch
@@ -187,7 +199,7 @@ export const deliveryTimelineQuery = (view: DeliveryLiveView & { kind: "timeline
     ...LIVE,
     placeholderData: keepPreviousData,
     queryKey: ["delivery", "timeline", view],
-    queryFn: (context) => subscribeLive<DeliveryTimelineResponse>(context, view),
+    queryFn: (context) => subscribeLive(context, view),
   });
 
 /** The measures panel's own read for a brushed window, live, under `["delivery"]` beside the
@@ -197,7 +209,7 @@ export const deliveryMeasuresQuery = (view: DeliveryLiveView & { kind: "measures
     ...LIVE,
     placeholderData: keepPreviousData,
     queryKey: ["delivery", "measures", view],
-    queryFn: (context) => subscribeLive<DeliveryMeasuresResponse>(context, view),
+    queryFn: (context) => subscribeLive(context, view),
   });
 
 /** One deploy-repository run with every job it ran, read by GET. A live delta that changes the
@@ -213,7 +225,7 @@ export const deliveryPipelineQuery = (view: DeliveryLiveView & { kind: "pipeline
   queryOptions({
     ...LIVE,
     queryKey: ["delivery", "pipeline", view],
-    queryFn: (context) => subscribeLive<DeliveryPipelineResponse>(context, view),
+    queryFn: (context) => subscribeLive(context, view),
   });
 
 /** The delivery timeline's configuration record, or `null` until someone sets it: the Settings

@@ -72,14 +72,29 @@ export function useAgentStream(sessionID: string): AgentStreamState {
       onResponder: (responder) =>
         setHeard((previous) => ({ ...previous, answered: true, responding: responder.responding })),
       // A rebuild from the session's own replay rather than a layer over a conversation whose
-      // newest frames may already be gone from the session's ring.
-      onReplay: (replay) =>
+      // newest frames may already be gone from the session's ring. The replay is the session's
+      // own JSON, which Dispatch relays unread: one without a list of frames rebuilds nothing,
+      // though it is still the session answering, and `applyFrames` drops each frame that does
+      // not check out.
+      onReplay: (replay) => {
+        if (
+          typeof replay !== "object" ||
+          replay === null ||
+          !("frames" in replay) ||
+          !Array.isArray(replay.frames)
+        ) {
+          console.error("agent view: a replay with no list of frames", replay);
+          setHeard((previous) => ({ ...previous, answered: true }));
+          return;
+        }
+        const frames: readonly unknown[] = replay.frames;
         setHeard((previous) => ({
           ...previous,
           answered: true,
-          conversation: applyFrames(EMPTY_CONVERSATION, replay.frames),
+          conversation: applyFrames(EMPTY_CONVERSATION, frames),
           replays: previous.replays + 1,
-        })),
+        }));
+      },
       onFrame: (frame) =>
         setHeard((previous) => ({
           ...previous,

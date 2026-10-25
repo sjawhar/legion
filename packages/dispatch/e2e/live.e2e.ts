@@ -5,7 +5,7 @@ import {
   createIssue,
   createMessage,
   createProject,
-  disconnectAllStreams,
+  disconnectLiveSockets,
   getIssue,
   patchIssue,
   putArchitectureSource,
@@ -372,7 +372,7 @@ test("live: a forced server disconnect resumes from the last event id", async ({
   await expect.poll(() => eventSubscriptions.length).toBeGreaterThanOrEqual(1);
 
   // A 1012 restart opens the socket at once and marks the event subscription as a gap.
-  await disconnectAllStreams();
+  await disconnectLiveSockets();
 
   await createMessage(issue.key, { body: "Missed during disconnect" }, bob);
   await expect(page.getByText("Missed during disconnect")).toBeVisible();

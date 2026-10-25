@@ -10,7 +10,7 @@ import {
   createIssueArtifact,
   createProject,
   dashboardOrigin,
-  disconnectAllStreams,
+  disconnectLiveSockets,
   getArtifactText,
 } from "./api";
 import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
@@ -473,7 +473,7 @@ test("an edit typed while the socket was down survives a text refetch the server
   // Dispatch restarting closes the page's live socket (1012); the page reopens it at once and,
   // once the event feed starts again, refreshes every query it holds for the gap, the document's
   // text among them; the app retries a 5xx twice before it fails the read.
-  await disconnectAllStreams();
+  await disconnectLiveSockets();
   await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
   // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
   // the page is given a moment to render the failure before what it shows is read.

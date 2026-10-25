@@ -9,12 +9,7 @@
 // change it applied with the revisions it holds and the event feed from the last event it applied,
 // and Dispatch answers what changed since. Dispatch rotates every socket once it reaches its age
 // (close 4001); the page reopens at once and shows nothing of it.
-import {
-  type AgentStreamFrame,
-  type AgentStreamReplay,
-  type AgentStreamResponder,
-  LIVE_SOCKET_MAX_AGE_CLOSE,
-} from "@legion/contracts";
+import { type AgentStreamResponder, LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts";
 import { hashKey, type QueryClient, type QueryKey, useQueryClient } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
 
@@ -65,7 +60,7 @@ const REPLACED = 4000;
 /** The status the matching GET route answers each error frame's code with, so the page's error
  *  handling (`isDeliveryNotConfigured`, the shared retry policy) reads a live refusal as it read
  *  the route's. Any other code is the server's own failure. */
-const ERROR_STATUS: Record<string, number> = {
+const ERROR_STATUS: Readonly<Partial<Record<string, number>>> = {
   DELIVERY_NOT_CONFIGURED: 404,
   INVALID_FRAME: 400,
   INVALID_QUERY: 400,
@@ -114,8 +109,11 @@ export interface EventsHandlers {
 /** An agent live view's side of its subscription. */
 export interface AgentHandlers {
   onResponder(data: AgentStreamResponder): void;
-  onReplay(data: AgentStreamReplay): void;
-  onFrame(data: AgentStreamFrame): void;
+  /** The session's replay, as the session published it: Dispatch relays it unread
+   *  (`LiveAgentFrame`), so the handler checks it before it renders it. */
+  onReplay(data: unknown): void;
+  /** One frame the session published, unread by Dispatch as a replay is. */
+  onFrame(data: unknown): void;
   /** An error frame for this subscription. Terminal: the page drops the subscription and never
    *  sends it again. */
   onUnavailable(code: string, message: string): void;
@@ -346,7 +344,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       case "frame":
         return sub.handlers.onFrame(frame.data);
       default:
-        console.error("live socket: an agent frame of an unknown event", frame as unknown);
+        console.error("live socket: an agent frame of an unknown event", frame satisfies never);
     }
   };
 
@@ -411,7 +409,20 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
   const receive = (data: unknown) => {
     lastFrameAt = Date.now();
     attempt = 0;
-    const frame = JSON.parse(String(data)) as LiveServerFrame;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(String(data));
+    } catch (error) {
+      console.error("live socket: a frame that is not JSON", data, error);
+      return;
+    }
+    // Dispatch writes every frame from the contract's types (fixtures/live holds the server to
+    // them), so an object naming its type is read as that type's frame; anything else is dropped.
+    if (typeof parsed !== "object" || parsed === null || !("type" in parsed)) {
+      console.error("live socket: a frame with no type", parsed);
+      return;
+    }
+    const frame = parsed as LiveServerFrame;
     switch (frame.type) {
       case "heartbeat":
         return;
@@ -439,7 +450,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       case "error":
         return onError(frame);
       default:
-        console.error("live socket: a frame of an unknown type", frame as unknown);
+        console.error("live socket: a frame of an unknown type", frame satisfies never);
     }
   };
 
@@ -464,15 +475,21 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     cancelStuck = after(LIVE_SOCKET_STUCK_MS, () => update({ stuck: true }));
   };
 
-  /** Lets the current socket go (4000): its subscriptions resume on the next, after a gap. */
-  const letGo = () => {
-    const dropped = socket;
-    if (dropped === null) return;
+  /** Lets go of the current socket, whose events the page ignores from now on, and stops checking
+   *  it for silence. Returns it, for the caller that closes it. */
+  const detach = (): WebSocket | null => {
+    const detached = socket;
     socket = null;
     isOpen = false;
     stopSilenceCheck?.();
     stopSilenceCheck = undefined;
-    dropped.close(REPLACED);
+    return detached;
+  };
+
+  /** Lets the current socket go (4000): its subscriptions resume on the next, after a gap. */
+  const letGo = () => {
+    if (socket === null) return;
+    detach()?.close(REPLACED);
     markGap();
     reconnecting();
   };
@@ -542,10 +559,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
 
   const lost = (code: number) => {
     const wasOpen = isOpen;
-    socket = null;
-    isOpen = false;
-    stopSilenceCheck?.();
-    stopSilenceCheck = undefined;
+    detach();
     if (wasOpen && code === LIVE_SOCKET_MAX_AGE_CLOSE) {
       // Dispatch rotated a socket that reached its age: every subscription resumes on the next,
       // nothing was missed, and nothing shows.
@@ -570,17 +584,12 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
   const shutDown = () => {
     cancelReconnect?.();
     cancelReconnect = undefined;
-    stopSilenceCheck?.();
-    stopSilenceCheck = undefined;
     cancelStuck?.();
     cancelStuck = undefined;
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("offline", onOffline);
     window.removeEventListener("online", onOnline);
-    const closing = socket;
-    socket = null;
-    isOpen = false;
-    closing?.close(1000);
+    detach()?.close(1000);
     update({ since: null, state: "closed", stuck: false });
   };
 

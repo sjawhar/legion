@@ -18,6 +18,7 @@
  *  contract; 2 on a usage error. */
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts";
 
 import { LIVE_SOCKET_SILENT_MS, reconnectDelayMs } from "../web/src/api/live-socket";
 import type {
@@ -127,8 +128,6 @@ const USAGE =
 const SUB = "probe";
 /** Dispatch closes every socket with this code when it shuts down; the page reconnects at once. */
 const SERVICE_RESTART = 1012;
-/** Dispatch rotates a socket at this code; the page reconnects before any backoff. */
-const SOCKET_ROTATED = 4001;
 /** The code the page closes a silent socket with before it opens another (api/live-socket.ts). */
 const REPLACED = 4000;
 /** The error codes that refuse what the probe sent: its view or its frame. Waiting cannot change
@@ -498,7 +497,7 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
       fail(`Dispatch refused the connection to ${liveUrl.href}: ${reason || `close ${code}`}`);
       return;
     }
-    if (code === SERVICE_RESTART || code === SOCKET_ROTATED) {
+    if (code === SERVICE_RESTART || code === LIVE_SOCKET_MAX_AGE_CLOSE) {
       open();
       return;
     }

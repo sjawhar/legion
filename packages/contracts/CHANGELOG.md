@@ -9,8 +9,10 @@
   `AgentLiveView`. Delivery views resume with `DeliveryLiveResume` (`seq`, `revs`); events views
   resume with `EventsLiveResume` (`since`) and begin with `LiveEventsStart`; agent views begin from
   the session replay. `LiveEventFrame`, `LiveAgentFrame`, and `LiveEnded` complete the new frame
-  family. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a random age in
-  [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and
+  family; a `LiveAgentFrame`'s `data` is an `AgentStreamResponder` for its `responder` event and
+  `unknown` for `replay` and `frame`, the session's own JSON, which Dispatch relays unparsed and a
+  page checks before it renders it. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a
+  random age in [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and
   `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64. `fixtures/delivery-live/` is now `fixtures/live/`.
 - `CreateAgentMessageInput.idempotency_key`, required in the type since the dashboard sends it on
   every send: it names one session-targeted send for its sender. A repeat with the same session,
@@ -115,9 +117,10 @@
 - **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`,
   `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`,
   `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`,
-  `LiveClientFrame`, `LiveError`, `LiveHeartbeat` and `LiveServerFrame`. `LiveSubscribe.view` is
-  any `LiveView` and its `resume` a `DeliveryLiveResume` or an `EventsLiveResume`, and
-  `LiveServerFrame` adds the events and agent views' frames.
+  `LiveClientFrame`, `LiveError`, `LiveHeartbeat` and `LiveServerFrame`. `LiveSubscribe` is a
+  union by view kind: a `DeliveryLiveView` resumes with a `DeliveryLiveResume`, an
+  `EventsLiveView` with an `EventsLiveResume`, and an `AgentLiveView` with none, which are the
+  only pairings Dispatch accepts. `LiveServerFrame` adds the events and agent views' frames.
 - `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
   broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
   `POST /api/v1/.../comments` and `POST /api/v1/broadcasts` accept, generated into Go as

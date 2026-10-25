@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentStreamFrame, AgentStreamReplay, AgentStreamResponder } from "./agent-stream";
+import type { AgentStreamResponder } from "./agent-stream";
 import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
@@ -3210,16 +3210,23 @@ export interface EventsLiveResume {
   readonly since: string;
 }
 
-export interface LiveSubscribe {
+/** A subscribe frame for a view of type `V`, whose resume is an `R`. */
+interface LiveSubscribeTo<V extends LiveView, R> {
   readonly type: "subscribe";
   /** The page's own id for this subscription, echoed on every frame for it. */
   readonly sub: string;
-  readonly view: LiveView;
-  /** A reconnecting page's resume point: a `DeliveryLiveResume` for a delivery view, an
-   *  `EventsLiveResume` for an events view, and none for an agent view, which starts from the
-   *  session's replay. Any other pairing is an `INVALID_FRAME` error frame. */
-  readonly resume?: DeliveryLiveResume | EventsLiveResume;
+  readonly view: V;
+  /** A reconnecting page's resume point, of its view's kind. */
+  readonly resume?: R;
 }
+/** Starts the subscription `sub` names. Its resume is its view's kind's: a `DeliveryLiveResume`
+ *  for a delivery view, an `EventsLiveResume` for the events view, and none for an agent view,
+ *  which starts from the session's replay. Dispatch refuses any other pairing with an
+ *  `INVALID_FRAME` error frame, so the type admits none. */
+export type LiveSubscribe =
+  | LiveSubscribeTo<DeliveryLiveView, DeliveryLiveResume>
+  | LiveSubscribeTo<EventsLiveView, EventsLiveResume>
+  | LiveSubscribeTo<AgentLiveView, never>;
 export interface LiveUnsubscribe {
   readonly type: "unsubscribe";
   readonly sub: string;
@@ -3298,15 +3305,17 @@ interface LiveAgentEvent<E extends string, D> {
   readonly type: "agent";
   readonly sub: string;
   readonly event: E;
-  /** The session's own JSON, which Dispatch relays and never parses: a page checks it before it
-   *  renders it. */
   readonly data: D;
 }
-/** One message of a session's agent stream; `event` names what `data` is. */
+/** One message of a session's agent stream; `event` names what `data` is. The responder verdict
+ *  is Dispatch's own. A replay's or a frame's data is the session's own JSON, which Dispatch
+ *  relays and never parses, so it is `unknown` here: meant to be an `AgentStreamReplay` or an
+ *  `AgentStreamFrame`, it is whatever the session published, and a page checks it before it
+ *  renders it. */
 export type LiveAgentFrame =
   | LiveAgentEvent<"responder", AgentStreamResponder>
-  | LiveAgentEvent<"replay", AgentStreamReplay>
-  | LiveAgentEvent<"frame", AgentStreamFrame>;
+  | LiveAgentEvent<"replay", unknown>
+  | LiveAgentEvent<"frame", unknown>;
 /** Dispatch ended this one subscription: it fell behind (`behind`), or the relay dropped the
  *  viewer (`dropped`). The page subscribes it again at once. */
 export interface LiveEnded {

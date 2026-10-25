@@ -389,6 +389,15 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// whoamiAnswer is what GET /auth/whoami answers a signed-in person, the Go mirror of
+// packages/contracts' AuthenticatedUser. Its fields are in their keys' order, which is the order the
+// answer's JSON has always carried them in.
+type whoamiAnswer struct {
+	EventHead string `json:"event_head"`
+	Kind      string `json:"kind"`
+	Login     string `json:"login"`
+}
+
 // authWhoami answers the signed-in person and event_head, the decimal id of the newest committed
 // event, read after the sign-in check and before the answer is written. The page starts every read
 // the event feed keeps current only once whoami has answered, and resumes its first events
@@ -410,7 +419,7 @@ func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read; ask again", "EVENT_HEAD_UNAVAILABLE")
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": email, "event_head": strconv.FormatInt(head, 10)})
+	api.WriteJSON(w, http.StatusOK, whoamiAnswer{EventHead: strconv.FormatInt(head, 10), Kind: "user", Login: email})
 }
 
 // apiGithubRest serves the web app's GitHub reads to a person, as the GitHub App.

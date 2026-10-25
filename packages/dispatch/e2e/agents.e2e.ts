@@ -17,7 +17,7 @@ import {
   createIssue,
   createMessage,
   createProject,
-  disconnectAllStreams,
+  disconnectLiveSockets,
   getAgentStates,
   listAgentMessages,
   putAgentState,
@@ -485,7 +485,7 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
     // state, so this tab learns it only when the stream reopens - and a reconnect has to
     // refresh every query the app holds, not the ones some hand-written list remembered.
     await putAgentState(planner.session_id, { cleared_before: new Date().toISOString() });
-    await disconnectAllStreams();
+    await disconnectLiveSockets();
     await expect(plannerCard.getByRole("button", { name: "Show anyway" })).toBeVisible();
     await expect(conversation).toHaveCount(0);
   } finally {

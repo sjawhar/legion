@@ -87,9 +87,15 @@ type liveKind struct {
 	start func(ctx context.Context, stream liveStreamer, sub string, view LiveView, resume *EventsLiveResume) (liveSubscription, *LiveError)
 }
 
-// liveSub is one subscription a socket holds. A delivery view's is the hub's and has neither a
-// running subscription nor a stream of its own.
+// liveSub is one subscription a socket holds. A delivery view's is the hub's, and its streamed is
+// nil; an events or agent subscription's is streamed.
 type liveSub struct {
+	streamed *streamedLiveSub
+}
+
+// streamedLiveSub is an events or agent subscription a socket holds: what runs it, never nil, and
+// the stream it writes through.
+type streamedLiveSub struct {
 	running liveSubscription
 	stream  *liveSubscriptionStream
 }
@@ -148,7 +154,7 @@ func (s *server) subscribeLive(socket *liveSocket, frame LiveSubscribe) {
 		return
 	}
 	kind := frame.View.Kind
-	delivery := kind == deliveryLiveTimeline || kind == deliveryLiveMeasures || kind == deliveryLivePipeline
+	_, delivery := deliveryLiveKinds[kind]
 	other, served := s.liveKinds[kind]
 	if !delivery && !served {
 		socket.Send(liveRefusal(sub, "INVALID_FRAME", "view.kind "+strconv.Quote(kind)+" is not a view this socket serves"))
@@ -181,7 +187,7 @@ func (s *server) subscribeLive(socket *liveSocket, frame LiveSubscribe) {
 	}
 
 	if delivery {
-		if held != nil && held.running != nil {
+		if held != nil && held.streamed != nil {
 			s.endLive(socket, sub, held)
 		}
 		if s.deliveryHub.Subscribe(socket, deliverySubscription{Sub: sub, View: frame.View.DeliveryLiveView, Resume: deliveryResume}) {
@@ -206,7 +212,14 @@ func (s *server) subscribeLive(socket *liveSocket, frame LiveSubscribe) {
 		socket.Send(*refusal)
 		return
 	}
-	socket.subs[sub] = &liveSub{running: running, stream: stream}
+	if running == nil {
+		// A kind must start the subscription or refuse it; one that did neither is a bug, and the
+		// socket holds nothing it could never stop.
+		slog.Error("dispatch: a live view kind neither started nor refused a subscription", "kind", kind)
+		socket.Send(liveRefusal(sub, codeInternal, "the subscription could not start"))
+		return
+	}
+	socket.subs[sub] = &liveSub{streamed: &streamedLiveSub{running: running, stream: stream}}
 }
 
 // unsubscribeLive ends the subscription sub names, of any kind; a sub the socket does not hold is
@@ -222,15 +235,15 @@ func (s *server) unsubscribeLive(socket *liveSocket, sub string) {
 // still queued are no longer written, and the socket waits for it to return once it ends.
 func (s *server) endLive(socket *liveSocket, sub string, held *liveSub) {
 	delete(socket.subs, sub)
-	if held.running == nil {
+	if held.streamed == nil {
 		s.deliveryHub.Unsubscribe(socket, sub)
 		return
 	}
-	held.stream.stopped.Store(true)
+	held.streamed.stream.stopped.Store(true)
 	socket.ending.Add(1)
 	go func() {
 		defer socket.ending.Done()
-		held.running.stop()
+		held.streamed.running.stop()
 	}()
 }
 
@@ -239,7 +252,7 @@ func (s *server) endLive(socket *liveSocket, sub string, held *liveSub) {
 // delivery views' (deliveryHub.Close).
 func (s *server) endLiveSubscriptions(socket *liveSocket) {
 	for sub, held := range socket.subs {
-		if held.running != nil {
+		if held.streamed != nil {
 			s.endLive(socket, sub, held)
 		}
 	}

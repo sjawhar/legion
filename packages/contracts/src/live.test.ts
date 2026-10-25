@@ -6,10 +6,16 @@ import ended from "../fixtures/live/ended.json";
 import error from "../fixtures/live/error.json";
 import event from "../fixtures/live/event.json";
 import eventsStart from "../fixtures/live/events_start.json";
+import freshness from "../fixtures/live/freshness.json";
 import heartbeat from "../fixtures/live/heartbeat.json";
 import snapshot from "../fixtures/live/snapshot.json";
+import subscribeAgent from "../fixtures/live/subscribe_agent.json";
+import subscribeEvents from "../fixtures/live/subscribe_events.json";
+import subscribeTimeline from "../fixtures/live/subscribe_timeline.json";
+import unsubscribe from "../fixtures/live/unsubscribe.json";
 import { AGENT_STREAM_PROTOCOL, type AgentStreamResponder } from "./agent-stream";
 import {
+  type AgentLiveView,
   type DeliveryLiveCounts,
   type DeliveryLiveDelta,
   type DeliveryLiveFreshness,
@@ -20,9 +26,11 @@ import {
   type DeliveryLiveRevChanges,
   type DeliveryLiveRevs,
   type DeliveryLiveSnapshot,
+  type DeliveryLiveView,
   type DeliveryTimelineResponse,
   type DispatchEvent,
   type EventsLiveResume,
+  type EventsLiveView,
   LIVE_SOCKET_MAX_AGE_CLOSE,
   LIVE_SOCKET_MAX_AGE_MS,
   LIVE_SOCKET_MAX_SUBSCRIPTIONS,
@@ -40,11 +48,12 @@ import {
   type LiveView,
 } from "./dispatch-api";
 
-// The frames in fixtures/live are written by the Dispatch server's own diff and event feed
-// (TestTheLiveFixturesAreWhatTheDiffWrites, packages/envoy/internal/dispatch/api), so each is what
-// the live socket sends. These tests hold them to the Live* and DeliveryLive* contract key for
-// key: each list below must name every key of its type, or the type check fails, so a key the
-// contract gains or loses fails here until the server writes it too.
+// The frames Dispatch sends, in fixtures/live, are written by the Dispatch server's own diff and
+// event feed (TestTheLiveFixturesAreWhatTheDiffWrites, packages/envoy/internal/dispatch/api), so
+// each is what the live socket sends; the page's own frames there are read by the socket's own
+// decoding (TestTheClientLiveFixturesAreFramesTheSocketReads). These tests hold them to the Live*
+// and DeliveryLive* contract key for key: each list below must name every key of its type, or the
+// type check fails, so a key the contract gains or loses fails here until the server matches it.
 
 /** `list`, which must hold every member of U. */
 function allOf<U extends string>() {
@@ -251,6 +260,13 @@ test("a heartbeat frame carries its type and nothing else", () => {
   expect(Object.keys(SERVER_FRAME_KEYS)).toContain(heartbeat.type);
 });
 
+test("a freshness frame carries the freshness object a delivery body carries, and the stale sources", () => {
+  expect(keysOf(freshness)).toEqual(sorted(SERVER_FRAME_KEYS.freshness));
+  expect(freshness.type).toBe("freshness");
+  expect(keysOf(freshness.freshness)).toEqual(keysOf(snapshot.body.freshness));
+  for (const source of freshness.stale) expect(typeof source).toBe("string");
+});
+
 test("an events_start frame names the decimal id its subscription starts after", () => {
   expect(keysOf(eventsStart)).toEqual(sorted(SERVER_FRAME_KEYS.events_start));
   expect(eventsStart.type).toBe("events_start");
@@ -300,6 +316,29 @@ test("every frame names its type, and every frame of one subscription names the 
 test("a resume's keys tell a delivery view's resume from an events view's", () => {
   // Dispatch refuses a resume whose shape is not its view's kind, so the two share no key.
   for (const key of DELIVERY_RESUME_KEYS) expect(EVENTS_RESUME_KEYS).not.toContain(key);
+});
+
+test("the page's frames carry every key of their types, and the socket reads each", () => {
+  const timelineViewKeys = allOf<keyof Extract<DeliveryLiveView, { kind: "timeline" }>>()([
+    "kind",
+    "window",
+    "query",
+  ]);
+  const eventsViewKeys = allOf<keyof EventsLiveView>()(["kind"]);
+  const agentViewKeys = allOf<keyof AgentLiveView>()(["kind", "session_id"]);
+  const subscribeKeys = sorted(CLIENT_FRAME_KEYS.subscribe);
+
+  expect(keysOf(subscribeTimeline)).toEqual(subscribeKeys);
+  expect(keysOf(subscribeTimeline.view)).toEqual(sorted(timelineViewKeys));
+  expect(keysOf(subscribeTimeline.resume)).toEqual(sorted(DELIVERY_RESUME_KEYS));
+  expect(keysOf(subscribeTimeline.resume.revs)).toEqual(sorted(REVS_KEYS));
+  expect(keysOf(subscribeEvents)).toEqual(subscribeKeys);
+  expect(keysOf(subscribeEvents.view)).toEqual(sorted(eventsViewKeys));
+  expect(keysOf(subscribeEvents.resume)).toEqual(sorted(EVENTS_RESUME_KEYS));
+  // An agent view takes no resume.
+  expect(keysOf(subscribeAgent)).toEqual(subscribeKeys.filter((key) => key !== "resume"));
+  expect(keysOf(subscribeAgent.view)).toEqual(sorted(agentViewKeys));
+  expect(keysOf(unsubscribe)).toEqual(sorted(CLIENT_FRAME_KEYS.unsubscribe));
 });
 
 test("a socket ends at an age between thirty minutes and an hour, with a close code of its own", () => {

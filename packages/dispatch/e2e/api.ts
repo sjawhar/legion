@@ -784,7 +784,7 @@ export function putIssueState(
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
  * proves the page resumes every subscription after an unplanned gap.
  */
-export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+export function disconnectLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(
     "/api/v1/live/_test/disconnect",
     "POST",

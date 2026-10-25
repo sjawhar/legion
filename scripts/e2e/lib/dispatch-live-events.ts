@@ -1,9 +1,9 @@
 import { parseArgs } from "node:util";
+import { LIVE_SOCKET_MAX_AGE_CLOSE } from "../../../packages/contracts/src/dispatch-api";
 
 const USAGE =
   "usage: bun scripts/e2e/lib/dispatch-live-events.ts --url <dispatch> [--bearer-file <file> | --user <email>] [--since <id>] [--until <substring>] [--timeout <s>]";
 const SERVICE_RESTART = 1012;
-const SOCKET_ROTATED = 4001;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
@@ -298,7 +298,7 @@ async function watch(options: Options): Promise<boolean> {
       if (socket !== next || stopped) return;
       socket = null;
       write({ close: event.code, reason: event.reason });
-      const immediate = event.code === SERVICE_RESTART || event.code === SOCKET_ROTATED;
+      const immediate = event.code === SERVICE_RESTART || event.code === LIVE_SOCKET_MAX_AGE_CLOSE;
       const delay = immediate ? 0 : reconnectDelay(attempt++) * (0.75 + Math.random() * 0.5);
       reconnect = setTimeout(() => {
         reconnect = undefined;

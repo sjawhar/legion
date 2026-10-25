@@ -21,7 +21,7 @@ import {
 } from "../../theme/classes";
 import { useMarkRepliesRead } from "../agents/unread";
 import { MODE_LABELS } from "../conversation/delivery";
-import { stoppable } from "../conversation/held-sends";
+import { StopTryingButton } from "../conversation/StopTryingButton";
 import { KEYED_SEND_LATE_TEXT, SendStoppedError } from "../conversation/send-request";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
@@ -234,16 +234,7 @@ export function AgentConversationPage(): ReactNode {
                 <p className={`text-sm ${textMutedOnCanvas}`} role="status">
                   {held.status === "late" ? KEYED_SEND_LATE_TEXT : "Sending…"}
                 </p>
-                {stoppable(held) || held.stopping ? (
-                  <RefusableButton
-                    busy={held.stopping ? "Stopping…" : undefined}
-                    look="secondary-compact"
-                    onPress={live.stop}
-                    refusal={null}
-                  >
-                    Stop trying
-                  </RefusableButton>
-                ) : null}
+                <StopTryingButton held={held} onStop={live.stop} />
               </>
             )}
           </div>
