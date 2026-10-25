@@ -11,6 +11,7 @@ require (
 	github.com/aws/smithy-go v1.28.5
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/googleapis/gax-go/v2 v2.23.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/nats-io/nats.go v1.50.0
 	github.com/nats-io/nkeys v0.4.15
 	github.com/pulumi/pulumi-aws/sdk/v7 v7.50.0

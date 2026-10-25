@@ -55,33 +55,13 @@ func (s *server) startEventsView(ctx context.Context, stream liveStreamer, sub s
 	return s.startEventsSubscription(ctx, stream, sub, since), nil
 }
 
-// eventsSubscription is one running events view. stop cancels the subscription's own context,
-// which ends its goroutine wherever it waits, and returns once the goroutine has: the socket stops
-// a subscription while it stays open (an unsubscribe, a replacement) as well as when it ends.
-type eventsSubscription struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-}
-
-func (running *eventsSubscription) stop() {
-	running.cancel()
-	<-running.done
-}
-
 // startEventsSubscription starts sub's event feed on a goroutine of its own, after since when it
 // is not nil, and returns at once. The goroutine writes the subscription's frames through stream
 // until ctx ends or the subscription is stopped: events_start first, then the catch-up after the
 // id it names, then the events the relay publishes, and an ended frame (behind) should the relay
 // drop it or a read fail.
 func (s *server) startEventsSubscription(ctx context.Context, stream liveStreamer, sub string, since *int64) liveSubscription {
-	ctx, cancel := context.WithCancel(ctx)
-	running := &eventsSubscription{cancel: cancel, done: make(chan struct{})}
-	go func() {
-		defer close(running.done)
-		defer cancel()
-		s.feedEvents(ctx, stream, sub, since)
-	}()
-	return running
+	return runSubscription(ctx, func(ctx context.Context) { s.feedEvents(ctx, stream, sub, since) })
 }
 
 // feedEvents is one events subscription's whole life: it returns once the subscription has ended,

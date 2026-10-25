@@ -3,9 +3,9 @@
 package core_test
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 
@@ -294,6 +295,10 @@ func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *na
 	require.True(t, strings.HasSuffix(envelope.Topic, ".issue.created"), "event topic %q", envelope.Topic)
 }
 
+// requireAgentStreamRelayed signs a person in and watches the session's conversation through an
+// agent view on Dispatch's live socket: Dispatch tells the session a viewer is attached and asks
+// for its replay on the session's control subject, which its grant publishes, and relays the frame
+// the session publishes, which its grant subscribes.
 func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	t.Helper()
 	control, err := conn.SubscribeSync(contracts.AgentStreamControlSubject(dispatchSessionID))
@@ -318,14 +323,14 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	require.Equal(t, http.StatusFound, response.StatusCode)
 	_ = response.Body.Close()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, dispatchURL(port, "/api/v1/agents/"+dispatchSessionID+"/stream"), nil)
+	dialer := websocket.Dialer{Jar: jar, HandshakeTimeout: 10 * time.Second}
+	socket, _, err := dialer.DialContext(t.Context(), "ws://127.0.0.1:"+strconv.Itoa(port)+"/ws/live", nil)
 	require.NoError(t, err)
-	stream, err := human.Do(request)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = stream.Body.Close() })
-	require.Equal(t, http.StatusOK, stream.StatusCode)
+	t.Cleanup(func() { _ = socket.Close() })
+	require.NoError(t, socket.SetReadDeadline(time.Now().Add(10*time.Second)))
+	require.NoError(t, socket.WriteJSON(map[string]any{
+		"type": "subscribe", "sub": "agent", "view": map[string]string{"kind": "agent", "session_id": dispatchSessionID},
+	}))
 
 	watch, err := control.NextMsg(10 * time.Second)
 	require.NoError(t, err, "Dispatch sent no agent stream control message within 10s")
@@ -334,27 +339,33 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	require.NoError(t, err, "Dispatch sent no agent stream control message within 10s")
 	require.Equal(t, `{"v":1,"type":"replay"}`, string(replay.Data))
 	require.NoError(t, replay.Respond(nil))
+	requireAgentFrame(t, socket, "responder", `{"v":1,"responding":true}`)
 
 	frame := `{"v":1,"kind":"message","seq":1}`
 	require.NoError(t, conn.Publish(contracts.AgentStreamFramesSubject(dispatchSessionID), []byte(frame)))
 	require.NoError(t, conn.Flush())
-	requireSSEFrame(t, bufio.NewReader(stream.Body), frame)
+	requireAgentFrame(t, socket, "frame", frame)
 }
 
-func requireSSEFrame(t *testing.T, reader *bufio.Reader, want string) {
+// requireAgentFrame reads the live socket past its heartbeats to the agent view's next frame, which
+// must be named event and carry data.
+func requireAgentFrame(t *testing.T, socket *websocket.Conn, event, data string) {
 	t.Helper()
 	for {
-		line, err := reader.ReadString('\n')
-		require.NoError(t, err)
-		if line != "event: frame\n" {
+		var frame struct {
+			Type  string          `json:"type"`
+			Sub   string          `json:"sub"`
+			Event string          `json:"event"`
+			Data  json.RawMessage `json:"data"`
+		}
+		require.NoError(t, socket.ReadJSON(&frame))
+		if frame.Type == "heartbeat" {
 			continue
 		}
-		data, err := reader.ReadString('\n')
-		require.NoError(t, err)
-		require.Equal(t, "data: "+want+"\n", data)
-		separator, err := reader.ReadString('\n')
-		require.NoError(t, err)
-		require.Equal(t, "\n", separator)
+		require.Equal(t, "agent", frame.Type, "the live socket sent a %s frame, want the agent view's %s", frame.Type, event)
+		require.Equal(t, "agent", frame.Sub)
+		require.Equal(t, event, frame.Event)
+		require.Equal(t, data, string(frame.Data))
 		return
 	}
 }

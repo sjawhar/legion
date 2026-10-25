@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,57 +68,44 @@ func TestTheEventFeedClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 	}
 }
 
-// The same holds for a human watching an agent's live conversation: the relay resolves the viewer
-// on each heartbeat and stops relaying once their session has ended.
+// The same holds for a human watching an agent's live conversation: the socket that carries the
+// agent view resolves its person on each heartbeat and closes with 1008 once their session has
+// ended, so the view stops relaying.
 func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documents := docs.New(docs.Deps{Store: database, Events: broker})
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	person := &endableIdentity{}
+	source := agentstream.NewMemory()
+	source.SetResponder(plannerSessionID, true)
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
-		AgentStream: agentstream.NewMemory(), StreamHeartbeat: 20 * time.Millisecond,
+		AgentStream: source, StreamHeartbeat: time.Second, Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
-	response, err := http.Get(server.URL + "/api/v1/agents/" + plannerSessionID + "/stream")
-	if err != nil {
-		t.Fatalf("open agent stream: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("agent stream status %d, want 200", response.StatusCode)
-	}
-	reader := bufio.NewReader(response.Body)
-	if line, err := reader.ReadString('\n'); err != nil {
-		t.Fatalf("first line of the stream: %q %v", line, err)
+	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(server.URL, "http")+"/ws/live", nil).read()
+	client.subscribeAgent(t, "agent", plannerSessionID)
+	if data := client.agentFrame(t, "agent", "responder"); data != `{"v":1,"responding":true}` {
+		t.Fatalf("the agent view's first frame has data %s, want the session responding", data)
 	}
 
 	person.ended.Store(true)
-	closed := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(io.Discard, reader)
-		closed <- err
-	}()
-	select {
-	case err := <-closed:
-		if err != nil {
-			t.Fatalf("stream ended with %v, want a clean close", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the agent stream stayed open after its viewer stopped resolving")
+	if closed := client.closeError(t, 5*time.Second); closed.Code != gws.ClosePolicyViolation {
+		t.Fatalf("the agent view's socket closed with %d %q once its viewer stopped resolving, want 1008", closed.Code, closed.Text)
 	}
+	pollUntil(t, 5*time.Second, "the closed socket's view leaves the session's frames", func() bool { return source.Viewers(plannerSessionID) == 0 })
 }
 
 // A person whose session ends while their editor holds a document open loses the live document
-// too: the document socket resolves them again on every heartbeat, as the event streams do, and
+// too: the document socket resolves them again on every heartbeat, as the live socket does, and
 // closes once they no longer resolve, so the editor neither receives the document's edits nor
 // sends its own. Each case ends the session the way it ends in production: the hourly membership
 // check finding the person out of the group, and a sign-out.

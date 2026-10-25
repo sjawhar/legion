@@ -916,8 +916,9 @@ func TestAListWithARepeatedIDIsRefused(t *testing.T) {
 // contracts' and the dashboard's Bun tests read, to the frames this package writes: a timeline
 // snapshot, the delta of one deploy, a merge and a pull request leaving the window, the snapshot
 // a page subscribing afterwards gets (applying the delta to the first gives its body, but for the
-// freshness a delta never carries), an error, and the event feed's start, one of its events and
-// its end. `go test ./internal/dispatch/api -run TestTheLiveFixturesAreWhatTheDiffWrites -update`
+// freshness a delta never carries), an error, the event feed's start, one of its events and its
+// end, and an agent view's responder verdict, the one agent frame whose data Dispatch writes
+// itself. `go test ./internal/dispatch/api -run TestTheLiveFixturesAreWhatTheDiffWrites -update`
 // rewrites them.
 func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 	heldTo := liveFrom.Add(48 * time.Hour)
@@ -963,6 +964,7 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 		"events_start.json": liveEventsStart("events-1", 41),
 		"event.json":        event,
 		"ended.json":        liveEnded("events-1", liveEndedBehind),
+		"agent.json":        liveAgentFrame("agent-1", agentEventResponder, responderEvent(true)),
 	}
 	for name, frame := range frames {
 		got, err := json.MarshalIndent(frame, "", "  ")

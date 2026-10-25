@@ -441,7 +441,8 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the agent conversation stream is long-lived.
+		// No WriteTimeout: it is a deadline on a whole response, which a large file version sent
+		// to a slow client can outlast.
 	}
 	// Bound before serving, so an address that cannot be taken ends the process with 1: a
 	// supervisor must not read a port clash as a clean stop.

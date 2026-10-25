@@ -84,7 +84,7 @@ type Deps struct {
 	// JWT-shaped bearer is only ever an unknown personal token.
 	OIDC *oidc.Verifier
 	// AgentStream relays a live session's own conversation to a human watching it; nil is a
-	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
+	// deployment with no NATS, where an agent view is refused STREAM_UNAVAILABLE.
 	AgentStream agentstream.Source
 	// AgentSecrets relays the credential-request UI to the secrets broker; nil (the broker URL
 	// is unconfigured) means the feature is off: the pending list answers null, and every other
@@ -94,17 +94,15 @@ type Deps struct {
 	// nil keeps them in each version's row, and a row that still holds bytes is served from the
 	// row either way (files.BackfillRows moves them).
 	Files files.Store
-	// Lifetime bounds work a handler starts and does not wait for, and every event stream and
-	// live socket: it is the process's own context, cancelled when the server is shutting down,
-	// so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines behind,
-	// and ends each open stream (streamAgentConversation) and closes each live socket with 1012
-	// so http.Server.Shutdown is not held for its whole budget by a connection that never goes
-	// idle. The delivery hub runs on it, and GET /ws/live is mounted only with one. Nil means
-	// unbounded, which is what a test gets.
+	// Lifetime bounds work a handler starts and does not wait for, and every live socket: it is
+	// the process's own context, cancelled when the server is shutting down, so a deploy stops a
+	// broadcast's remaining deliveries instead of leaving goroutines behind, and closes each live
+	// socket with 1012, ending every subscription it carries, so http.Server.Shutdown is not held
+	// for its whole budget by a connection that never goes idle. The delivery hub runs on it, and
+	// GET /ws/live is mounted only with one. Nil means unbounded, which is what a test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
-	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
-	// its caller again, a document socket and a live socket resolve their caller again
+	// StreamHeartbeat is how often a document socket and a live socket resolve their caller again
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a live socket
 	// pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
@@ -152,7 +150,7 @@ type DepsInput struct {
 	// Files is the uploaded-file store; nil keeps files in Postgres. See Deps.Files.
 	Files            files.Store
 	TestHooksEnabled bool
-	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
+	// StreamHeartbeat replaces the heartbeat of the document and live sockets
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
@@ -255,6 +253,9 @@ type server struct {
 	// liveKinds starts a live socket's subscriptions to the views beside the delivery views, by
 	// kind (live_subscriptions.go); a kind it does not hold is refused.
 	liveKinds map[string]liveKind
+	// agentWatchInterval is how often an agent view re-arms its session: agentStreamWatchInterval,
+	// which a test replaces.
+	agentWatchInterval time.Duration
 	// eventRelay is the live feed every events subscription reads (INFRA-66), on every server
 	// register mounts: it starts its listening connection on the first subscription.
 	eventRelay *eventStreamRelay
@@ -325,8 +326,11 @@ func (s *server) waitBackground() {
 // register is Register, answering the server it mounted, whose delivery hub and event stream
 // relay a test waits out before its database closes.
 func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps}
-	s.liveKinds = map[string]liveKind{liveEventsView: {resumes: true, start: s.startEventsView}}
+	s := &server{deps: deps, agentWatchInterval: agentStreamWatchInterval}
+	s.liveKinds = map[string]liveKind{
+		liveEventsView: {resumes: true, start: s.startEventsView},
+		liveAgentView:  {start: s.startAgentView},
+	}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
@@ -356,12 +360,11 @@ func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 }
 
 // whileCallerResolves serves a connection that outlives its request, a websocket, only while its
-// caller resolves: on every StreamHeartbeat it resolves the caller again, as the event streams do,
-// and once the caller no longer resolves (a logout, a membership the sign-in issuer no longer
-// confirms, a revoked token) it cancels the connection's context, on which the document server and
-// the live socket close the socket. The check runs beside the handler, which holds pooled
-// connections of its own while it admits the socket, so it marks a context of its own for the pool
-// (store.ErrNestedAcquire).
+// caller resolves: on every StreamHeartbeat it resolves the caller again, and once the caller no
+// longer resolves (a logout, a membership the sign-in issuer no longer confirms, a revoked token)
+// it cancels the connection's context, on which the document server and the live socket close the
+// socket. The check runs beside the handler, which holds pooled connections of its own while it
+// admits the socket, so it marks a context of its own for the pool (store.ErrNestedAcquire).
 func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, closeConnection := context.WithCancel(r.Context())

@@ -183,8 +183,13 @@ type LiveEnded struct {
 }
 
 // liveEndedBehind is an ended frame's reason for a subscription that fell behind: an events
-// subscription the relay dropped, for a full buffer or a reset log, or one whose read failed.
+// subscription the relay dropped, for a full buffer or a reset log, or one whose read failed; an
+// agent view whose buffer filled.
 const liveEndedBehind = "behind"
+
+// liveEndedDropped is an ended frame's reason for an agent view the relay dropped, as a lost
+// connection does, or whose relay call failed.
+const liveEndedDropped = "dropped"
 
 // liveEnded is the frame ending sub, for reason.
 func liveEnded(sub, reason string) LiveEnded {
@@ -192,9 +197,10 @@ func liveEnded(sub, reason string) LiveEnded {
 }
 
 // LiveError refuses a frame or a subscription, by the code the matching GET route would answer
-// (INVALID_QUERY, DELIVERY_NOT_CONFIGURED) or the socket's own (INVALID_FRAME,
-// TOO_MANY_SUBSCRIPTIONS). Sub names the subscription it refuses, and is empty for a frame
-// Dispatch could not read a sub from.
+// (INVALID_QUERY, DELIVERY_NOT_CONFIGURED), the socket's own (INVALID_FRAME,
+// TOO_MANY_SUBSCRIPTIONS) or an agent view's (HUMAN_ONLY, SESSION_ID_INPUT, STREAM_UNAVAILABLE).
+// Sub names the subscription it refuses, and is empty for a frame Dispatch could not read a sub
+// from.
 type LiveError struct {
 	Type    string `json:"type"`
 	Sub     string `json:"sub,omitempty"`

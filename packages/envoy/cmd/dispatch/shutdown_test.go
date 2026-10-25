@@ -32,61 +32,47 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// promptShutdown bounds a SIGTERM's whole ordered shutdown with a dashboard open. Ending the
-// streams, finishing the requests in flight and settling one small document take milliseconds; a
-// stream that held the HTTP drain open would cost httpDrainBeforeDocuments, eleven seconds, alone.
+// promptShutdown bounds a SIGTERM's whole ordered shutdown with a dashboard open. Closing the
+// sockets, finishing the requests in flight and settling one small document take milliseconds; a
+// connection that held the HTTP drain open would cost httpDrainBeforeDocuments, eleven seconds,
+// alone.
 const promptShutdown = 3 * time.Second
 
-// streamedSessionID is the session whose conversation the test's agent view watches; the agent
-// stream route takes a session uuid.
+// streamedSessionID is the session whose conversation the test's agent view watches; an agent
+// view names a session uuid.
 const streamedSessionID = "01a0e090-4848-7473-acc5-fc96e6a646d3"
 
 // A deploy stops Dispatch while people have the dashboard open: every tab holds a live socket
-// subscribed to the event feed, and one on an agent's page holds that conversation's stream too.
-// SIGTERM closes each socket with 1012 and ends each stream, so http.Server.Shutdown returns once
-// the requests in flight have, and the document service settles the document an edit has just left
-// owing a settlement. An edit's settlement runs two seconds after it (docs.Deps.Settle's default),
-// so a signal sent as soon as the edit answers reaches the document service with that settlement
-// still owed, and Shutdown is the one that runs it.
+// subscribed to the event feed, and one on an agent's page holds that conversation's agent view on
+// its socket too. SIGTERM closes each socket with 1012, ending every subscription it carries, so
+// http.Server.Shutdown returns once the requests in flight have, and the document service settles
+// the document an edit has just left owing a settlement. An edit's settlement runs two seconds after
+// it (docs.Deps.Settle's default), so a signal sent as soon as the edit answers reaches the document
+// service with that settlement still owed, and Shutdown is the one that runs it.
 func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing.T) {
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
 	_, artifactID := process.createIssue(t)
 
-	feed := process.openLiveEvents(t)
-	feedEnded := make(chan streamEnd, 1)
-	go func() {
-		for {
-			if _, _, err := feed.ReadMessage(); err != nil {
-				feedEnded <- streamEnd{at: time.Now(), err: err}
-				return
-			}
-		}
-	}()
-	streams := map[string]<-chan streamEnd{
-		"agent conversation stream": process.openStream(t, "/api/v1/agents/"+streamedSessionID+"/stream"),
+	agentPage := process.openLiveEvents(t)
+	process.watchAgent(t, agentPage, streamedSessionID)
+	sockets := map[string]<-chan streamEnd{
+		"the event feed's live socket": socketEnd(process.openLiveEvents(t)),
+		"the agent page's live socket": socketEnd(agentPage),
 	}
 	process.editOwingSettlement(t, database, artifactID)
 
 	signalled := process.Terminate(t)
 	process.waitPromptExit(t, signalled)
-	ended := <-feedEnded
-	t.Logf("the event feed's live socket ended %v after SIGTERM (%v)", ended.at.Sub(signalled), ended.err)
-	// A socket the server closed reads its close frame; one the exiting process cut reads as an
-	// abnormal closure, which the page also reconnects from, but which says the server held the
-	// socket for as long as the process lived.
-	if !gws.IsCloseError(ended.err, gws.CloseServiceRestart) {
-		t.Errorf("the event feed's live socket ended with %v, want the server to close it with 1012", ended.err)
-	}
-	for name, streamEnded := range streams {
-		ended := <-streamEnded
-		t.Logf("the %s ended %v after SIGTERM (%v)", name, ended.at.Sub(signalled), ended.err)
-		// A stream the server ended reads to its end; one the exiting process cut reads as a
-		// broken response, which the dashboard's reader also reconnects from, but which says the
-		// server held the stream for as long as the process lived.
-		if ended.err != io.EOF {
-			t.Errorf("the %s ended with %v, want the server to end it (EOF)", name, ended.err)
+	for name, socketEnded := range sockets {
+		ended := <-socketEnded
+		t.Logf("%s ended %v after SIGTERM (%v)", name, ended.at.Sub(signalled), ended.err)
+		// A socket the server closed reads its close frame; one the exiting process cut reads as an
+		// abnormal closure, which the page also reconnects from, but which says the server held the
+		// socket for as long as the process lived.
+		if !gws.IsCloseError(ended.err, gws.CloseServiceRestart) {
+			t.Errorf("%s ended with %v, want the server to close it with 1012", name, ended.err)
 		}
 	}
 	if output := process.Output.String(); strings.Contains(output, `msg="dispatch: shutdown"`) ||
@@ -672,7 +658,7 @@ func (p *dispatchProcess) editOwingSettlement(t *testing.T, database *store.Stor
 	}
 }
 
-// streamEnd is when a stream or a socket stopped and the read error that stopped it.
+// streamEnd is when a socket stopped and the read error that stopped it.
 type streamEnd struct {
 	at  time.Time
 	err error
@@ -714,25 +700,39 @@ func (p *dispatchProcess) openLiveEvents(t *testing.T) *gws.Conn {
 	return conn
 }
 
-// openStream opens the server-sent stream at path as a signed-in tab holds it and reads it until it
-// ends, reporting when and how on the returned channel.
-func (p *dispatchProcess) openStream(t *testing.T, path string) <-chan streamEnd {
+// watchAgent subscribes conn, a live socket, to session's agent view, as an agent's page does,
+// returning once Dispatch has answered whether the session is responding (the view's first frame).
+func (p *dispatchProcess) watchAgent(t *testing.T, conn *gws.Conn, session string) {
 	t.Helper()
-	response, err := p.send(http.MethodGet, path, "")
-	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
+	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "sub": "agent", "view": map[string]string{"kind": "agent", "session_id": session}}); err != nil {
+		t.Fatalf("subscribe the live socket to the agent view: %v", err)
 	}
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
-		body, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		t.Fatalf("open %s: status %d, content type %q: %s", path, response.StatusCode, response.Header.Get("Content-Type"), body)
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		// An event frame's event is an object, an agent frame's a string, so it is read raw.
+		var frame struct {
+			Type, Sub string
+			Event     json.RawMessage
+		}
+		if err := conn.ReadJSON(&frame); err != nil {
+			t.Fatalf("read the agent view's responder: %v\n%s", err, p.Output.String())
+		}
+		if frame.Type == "agent" && frame.Sub == "agent" && string(frame.Event) == `"responder"` {
+			break
+		}
+		if frame.Type != "heartbeat" && frame.Type != "event" {
+			t.Fatalf("the live socket answered the agent view's subscribe with a %s frame, want its responder", frame.Type)
+		}
 	}
+	_ = conn.SetReadDeadline(time.Time{})
+}
+
+// socketEnd reads conn until it ends, reporting when and how on the returned channel.
+func socketEnd(conn *gws.Conn) <-chan streamEnd {
 	ended := make(chan streamEnd, 1)
 	go func() {
-		defer response.Body.Close()
-		buffer := make([]byte, 4096)
 		for {
-			if _, err := response.Body.Read(buffer); err != nil {
+			if _, _, err := conn.ReadMessage(); err != nil {
 				ended <- streamEnd{at: time.Now(), err: err}
 				return
 			}

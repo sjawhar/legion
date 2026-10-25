@@ -46,6 +46,33 @@ type liveStreamer interface {
 	Human() bool
 }
 
+// runningSubscription is an events or agent subscription whose whole life runs on a goroutine of
+// its own. stop cancels the subscription's own context, which ends the goroutine wherever it waits,
+// and returns once the goroutine has: the socket stops a subscription while it stays open (an
+// unsubscribe, a replacement) as well as when it ends.
+type runningSubscription struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func (running *runningSubscription) stop() {
+	running.cancel()
+	<-running.done
+}
+
+// runSubscription runs life on a goroutine of its own, on a context of its own derived from ctx,
+// and returns the running subscription at once.
+func runSubscription(ctx context.Context, life func(ctx context.Context)) *runningSubscription {
+	ctx, cancel := context.WithCancel(ctx)
+	running := &runningSubscription{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(running.done)
+		defer cancel()
+		life(ctx)
+	}()
+	return running
+}
+
 // liveKind is one view kind a live socket serves beside the delivery views.
 type liveKind struct {
 	// resumes is whether the kind takes a resume, an EventsLiveResume; a kind that does not (an

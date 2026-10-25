@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import after from "../fixtures/live/after.json";
+import agent from "../fixtures/live/agent.json";
 import delta from "../fixtures/live/delta.json";
 import ended from "../fixtures/live/ended.json";
 import error from "../fixtures/live/error.json";
@@ -7,6 +8,7 @@ import event from "../fixtures/live/event.json";
 import eventsStart from "../fixtures/live/events_start.json";
 import heartbeat from "../fixtures/live/heartbeat.json";
 import snapshot from "../fixtures/live/snapshot.json";
+import { AGENT_STREAM_PROTOCOL, type AgentStreamResponder } from "./agent-stream";
 import {
   type DeliveryLiveCounts,
   type DeliveryLiveDelta,
@@ -98,6 +100,7 @@ const VIEW_KINDS = allOf<LiveView["kind"]>()([
 const DELIVERY_RESUME_KEYS = allOf<keyof DeliveryLiveResume>()(["seq", "revs"]);
 const EVENTS_RESUME_KEYS = allOf<keyof EventsLiveResume>()(["since"]);
 const AGENT_EVENTS = allOf<LiveAgentFrame["event"]>()(["responder", "replay", "frame"]);
+const RESPONDER_KEYS = allOf<keyof AgentStreamResponder>()(["v", "responding"]);
 const ENDED_REASONS = allOf<LiveEnded["reason"]>()(["behind", "dropped"]);
 /** Every key of the event an event frame carries. */
 const EVENT_KEYS = allOf<keyof DispatchEvent>()([
@@ -265,6 +268,17 @@ test("an ended frame names its subscription and why Dispatch ended it", () => {
   expect(keysOf(ended)).toEqual(sorted(SERVER_FRAME_KEYS.ended));
   expect(ended.type).toBe("ended");
   expect(ENDED_REASONS).toContain(ended.reason as LiveEnded["reason"]);
+});
+
+test("an agent frame names its event, and its responder verdict is the one Dispatch writes", () => {
+  expect(keysOf(agent)).toEqual(sorted(SERVER_FRAME_KEYS.agent));
+  expect(agent.type).toBe("agent");
+  expect(AGENT_EVENTS).toContain(agent.event as LiveAgentFrame["event"]);
+  // A replay's or a frame's data is the session's own JSON, which Dispatch relays unread; the
+  // responder verdict is the one agent frame whose data Dispatch writes itself.
+  expect(agent.event).toBe("responder");
+  expect(keysOf(agent.data)).toEqual(sorted(RESPONDER_KEYS));
+  expect(agent.data).toEqual({ v: AGENT_STREAM_PROTOCOL, responding: true });
 });
 
 test("every frame names its type, and every frame of one subscription names the subscription", () => {

@@ -555,7 +555,7 @@ func TestARelayDropEndsTheSubscriptionAsBehind(t *testing.T) {
 		t.Fatalf("the subscription caught up through %d before it ended, want the head %d", last, head)
 	}
 	select {
-	case <-running.(*eventsSubscription).done:
+	case <-running.(*runningSubscription).done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the dropped subscription's goroutine was still running 5s after its end")
 	}

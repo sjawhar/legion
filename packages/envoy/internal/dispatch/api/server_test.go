@@ -74,8 +74,11 @@ type testServerOptions struct {
 	// service to observe a persistence boundary condition.
 	persistence func(*store.Store) docs.VersionedStore
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
-	// where the viewer route answers 503.
+	// where an agent view is refused STREAM_UNAVAILABLE.
 	agentStream agentstream.Source
+	// agentWatchInterval replaces how often an agent view re-arms its session (ten seconds), so a
+	// test of the re-arm need not wait one out.
+	agentWatchInterval time.Duration
 	// embedder wires meaning search (LEGION-549); nil (every test but search_meaning_test.go's
 	// own) is the deployment with no Cohere key, where search answers keyword-only.
 	embedder embed.Embedder
@@ -88,7 +91,7 @@ type testServerOptions struct {
 	// out; a test that stops the server before it ends (the socket's) passes one it can cancel
 	// itself. It must end by the test's end, so derive it from t.Context().
 	lifetime context.Context
-	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
+	// streamHeartbeat replaces the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
 	// liveSocketAge is the server's Deps.LiveSocketAge: nil draws each socket's age as
 	// production does.
@@ -128,12 +131,6 @@ func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 func newTestHandlerWithDefaultProject(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	handler, database, _ := newTestServer(t, testServerOptions{defaultProject: "DEFAULT"})
-	return handler, database
-}
-
-func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
-	t.Helper()
-	handler, database, _ := newTestServer(t, testServerOptions{testHooks: true})
 	return handler, database
 }
 
@@ -199,6 +196,9 @@ func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Hand
 	mux := http.NewServeMux()
 	served := register(mux, deps)
 	maps.Copy(served.liveKinds, options.liveKinds)
+	if options.agentWatchInterval != 0 {
+		served.agentWatchInterval = options.agentWatchInterval
+	}
 	t.Cleanup(served.eventRelay.wait)
 	if served.deliveryHub != nil {
 		t.Cleanup(served.deliveryHub.wait)
