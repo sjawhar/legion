@@ -2,73 +2,68 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T14:10:00Z",
+  "completed": "2026-10-25T15:45:00Z",
   "decision": "changes_requested",
-  "round": 5,
+  "round": 6,
   "critical": 0,
-  "important": 3,
-  "minor": 2,
+  "important": 1,
+  "minor": 3,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/launcher.go:407-409",
-      "description": "The merge took `#2179`'s second database kind but left a Postgres-only premise in two shared launch paths, so a `cloudsql-iam` deployment with no provider keys cannot boot. `launcher.go:407-409` passes `--provider-env-dir ProvidersDir` unconditionally, with the comment 'Every pod mounts the providers Secret — it holds the session database's URL at least — so the shim is always told the directory to read it from', and `probe.go:1188-1192` does the same with 'the session database's URL key is required, so the Secret is never absent'. Both premises were true before the merge and are false after it: `providers()` returns no volume and no mount when `mountsProviders()` is false (`manifest.go:576`, `:595-598`), and `mountsProviders()` is `len(providerKeys) > 0 || len(providersSecrets) > 0 || sessionDSNKey != \"\"` — all three empty under `cloudsql-iam` with the model route on a projected token, which `docs/kubernetes.md` describes as that kind's point. The directory is then absent and both consumers refuse it: `internal/shim/config.go:69-73` returns `--provider-env-dir %s is unreadable`, and `cmd/legion/probe_image.go` exits non-zero before any probe runs, so the daemon's boot image probe fails rather than the pod. `mountsProviders()` already exists and is the guard both sites want. Found independently by both thermonuclear agents and verified here at the head; no deployment runs `cloudsql-iam` yet, so the path is reachable by configuration rather than in production today."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:2522-2527",
-      "description": "The hardened exporter's refusals are swallowed, so the proof can lose its evidence and still pass. `collect_transcripts` runs `session_copy … || note \"the pods' sessions could not be copied …\"`, and a `note` is not a failure: it does not append to `teardown_failed`, which is what `:2588-2589` reads to print `FAIL`, and the teardown then removes the session database's container, after which the sessions are unrecoverable. The round-4 hardening is what makes this reachable: the exporter now *refuses* a colliding pair of keys, an over-long name and the other shapes it rejects, where before it would have written them. Two keys whose derived names collide — an agent in a pod can write both, since every role container holds the session DSN — therefore destroy the whole transcript export of the run and leave a green exit. The collector's own directory names are unreserved too, so a key deriving to `controller` obstructs the operator controller's copy. Make a collection failure part of the teardown verdict before the database is destroyed, and reserve the collector's names. Read from the source; not executed."
-    },
-    {
-      "severity": "important",
-      "file": "docs/site/src/content/docs/legion/running-legion.md:259",
-      "description": "'Postgres is the only store' survives outside the manual in five texts, three of them read by operators rather than by maintainers. The published site page says `session_store` must be `postgres`: it is the only store this runtime has (`:259`), that both keys are required (`:19`), and that the `runtime.kubernetes` block must name `session_store: postgres` and `session_dsn_secret` (`:507`). `deploy/kubernetes/daemon/legion.yaml.example:70` — the file an operator copies — marks `session_store: postgres` as required. `scripts/e2e/README.md:16` calls `postgres` the only store the daemon loads, and `AGENTS.md:71` the same. The merged rule is that the store must keep sessions in a database: `postgres` or `cloudsql-iam`, with `pvc` and an omitted key refused. `docs/kubernetes.md` itself is correct, which is what makes these five the survivors."
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:2556-2564",
+      "description": "The half of round 5's finding that asked for the collector's own names to be reserved is not done, and the consequence is the same one the other half fixed: a run that lost evidence and passed. `session_copy` refuses an empty name, `.`, `..` and a collision between two keys, but not a name that collides with a directory the collector itself makes. A pod can write a session row keyed `<pod_sessions_dir>/controller` — the table takes arbitrary text keys (`internal/ompsessions/ompsessions.go:44-47`) — which derives to `controller` and is written as a regular file. `collect_transcripts` then runs `mkdir -p \"$evidence/transcripts/controller\"` and `cp -R …` unguarded at `:2560-2561`: both fail, neither clears `copied`, and `:2563` returns success. The teardown's new `if ! collect_transcripts` (`:2584`) therefore sees a success, records no `teardown_failed`, and goes on to destroy the work directory holding the operator controller's real sessions. The `session_copy` half is genuinely fixed and its refusal does reach the verdict; this is the reservation the same finding named. Reserve `controller` and `daemon-controller` in the derivation, and let the controller copy's own failures reach `copied`."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/names.go:18",
-      "description": "The comment names `Options.SessionDSNKey` as the field the deployment's session database is named by; the merge replaced it with the store value, and the field is gone."
+      "file": "packages/daemon/internal/runtime/sandbox/operatorpod.go:190-198",
+      "description": "Security[sandbox], hardening: `legionClaim` refuses an operator volume naming a claim of Legion's own by three prefixes — `issue-legion-`, `cache-legion-`, `tree-legion-` — and the claim name this change introduces is none of them. An issue's disk is now the pod's own generic ephemeral volume, named `<pod>-issue`, so an operator `pod.volumes` entry naming it is accepted and projected into every role container (`manifest.go:448`), against the stated contract of the guard immediately above it. This needs the operator's own configuration, so it is not an agent's escalation and it is not blocking; the guard's own words are what make it worth closing."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/podkind.go:73-75",
-      "description": "Prose still teaching the removed model, now in more places than round 4 named, because the merge added its own. Confirmed at this head: `podkind.go:73-75` ('the issue's own volume, which its Sandbox owns'); `cleanup.go:70-75` (Sandbox-owned PVC given as the general deletion invariant); `manifest_test.go:659-661` (logs, browser profiles and plugin generations 'outlive the pod'); `scripts/e2e/README.md:1477` (the review pair reads the issue volume, where `stage4b-sandbox-tree.sh:1065-1071` reads the database); `relaunch_test.go:652-655` (the init container receives the session's location on the volume). The pair also names `manifest.go:755-759` and `:766-784`, `sandbox.go:1028-1033`, `lifecycle_test.go:290-295`, `manifest_test.go:820-825` and `stage4b-sandbox-tree.sh:3475-3476` (claims selected by labels a pod-owned ephemeral claim does not carry), and three texts the merge made stale in the other direction — `live_operator_test.go:141-143`, `stage4b-sandbox-tree.sh:3118-3120` and `api/version.go:319-320` call `postgres` the only or mandatory store — plus `docs/kubernetes.md:918-920`, which still says `legion sessions mark-lost` is unchanged while the same runbook records its removal at `:1011-1013`. I verified the five named; the rest are the pair's reading."
+      "file": "docs/kubernetes.md:1407-1409",
+      "description": "The cutover tells a deployment still on the file store that it 'copies its sessions into the table first', linking to 'Copying file sessions before turning it on'. That section says plainly that only `legion-v10.0.0` can copy and that a deployment on `legion-v10.1.0` to `legion-v10.2.x` has no copy path at all — its switch is a drain at a pushed boundary with those sessions lost — and `scripts/sessions-import-pods.sh:44-50` refuses such a project by name. So the path is disclosed, not missing, and the thermonuclear reading of it as an unexecutable prerequisite overstates it. What stands is the one sentence: a reader on `v10.1.x` is told to copy and learns only by following the link that they cannot. Say it at the link."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:918-919",
+      "description": "Three texts still teach what this change removed. `docs/kubernetes.md:918-919` says `legion sessions import` and `legion sessions mark-lost` 'are unchanged', while `cmd/legion/sessions.go` has deleted `mark-lost` and the same manual records its removal at `:1011-1013`. `manifest_test.go:825` says a later pod 'runs the .venv as it is and reuses what an earlier pod downloaded', which a disk that dies with its pod makes false. `relaunch.go:497` logs `relabelling a sandbox for its issue's new tree, keeping its volume`, an operator-visible line naming a volume an issue Sandbox no longer owns."
     }
   ],
-  "notAFinding": {
-    "redLanes": "`broker-multiprocess` and `envoy-go` are `failure` at the code head, and neither is this change's. Both fail on one compile error — `cmd/broker/service_account_scope_test.go:50` and `service_accounts_test.go:46` call `startBroker` in the pre-#2162 form against the `brokerOptions` signature — and I reproduced it in the workspace with `go vet ./...` in `packages/envoy`. The branch touches no file under `packages/envoy`: main itself landed the broken combination (#2162's signature with #2185's tests) and fixed it in #2194, which is `main@origin`'s tip `f9d5eabb`. The branch head's copies of those two files differ from main's precisely because main moved; `main_test.go` is byte-identical. Neither lane is in the base's required set. The forward merge the branch needs anyway — it is 40 behind — clears both."
-  },
-  "roundFourVerification": {
-    "note": "Every round-4 finding is fixed; I verified each at the head rather than from its report.",
+  "roundFiveVerification": {
+    "note": "Three of round 5's findings are fixed and one is half fixed; I verified each at the head.",
     "verified": [
-      "The head is MERGEABLE; the conflict against main is resolved.",
-      "The exporter no longer treats a key as a path: the name is derived under LC_ALL=C, empty/./../collisions are refused rather than sanitised, the resolved destination is asserted inside the directory before any write, and the listing returns hex so a newline-bearing key cannot arrive as two keys (stage4b-sandbox-tree.sh:976-1015). The swallowed-refusal finding above is new and is a consequence of that hardening, not a return of the traversal.",
-      "scripts/e2e/README.md:965 reads OMP_SESSION_STORAGE=sql with its DSN pointer, and :967 says the throwaway pod's own disk goes with its pod.",
-      "The E2E (implementer) line cites a commit permalink that answers 200, not a branch path retro deletes.",
-      "sandboxObject defaults to the pod-owned disk, withoutVolume is gone, and three migration sites opt in with withSupersededDisk (rig_test.go:899-932).",
-      "The census and the body state the merged rule: the store must keep sessions in a database, pvc and an omitted key refused, neither demanded to be postgres."
+      "launcher.go:412-414 and probe.go:1196-1198 pass --provider-env-dir only when mountsProviders(), and both comments now state the cloudsql-iam case that made the old premise false.",
+      "collect_transcripts returns failure and the teardown turns it into teardown_failed with a CHECK transcripts: FAIL line before the session database is destroyed — the half of the finding about session_copy's own refusals.",
+      "The five postgres-only texts are corrected: the published site page, the example file an operator copies, scripts/e2e/README.md and AGENTS.md.",
+      "names.go no longer names Options.SessionDSNKey.",
+      "podkind.go:73-75, cleanup.go:70-74 and manifest_test.go:657-662 state the pod-owned disk; three further sites of the same class are the minor finding above."
     ]
   },
   "ciAtCodeHead": {
-    "head": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+    "head": "2056d96c3f4821dd3fc535e113845c72313c0794",
     "requiredByBase": ["lint", "typecheck", "test", "pr-title"],
-    "read": "2026-10-25T13:52:00Z",
-    "verdict": "All four required lanes completed success. Two non-required lanes are red and inherited, as above.",
-    "compare": "gh api compare/ace35f9ce9f3...024a06f8ff77 in its printing form: `ahead`, 2 files, .legion/INFRA-80/implement.json and .legion/INFRA-80/test.json.",
-    "method": "Whole check set read at the code head with no select, then judged which lanes gate; the ref written out rather than interpolated from a variable, after an empty ref silently served main in my between-rounds read."
+    "read": "2026-10-25T15:40:00Z",
+    "verdict": "lint, typecheck and pr-title completed success; test still in_progress at the read. A request for changes does not wait on it, and this round's finding stands whatever it settles at.",
+    "inheritedLanes": "broker-multiprocess is completed/success at this head, so that one is cured here by the merge of main's #2194 — read, not inferred. envoy-go was still in_progress at my read, so I report it as running and not as cured; nobody should take it for green until it concludes.",
+    "compare": "gh api compare/2056d96c3f48...7032059f8e3b in its printing form: `ahead`, 2 files, .legion/INFRA-80/implement.json and .legion/INFRA-80/test.json."
+  },
+  "unprovenGapJudgement": {
+    "askedBy": "the architect, for its acceptance",
+    "position": "The framing of the remaining gap as two cluster-only behaviours, each a uid comparison, is accurate about what cannot be reached and understates what has not been exercised. Those two are acceptance 1's cluster half and acceptance 4, and nothing in this repository can reach them; that part is right. What it leaves out is that Stage 4b has run at no head at all, and this change rewrote its parked, released and lifecycle assertions, its delete log line and its whole transcript reader. Those are not behaviours we cannot reach: they are assertions whose own correctness is unverified, and the base rate on this change is that every reading of that harness found a defect — the Stage 4a marker path in round 2, two assertion families in round 2, the session reader in round 4, the exporter traversal in round 5, the unreserved collector name in this round. Five readings, five defects, no runs. An acceptance that says 'two behaviours remain provable only on a cluster' is true; one that lets a reader infer the rest is proven is not. The sentence I would want a stranger to read is that the tree-level proof is repaired but unexecuted, and that its repairs were found by reading rather than by running."
   },
   "thermonuclear": {
-    "head": "024a06f8ff77509b7f424d1b09d079dc6bd106ba",
-    "deepReview": "CHANGES — the provider-env-dir conflation under cloudsql-iam, and the swallowed exporter refusal. It judged the exporter's name derivation, refusals, hex transport and containment assertion clean against every key shape it tried, and the merged store rule correct in the loader and the runtime.",
-    "codeQuality": "CHANGES — the same provider-mount conflation, named as one shared finding, and the stale prose, which it found in more places than round 4 listed.",
-    "agreement": "Both reached the provider-env-dir finding independently; I verified it at the head before filing."
+    "head": "7032059f8e3b7062a5f1f5dabe404c015c4d23d0",
+    "deepReview": "CHANGES — the reserved-name collision, and the operator-volume guard missing the new claim names. It judged the provider guards complete and found nothing standing in migration 0051, the outbox decode, the displacement gap and its counter, the store refusal or the ephemeral volume rendering.",
+    "codeQuality": "CHANGES — the cutover's copy link and the three remaining prose sites. It judged the provider guards consistent, every golden consumed, no dead helper or orphaned fixture, and no file crossing a thousand lines.",
+    "checked": "I verified both Important claims at the head before filing, and graded the cutover one down: the code-quality agent read it as an unexecutable prerequisite, and the linked section states the restriction plainly, so what stands is the link's own sentence."
   },
   "threads": {
-    "openedRoundFour": 2,
+    "openedRoundFive": 2,
     "answeredByImplementer": 2,
     "resolved": 2,
     "botThreads": 0,
-    "note": "I replied on both at this head. Three of round 4's findings were in the review body rather than on threads, because their lines fall outside any diff hunk; all three are fixed."
+    "note": "I replied on both at this head. Three of round 5's findings were in the review body rather than on threads; all three are fixed."
   },
   "e2eLines": { "implementer": "present", "tester": "present" }
 }
