@@ -812,8 +812,9 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 	// accountKeeper exists so the account is never emptied by the deletes below. nats-server
 	// schedules the removal of the account's streams directory, in the background, on every stream
 	// delete, not only on the last one; that removal is an os.Remove, which fails on a directory that
-	// is not empty. Without the keeper, each delete below empties the directory, so the removal it
-	// schedules succeeds, and the restore after the second delete races that removal and fails. With
+	// is not empty. Without the keeper, each delete below leaves the directory empty — once the
+	// deleted stream's renamed copy, which goes in a goroutine of its own, is gone — so the removal
+	// it schedules can succeed, and the restore after the second delete races it and fails. With
 	// the keeper's stream in it, the directory is never empty, so every scheduled removal fails and
 	// leaves it in place.
 	const accountKeeper = "kvwatch-test-account-keeper"

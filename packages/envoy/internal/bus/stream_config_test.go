@@ -420,8 +420,11 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 //
 // Each subtest takes its own testnats.URL, inside the subtest, so each runs in an account of its
 // own. Its reset deletes Stream: in a fresh account there is nothing to delete, but in one account
-// shared by both, the second subtest's reset would delete the stream the first left, and its
-// recreate of that name would race nats-server's removal of the deleted stream's directory.
+// shared by both, the second subtest's reset would delete the stream the first left, emptying the
+// account, and its recreate of that name would race the background removal of the account's
+// streams directory that nats-server schedules on every stream delete and that succeeds once that
+// directory is empty. The deleted stream's own directory is not what a recreate races:
+// nats-server renames it aside and removes the renamed copy, which a recreate never meets.
 func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
 	shaped := func(legion string) nats.StreamConfig {
 		cfg := *streamCfg
