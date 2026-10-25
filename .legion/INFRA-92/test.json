@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-92",
+  "completed": "2026-10-25T01:35:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Both halves were driven here, not read from CI. The plugin half: the implementer's own command, bash packages/claude-envoy/scripts/smoke-session-title.sh, re-run in this pod against a nats-server with JetStream and an Envoy listener built from this tree; all four cases and its main@origin negative control reproduced exactly what implement.json records. The page half: the implementer could record only CI runs because the pod has no Postgres, so one was installed for this phase (PostgreSQL 17.11 with pgvector 0.8.0, unpacked from Debian packages under /tmp, loopback only) and Dispatch's own browser suite was run here in a real Chromium, both profiles, at this head (2 passed) and again with packages/dispatch/web/src/features/agents/AgentsPage.tsx restored to main@origin and the web bundle rebuilt (2 failed, SPAN: line clamp none, ellipsis, SPAN: 544x20 in 204x20 at unclipped.ts:43) — the same failure CI's before leg, run 40143159250, recorded. The page was restored and rebuilt afterwards; jj status is clean."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Register the Claude Code session's own name as the Envoy title; a title set through ENVOY_SESSION_TITLE still comes first.",
+      "surface": "The committed dist/session-hook.js and dist/envoy-channel.js run as Claude Code runs them, against a real nats-server with JetStream and an Envoy listener built from this tree, every title read back through the listener's own GET /v1/sessions.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/claude-envoy/scripts/smoke-session-title.sh (case 1), then a tester probe that starts the same channel server with ENVOY_SESSION_TITLE set beside a recorded name",
+      "observed": "The listener held \"eeny meeny\" for smoke-title-0001, the name the SessionStart payload carried, with no short id after it. With ENVOY_SESSION_TITLE=\"an explicit override\" set and \"chosen by a person\" recorded for the same session, the listener held \"an explicit override\", so the variable still outranks the chosen name.",
+      "headSha": "485db1c056d83304336ec530bb092124a6250751",
+      "negativeControl": "The same recorded name against main@origin's dist/envoy-channel.js (the smoke's last case): it registered \"probe-project smoke-ti\", the folder-and-short-id fallback, and not \"eeny meeny\"."
+    },
+    {
+      "criterion": "Keep it current: a rename reaches the page by the session's next prompt, without restarting the session.",
+      "surface": "The already-registered channel server of the run above, with UserPromptSubmit payloads run through the committed dist/session-hook.js while it stays up.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 2), then a tester probe that records two renames inside one heartbeat and twenty concurrent renames",
+      "observed": "The listener moved from \"eeny meeny\" to \"miny moe\" within the heartbeat after the hook run, with no restart. Two renames inside one heartbeat left \"second rename\". Twenty hook processes renaming the same session at once left one whole name, \"race 19\", in the title file, at the listener and in the dispatch stamp — no torn or mixed value, which is the atomic write holding.",
+      "headSha": "485db1c056d83304336ec530bb092124a6250751",
+      "negativeControl": "The same session with its name taken away (a UserPromptSubmit payload with no session_title) moved the listener off the chosen name back to \"probe-project smoke-ti\", so the heartbeat reads the record each time instead of latching the first value it saw."
+    },
+    {
+      "criterion": "A session nobody named keeps the name it reads today: its tmux pane or folder, then eight characters of its session id.",
+      "surface": "The same live run, with payloads that carry no usable name.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 3), then a tester probe with a name of two zero-width spaces, a name of only a NUL, a two-line name and a bidirectional override",
+      "observed": "No session_title at all, and a name of two zero-width spaces, both left the listener holding \"probe-project smoke-ti\" / \"probe-project probe-se\" — the project directory's name and eight characters of the session id. A name of \"a\\0b\" registered as \"a b\", a two-line name as one line, and \"\\u202eevil\\u202c name\" as \"evil name\", so a name that would reorder or blank the row is cleaned or falls through to the fallback rather than reaching the page.",
+      "headSha": "485db1c056d83304336ec530bb092124a6250751",
+      "negativeControl": "The same session with \"eeny meeny\" recorded registered that name instead, so the fallback is not simply all this build can produce."
+    },
+    {
+      "criterion": "A session's Dispatch writes carry the same name a person reads on the Agents page, and a cosmetic title never breaks the registration that carries it or the prompt whose hook records it.",
+      "surface": "The dispatch command's attribution file the channel server stamps as it registers, <DISPATCH_STATE_DIR>/sessions/<id>/title, and the committed dist/session-hook.js run as a UserPromptSubmit hook.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (the stamp case), then tester probes: an unreadable title file (mode 000), a directory in the title file's place, a 31-day-old title file, a read-only state directory, malformed JSON, empty stdin, a numeric session_title, a missing session_id, and session_id \"../../../../tmp/pwn\"",
+      "observed": "After the rename the stamp held \"miny moe\", the same string the listener held, and after the twenty-way race it held \"race 19\" with the listener. An unreadable title file and a directory in its place each left the session registering its fallback instead of failing — the registration survived both. A title file 31 days old was gone after a server start while a fresh one survived (the thirty-day prune). Every malformed or refused hook input exited 0 with an empty stdout and a single stderr line, so Claude Code can neither block the user's prompt nor take hook output as context, and the hook took 256 ms against the 5 s hooks.json allows. session_id \"../../../../tmp/pwn\" wrote titles/..%2F..%2F..%2F..%2Ftmp%2Fpwn inside the state directory; no /tmp/pwn was created.",
+      "headSha": "485db1c056d83304336ec530bb092124a6250751",
+      "negativeControl": "A read-only titles directory: the hook still exited 0 and wrote nothing to stdout, reporting only \"envoy: could not record the session title — EACCES: permission denied\" on stderr."
+    },
+    {
+      "criterion": "The name gets the space: a 64-character name shows in full at a laptop's width, wrapping rather than being cut off; the directory shrinks to its last path segment and keeps the whole path on hover.",
+      "surface": "Dispatch's own browser suite in a real Chromium (project chromium, 1280x720), run in this pod against a PostgreSQL 17.11 with pgvector 0.8.0 installed for the run under /tmp, loopback only.",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e PATH=/tmp/pg17/usr/lib/postgresql/17/bin:$PATH ./node_modules/.bin/playwright test --config e2e/playwright.config.ts e2e/agents.e2e.ts --project chromium --project iphone -g \"an agent row shows the whole session name\"",
+      "observed": "2 passed (14.2s). The 64-character name shows whole with no clamp, no ellipsis and no box too small for it (assertWhole), and the row's directory reads \"build-host · features\" with title \"build-host · /workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features\". Driving the same page with rows the suite does not seed — a 2,000-character unbroken name, a 300-character URL-shaped name, dir \"/\", \"/w/legion/\", \"\" and an 81-segment path — the page still fitted its viewport in both profiles, the 2,000-character name showed whole (the row grew to 810 px on the laptop, 1,518 px on the phone) instead of pushing the page wider, and \"/\" and \"\" were kept rather than shown as an empty directory.",
+      "headSha": "485db1c056d83304336ec530bb092124a6250751",
+      "negativeControl": "The identical row with packages/dispatch/web/src/features/agents/AgentsPage.tsx restored to main@origin and the web bundle rebuilt: 2 failed, both profiles reporting \"SPAN: line clamp none, ellipsis, SPAN: 544x20 in 204x20\" at unclipped.ts:43 — 544 pixels of text in a 204-pixel box. The page was restored and rebuilt afterwards."
+    },
+    {
+      "criterion": "On a phone the directory keeps the whole path, because there it has a line of its own and hovering shows nothing.",
+      "surface": "The same browser suite, project iphone (390x664, chromium engine), in the same local run.",
+      "command": "the same playwright command, project iphone",
+      "observed": "The row's directory reads \"build-host · /workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features\" whole, with no clamp or ellipsis anywhere above it (assertWhole), and the 64-character name shows whole on that width too. The probe rows confirmed it for an 81-segment path and for a trailing-slash path, both kept entire on the phone.",
+      "headSha": "485db1c056d83304336ec530bb092124a6250751",
+      "negativeControl": "The same iphone row against main@origin's AgentsPage.tsx failed with the same ellipsis finding, SPAN: 544x20 in 204x20 at unclipped.ts:43."
+    }
+  ],
+  "ciRead": {
+    "head": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
+    "readAt": "2026-10-25T01:30:00Z",
+    "runs": [
+      "Tests run 40148254737 — lint, typecheck, test all success",
+      "Docs run 40148254735 — success",
+      "PR Title run 40148349908 — success (run 40148254805 cancelled as superseded)",
+      "Legion Envoy and Contracts run 40148254772 — changes, claude-envoy and envoy-smoke success; job dispatch (the browser suite) in progress when read, cited as running and not waited for"
+    ],
+    "note": "The static work — lint, types and the unit and integration suites — is CI's and was not re-run here. The claude-envoy job passed at this head, including the 'queryTmux is bounded even by a tmux that ignores SIGTERM' row the implementer recorded as slow under pod load."
+  },
+  "notProven": [
+    "That Claude Code itself sends session_title to a hook, and that the Legion daemon's seeded '/rename Legion <role> · <KEY>' (packages/daemon/internal/claudebridge/bridge.go:196-198, b.writeUser(\"/rename \" + cfg.Title)) makes a pane read as its role and issue. Claude Code is not installed in a Legion issue pod, so both hook payloads in every run above are JSON the harness writes in the shape Claude Code's hooks reference documents. The daemon's seed was read in the code; its effect on a live pane was not driven. The implementer recorded the same limit in implement.json openQuestions, and the architect accepted it on 2026-10-24T23:22:06Z.",
+    "A session whose Envoy or inbound messages are off registers nothing, so it stamps its title once at startup and a later rename does not reach its Dispatch attribution. Unchanged behaviour for every title, recorded here so the next phase does not read it as a regression."
+  ],
+  "notThisChange": [
+    "[iphone] e2e/phone.e2e.ts:393 'an inline link keeps its line and grows its hit box without covering its neighbours' failed in CI's before-leg run 40143159250. It passes and fails on unchanged code and is the row dispatch://INFRA-95 exists to fix; it is not a defect of this change and nothing here touches it."
+  ]
+}
