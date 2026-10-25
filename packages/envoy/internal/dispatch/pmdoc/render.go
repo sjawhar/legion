@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/yuin/goldmark/util"
 )
 
 type renderer struct {
@@ -778,7 +780,7 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
-// linkTail writes the end of a link or image after its text: the destination and title.
+// linkTail writes the end of a text link after its text: the destination and title.
 func linkTail(destination, title string, escapePipes bool) string {
 	return "](" + escapeLinkDestination(destination, escapePipes) + titleSuffix(title, escapePipes) + ")"
 }
@@ -793,29 +795,35 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 	return href
 }
 
-// escapeDecodedLinkDestination writes a destination held decoded - a linked image's link, whose
-// character references and backslash escapes Parse read - so that goldmark and the browser
-// editor's parser read it back as it is: a backslash before ASCII punctuation or at the end, an
-// angle bracket, a pipe in a table cell and an ampersand that would open a character reference are
-// escaped, and a control character, which no destination holds as written, is a numeric character
-// reference. One holding a space or a parenthesis is written in angle brackets, as a text link's.
-func escapeDecodedLinkDestination(link string, escapePipes bool) string {
+// escapeDecodedLinkDestination writes a destination held decoded - an image's source or a linked
+// image's link, whose character references and backslash escapes Parse read (decodeDestination) -
+// so that goldmark and the browser editor's parser read it back as it is, escaping only what
+// either would otherwise read differently: a backslash before ASCII punctuation, before a
+// character written as a reference or at the end, an ampersand opening a reference
+// decodeDestination decodes, a `<` opening the destination, a pipe in a table cell, and in angle
+// brackets every angle bracket. A tab, line feed, form feed or carriage return is a numeric
+// character reference, which reads back as the character. One holding a space, a parenthesis or
+// another control character, which only angle brackets hold as written, is written in them.
+// Anything else is written as it is, as escapeLinkDestination writes a source.
+func escapeDecodedLinkDestination(destination string, escapePipes bool) string {
 	var written strings.Builder
-	written.Grow(len(link) + 2)
-	angle := strings.ContainsAny(link, " ()")
+	written.Grow(len(destination) + 2)
+	angle := strings.ContainsAny(destination, " ()") || strings.IndexFunc(destination, func(char rune) bool {
+		return char < ' ' && !isReferencedControl(byte(char)) || char == 0x7f
+	}) >= 0
 	if angle {
 		written.WriteByte('<')
 	}
-	for index := range len(link) {
-		char := link[index]
+	for index := range len(destination) {
+		char := destination[index]
 		switch {
-		case char == '\\' && (index+1 == len(link) || isASCIIPunctuation(link[index+1])):
+		case char == '\\' && (index+1 == len(destination) || isASCIIPunctuation(destination[index+1]) || isReferencedControl(destination[index+1])):
 			written.WriteByte('\\')
-		case char == '<' || char == '>' || (char == '|' && escapePipes):
+		case char == '<' && (angle || index == 0), char == '>' && angle, char == '|' && escapePipes:
 			written.WriteByte('\\')
-		case char == '&' && characterReference.MatchString(link[index:]):
+		case char == '&' && opensDecodedReference(destination[index:]):
 			written.WriteByte('\\')
-		case char < ' ' || char == 0x7f:
+		case isReferencedControl(char):
 			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
 			continue
 		}
@@ -824,6 +832,61 @@ func escapeDecodedLinkDestination(link string, escapePipes bool) string {
 	if angle {
 		written.WriteByte('>')
 	}
+	return written.String()
+}
+
+// isReferencedControl reports whether char is a control character escapeDecodedLinkDestination
+// writes as a numeric character reference: one decodeDestination reads such a reference back as,
+// where it reads any other control character's as U+FFFD.
+func isReferencedControl(char byte) bool {
+	return char == '\t' || char == '\n' || char == '\f' || char == '\r'
+}
+
+// decodedReference is a character reference opening a value, as decodeDestination finds one.
+var decodedReference = regexp.MustCompile(`^` + destinationReferencePattern)
+
+// opensDecodedReference reports whether value opens with a character reference decodeDestination
+// decodes: a numeric one, or a named one whose name an HTML entity has. `&foo;` it keeps as written.
+func opensDecodedReference(value string) bool {
+	reference := decodedReference.FindString(value)
+	if reference == "" {
+		return false
+	}
+	if reference[1] == '#' {
+		return true
+	}
+	_, ok := util.LookUpHTML5EntityByName(reference[1 : len(reference)-1])
+	return ok
+}
+
+// decodedTitleSuffix writes a title held decoded - an image's title or a linked image's link
+// title, read by decodedTitleOrNil - so that it reads back as it is: as titleSuffix writes a
+// text link's, every backslash doubled, a double quote and a pipe in a table cell escaped, and
+// besides an ampersand opening a reference decodeDestination decodes escaped. A line feed is
+// written as it is, as titleSuffix writes it, so a title the server already stores keeps its bytes;
+// a carriage return, which only a reference puts in a title and a write reads as a line feed, is
+// written as that reference.
+func decodedTitleSuffix(title string, escapePipes bool) string {
+	if title == "" {
+		return ""
+	}
+	var written strings.Builder
+	written.Grow(len(title) + 3)
+	written.WriteString(" \"")
+	for index := range len(title) {
+		char := title[index]
+		switch {
+		case char == '\\' || char == '"' || char == '|' && escapePipes:
+			written.WriteByte('\\')
+		case char == '&' && opensDecodedReference(title[index:]):
+			written.WriteByte('\\')
+		case char == '\r':
+			written.WriteString("&#13;")
+			continue
+		}
+		written.WriteByte(char)
+	}
+	written.WriteByte('"')
 	return written.String()
 }
 

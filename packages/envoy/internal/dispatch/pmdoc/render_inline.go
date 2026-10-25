@@ -512,12 +512,13 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			src, _ := n.Attrs["src"].(string)
 			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			image := "![" + imageAlt(alt, context) + linkTail(src, title, escapePipes)
-			// A linked image is written inside its link's syntax, its link escaped as it is held,
-			// decoded (escapeDecodedLinkDestination), and its title spelled as a text link's.
+			// An image's source, title, link and link title are held decoded (decodeDestination,
+			// decodedTitleOrNil), each escaped so it reads back as it is held; a linked image is
+			// written inside its link's syntax.
+			image := "![" + imageAlt(alt, context) + "](" + escapeDecodedLinkDestination(src, escapePipes) + decodedTitleSuffix(title, escapePipes) + ")"
 			if link, _ := n.Attrs["link"].(string); link != "" {
 				linkTitle, _ := n.Attrs["linkTitle"].(string)
-				image = "[" + image + "](" + escapeDecodedLinkDestination(link, escapePipes) + titleSuffix(linkTitle, escapePipes) + ")"
+				image = "[" + image + "](" + escapeDecodedLinkDestination(link, escapePipes) + decodedTitleSuffix(linkTitle, escapePipes) + ")"
 			}
 			r.writeSyntax(image)
 			position.atLineStart, position.atTextStart = false, false

@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"html"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -468,7 +469,7 @@ func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
 		{"an asterisk", paragraph(image(nil, "https://u.com/a*b", nil)), "[![x](i.png)](https://u.com/a*b)\n"},
 		{"an unbalanced closing parenthesis", paragraph(image(nil, "https://u.com/)x", nil)), "[![x](i.png)](<https://u.com/)x>)\n"},
 		{"backslashes before punctuation, a letter and the end", paragraph(image(nil, `https://u.com/a\*b\c\`, nil)), "[![x](i.png)](https://u.com/a\\\\*b\\c\\\\)\n"},
-		{"angle brackets", paragraph(image(nil, "<https://u.com/<a>>", nil)), "[![x](i.png)](\\<https://u.com/\\<a\\>\\>)\n"},
+		{"angle brackets", paragraph(image(nil, "<https://u.com/<a>>", nil)), "[![x](i.png)](\\<https://u.com/<a>>)\n"},
 		{"spaces and angle brackets", paragraph(image(nil, "https://u.com/a b<c>", nil)), "[![x](i.png)](<https://u.com/a b\\<c\\>>)\n"},
 		{"control characters", paragraph(image(nil, "https://u.com/a\tb\nc", nil)), "[![x](i.png)](https://u.com/a&#9;b&#10;c)\n"},
 		{"a table cell with a pipe, a backslash and a character reference in the link", inCell(image(nil, `https://u.com/a\|b&amp;c`, nil)), "| h |\n| --- |\n| [![x](i.png)](https://u.com/a\\\\\\|b\\&amp;c) |\n"},
@@ -491,6 +492,106 @@ func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
 				got, _ := back.JSON()
 				want, _ := test.doc.JSON()
 				t.Fatalf("Parse(%q)\n got: %s\nwant: %s", markdown, got, want)
+			}
+		})
+	}
+}
+
+// An image's source, title, link and link title are held decoded, as the browser editor's parser
+// reads them, and each is written so it reads back as it is held: Go's Parse and ParseForWrite
+// take the rendering as the tree, and the editor's engine reads the same image, for references
+// with a name an HTML entity has and without one, numeric ones, backslashes, angle brackets,
+// parentheses, spaces, quotes, control characters, non-ASCII text and pipes, in a paragraph and in
+// a table cell.
+func TestRenderWritesEachImageFieldSoItReadsBackAsHeld(t *testing.T) {
+	common := []string{
+		"&amp;", "i&amp;.png", "&copy;", "a&copy;b", "&foo;", "a&foo;b", "&#", "a&#b", "&#65;", "&#x41;", "&#X41;x",
+		"&amp", "&copy=1", "&&amp;", `\&amp;`, `\&foo;`, `\`, `a\b`, `a\*b`, `\\`, `a\`, `a\\`, `\|`, "a|b", "|",
+		"<", ">", "<a", "a<b>c", "a>", "(", ")", "a(b)c", "a)b", "a b", " a ", "a b<c>", "<a b>", "é ü 日本 \u00a0",
+		"a\tb", "a\nb", "a\rb", "a\fb", "a\x01b", "a\x7fb", "a\vb", `a\` + "\tb", `a\` + "\nb", "&#10;", `\&#9;`,
+		"https://u.com/?a=1&amp;b=2&c=3", "javascript&#58;x",
+	}
+	titles := []string{`"`, `say "hi"`, `\"`, `a\"b`, "'", `"\`, `a"`}
+	image := func(src string, title any, link, linkTitle any) *Node {
+		return &Node{Type: "image", Attrs: Attrs{"src": src, "alt": "x", "title": title, "link": link, "linkTitle": linkTitle}}
+	}
+	inParagraph := func(img *Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{img}}}}
+	}
+	inCell := func(img *Node) *Node {
+		doc, err := Parse("| h |\n| - |\n| ![x](i.png) |\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.Children[0].Children[1].Children[0].Children[0].Children = []*Node{img}
+		return doc
+	}
+	type row struct {
+		name  string
+		doc   *Node
+		image *Node
+	}
+	var rows []row
+	for _, field := range []string{"src", "title", "link", "linkTitle"} {
+		values := common
+		if field == "title" || field == "linkTitle" {
+			values = append(append([]string{}, common...), titles...)
+		}
+		for _, value := range values {
+			var img func() *Node
+			switch field {
+			case "src":
+				img = func() *Node { return image(value, nil, nil, nil) }
+			case "title":
+				img = func() *Node { return image("i.png", value, nil, nil) }
+			case "link":
+				img = func() *Node { return image("i.png", nil, value, nil) }
+			case "linkTitle":
+				img = func() *Node { return image("i.png", nil, "https://u.com", value) }
+			}
+			paragraph, cell := img(), img()
+			rows = append(rows, row{field + " " + strconv.Quote(value) + " in a paragraph", inParagraph(paragraph), paragraph})
+			// A title's line feed is written as it is, as the server wrote it before, which a
+			// table row cannot hold.
+			if (field == "title" || field == "linkTitle") && strings.Contains(value, "\n") {
+				continue
+			}
+			rows = append(rows, row{field + " " + strconv.Quote(value) + " in a table cell", inCell(cell), cell})
+		}
+	}
+	rendered := make([]string, len(rows))
+	for index, test := range rows {
+		markdown, err := Render(test.doc)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", test.name, err)
+		}
+		rendered[index] = markdown
+	}
+	readings := engineReadings(t, rendered)
+	for index, test := range rows {
+		t.Run(test.name, func(t *testing.T) {
+			markdown := rendered[index]
+			want, _ := test.doc.JSON()
+			if back, err := Parse(markdown); err != nil || !back.Equal(test.doc) {
+				got, _ := back.JSON()
+				t.Errorf("Parse(%q) = %s (%v)\nwant: %s", markdown, got, err, want)
+			}
+			if back, err := ParseForWrite(markdown, nil); err != nil || !back.Equal(test.doc) {
+				got, _ := back.JSON()
+				t.Errorf("ParseForWrite(%q) = %s (%v)\nwant: %s", markdown, got, err, want)
+			}
+			var engine *Node
+			if readings[index] != nil {
+				Walk(readings[index], func(node *Node) bool {
+					if node.Type == "image" && engine == nil {
+						engine = node
+					}
+					return engine == nil
+				})
+			}
+			if engine == nil || !engine.Equal(test.image) {
+				got, _ := readings[index].JSON()
+				t.Errorf("the engine reads %q as %s, want its image %v", markdown, got, test.image.Attrs)
 			}
 		})
 	}

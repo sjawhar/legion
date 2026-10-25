@@ -836,7 +836,7 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	return &Node{Type: "image", Attrs: Attrs{
 		"src":       decodeDestination(image.Destination),
 		"alt":       text.String(),
-		"title":     titleOrNil(image.Title),
+		"title":     decodedTitleOrNil(image.Title),
 		"link":      nil,
 		"linkTitle": nil,
 	}}, nil
@@ -966,7 +966,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 					return nil, nil, err
 				}
 				node.Attrs["link"] = decodeDestination(current.Destination)
-				node.Attrs["linkTitle"] = titleOrNil(current.Title)
+				node.Attrs["linkTitle"] = decodedTitleOrNil(current.Title)
 				children = append(children, node)
 				continue
 			}
@@ -1038,18 +1038,22 @@ func unescapeMarkdownText(value []byte) string {
 	return html.UnescapeString(string(util.UnescapePunctuations(value)))
 }
 
-// destinationEscapeOrReference is a backslash escape or a character reference in a destination,
-// as the browser editor's parser finds them there (micromark's decodeString): the escaped
-// punctuation, or the reference's name or number.
-var destinationEscapeOrReference = regexp.MustCompile(`\\([!-/:-@\[-` + "`" + `{-~])|&(#(?:[0-9]{1,7}|[xX][0-9A-Fa-f]{1,6})|[0-9A-Za-z]{1,31});`)
+// destinationReferencePattern is a character reference in a destination or title, as the browser
+// editor's parser finds one there (micromark's decodeString): the reference's name or number.
+const destinationReferencePattern = `&(#(?:[0-9]{1,7}|[xX][0-9A-Fa-f]{1,6})|[0-9A-Za-z]{1,31});`
 
-// decodeDestination is an image's source or a linked image's link as the browser editor's parser
-// reads it, its backslash escapes and character references decoded in one pass, each spelling read
-// once: `\&amp;` is `&amp;`. A name no HTML entity has, a reference without its `;` (`&copy=1`),
-// and an `&` opening neither stay as written, and a number naming a control character, a
-// surrogate, a noncharacter or nothing is U+FFFD, as that parser reads them. unescapeMarkdownText,
-// which decodes the escapes and then the references it finds in what they left, reads both of the
-// first two otherwise.
+// destinationEscapeOrReference is a backslash escape or a character reference in a destination or
+// title, as the browser editor's parser finds them there: the escaped punctuation, or the
+// reference's name or number.
+var destinationEscapeOrReference = regexp.MustCompile(`\\([!-/:-@\[-` + "`" + `{-~])|` + destinationReferencePattern)
+
+// decodeDestination is an image's source or title, or a linked image's link or link title, as the
+// browser editor's parser reads it, its backslash escapes and character references decoded in one
+// pass, each spelling read once: `\&amp;` is `&amp;`. A name no HTML entity has, a reference
+// without its `;` (`&copy=1`), and an `&` opening neither stay as written, and a number naming a
+// control character, a surrogate, a noncharacter or nothing is U+FFFD, as that parser reads them.
+// unescapeMarkdownText, which decodes the escapes and then the references it finds in what they
+// left, reads both of the first two otherwise.
 func decodeDestination(destination []byte) string {
 	return destinationEscapeOrReference.ReplaceAllStringFunc(string(destination), func(match string) string {
 		if match[0] == '\\' {
@@ -1173,6 +1177,16 @@ func titleOrNil(title []byte) any {
 		return nil
 	}
 	return unescapeMarkdownText(title)
+}
+
+// decodedTitleOrNil is an image's title or a linked image's link title as the browser editor's
+// parser reads it, decoded in one pass as decodeDestination decodes a destination, or nil when it
+// has none.
+func decodedTitleOrNil(title []byte) any {
+	if len(title) == 0 {
+		return nil
+	}
+	return decodeDestination(title)
 }
 
 func parseAnchorMark(value string) (Mark, bool) {
