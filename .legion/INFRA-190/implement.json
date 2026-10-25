@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-190",
+  "completed": "2026-10-25T18:45:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2204",
+  "evidence": "https://github.com/sjawhar/legion/pull/2204#issuecomment-6401596447",
+  "proof": [
+    {
+      "criterion": "A1 (R1): the spec's reproduction prints [![x](i.png)](https://u.com) for the original and for the copy read back from the Y.Doc",
+      "surface": "the headless editor engine (@legion/proof-editor/headless) and y-prosemirror's prosemirrorToYXmlFragment / yXmlFragmentToProseMirrorRootNode, as the spec's reproduction runs them",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun --no-install run - < /legion/scratch/tmp/infra190/repro.ts (the LEGION-365 reproduction verbatim); cd packages/proof-editor && bun test tests/linked-image.test.ts",
+      "observed": "both lines print [![x](i.png)](https://u.com); proof-editor suite 105 pass 0 fail",
+      "headSha": "3562964859069a0c762adda181fc94efe89e7123",
+      "negativeControl": "the same script run from a git archive of base 4b01e0122f94 prints ![x](i.png) on the second line (the Y.Doc round trip loses the link)"
+    },
+    {
+      "criterion": "A2 (R1): a linked image with titles is written through the documents API and reads back unchanged; a link around text and an image is stored as today",
+      "surface": "the real Go Dispatch server built from the head, on a real Postgres 17 + pgvector, called with curl as the agent bearer",
+      "command": "bash /legion/scratch/tmp/infra190/live/a2.sh: POST /api/v1/issues/LIVE-1/artifacts {content: [![x](i.png)](https://u.com \"t\")} then GET /api/v1/artifacts/<id>/text; also go test ./internal/dispatch/pmdoc -run 'Linked|Render' and ./internal/dispatch/api -run TestUploadArtifactJSONKeepsALinkedImagesLink",
+      "observed": "HTTP 201 then /text markdown \"[![x](i.png)](https://u.com \\\"t\\\")\\n\" (33 bytes, identical to the upload); Go tests ok",
+      "headSha": "3562964859069a0c762adda181fc94efe89e7123",
+      "negativeControl": "[a ![x](i.png) b](https://u.com) reads back as [a ](https://u.com)![x](i.png)[ b](https://u.com), as at base"
+    },
+    {
+      "criterion": "A3 (R1): a browser test imports a linked image (paste and API write), saves, reloads and opens the link in the live and past-version views, for a Dispatch picture, a dispatch:// link and a comment; document cases fail at base",
+      "surface": "Dispatch in Playwright Chromium and the iPhone profile against the real Go server, the production SPA bundle and Postgres (issue-pod harness /legion/scratch/tmp/infra190/harness)",
+      "command": "cd packages/dispatch && ( source /legion/scratch/tmp/infra190/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts linked-images.e2e.ts --project chromium --project iphone )",
+      "observed": "16 passed (8 cases x 2 projects); log /legion/scratch/tmp/infra190/e2e-head-final.log",
+      "headSha": "3562964859069a0c762adda181fc94efe89e7123",
+      "negativeControl": "the same spec at base 4b01e0122f94 (git archive, spec copied in, chromium): 6 failed 2 passed; D1-D4 fail on 'the ... picture sits in its link' (element(s) not found), C2 on 'the picture is still shown inside its link', N2 on a javascript: link drawn as an anchor in a comment; log /legion/scratch/tmp/infra190/e2e-base-final.log"
+    },
+    {
+      "criterion": "A4 (R2, R3): differential.sh reports 0 regressions, misreads and churn, keeps every whole-image link, stores stay-as-today shapes as base, refuses no write base takes",
+      "surface": "the pmdoc differential: base and head Go builds against the browser editor's engine over the in-repo corpora and the deployment's 2,156-document export",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 4b01e0122f94060805afb3d9ab11f9230fe594e1 --head 356296485906 --corpus <the deployment's documents export, the JSONL file plan.json's harness line names> --out /legion/scratch/tmp/infra190/diff-final",
+      "observed": "exit 0; 2243 documents; every GATE 0 (head refuses a write the base takes 0, head loses a whole-image link 0, head changes a linked image the base stored 0); engine links a whole image: 2, linked image kept: 2",
+      "headSha": "3562964859069a0c762adda181fc94efe89e7123",
+      "negativeControl": "a scratch writer that drops linkTitle (not committed) gives GATE head loses a whole-image link 2 and head refuses a write the base takes 1, exit 1 (/legion/scratch/tmp/infra190/diff-neg)"
+    },
+    {
+      "criterion": "A5 (R1): an editor built before the change is admitted read-only with the old and the fetched schema version and its link-stripping edit is not applied; the new editor stays writable",
+      "surface": "the document websocket of the real Go server, dialed with @hocuspocus/provider as the dashboard dials it, with a dev sign-in cookie",
+      "command": "cd packages/dispatch && ( source /legion/scratch/tmp/infra190/harness/env.sh && bun run /legion/scratch/tmp/infra190/live/a5.ts ); go test ./internal/dispatch/docs -run 'Admission|Hocuspocus' and ./internal/dispatch/api -run TestAStaleEditorsUpdateLeavesALinkedImageAlone; bun test web/src/features/doc/connection.test.ts web/src/features/doc/pending-sync.test.ts",
+      "observed": "schema_version=2 token \"2\" -> readonly; schema_version=3 token \"3\" -> readonly, its update removing link/linkTitle answered SyncStatus applied=0 and /text unchanged; schema_version=3&editor_schema=1 token \"3:1\" -> read-write",
+      "headSha": "3562964859069a0c762adda181fc94efe89e7123",
+      "negativeControl": "the same link-removing update from the read-write (new bundle) peer is applied: /text becomes ![x](i.png)"
+    }
+  ],
+  "filesChanged": [
+    "packages/proof-editor/src/editor/schema/linked-image.ts (new): remarkLinkedImages, linkedImageSchemas (image link/linkTitle attrs, toDOM anchor, parseDOM, link-mark skip)",
+    "packages/proof-editor/src/lib.ts, src/lib-headless.ts, AGENTS.md, tests/linked-image.test.ts, tests/dom-window.ts, tests/clipboard-paste-recovery.test.ts; biome.json (linked-image.ts checked)",
+    "packages/envoy/internal/dispatch/pmdoc: parse.go, render.go (linkTail), render_inline.go, marks.go, escape.go, update.go, elements.go, schema/blocks.json (version 3), gen/edit-blocks.ts, tests, testdata/corpus/linked-image.md, testdata/diffcorpus/*.md, testdata/fixtures.json, differential_test.go, gen/differential.sh",
+    "packages/contracts: DOCUMENT_EDITOR_SCHEMA_VERSION, gen-go.ts, CHANGELOG; packages/envoy/internal/contracts/generated.go",
+    "packages/envoy/internal/dispatch/docs/websocket.go, docs/docstest/docstest.go, websocket_test.go; api tests (artifacts, schema, browser_peer, storable_text); cmd/dispatch memory and shutdown tests",
+    "packages/dispatch/web/src/features/doc: connection.ts, pending-sync.ts, picture-view.ts, dispatch-link-click.ts (new), ProofDocument.tsx, VersionView.tsx and tests; features/refs: markdown-engine.ts, RefLink.tsx, DispatchPicture.tsx, useRenderedMarkdown.tsx and tests; src/__tests__/link-clicks.ts, open-socket.ts",
+    "packages/dispatch/e2e/linked-images.e2e.ts (new); docs: packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "Harness for the tester: bash /legion/scratch/tmp/infra190/harness/setup.sh (idempotent; lanes by LEGION_ROLE: tester = Postgres 127.0.0.1:5434, dbs dispatch_tester_test / dispatch_tester_e2e, DISPATCH_E2E_PORT 28777, fakes 29021-29024). Source /legion/scratch/tmp/infra190/harness/env.sh only in a subshell: it exports DATABASE_URL, DISPATCH_TEST_DATABASE_URL, PATH (+ pgroot/usr/lib/postgresql/17/bin), LD_LIBRARY_PATH (+ pgroot/usr/lib/x86_64-linux-gnu:pgroot/usr/lib/postgresql/17/lib), PLAYWRIGHT_BROWSERS_PATH. bash harness/prepare-tree.sh <tree> builds web/dist and the server binary; packages/contracts needs `bun run build` before the whole e2e suite (other specs import its dist). README: /legion/scratch/tmp/infra190/harness/README.md.",
+    "The fence is in two places: the upgrade's query (schema_version, editor_schema) and the Hocuspocus token '<schema>:<editor>', whose answer overrides the query's. A bare token is read-only.",
+    "A Ctrl/Cmd-click on a linked picture in the editable editor must not be default-prevented by the node view, or ProseMirror never hands it to markdownLinkClickPlugin (picture-view.ts followNoClickWhileEditable); the e2e caught this.",
+    "Document dispatch:// clicks are handled in the capture phase (followDispatchLink, both ProofDocument and VersionView), so the past-version view navigates in-app and the link plugin does not also open a new tab."
+  ],
+  "deviations": [
+    "Pasted HTML title: the image parseDOM uses the img's title attribute when present (the editor's own DOM always carries it) and falls back to alt only when absent, so an editor copy/paste round-trips byte for byte; a foreign README paste <a href><img alt=x></a> gains title \"x\" as Milkdown's rule gives today.",
+    "Reference-style linked images are not in pmdoc's testdata/corpus: pmdoc refuses link reference definitions today (refusals_test.go); the editor test covers them.",
+    "The stay-as-today shape ![[![x](i.png)](u)](j.png) is its own diffcorpus document (linked-image-in-alt.md): engine and Go read the outer alt differently at base already, unrelated to links.",
+    "A held browser edit that strips a link is reported through a new PendingState.strippedAt notice, not rebuiltAt.",
+    "The past-version view now navigates in-app for any dispatch:// link (text, picture, fallback) on a plain click instead of opening a new tab."
+  ],
+  "openQuestions": [
+    "Memory tests (go test -tags memory ./cmd/dispatch) cannot run in this pod (gVisor refuses /proc/<pid>/clear_refs); the new '[![](u)](v)' heaviest shape is measured only by CI's memory job.",
+    "pmdoc linearity timing tests (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail in this pod at base and head alike (gVisor 10 ms clock); CI runs them."
+  ],
+  "discoveredComplexity": [
+    "pmdoc does not escape a '!' ending text before a text link (wow![a](u) would read as an image); this change escapes it only before a linked image. Reported to the architect, not changed here."
+  ]
+}
