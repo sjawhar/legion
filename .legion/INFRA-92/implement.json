@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-92",
+  "completed": "2026-10-25T02:05:00Z",
+  "proof": [
+    {
+      "criterion": "The name a person gave the session is what the plugin registers.",
+      "surface": "The committed dist/envoy-channel.js registering with a real Envoy listener built from this tree, against a real nats-server with JetStream, the name recorded by the committed dist/session-hook.js from a SessionStart payload.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 1), then the listener's own GET /v1/sessions",
+      "observed": "The listener holds \"eeny meeny\" for session smoke-title-0001, the name the SessionStart payload carried, alone and with no short id after it.",
+      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
+      "negativeControl": "The same recorded name against main@origin's dist/envoy-channel.js (the script's last case): it registered \"probe-project smoke-ti\", the folder-and-short-id fallback, and not \"eeny meeny\"."
+    },
+    {
+      "criterion": "A later rename replaces it, without restarting the session.",
+      "surface": "The same live run: the already-registered channel server, with a UserPromptSubmit payload run through the committed dist/session-hook.js while it is up.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 2), then GET /v1/sessions",
+      "observed": "The listener held \"eeny meeny\" and then held \"miny moe\" within the heartbeat that followed the hook run, with no restart of the channel server.",
+      "negativeControl": "Case 3 of the same run, below: a payload with no session_title moves the registered title off the chosen name, so the heartbeat is reading the record each time rather than latching the first value it saw.",
+      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5"
+    },
+    {
+      "criterion": "A session nobody named keeps today's fallback, its tmux pane or folder and eight characters of its session id.",
+      "surface": "The same live run, with a UserPromptSubmit payload carrying no session_title, which is how Claude Code says the session has no custom title.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 3), then GET /v1/sessions",
+      "observed": "The listener holds \"probe-project smoke-ti\" — the project directory's name and the first eight characters of the session id — exactly what the base bundle registers for the same session.",
+      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
+      "negativeControl": "Cases 1 and 2 of the same run: with a name recorded, the same session registers that name instead, so the fallback is not simply all this build can produce."
+    },
+    {
+      "criterion": "A session's Dispatch writes carry the same name a person reads on the Agents page.",
+      "surface": "The dispatch command's attribution file, which the channel server stamps as it registers: <DISPATCH_STATE_DIR>/sessions/<id>/title.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (the stamp case), then cat of that file",
+      "observed": "After the rename, /tmp/claude-session-title.*/dispatch-state/sessions/smoke-title-0001/title holds \"miny moe\", the same string the listener holds for that session.",
+      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
+      "negativeControl": "The script fails the case if the file is missing or holds anything else; before the rename the same path held the earlier title, so the file follows the registration rather than being written once."
+    },
+    {
+      "criterion": "A 64-character name shows in full at a laptop's width, the directory shrinks to its last segment with the whole path on hover, and a phone keeps the whole path.",
+      "surface": "Dispatch's own browser suite in a real Chromium, both profiles (chromium 1280x720, iphone 390x664), run by the dispatch job of the Legion Envoy and Contracts workflow. An issue pod has no Postgres, so packages/dispatch/e2e/run-server.sh cannot start the suite here; the deployment instructions' before-and-after pair therefore comes from two pushes on this pull request, as the plan's order of work sets out.",
+      "command": "run 40143159250 (the dispatch job at head 4a134cac6ddb, the browser row alone) for the before leg; run 40148254772 (the same job at head b790a592c539) for the after leg",
+      "observed": "Before: both profiles failed the new row, e2e/agents.e2e.ts 'an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path', each with 'SPAN: line clamp none, ellipsis, SPAN: 544x20 in 204x20' at unclipped.ts:43 — the name's own span ellipsised, 544 pixels of text in a 204-pixel box. After: the same row runs at this head as run 40148254772, which GitHub still showed queued when this phase completed; the implementer does not wait for, watch or poll CI, and the daemon reads every settlement itself. The tester and the reviewer read that run on GitHub.",
+      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
+      "negativeControl": "The before leg is itself the control: the identical row, in both profiles, against the same tree without the page change, failing on the ellipsis the change removes. That run also failed [iphone] e2e/phone.e2e.ts:393 'an inline link keeps its line…', the row dispatch://INFRA-95 exists to fix, which passes and fails on unchanged code and is not this change's."
+    }
+  ],
+  "filesChanged": [
+    "packages/claude-envoy/src/session-identity.ts — sessionTitleFile/writeChosenTitle/removeChosenTitle/readChosenTitleSync and pruneStaleSessionTitles with SESSION_TITLE_MAX_AGE_MS (thirty days)",
+    "packages/claude-envoy/src/session-title.ts — the ChosenTitle source, read on every call, between ENVOY_SESSION_TITLE and the tmux-or-folder fallback; the three injected seams gathered into SessionTitleSources",
+    "packages/claude-envoy/src/envoy-channel-server.ts — the chosen-title reader over CLAUDE_PLUGIN_DATA, and pruneStaleSessionTitles beside the handoff prune",
+    "packages/claude-envoy/hooks/session-hook.ts — session_title on OpenAsksInput, the shared recordChosenTitle, and the new silent always-exit-0 session-title mode",
+    "packages/claude-envoy/hooks/hooks.json — the UserPromptSubmit entry, timeout 5",
+    "packages/claude-envoy/dist/envoy-channel.js, packages/claude-envoy/dist/session-hook.js — the committed bundle, rebuilt",
+    "packages/claude-envoy/scripts/smoke-session-title.sh — the live smoke this handoff's first four proofs ran",
+    "packages/claude-envoy/tests/session-title.test.ts, session-identity.test.ts, open-asks-hook.test.ts, session-title-hook.test.ts (new), envoy-channel-handoff.test.ts, hooks-timeout.test.ts, dispatch-first-hook.test.ts",
+    "packages/claude-envoy/AGENTS.md, README.md, CHANGELOG.md",
+    "packages/dispatch/web/src/features/agents/AgentsPage.tsx — the name takes the row's width and wraps at every width; the directory carries data-agent-dir, shortens to its last segment from md with the whole path as its title, and keeps the whole path below md; one useMediaQuery(PHONE_VIEWPORT_QUERY) for the whole list",
+    "packages/dispatch/e2e/agents.e2e.ts — the new browser row",
+    "packages/dispatch/e2e/phone.e2e.ts — the agent-row ellipsis assertion deleted",
+    "packages/dispatch/AGENTS.md"
+  ],
+  "trickyParts": [
+    "CLAUDE_PLUGIN_DATA is read for the chosen-title reader through configuredValue, not through pluginStateDirectory(): that helper throws when the variable is unset and is deliberately called after the Envoy-off early return, so reusing or moving it would turn a session with Envoy off and no plugin data into a crash.",
+    "readChosenTitleSync is synchronous and swallows every error on purpose. The registration path reads it inside a (sessionId) => string, and the title is cosmetic: a failed read must leave the session on its fallback name rather than fail the registration that carries it.",
+    "The new UserPromptSubmit hook must stay silent on stdout and exit 0 whatever happens, malformed input included, because Claude Code adds such a hook's stdout to the model's context and reads its exit code 2 as a block of the user's prompt. The dispatcher in hooks/session-hook.ts was restructured so this mode's JSON.parse is inside its own guard while the two older modes keep failing loudly on a payload that is not JSON.",
+    "The hook writes the chosen name untrimmed and uncleaned; src/session-title.ts's existing oneLine/visible pair is the one place that cleans and judges it, so a blank, invisible or multi-line name falls through to the fallback by the same rule every other source follows.",
+    "An agent row's heading no longer uses TruncatedText at all: the component exists for text that ellipsises inside a flex container, and this name never does. packages/dispatch/AGENTS.md's list of its hosts was corrected accordingly."
+  ],
+  "deviations": [
+    "The architect overruled plan B1 and gap finding F4 after the plan was approved (Envoy message on 2026-10-24T23:22:06Z): the name wraps on a phone too, not only at a laptop's width. Built that way — the heading has no width cap and no clamp at any width.",
+    "Following from that, packages/dispatch/e2e/phone.e2e.ts:757-761 was deleted rather than narrowed to the iphone profile, as the architect directed: narrowing it would re-pin the ellipsis this change removes. The phone assertion for the row now lives in the new agents.e2e.ts row, which asserts the whole name and the whole path on that profile.",
+    "The plan's order of work says to complete the phase only at the green head. The role's hard rule — push, then complete, never wait for, watch or poll CI — governs: the after-leg run (40148254772) is named in the handoff and the pull request body with its state as GitHub showed it at completion, and the daemon reads its settlement itself.",
+    "The simplify pass applied four of six findings and so moved the head; the package checks and the live plugin run above were re-run on the applied head, b790a592c539. The two skipped findings and why are in the pull request's Thermo line."
+  ],
+  "openQuestions": [
+    "Plan A4, reported rather than asserted, as the architect accepted on 2026-10-24T23:22:06Z: a Legion Claude pane's name lands on its first prompt, not at launch. The daemon seeds a fresh pane with '/rename Legion <role> · <KEY>' as a user message (packages/daemon/internal/claudebridge/bridge.go:196-199), so the UserPromptSubmit hook sees the custom title on the pane's next prompt — the daemon's first task — and the pane reads as 'Legion implementer · INFRA-92' from then on. That a slash command arriving on stream-json input renames the session is Claude Code's own behaviour, which no test here covers and no pod here can run.",
+    "Plan decision 9, unchanged behaviour recorded so the next phase does not read it as a regression: a session whose Envoy or inbound messages are off registers nothing, so it stamps its title once at startup and a later rename does not reach its Dispatch attribution. That is today's behaviour for every title and is not this change's to fix."
+  ],
+  "discoveredComplexity": [
+    "packages/claude-envoy's own suite has a row that is flaky in a Legion issue pod under load: 'queryTmux is bounded even by a tmux that ignores SIGTERM' (tests/session-title.test.ts) measured 5.1-5.2 s against its 3 s bound on two runs and passed on five others, including three consecutive clean runs at the final head. It exercises execFileSync's timeout killing a SIGTERM-ignoring child; neither queryTmux nor that row is touched by this change.",
+    "The before-leg CI run also failed [iphone] e2e/phone.e2e.ts:393 'an inline link keeps its line and grows its hit box without covering its neighbours'. That is the row dispatch://INFRA-95 exists to fix — it passes and fails on the same code — and the plan's Risks section names INFRA-95 as editing other rows of the same two files; whichever pull request lands second forward-merges its base and re-runs the suite."
+  ]
+}
