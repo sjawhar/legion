@@ -2,42 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T16:17:28Z",
-  "round": 9,
-  "headSha": "ae01882052a9",
-  "mergeState": "MERGEABLE (BLOCKED only on review) at 8734a081633e, read first.",
-  "productDelta": "`git diff --stat 9ca2004f5f5f ae01882052a9 -- . ':!.legion'` lists one file, packages/envoy/internal/kvwatch/kvwatch_test.go, +14 lines. `git log 9ca2004f5f5f..ae01882052a9` holds only that commit and three handoff commits. Nothing else moved.",
+  "completed": "2026-10-25T17:11:57Z",
+  "round": 10,
+  "headSha": "b882ed81da45",
+  "mergeState": "MERGEABLE (BLOCKED only on review) at e1574f8d80db, read first.",
+  "diffShape": "`git diff 3bd29e65fae1 b882ed81da45 -- packages/` changes three files. Every changed line is a comment, except one: the guard's func line, renamed TestNoPackageOutsideTestnatsNeedsAContainerRuntime → TestNoPackageOutsideTheRigsImportsOrDrivesAContainerRuntime. No statement, test case or subtest is added or removed.",
+  "authorship": "b882ed81da45 and 480e4e7a6249 are authored by legion-reviewer[bot] and committed by legion-implementer[bot]. b882ed81da45 carries 'Omp-Session: 01a17175-85f5-72df-8344-6164b647dc13', the implementer's session (the one that sends as 'Legion implementer · INFRA-250' on Envoy), so its content is the implementer's work. Only its author field is wrong, because the implementer split a working-copy commit the reviewer's pane had created. e1574f8d80db re-commits the handoff under the implementer's author. Nothing was rewritten.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "In a git archive of ae01882052a9, TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache passes at the head (and 20/20 with -count=20), and internal/kvwatch passes whole (ok 60.0 s). Negative control: with the keeper's CreateKeyValue removed and nothing else changed, the test fails at its own assertion, 'kvwatch_test.go:846: the account keeper bucket is gone before the delete: …'. A second mutation shows the assertion reads the server's state, not a local: the keeper is created as written, then deleted through JetStream just before the check, leaving every local the test holds untouched, and the test fails the same way (kvwatch_test.go:851). js.StreamNames() asks the server. Restored, it passes."
+    "how": "Rename control, in a git archive of b882ed81da45. `go test ./internal/testnats/ -run '^TestNoPackageOutsideTheRigsImportsOrDrivesAContainerRuntime$' -v` runs the test and both subtests: imports PASS 2.92 s, docker PASS 1.08 s. The old name gives 'testing: warning: no tests to run … [no tests to run]'. `-list Container` lists only the new name. The old name appears nowhere in the tree outside .legion/. I checked each comment against the code; one is not true of it (failures)."
   },
-  "notClaimed": "The race itself is not shown fixed. Its window is rare by construction, and a green run, the 20/20 here included, says nothing about it. What is measured: the account provably still holds the keeper's stream at the instant before the delete, so the delete cannot empty it and nats-server has no streams-directory removal to schedule.",
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Review round 3 finding: the restore test's delete-then-restore of one name must not race nats-server's streams-directory removal, because the delete must not empty the account.",
-      "surface": "internal/kvwatch's TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache against the in-process nats-server 2.10.29, in this pod.",
-      "command": "cd packages/envoy && go test ./internal/kvwatch/ -run '^TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache$' -count=1 (and -count=20) ; go test ./internal/kvwatch/ -count=1 ; the two mutations above",
-      "observed": "Passes, 20/20 included; the package passes whole. The assertion fails when the keeper is never created, and fails when the keeper exists in the test's locals but is gone on the server.",
-      "headSha": "ae01882052a9",
-      "negativeControl": "Keeper creation removed: 'kvwatch_test.go:846: the account keeper bucket is gone before the delete: the delete would empty the account and the restore would race the streams-directory removal', FAIL."
-    },
-    {
-      "criterion": "The widened sweep's table accounts for every delete site in packages/envoy, and the one unprotected site is the one fixed.",
-      "surface": "The tree at ae01882052a9.",
-      "command": "grep -rnE '\\.(DeleteStream|DeleteKeyValue|DeleteObjectStore|PurgeStream)\\(' --include=*.go packages/envoy, excluding infra (which has none); spot-checks of the table rows by reading each site",
-      "observed": "26 matches. Two are production purges by subject or sequence, which delete no stream: internal/bus/stream.go:143 and internal/store/interest_markers.go:168. That leaves 24 matches across 23 sites, because the purgeThenDelete wrapper at interest_markers_test.go:529/532 is one site (used at :503, and its bucket is never put back). The table's rows that I spot-checked hold: kvwatch_test.go's six RecreateKeyValue sites (297, 335, 561, 638, 701, 830); cmd/listener main_test.go:4463 and :4565 and interest_markers_test.go:460/:480 never put the name back; kv_key_test.go:36/:160 are t.Cleanup deletes; the fixed site is now kvwatch_test.go:851, after the 14 inserted lines.",
-      "headSha": "ae01882052a9",
-      "negativeControl": "Round 7's call-shape sweep, mine, ran over this same tree and missed kvwatch_test.go:837-840, because a restore is a create under a name its pattern did not contain. The post-condition method finds it."
+      "criterion": "Round 10's own bar: each corrected comment is true of the code, not merely less wrong.",
+      "evidence": "packages/envoy/internal/bus/stream_config_test.go:421-424 now ends 'its recreate of that name would race nats-server's removal of the deleted stream's directory'. In nats-server v2.10.29 that is not the race. On a delete, fileStore.Delete (filestore.go:8709) renames the stream's own directory to a dot-prefixed sibling ('.' + name, tsep) and removes that copy in a goroutine. A recreate of the same name makes streams/<name>, which that removal never touches. The removal a recreate can lose to is the other goroutine, which stream.go:5288-5293 starts on every stream delete: `os.Remove(filepath.Join(accDir, streamsDir)); os.Remove(accDir)` ('no op if not empty'). That removes the account's streams directory. It is the mechanism the keeper comment in kvwatch_test.go:812-818 describes correctly, and the one round 7's fix (a fresh account per subtest, so the delete finds nothing and empties nothing) defeats. So the two comments now describe one race two different ways, and stream_config's is false. Fix: '…race nats-server's background removal of the account's streams directory, which it schedules on every stream delete and which succeeds once that directory is empty'. A smaller precision point in the keeper comment, on the same lines: 'each delete below empties the directory, so the removal it schedules succeeds' holds only once the deleted stream's renamed copy is gone, and that copy is removed in its own goroutine. The scheduled os.Remove can still run first and fail, which is what makes it a race. 'leaves it empty, so the removal it schedules can succeed' would be exact. No red test: these are comments."
     }
   ],
-  "corrections": [
-    "My round-7 tester line said the sweep 'finds no third unprotected site'. It was false: kvwatch_test.go:837-840 was one. I marked it false in the PR body, pointing at the round-9 entry.",
-    "The CI line said that at 9ca2004f5f5f the runs 'settled 16 passed, 0 failed, 8 skipped'. GitHub's check runs for that commit are 18 success and 8 skipped (pr-title ran twice, and changes is a job). As the role that reads CI, I updated the counts. The envoy-go-race quote holds: job 121209965645 'ok github.com/sjawhar/envoy/internal/bus 207.027s', and 'WARNING: DATA RACE' appears 0 times in the job log.",
-    "The Size line, '39 files changed, +2057 −813', matches `git diff --shortstat 687c9e6f2b92 ae01882052a9`, the code head with its committed .legion/ files. Excluding .legion/ it is 35 files, +1651 −813. GitHub's pull request counter shows +2075 at the handoff head 8734a081633e because it counts that head's handoff files, and retro's removal of .legion/ will change it again."
+  "checkedTrue": [
+    "Guard comment (nats_test.go:611-624): the guard reads ImportPath, Imports, TestImports and XTestImports from `go list -f` (nats_test.go:670) and allowlists internal/testnats, internal/testpg and internal/tests3 (:594-597). A package that imports an allowlisted rig passes the guard: cmd/listener/dispatch_resolution_test.go imports internal/testpg. tests3's one consumer is internal/dispatch/files/s3_server_test.go, which skips under DISPATCH_TEST_NO_CONTAINERS=1. The new name, '…OutsideTheRigsImportsOrDrivesAContainerRuntime', claims the same scope as the comment and no more.",
+    "Keeper comment (kvwatch_test.go:812-818): nats-server does schedule the account streams-directory removal on every delete (stream.go:5288-5293), and os.Remove is a no-op on a non-empty directory. The precision point above aside, it is true."
   ],
-  "observations": [
-    "CI at ae01882052a9: Docs success, PR Title success; Tests and Worker Image in progress; Legion Envoy and Contracts queued when I read, so envoy-go-race at this head is not settled. The change is test-only, inside internal/kvwatch, which envoy-go-race does not run."
-  ]
+  "workspace": "The shared workspace's @ held three new, unpushed docs/solutions/ notes from the implementer's banked retro, in a commit authored by legion-reviewer[bot]. The phase rules forbid splitting it, so I wrote this handoff on `jj new @-`. Those notes are intact in change pqxrxpukqqws (commit de770a629b66). I told the implementer, with the command to restore them."
 }
