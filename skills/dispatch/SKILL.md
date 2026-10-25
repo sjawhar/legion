@@ -28,7 +28,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 - A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
 - In a Legion session, a finding outside your own issue is an ask as `skill://legion-worker/references/findings.md` says, never an issue you file.
 - An open ask is the request. Do not raise it again in each message.
-- Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask again in a new block.
+- Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
 - Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
 - When an answer's option and text disagree, the text is the answer.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
@@ -38,12 +38,14 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 - When you finish an issue, take the top ready issue: status `todo`, by priority and then board rank, in each project.
 - `todo` means specced and waiting on nothing. An issue that waits goes in `backlog`, saying on what.
-- Hold at most three issues in flight. Past three, move unfinished work to `backlog`, saying where it is.
-- Never reorder the board. When the top looks wrong, tell the project's order keeper: `notifications.role.legion-<project>-controller`.
+- Hold at most three issues in flight; move the rest to `backlog`, saying where each is.
+- Never reorder the board. If the top looks wrong, tell `notifications.role.legion-<project>-controller`.
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and the children you own: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits to merge, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one.
+
+A claim delivers no comments: in the same turn, `--route session:<your id>` (clear it on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.
 
 ## Close what you opened
 
@@ -52,13 +54,13 @@ Outside Legion, claim your issue (`dispatch claim`) and move it and the children
 
 ## Structure over stream
 
-- One issue per deliverable, with its content as the issue's document. Decisions are asks. A message only announces.
+- One issue per deliverable, its content the issue's document. Decisions are asks. A message only announces.
 - A message replies to a person, or tells them a change they must know now.
 - Text a person must read to decide is a section of the spec. An artifact is a real file.
 
 ## Architecture components
 
-Attach each architectural issue to the components it changes (`--components-json`), the root before you decompose it. Change code and `.dispatch/architecture/<id>.md` in the same review.
+Attach each architectural issue to its components (`--components-json`), the root before you decompose it. Change code and `.dispatch/architecture/<id>.md` in the same review.
 
 ## References
 
