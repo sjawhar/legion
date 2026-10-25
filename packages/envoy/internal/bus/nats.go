@@ -447,18 +447,29 @@ func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 }
 
 // subscriptionRefusal and subscriptionRefusalQueue read the subject, and the queue group when there
-// is one, of the server's refusal of a subscription (`Permissions Violation for Subscription to
-// "<subject>" using queue "<queue>"`), as nats.go reads them to record the refusal on its
-// subscription (permissionsRe and permissionsQueueRe, nats.go v1.50.0 nats.go:3795-3833).
+// is one, of the server's refusal of a subscription it was sent (`Permissions Violation for
+// Subscription to "<subject>" using queue "<queue>"`), as nats.go reads them to record the refusal
+// on its subscription (permissionsRe and permissionsQueueRe, nats.go v1.50.0 nats.go:3795-3833).
+// subscriptionRefusalSid reads the sid of the other form of refusal, the one a server sends when a
+// configuration reload revokes a subscription it had accepted (`Permissions Violation for
+// Subscription to "<subject>" (sid "<sid>")`, nats-server v2.10.29 client.go:5300), which names no
+// queue group whether the subscription had one or not.
 var (
 	subscriptionRefusal      = regexp.MustCompile(`Subscription to "(\S+)"`)
 	subscriptionRefusalQueue = regexp.MustCompile(`using queue "(\S+)"`)
+	subscriptionRefusalSid   = regexp.MustCompile(`\(sid "(\S+)"\)`)
 )
 
 // onAsyncError is wired as the connection's async error callback, after the error is logged. A
 // server's refusal of the client's core subscription marks it refused for CoreSubOK. Any other
 // error, a refusal of a publish or of another subscription among them, changes nothing, and so
 // does one a connection the client has since replaced reports late.
+//
+// A refusal of a subscription the client sent names its subject and, when it has one, its queue
+// group, and both must be the core registration's. A reload's revocation names the subject and the
+// sid but never the queue group, so its subject alone identifies the core registration: the client
+// holds one core subscription, and nats.go itself leaves that refusal unrecorded on a queue
+// subscription and the subscription valid, though the server has removed it.
 //
 // The mark cannot outlive the refusal: nats.go queues the reconnect callback, which clears it
 // (onReconnect), before any refusal of the subscriptions it re-sent, since it holds the
@@ -478,6 +489,7 @@ func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 	if match := subscriptionRefusalQueue.FindStringSubmatch(text); match != nil {
 		queue = match[1]
 	}
+	revoked := queue == "" && subscriptionRefusalSid.MatchString(text)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if nc != c.Conn {
@@ -486,7 +498,7 @@ func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
 	core := &c.subscriptions[coreSubscription]
-	if core.handler != nil && core.subject == subject[1] && core.queue == queue {
+	if core.handler != nil && core.subject == subject[1] && (revoked || core.queue == queue) {
 		core.refused = true
 	}
 }

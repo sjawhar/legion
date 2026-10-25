@@ -40,10 +40,12 @@ func TestAConsumerNotActiveReportIsAWarning(t *testing.T) {
 }
 
 // Only the server's refusal of the client's core subscription, on its subject and in its queue
-// group, reported by the connection the client holds, marks it refused (CoreSubOK). A refusal of a
-// publish, of another subscription, of the same subject in another queue group or outside one, and
-// one a connection the client has replaced reports late, leave it as it is. The errors are built as
-// nats.go builds the one it hands the async error callback for a server's -ERR (processErr).
+// group, reported by the connection the client holds, marks it refused (CoreSubOK), and so does a
+// reload's revocation of its subject, which names a sid and no queue group. A refusal of a publish,
+// of another subscription, of the same subject in another queue group or outside one, a revocation
+// of another subject, and one a connection the client has replaced reports late, leave it as it
+// is. The errors are built as nats.go builds the one it hands the async error callback for a
+// server's -ERR (processErr).
 func TestOnlyTheServersRefusalOfTheCoreSubscriptionMarksItRefused(t *testing.T) {
 	violation := func(text string) error { return fmt.Errorf("%w: %s", nats.ErrPermissionViolation, text) }
 	own := violation(`Permissions Violation for Subscription to "notifications.>" using queue "live"`)
@@ -59,6 +61,9 @@ func TestOnlyTheServersRefusalOfTheCoreSubscriptionMarksItRefused(t *testing.T) 
 		{name: "another subject", conn: current, err: violation(`Permissions Violation for Subscription to "notifications.role.>" using queue "live"`)},
 		{name: "another queue group", conn: current, err: violation(`Permissions Violation for Subscription to "notifications.>" using queue "other"`)},
 		{name: "no queue group", conn: current, err: violation(`Permissions Violation for Subscription to "notifications.>"`)},
+		{name: "a reload's revocation", conn: current, err: violation(`Permissions Violation for Subscription to "notifications.>" (sid "3")`), want: true},
+		{name: "a reload's revocation of another subject", conn: current, err: violation(`Permissions Violation for Subscription to "notifications.role.>" (sid "3")`)},
+		{name: "a revocation from a replaced connection", conn: &nats.Conn{}, err: violation(`Permissions Violation for Subscription to "notifications.>" (sid "3")`)},
 		{name: "a replaced connection", conn: &nats.Conn{}, err: own},
 		{name: "not a permissions violation", conn: current, err: errors.New(own.Error())},
 	} {
