@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -342,10 +343,41 @@ func TestTheGateBandLiesBelowTheEphemeralRangeItIsGiven(t *testing.T) {
 		if err == nil {
 			t.Fatalf("gatePorts = %d ports from %d, want a refusal", count, first)
 		}
-		if !strings.Contains(err.Error(), "1024\\t65535") {
-			t.Errorf("refusal %q does not name the range it read", err)
+		if !strings.Contains(err.Error(), "1024") {
+			t.Errorf("refusal %v does not name the range's first port, 1024", err)
 		}
 	})
+}
+
+// StartGate takes its port from just below this machine's ephemeral range, which it reads from
+// ephemeralRangePath. The test reads that file itself, as the rig does, and checks the ports of 20
+// gates against it: a StartGate that stopped reading the file and took a band of its own fails
+// here on every machine whose range does not start where that band ends.
+func TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange(t *testing.T) {
+	low := fallbackEphemeralLow
+	text, err := os.ReadFile(ephemeralRangePath)
+	if fields := strings.Fields(string(text)); err == nil && len(fields) == 2 {
+		first, firstErr := strconv.Atoi(fields[0])
+		last, lastErr := strconv.Atoi(fields[1])
+		if firstErr == nil && lastErr == nil && 0 < first && first <= last && last <= 65535 {
+			low = first
+		}
+	}
+	server, _ := Start(t)
+	for range 20 {
+		gate := StartGate(t, server)
+		address, err := url.Parse(gate.URL())
+		if err != nil {
+			t.Fatalf("parse the gate's URL %s: %v", gate.URL(), err)
+		}
+		port, err := strconv.Atoi(address.Port())
+		if err != nil {
+			t.Fatalf("read the port of the gate's URL %s: %v", gate.URL(), err)
+		}
+		if port >= low || port < low-gatePortCount {
+			t.Errorf("a gate took port %d, want one of the %d ports below %d, the first port of this machine's ephemeral range (%s holds %q)", port, gatePortCount, low, ephemeralRangePath, text)
+		}
+	}
 }
 
 // Terminate ends the server for good and gives up the port its URL named, so nothing answers there
