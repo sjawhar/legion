@@ -1180,7 +1180,7 @@ so a development run can reach a later checkpoint while a defect of the controll
 keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the transcript, the
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
 every agent transcript (the pods' under `transcripts/pods/`, the operator's controller's under
-`transcripts/controller/`, and under `transcripts/daemon-controller/` the controller the daemon
+`transcripts/controller/`, and under `transcripts/daemon-controller/<pod>/` the controller the daemon
 launched in `daemon-controller-liveness`, whose sessions are also among the pods'), the interest
 samples, the audit files and the negative controls. The pods' transcripts are copied from the
 session database before the teardown removes it, each at a name derived from its session key, so
@@ -1189,7 +1189,16 @@ no key a pod writes can take a name the harness writes beside it (`controller`, 
 A key the copy refuses (its name empty, `.` or `..`, shared with another key, or resolving outside
 the directory) or cannot read is named, never its bytes, and skipped while every other session is
 still copied, and any key left out fails the teardown check `transcripts`, as does a failure to copy
-the operator's controller's sessions out of the run's profile before the teardown removes it. What the
+the operator's controller's sessions out of the run's profile before the teardown removes it. The
+directory a copy writes in is the harness's own, never a path an agent's value chooses: the
+reviewer's subagents' go under `review-pair/subagents/`, a name the harness fixes, and the launched
+controller's under `transcripts/daemon-controller/<pod>/`, named for the pod the daemon launched it
+in, as the daemon's claim locator records it. The session file an agent records only selects which
+sessions to copy; the reviewer's stem is kept as data in `review-pair/session-stem`, so a reader
+can tell which session the pair came from. The copy still refuses, by name and never cleaned, a
+directory name that is not a plain one of `[A-Za-z0-9._-]`, is `.` or `..`, or does not resolve
+directly inside `review-pair/` or `transcripts/daemon-controller/`, and writes nothing of that copy:
+a second fence behind the harness's own names. What the
 run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
 `stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
 on whether the controller could have failed that check for want of a model key; or

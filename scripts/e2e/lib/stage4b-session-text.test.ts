@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -13,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scriptFunctions } from "./script-functions";
 
-// session_text, session_copy, claim_session_text and collect_transcripts, taken from
+// session_text, session_copy, record_pair, claim_session_text and collect_transcripts, taken from
 // stage4b-sandbox-tree.sh by name: every pod of the run keeps its Oh My Pi session in the run's
 // scratch Postgres, keyed by the path its file would have had, so the harness reads a session from
 // the table through the database's own container (session_psql: `docker exec … psql -A -t`), never
@@ -22,7 +23,8 @@ import { scriptFunctions } from "./script-functions";
 // closing newline, and a session the table does not hold is no row and no output at all. Each test
 // pins what the reader makes of that: the bytes whole, the closing newline taken off, a missing
 // session refused by name, a key, which an agent writes and so is not trusted, never taken as a
-// path to write at, and a key refused costing no other session yet failing the run's teardown.
+// path to write at, a directory to write in never one a caller derives from an agent's value, and
+// a key refused costing no other session yet failing the run's teardown.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-session-text-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -175,13 +177,15 @@ function derived(rel: string): string {
   }).join("");
 }
 
-// copyInto runs session_copy PREFIX into DEST, a directory three levels down a fresh temporary
-// directory ROOT, with a sentinel file beside it, so a key that climbs out of DEST, or a file written
-// through a symlink in it, lands where outside sees it. ROWS is given ROOT, so a key can name it;
-// BEFORE prepares DEST.
+// copyInto runs session_copy PREFIX into the directory STEM (default `dest`) of the area
+// review-pair, with evidence a directory two levels down a fresh temporary directory ROOT, so the
+// area's root, BASE, is three levels down it and DEST is BASE/dest, with a sentinel file beside it:
+// a key that climbs out of DEST, or a file written through a symlink in it, lands where outside
+// sees it. ROWS is given ROOT, so a key can name it; BEFORE prepares DEST.
 interface Copied {
   r: Ran;
   root: string;
+  evidence: string;
   base: string;
   dest: string;
 }
@@ -189,23 +193,29 @@ const sentinel = "the sentinel beside the destination\n";
 function copyInto(
   prefix: string,
   rows: (root: string) => Record<string, string>,
-  before?: (dest: string, root: string) => void
+  before?: (dest: string, root: string) => void,
+  stem = "dest"
 ): Copied {
   const root = mkdtempSync(join(dir, "copy."));
-  const base = join(root, "l1", "l2", "base");
+  const evidence = join(root, "l1", "l2");
+  const base = join(evidence, "review-pair");
   const dest = join(base, "dest");
   mkdirSync(dest, { recursive: true });
   writeFileSync(join(base, "sentinel"), sentinel);
   before?.(dest, root);
-  return { r: run(`session_copy '${prefix}' '${dest}'`, rows(root)), root, base, dest };
+  const r = run(
+    `evidence='${evidence}'\nsession_copy '${prefix}' review-pair '${stem}'`,
+    rows(root)
+  );
+  return { r, root, evidence, base, dest };
 }
 // outside lists every entry under ROOT that is neither DEST, nor in it, nor one copyInto made.
 function outside({ root, dest }: Copied): string[] {
   const made: Record<string, true> = {
     l1: true,
     "l1/l2": true,
-    "l1/l2/base": true,
-    "l1/l2/base/sentinel": true,
+    "l1/l2/review-pair": true,
+    "l1/l2/review-pair/sentinel": true,
   };
   const found: string[] = [];
   const walk = (at: string, rel: string) => {
@@ -234,35 +244,45 @@ describe("session_copy", () => {
     const sub = `${stem}/thermonuclear-deep-review-1.jsonl`;
     const nested = `${stem}/thermonuclear-deep-review-1/Explore-2.jsonl`;
     const other = `${sessions}/-legion-workspaces-sjawhar-legion-smoke-legsmoke-2/2026-10-25_4343.jsonl`;
-    const r = run(`session_copy '${stem}/' "$OUT"`, {
+    const r = run(`evidence="$OUT"\nsession_copy '${stem}/' review-pair 2026-10-25_4242`, {
       [key]: transcript,
       [sub]: `${transcript}{"sub":1}\n`,
       [nested]: '{"nested":"\\"x\\""}\n',
       [other]: transcript,
     });
     expect(r.code).toBe(0);
+    // The directory is STEM directly in the area's root, which holds nothing else.
+    expect(readdirSync(r.out)).toEqual(["review-pair"]);
+    expect(readdirSync(join(r.out, "review-pair"))).toEqual(["2026-10-25_4242"]);
+    const out = join(r.out, "review-pair", "2026-10-25_4242");
     // A subagent's session keeps its name; a nested one's `/` becomes `_`, so DIR holds files alone.
-    expect(readdirSync(r.out).sort()).toEqual([
+    expect(readdirSync(out).sort()).toEqual([
       "thermonuclear-deep-review-1.jsonl",
       "thermonuclear-deep-review-1_Explore-2.jsonl",
     ]);
-    expect(readFileSync(join(r.out, "thermonuclear-deep-review-1.jsonl"), "utf8")).toBe(
+    expect(readFileSync(join(out, "thermonuclear-deep-review-1.jsonl"), "utf8")).toBe(
       `${transcript}{"sub":1}\n`
     );
-    expect(readFileSync(join(r.out, "thermonuclear-deep-review-1_Explore-2.jsonl"), "utf8")).toBe(
+    expect(readFileSync(join(out, "thermonuclear-deep-review-1_Explore-2.jsonl"), "utf8")).toBe(
       '{"nested":"\\"x\\""}\n'
     );
   });
 
   test("no session under the prefix copies nothing, makes no directory, and succeeds", () => {
-    const r = run(`session_copy '${stem}/' "$OUT"; echo copied`, { [key]: transcript });
+    const r = run(`evidence="$OUT"\nsession_copy '${stem}/' review-pair s; echo copied`, {
+      [key]: transcript,
+    });
     expect(r.code).toBe(0);
     expect(r.stdout).toBe("copied\n");
     expect(existsSync(r.out)).toBe(false);
   });
 
   test("a database that does not answer the listing fails", () => {
-    const r = run(`session_copy '${sessions}/' "$OUT"`, { [key]: transcript }, 2);
+    const r = run(
+      `evidence="$OUT"\nsession_copy '${sessions}/' transcripts pods`,
+      { [key]: transcript },
+      2
+    );
     expect(r.code).toBe(1);
   });
 
@@ -428,6 +448,218 @@ describe("session_copy", () => {
   });
 });
 
+// session_copy's destination: the directory it writes in is STEM directly in a root session_copy
+// names itself by AREA, never a path its caller passes, because every guard above is measured
+// against that directory. Every caller names STEM itself or from a value the daemon sets, never from
+// a session file an agent records; a STEM that is not a plain name is still refused, never cleaned,
+// before any key is listed or anything written, the second fence behind those names.
+describe("session_copy's destination", () => {
+  const stem = key.replace(/\.jsonl$/, "");
+
+  test.each([
+    ["`..`, the root's parent", ".."],
+    ["`.`, the root itself", "."],
+    ["empty, the root itself", ""],
+    ["a `/`", "sub/dest"],
+    ["a `/` that climbs", "../dest"],
+    ["a byte outside [A-Za-z0-9._-]", "dest x"],
+  ])("a STEM of %s is refused by name before any key is listed, and nothing is written", (_, bad) => {
+    const c = copyInto(
+      `${stem}/`,
+      () => ({ [`${stem}/ok.jsonl`]: "SESSION-BYTES-ok\n" }),
+      undefined,
+      bad
+    );
+    expect(c.r.code).toBe(1);
+    expect(c.r.stderr).toBe(
+      `the sessions under ${stem}/ are not copied: their directory's name '${bad}' is not a plain name of [A-Za-z0-9._-] other than . and .. in ${c.base}\n`
+    );
+    // No listing ran, so no name was derived; nothing appeared anywhere.
+    expect(c.r.sql).toBe("");
+    untouched(c);
+    expect(readdirSync(c.dest)).toEqual([]);
+  });
+
+  // The relocation the anchor closes: handed $evidence/review-pair/.. as a path, session_copy
+  // canonicalised it to $evidence and every guard held there, so a key deriving to run.json
+  // overwrote the collector's own run metadata and was reported copied. As a STEM it is refused.
+  test("a STEM of `..` cannot carry a key's name onto the collector's own file beside the root", () => {
+    const runJson = '{"source":"the collector\'s own run metadata"}\n';
+    const c = copyInto(
+      `${stem}/`,
+      () => ({ [`${stem}/run.json`]: '{"agent":"bytes an agent chose"}\n' }),
+      (_, root) => writeFileSync(join(root, "l1", "l2", "run.json"), runJson),
+      ".."
+    );
+    expect(c.r.code).toBe(1);
+    expect(c.r.stderr).toContain(`their directory's name '..' is not a plain name`);
+    expect(readFileSync(join(c.evidence, "run.json"), "utf8")).toBe(runJson);
+    expect(outside(c)).toEqual(["l1/l2/run.json"]);
+    expect(readdirSync(c.base).sort()).toEqual(["dest", "sentinel"]);
+    expect(c.r.sql).toBe("");
+  });
+
+  test("a STEM that is a symlink out of the root is refused, naming where it resolves, and nothing is written", () => {
+    let elsewhere = "";
+    const c = copyInto(
+      `${stem}/`,
+      () => ({ [`${stem}/ok.jsonl`]: "SESSION-BYTES-ok\n" }),
+      (dest, root) => {
+        elsewhere = join(root, "l1", "elsewhere");
+        mkdirSync(elsewhere);
+        symlinkSync(elsewhere, join(dest, "..", "linked"));
+      },
+      "linked"
+    );
+    const base = realpathSync(c.base);
+    expect(c.r.code).toBe(1);
+    expect(c.r.stderr).toBe(
+      `the sessions under ${stem}/ are not copied: their directory ${base}/linked resolves to ${realpathSync(elsewhere)}, not directly inside ${base}\n`
+    );
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(c.r.sql).toBe("");
+  });
+
+  test("a path in place of an area is refused, naming it, and nothing is written", () => {
+    const r = run(`evidence="$OUT"\nsession_copy '${stem}/' "$OUT/review-pair" dest`, {
+      [`${stem}/ok.jsonl`]: transcript,
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe(
+      `the sessions under ${stem}/ are not copied: '${r.out}/review-pair' is no evidence directory session_copy writes in\n`
+    );
+    expect(r.sql).toBe("");
+    expect(existsSync(r.out)).toBe(false);
+  });
+
+  test.each([
+    ["transcripts", "pods", ["transcripts", "pods"]],
+    [
+      "daemon-controller",
+      "legion-legsmoke-controller",
+      ["transcripts", "daemon-controller", "legion-legsmoke-controller"],
+    ],
+    ["review-pair", "subagents", ["review-pair", "subagents"]],
+  ])("the area %s puts STEM %s directly in its own root", (area, name, at) => {
+    const r = run(`evidence="$OUT"\nsession_copy '${stem}/' ${area} '${name}'`, {
+      [`${stem}/ok.jsonl`]: transcript,
+    });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(readdirSync(r.out)).toEqual([at[0]]);
+    expect(readFileSync(join(r.out, ...at, "ok.jsonl"), "utf8")).toBe(transcript);
+  });
+
+  // The second fence, as record_pair once reached it: a recorded session file ending `/..` has the
+  // basename `..`, and handed that as STEM, a subagent's key under it deriving to run.json would land
+  // on the collector's own run.json. record_pair no longer passes it, and session_copy still refuses it.
+  test("a STEM taken from a recorded session file ending `/..` is refused, and the collector's run.json is byte-unchanged", () => {
+    const pairSession = `${sessions}/-legion-workspaces-pod/..`;
+    const runJson = '{"source":"the collector run metadata"}\n';
+    const r = run(
+      `evidence="$OUT" pair_session='${pairSession}'
+mkdir -p "$OUT"
+printf '%s' '${runJson}' >"$OUT/run.json"
+if session_copy "\${pair_session%.jsonl}/" review-pair "$(basename "$pair_session" .jsonl)"; then echo copied; else echo "session_copy failed $?"; fi`,
+      {
+        [pairSession]: transcript,
+        [`${pairSession}/run.json`]: '{"agent":"bytes an agent chose"}\n',
+      }
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("session_copy failed 1\n");
+    expect(r.stderr).toBe(
+      `the sessions under ${pairSession}/ are not copied: their directory's name '..' is not a plain name of [A-Za-z0-9._-] other than . and .. in ${r.out}/review-pair\n`
+    );
+    expect(r.sql).toBe("");
+    expect(readFileSync(join(r.out, "run.json"), "utf8")).toBe(runJson);
+    expect(readdirSync(r.out)).toEqual(["run.json"]);
+  });
+});
+
+// record_pair, the reviewer's caller of session_copy: the reviewer's stem is the basename of the
+// session file the reviewer's claim records, which the reviewer itself can set by re-registering, so
+// it is kept as data in session-stem and names no directory: the subagents' is the harness's own.
+describe("record_pair", () => {
+  function recordPair(pairSession: string, rows: Record<string, string>, prepare = ""): Ran {
+    return run(
+      `evidence="$OUT" pair_session='${pairSession}' pair_recorded=
+pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
+${fn("pair_text")}
+${fn("pair_dispatch")}
+${fn("record_pair")}
+mkdir -p "$OUT"
+${prepare}
+if record_pair; then echo recorded; else echo "record_pair failed $?"; fi`,
+      rows
+    );
+  }
+
+  test("keeps the reviewer's session, its subagents' in review-pair/subagents, each dispatch and the stem", () => {
+    const stem = key.replace(/\.jsonl$/, "");
+    const r = recordPair(key, {
+      [key]: transcript,
+      [`${stem}/thermonuclear-deep-review-1.jsonl`]: "SUB-BYTES\n",
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("recorded\n");
+    expect(r.stderr).toBe("");
+    const pair = join(r.out, "review-pair");
+    expect(readdirSync(pair).sort()).toEqual([
+      "reviewer.jsonl",
+      "session-stem",
+      "subagents",
+      "thermonuclear-code-quality.json",
+      "thermonuclear-deep-review.json",
+    ]);
+    expect(readFileSync(join(pair, "reviewer.jsonl"), "utf8")).toBe(transcript);
+    expect(readFileSync(join(pair, "session-stem"), "utf8")).toBe("2026-10-25_4242\n");
+    expect(readdirSync(join(pair, "subagents"))).toEqual(["thermonuclear-deep-review-1.jsonl"]);
+    expect(readFileSync(join(pair, "subagents", "thermonuclear-deep-review-1.jsonl"), "utf8")).toBe(
+      "SUB-BYTES\n"
+    );
+  });
+
+  // The property the harness's own directory is for: whatever basename the reviewer's recorded
+  // session file has, no part of it reaches a path, so even one session_copy would refuse as a STEM
+  // is recorded whole. A subagent's key under it deriving to run.json is written in
+  // review-pair/subagents, the collector's own run.json beside review-pair is byte-unchanged, and the
+  // agent's stem is in session-stem as data. A basename holds no `/`, so `..` is the one that climbs.
+  test.each([
+    ["`..`", `${sessions}/-legion-workspaces-pod/..`, ".."],
+    ["`.`", `${sessions}/-legion-workspaces-pod/.`, "."],
+    ["a space and a newline", `${sessions}/-legion-workspaces-pod/a b\nc.jsonl`, "a b\nc"],
+  ])("a recorded session file whose basename is %s is recorded, its subagents in review-pair/subagents and its stem as data", (_, pairSession, stem) => {
+    const runJson = '{"source":"the collector run metadata"}\n';
+    const agentBytes = '{"agent":"bytes an agent chose"}\n';
+    const r = recordPair(
+      pairSession,
+      {
+        [pairSession]: transcript,
+        [`${pairSession.replace(/\.jsonl$/, "")}/run.json`]: agentBytes,
+      },
+      `printf '%s' '${runJson}' >"$OUT/run.json"`
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("recorded\n");
+    expect(r.stderr).toBe("");
+    expect(readFileSync(join(r.out, "run.json"), "utf8")).toBe(runJson);
+    expect(readdirSync(r.out).sort()).toEqual(["review-pair", "run.json"]);
+    const pair = join(r.out, "review-pair");
+    expect(readdirSync(pair).sort()).toEqual([
+      "reviewer.jsonl",
+      "session-stem",
+      "subagents",
+      "thermonuclear-code-quality.json",
+      "thermonuclear-deep-review.json",
+    ]);
+    expect(readFileSync(join(pair, "reviewer.jsonl"), "utf8")).toBe(transcript);
+    expect(readdirSync(join(pair, "subagents"))).toEqual(["run.json"]);
+    expect(readFileSync(join(pair, "subagents", "run.json"), "utf8")).toBe(agentBytes);
+    expect(readFileSync(join(pair, "session-stem"), "utf8")).toBe(`${stem}\n`);
+  });
+});
+
 // collect_transcripts, the teardown's copy of every pod's session out of the session database
 // before the teardown removes it: a session it leaves out is gone for good, so it must fail, and
 // cleanup must carry that failure to the run's verdict as the teardown check `transcripts`.
@@ -581,8 +813,8 @@ exit 0`,
 
   test("a copy that leaves a session out fails the run's teardown check transcripts", () => {
     const r = teardownRun(`session_copy() {
-  [ "$1 $2" = "${sessions}/ $evidence/transcripts/pods" ] || return 9
-  echo "the session key ${sessions}/x/y.jsonl would be written as x_y.jsonl in $2, as would the key ${sessions}/x_y.jsonl; neither is copied" >&2
+  [ "$1 $2 $3" = "${sessions}/ transcripts pods" ] || return 9
+  echo "the session key ${sessions}/x/y.jsonl would be written as x_y.jsonl in $evidence/transcripts/$3, as would the key ${sessions}/x_y.jsonl; neither is copied" >&2
   return 1
 }`);
     expect(r.code).toBe(1);
@@ -603,7 +835,7 @@ exit 0`,
 
   test("a controller's copy that fails fails the run's teardown check transcripts", () => {
     const r = teardownRun(
-      `session_copy() { [ "$1 $2" = "${sessions}/ $evidence/transcripts/pods" ]; }`,
+      `session_copy() { [ "$1 $2 $3" = "${sessions}/ transcripts pods" ]; }`,
       (evidence) => {
         mkdirSync(join(evidence, "transcripts"), { recursive: true });
         writeFileSync(join(evidence, "transcripts", "controller"), "in the way\n");
@@ -621,9 +853,7 @@ exit 0`,
   });
 
   test("a copy that leaves nothing out leaves a passed run's teardown clean", () => {
-    const r = teardownRun(
-      `session_copy() { [ "$1 $2" = "${sessions}/ $evidence/transcripts/pods" ]; }`
-    );
+    const r = teardownRun(`session_copy() { [ "$1 $2 $3" = "${sessions}/ transcripts pods" ]; }`);
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("FAIL");
     expect(readFileSync(join(r.evidence, "transcripts", "controller", "c.jsonl"), "utf8")).toBe(

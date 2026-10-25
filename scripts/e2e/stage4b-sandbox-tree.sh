@@ -973,28 +973,60 @@ session_text() {
   [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
   printf '%s' "${out%$'\n'}"
 }
-# session_copy PREFIX DIR copies every session the table holds under the key prefix PREFIX into DIR,
-# one file a session, at a name derived from the key, never at the key: an agent writes its own
-# session rows, so a key is not trusted, and one holding `..`, a `/` after PREFIX or a newline would
-# otherwise place a file anywhere on this machine. The name is the key after PREFIX with every byte
-# outside [A-Za-z0-9._-] made `_` (bytes, so LC_ALL=C), so it holds no `/` and cannot name a
-# directory: a subagent's <id>/<sub>.jsonl is written as <id>_<sub>.jsonl. A key whose name would be
-# empty, `.` or `..` is refused, and so is every key of a name two keys under PREFIX derive: written
-# first-come, an agent's row that sorts first would put its own bytes at the name of the session it
-# collides with. A name that does not resolve directly inside DIR resolved with pwd -P, a symlink
-# already there followed, is refused too, so the guarantee holds even if the derivation is wrong.
-# Each key is judged by its own name alone, so a refused key, or one whose session cannot be read,
-# is named (never the session's bytes) and skipped while every other is still copied: one agent's
-# row cannot cost the run the rest of its transcripts. Any key not copied fails the call at the end,
-# so the caller still sees the loss. The listing gives each key as hex, one line a key even when the
-# key holds a newline, decoded here byte for byte.
+# session_copy PREFIX AREA STEM copies every session the table holds under the key prefix PREFIX into
+# the directory STEM of AREA, one of the evidence directories this function names for itself:
+# `transcripts`, `daemon-controller` (transcripts/daemon-controller) or `review-pair`, under
+# $evidence. A caller passes a word, never a path, because the directory is what every guard below
+# is measured against: handed a path, they would hold honestly against whatever directory a caller
+# derived. Every caller names STEM itself or from a value the daemon sets (pods, subagents, the
+# launched controller's pod), never from a session file an agent records, but a STEM of `..` would
+# move the whole copy up into the root's parent ($evidence itself, for review-pair) and a key's name
+# onto the collector's own files there, so these checks stay as a second fence: the
+# root is this function's constant, STEM must be a plain name of [A-Za-z0-9._-] other than `.` and
+# `..`, refused rather than cleaned, as a key's name is, and the directory, resolved with realpath
+# -m, a symlink already there followed, must sit directly in the resolved root, all before any key
+# is listed, any name derived or anything written. Why the pods' sessions have a directory of their
+# own, and what these guards cannot know, is said above collect_transcripts.
+# Within the directory, one file a session, at a name derived from the key, never at the key: an
+# agent writes its own session rows, so a key is not trusted, and one holding `..`, a `/` after
+# PREFIX or a newline would otherwise place a file anywhere on this machine. The name is the key
+# after PREFIX with every byte outside [A-Za-z0-9._-] made `_` (bytes, so LC_ALL=C), so it holds no
+# `/` and cannot name a directory: a subagent's <id>/<sub>.jsonl is written as <id>_<sub>.jsonl. A
+# key whose name would be empty, `.` or `..` is refused, and so is every key of a name two keys under
+# PREFIX derive: written first-come, an agent's row that sorts first would put its own bytes at the
+# name of the session it collides with. A name that does not resolve directly inside the directory,
+# a symlink already there followed, is refused too, so the guarantee holds even if the derivation is
+# wrong. Each key is judged by its own name alone, so a refused key, or one whose session cannot be
+# read, is named (never the session's bytes) and skipped while every other is still copied: one
+# agent's row cannot cost the run the rest of its transcripts. Any key not copied fails the call at
+# the end, so the caller still sees the loss. The listing gives each key as hex, one line a key even
+# when the key holds a newline, decoded here byte for byte. The directory is made only once the
+# listing holds a key.
 session_copy() {
-  local prefix=$1 dir=$2 LC_ALL=C hex line path name other dest resolved i lost=
+  local prefix=$1 area=$2 stem=$3 LC_ALL=C root hex line path name other dest resolved i lost=
   local -a keys=() names=()
   local -A first=() also=()
+  case $area in
+    transcripts) root=$evidence/transcripts ;;
+    daemon-controller) root=$evidence/transcripts/daemon-controller ;;
+    review-pair) root=$evidence/review-pair ;;
+    *)
+      echo "the sessions under $prefix are not copied: '$area' is no evidence directory session_copy writes in" >&2
+      return 1 ;;
+  esac
+  case $stem in
+    "" | . | .. | *[!A-Za-z0-9._-]*)
+      echo "the sessions under $prefix are not copied: their directory's name '$stem' is not a plain name of [A-Za-z0-9._-] other than . and .. in $root" >&2
+      return 1 ;;
+  esac
+  root=$(realpath -m -- "$root") && dest=$(realpath -m -- "$root/$stem") || return 1
+  if [ "${dest%/*}" != "${root%/}" ]; then
+    echo "the sessions under $prefix are not copied: their directory $root/$stem resolves to $dest, not directly inside $root" >&2
+    return 1
+  fi
   hex=$(session_psql prefix "$prefix" <<<"SELECT encode(convert_to(path, 'UTF8'), 'hex') FROM omp_session_files WHERE left(path, length(:'prefix')) = :'prefix' ORDER BY path;") || return 1
   [ -n "$hex" ] || return 0
-  mkdir -p -- "$dir" && dest=$(cd -- "$dir" && pwd -P) || return 1
+  mkdir -p -- "$dest" || return 1
   # Every name is derived before any is written, so a key whose name a later key also derives is
   # known to collide before either is copied. An empty name is no array subscript, and it, `.` and
   # `..` are refused below whatever else derives them.
@@ -1039,7 +1071,7 @@ session_copy() {
       continue
     fi
     # session_text names the key it cannot read; the empty file the redirection made goes, so no
-    # file in DIR stands for a session it does not hold.
+    # file in the directory stands for a session it does not hold.
     session_text "$path" >"$dest/$name" || { rm -f -- "$dest/$name"; lost=1; }
   done
   [ -z "$lost" ]
@@ -1121,17 +1153,22 @@ pair_settled() {
   done
 }
 # record_pair keeps the reviewer's session, the sessions of the subagents it started (every session
-# keyed under its stem), and each agent's dispatch under $evidence/review-pair, once. Its callers
-# read its status (tree-reviewed fails on it), and errexit is off inside a function called that
-# way, so every write returns on failure: a file it could not write must not leave it recorded.
+# keyed under its stem) in review-pair/subagents, each agent's dispatch and the stem under
+# $evidence/review-pair, once. Its callers read its status (tree-reviewed fails on it), and errexit
+# is off inside a function called that way, so every write returns on failure: a file it could not
+# write must not leave it recorded. The stem comes from the session file the reviewer's claim
+# records, which the reviewer itself can set by re-registering, so it is kept as data alone, in
+# session-stem, for a reader to see which session the pair came from, and names no directory: the
+# subagents' directory is the harness's constant `subagents`, so session_copy's refusal of a name
+# that is not plain, and its anchor inside review-pair, are a second fence rather than the only one.
 record_pair() {
   local text agent stem
   [ -z "$pair_recorded" ] || return 0
   text=$(pair_text) || return 1
   stem=$(basename "$pair_session" .jsonl)
-  mkdir -p "$evidence/review-pair/$stem" || return 1
+  mkdir -p "$evidence/review-pair" || return 1
   printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl" || return 1
-  session_copy "${pair_session%.jsonl}/" "$evidence/review-pair/$stem" || return 1
+  session_copy "${pair_session%.jsonl}/" review-pair subagents || return 1
   for agent in $pair_agents; do
     pair_dispatch "$agent" <<<"$text" >"$evidence/review-pair/$agent.json" || return 1
   done
@@ -2550,17 +2587,26 @@ remove_run_branches() {
 # pod's, from the session database, into transcripts/pods, each at the name session_copy derives
 # from its key under pod_sessions_dir, <cwd dir>_<file> (a pod already gone, a child's included),
 # and the operator's controller's, which lives in the run's own profile on this machine and goes
-# with that profile at teardown, into transcripts/controller. The pods' names come from keys a pod
-# writes, so they get a directory of their own: no key can derive a name the harness itself writes
-# beside them (controller, daemon-controller, any added later), where a reserved-name list would
-# hold only until the next one. It runs before the teardown removes the database's container and
-# the profile, so a session it does not copy is gone for good: it fails when session_copy left any
-# out (a key refused or unreadable, each named on stderr) or could not list them, or when the
-# controller's sessions could not be copied, after copying everything else all the same, and
-# cleanup makes that the teardown check `transcripts`, never a note a passing run reads past.
+# with that profile at teardown, into transcripts/controller. It runs before the teardown removes
+# the database's container and the profile, so a session it does not copy is gone for good: it
+# fails when session_copy left any out (a key refused or unreadable, each named on stderr) or could
+# not list them, or when the controller's sessions could not be copied, after copying everything
+# else all the same, and cleanup makes that the teardown check `transcripts`, never a note a
+# passing run reads past.
+# The pods' transcripts go in a directory of their own because of where, not what: session_copy
+# writes only names that resolve as a direct child of the directory it writes in (:1065-1071, a
+# parent-equality test rather than a prefix one), so a key's derived name can never leave
+# transcripts/pods whatever it derives — controller, daemon-controller and pods among them. The
+# collector's own directories are that directory's siblings, not its parent. Merging them back into
+# one directory would put a pod's derived name and the collector's own paths in one namespace
+# again, and every guard in this file would still pass: the derivation, the refusals and the
+# containment assertion are all about a name's shape and its parent, and none of them knows which
+# names the collector owns. Nor need they know which directory they measure against: session_copy
+# is handed none, but anchors it itself, transcripts/pods here, as a direct child of a root of its
+# own (:1008-1025), so no value a caller derives can move it.
 collect_transcripts() {
   local copied=1
-  session_copy "$pod_sessions_dir/" "$evidence/transcripts/pods" || copied=
+  session_copy "$pod_sessions_dir/" transcripts pods || copied=
   if [ -d "$profile_agent/sessions" ]; then
     if ! { mkdir -p -- "$evidence/transcripts/controller" && cp -R -- "$profile_agent/sessions/." "$evidence/transcripts/controller/"; }; then
       echo "the operator's controller's sessions in $profile_agent/sessions could not all be copied into $evidence/transcripts/controller" >&2
@@ -4665,7 +4711,8 @@ begin review-pair
 # to the model as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No
 # model selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
 # the same from outside. tree-reviewed recorded the dispatches (record_pair); each failure below
-# quotes them.
+# quotes them. The subagents' sessions are in review-pair/subagents, the harness's own directory;
+# the reviewer's recorded stem is read only to name the session in a failure.
 stem=$(cat "$evidence/review-pair/session-stem")
 # Both agents declare @review, which the operator's overlay maps. The task executor runs a subagent
 # on its parent's model when the subagent's own does not resolve, silently, so each pair session's
@@ -4686,8 +4733,8 @@ for agent in $pair_agents; do
   id=$(jq -r --arg agent "$agent" '([.deliveries[].content | capture("<task-result id=\"(?<id>[^\"]+)\" agent=\"" + $agent + "\" status=\"completed\"")? | .id]
     + [.ids[] as $i | select([.deliveries[].content | select(contains("id=\"" + $i + "\""))] | length == 0) | $i]) | first // empty' "$d")
   [ -n "$id" ] || fail "the reviewer's task for $agent did not complete: $(jq -c '[.deliveries[] | .content[0:300]] + [.results[] | {isError, text: .text[0:300]}]' "$d")"
-  sub=$evidence/review-pair/$stem/$id.jsonl
-  [ -s "$sub" ] || fail "$agent's session $stem/$id.jsonl is not beside the reviewer's"
+  sub=$evidence/review-pair/subagents/$id.jsonl
+  [ -s "$sub" ] || fail "$agent's session $stem/$id.jsonl is not beside the reviewer's, at $sub"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "toolResult" and .message.toolName == "yield" and .message.isError == false)] | length > 0' "$sub" >/dev/null ||
     fail "$agent's session $id holds no accepted yield"
   models=$(jq -R -s -c '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant") | "\(.message.provider)/\(.message.model)"] | unique' "$sub")
@@ -5651,18 +5698,23 @@ printf '%s\n' "$up" >"$evidence/controller-liveness-up.json"
 jq -e '.wrong == []' <<<"$up" >/dev/null || fail "the daemon logged a liveness line while its controller held the role: $(jq -c .wrong <<<"$up")"
 note "negative control: after line $up_mark of the daemon log, for $watched s with $launched_session holding the role, neither line"
 claim=$(claim_by_token "$controller_token")
-pod=$(jq -r .locator.sandbox.name <<<"$claim")
+pod=$(jq -r '.locator.sandbox.name // ""' <<<"$claim")
 # Its sessions are the session database's under its session file's directory, copied into
 # transcripts/daemon-controller, a directory of the harness's own beside transcripts/pods (see
-# collect_transcripts), each at the name session_copy derives from its key there, a subagent's
-# <stem>/<id>.jsonl as <stem>_<id>.jsonl. A copy that fails, its directory's creation included
-# (session_copy makes it), is a note and not this checkpoint's failure: the controller's pod keeps
-# its sessions under pod_sessions_dir like every pod, so collect_transcripts copies the same
-# sessions into transcripts/pods at teardown, and fails the run's teardown check if it cannot.
+# collect_transcripts), in a directory there named for its pod, each at the name session_copy
+# derives from its key, a subagent's <stem>/<id>.jsonl as <stem>_<id>.jsonl. The pod's name is the
+# daemon's: its runtime chose it at the launch and recorded it in the claim's locator, which no
+# registration writes. The session file is the controller's own to record, so it only selects the
+# keys to copy and names no directory; session_copy's refusal of a name that is not plain, and its
+# anchor directly inside transcripts/daemon-controller, are a second fence rather than the only one.
+# A copy that fails, a claim with no pod or session file and a directory that could not be made
+# included, is a note and not this checkpoint's failure: the controller's pod keeps its sessions
+# under pod_sessions_dir like every pod, so collect_transcripts copies the same sessions into
+# transcripts/pods at teardown, and fails the run's teardown check if it cannot.
 launched_file=$(jq -r '.sessionFile // ""' <<<"$claim")
 launched_dir=$(dirname "$launched_file")
-{ [ -n "$launched_file" ] && session_copy "$launched_dir/" "$evidence/transcripts/daemon-controller/$(basename "$launched_dir")"; } ||
-  note "the sessions of the controller the daemon launched could not be copied from the session database into $evidence/transcripts/daemon-controller (its claim records session file '$launched_file'); collect_transcripts copies them into $evidence/transcripts/pods at teardown"
+{ [ -n "$launched_file" ] && [ -n "$pod" ] && session_copy "$launched_dir/" daemon-controller "$pod"; } ||
+  note "the sessions of the controller the daemon launched in pod '$pod' could not be copied from the session database into $evidence/transcripts/daemon-controller (its claim records session file '$launched_file'); collect_transcripts copies them into $evidence/transcripts/pods at teardown"
 if [ -n "$skip_controller" ]; then
   note "STAGE4B_SKIP_CONTROLLER: the daemon-launched controller's GitHub credential is not checked"
 else
