@@ -189,7 +189,8 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	defer cancel()
 	if ended {
 		// A real failed init proves no role could start. Return its recorded pod so supervision
-		// observes Gone (and WorkspaceLost), rather than charging an unrelated launcher timeout.
+		// observes that pod's Gone, which carries InitFailed, rather than charging an unrelated
+		// launcher timeout.
 		r.join(loc)
 		return loc, nil
 	}

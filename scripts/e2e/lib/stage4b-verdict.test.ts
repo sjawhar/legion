@@ -780,110 +780,69 @@ if handover_ridden_out ${JSON.stringify(log)} LEGSMOKE-13; then echo ridden-out;
 });
 
 // carried-child judges how the carried child's planner came back in its own tree
-// (carried_child_sessions). Any of the child's roles may find its volume lost, in either order, so
-// the rows hold every such order to a pass, a claim that logs the loss twice to a failure, and the
-// planner's session to its log: a new session must have a loss behind it, and a kept one none.
+// (carried_child_sessions). A session is a row in the table every tree's pods read, and the old
+// tree's cleanup takes only a Sandbox and a pod, so the move can cost the planner no session: the
+// rows hold a planner back on the session it registered before its move to the one pass, and each
+// way a log can fall short of that — another session, no registration on one side of the move, no
+// move at all — to the failure that names it.
 describe("stage 4b's carried-child sessions verdict", () => {
   const prefix = "legion-legsmoke-legsmoke-13-";
   const planner = `${prefix}planner`;
-  const architect = `${prefix}architect`;
-  const line = (msg: string, claim: string, extra: object = {}) => ({
+  const line = (msg: string, extra: object) => ({
     time: "2026-10-12T10:46:00Z",
     level: "INFO",
     msg,
-    claim,
+    claim: planner,
     ...extra,
   });
-  const lost = (claim: string) =>
-    line(
-      "supervise: the issue's volume was lost with the session; relaunching a fresh session",
-      claim,
-      { session: "" }
-    );
-  const dropped = (claim: string) =>
-    line(
-      "supervise: the issue's volume the session lived on was lost; the next launch is a fresh session",
-      claim,
-      { session: "kept" }
-    );
-  // cameBack is the verdict on a daemon log holding the planner's registration as session `kept`,
-  // its move, the LINES between, and its registration after them as session AFTER (none if null).
-  const cameBack = (lines: object[], after: string | null) => {
+  const registered = (session: string, generation: number) =>
+    line("api: claim registered", { session, generation });
+  const moved = line("supervise: the claim's issue moved to another tree", {
+    from: "LEGSMOKE-12",
+    to: "LEGSMOKE-13",
+  });
+  // cameBack is the verdict on a daemon log holding exactly ENTRIES.
+  const cameBack = (entries: object[]) => {
     const log = join(dir, `daemon-${++runs}.log`);
-    const all = [
-      line("api: claim registered", planner, { session: "kept", generation: 1 }),
-      line("supervise: the claim's issue moved to another tree", planner, {
-        from: "LEGSMOKE-12",
-        to: "LEGSMOKE-13",
-      }),
-      ...lines,
-      ...(after === null
-        ? []
-        : [line("api: claim registered", planner, { session: after, generation: 2 })]),
-    ];
-    writeFileSync(log, `${all.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+    writeFileSync(log, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
     const result = Bun.spawnSync([
       "bash",
       "-c",
       `set -Eeuo pipefail
 ${fn("carried_child_sessions")}
-if out=$(carried_child_sessions ${JSON.stringify(log)} ${prefix} ${planner} 2>&1); then echo "ok $out"; else echo "fail $out"; fi
+if out=$(carried_child_sessions ${JSON.stringify(log)} ${planner} 2>&1); then echo "ok $out"; else echo "fail $out"; fi
 `,
     ]);
     expect(result.exitCode).toBe(0);
     return result.stdout.toString().trim();
   };
 
-  test("passes a fresh planner when the architect and then the planner each found the volume lost", () => {
-    expect(cameBack([lost(architect), dropped(planner), lost(planner)], "new")).toBe("ok fresh");
+  test("passes a planner back on the session it registered before its move", () => {
+    expect(cameBack([registered("kept", 1), moved, registered("kept", 2)])).toBe("ok kept");
   });
 
-  test("passes a fresh planner that found the volume lost first, or alone", () => {
-    expect(cameBack([lost(planner), lost(architect)], "new")).toBe("ok fresh");
-    expect(cameBack([lost(planner)], "new")).toBe("ok fresh");
-  });
-
-  test("passes a fresh planner whose session a sibling's loss dropped before its own launch", () => {
-    expect(cameBack([lost(architect), dropped(planner)], "new")).toBe("ok fresh");
-  });
-
-  test("passes a planner back on its kept session with no loss logged, the relabel path", () => {
-    expect(cameBack([], "kept")).toBe("ok kept");
-  });
-
-  test("fails a fresh planner with no loss of its kept session logged", () => {
-    expect(cameBack([], "new")).toBe(
-      `fail ${planner} came back as session new, not its kept kept, with no loss of the kept one logged`
-    );
-    expect(cameBack([lost(architect)], "new")).toBe(
-      `fail ${planner} came back as session new, not its kept kept, with no loss of the kept one logged`
-    );
-  });
-
-  test("fails a claim that logged the volume lost twice", () => {
-    expect(cameBack([lost(planner), lost(planner)], "new")).toBe(
-      `fail the issue's volume was logged lost more than once for ${planner}`
-    );
-    expect(cameBack([lost(architect), lost(planner), lost(architect)], "new")).toBe(
-      `fail the issue's volume was logged lost more than once for ${architect}`
-    );
-  });
-
-  test("fails a planner back on the session it logged lost", () => {
-    expect(cameBack([lost(planner)], "kept")).toBe(
-      `fail ${planner} logged its session kept lost, yet came back on it`
+  test("fails a planner that came back on another session", () => {
+    expect(cameBack([registered("kept", 1), moved, registered("new", 2)])).toBe(
+      `fail ${planner} came back as session new, not its kept kept, which the session table holds across the move`
     );
   });
 
   test("fails a planner that has not registered since its move", () => {
-    expect(cameBack([lost(planner)], null)).toBe(
+    expect(cameBack([registered("kept", 1), moved])).toBe(
       `fail ${planner} has not registered since its move`
     );
   });
 
-  test("counts only the child's own claims, not those of a key it prefixes", () => {
-    const other = "legion-legsmoke-legsmoke-130-architect";
-    expect(cameBack([lost(other), lost(other)], "kept")).toBe("ok kept");
+  test("fails a planner that registered no session before its move", () => {
+    expect(cameBack([moved, registered("kept", 2)])).toBe(
+      `fail ${planner} registered no session before its move`
+    );
+  });
+
+  test("fails a log in which the planner never moved to another tree", () => {
+    expect(cameBack([registered("kept", 1), registered("kept", 2)])).toBe(
+      `fail ${planner} never moved to another tree`
+    );
   });
 });
 

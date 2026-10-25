@@ -250,17 +250,14 @@ done
 run_resources="${run_resources%,}}"
 unset role
 # The daemon's log texts the children's and tree 1's volumes are judged by: the release a child's
-# close as done logs (internal/runtime/sandbox/issue_suspend.go); the lost volume a resume finds
-# (internal/supervise/machine.go), which child-release requires absent, re-admission exactly once
-# for tree 1's claims (issue_lost_lines), and carried-child at most once for each of child 3's
-# (carried_child_sessions); and the prefix of the runtime's detail for the process that death ends
-# (internal/runtime/sandbox/observe.go), which pod_watch_verdict exempts. Then the texts
+# close as done logs (internal/runtime/sandbox/issue_suspend.go); and the prefix of the lost-volume
+# detail pod_watch_verdict exempts, which nothing logs now that an issue's disk dies with its pod
+# (INFRA-80), so it exempts no death. Then the texts
 # carried-child reads child 3's hand-over by: its decision (internal/workflow/linger.go handOver),
 # the outbox's drop of a status write as permanently refused (internal/daemon/outbox.go RunOnce),
 # which the hand-over must never get, and a claim's move to its issue's new tree
 # (internal/supervise/lifecycle.go Retree).
 released_msg="sandbox runtime: released the closed issue's Sandbox and the volume it owned"
-lost_msg="supervise: the issue's volume was lost with the session; relaunching a fresh session"
 lost_detail="the issue's volume was lost: "
 handed_msg="workflow: a finished root hands its unfinished child to Legion"
 dropped_msg="outbox status write refused by Dispatch and dropped; the issue's later writes go on"
@@ -1374,10 +1371,6 @@ left_planning() {
   log_lines "workflow: phase changed" |
     jq -s -e -c --arg issue "$1" 'map(select(.issue == $issue and .from == "planning")) | first // empty | {time, to}'
 }
-# issue_lost_lines ISSUE prints the daemon log's lost-volume lines (lost_msg) for the claims of
-# ISSUE, which the machine's log names by token (claim_token's issue prefix): re-admission counts
-# tree 1's, and carried-child names child 3's in its note (carried_child_sessions judges them).
-issue_lost_lines() { log_lines "$lost_msg" | jq -c --arg c "$(claim_token "$1" "")" 'select((.claim // "") | startswith($c))'; }
 # handover_refusals LOG ISSUE counts, in the daemon log LOG, the outbox's failed attempts of ISSUE's
 # hand-over write that a Dispatch predating labels_add refused by that field's name: the
 # client's error for the write (internal/daemon/outbox.go status) wraps Dispatch's
@@ -1397,48 +1390,31 @@ handover_drops() {
 # Dispatch that refuses labels_add: retried at least twice on that refusal, and never dropped
 # (dispatch.PermanentRefusal). stage4b-verdict.test.ts holds it to a fabricated drop.
 handover_ridden_out() { [ "$(handover_refusals "$1" "$2")" -ge 2 ] && [ "$(handover_drops "$1" "$2")" = 0 ]; }
-# carried_child_sessions LOG PREFIX PLANNER is carried-child's verdict, from the daemon log LOG, on
-# how the carried child's planner claim PLANNER came back in the child's own tree. It holds the
-# lost-volume lines of the child's claims (tokens starting with PREFIX, claim_token's issue prefix)
-# to at most one each. Which of them log one is not fixed: once one role of an issue recorded a
-# session, every launch of the issue expects its volume (store/claims.go IssueHasSessions, whose
-# comment says a new role may be the first to find another role's session gone), so after tree 1's
-# cleanup deleted the child's volume, the new tree's fresh architect, the planner, or both find it
-# lost, in either order, whichever start runs first. It prints `fresh` when the planner's first
-# registration after its move to the new tree names another session than its last one before the
-# move, and LOG then holds that session's loss: the planner's own lost line, or its drop of the
-# session when a sibling found the volume lost (supervise/table.go sessionLost). It prints `kept`
-# when the planner came back on the same session with no loss logged for it: the child's launch
-# relabelled its Suspended Sandbox for the new tree before the cleanup took it
-# (runtime/sandbox/relaunch.go), so the volume and its sessions stayed. Any other case fails,
-# naming why: a claim that logged the loss twice, no move, no registration on either side of it, a
-# new session with no loss logged, or a loss logged for a session that came back. The messages are
-# spelled here so a verdict test needs no variable: supervise/machine.go relaunchFresh, table.go
-# sessionLost, lifecycle.go Retree and api/claims.go register.
+# carried_child_sessions LOG PLANNER is carried-child's verdict, from the daemon log LOG, on how the
+# carried child's planner claim PLANNER came back in the child's own tree. It has one right answer,
+# `kept`: a session is a row in the table every tree's pods read, and the old tree's cleanup takes
+# only a Sandbox and a pod (INFRA-80), so nothing of the move can cost the planner its session. It
+# prints `kept` when PLANNER moved to another tree, registered on both sides of that move, and the
+# session of its first registration after it is the one its last registration before it named. Any
+# other case fails, naming why: no move, no registration on one side of it, or a session that
+# changed across it. The messages are spelled here so a verdict test needs no variable:
+# supervise/lifecycle.go Retree and api/claims.go register.
 carried_child_sessions() {
   local verdict
-  verdict=$(jq -R -s -r --arg prefix "$2" --arg planner "$3" \
-    --arg lost "supervise: the issue's volume was lost with the session; relaunching a fresh session" \
-    --arg dropped "supervise: the issue's volume the session lived on was lost; the next launch is a fresh session" \
+  verdict=$(jq -R -s -r --arg planner "$2" \
     --arg moved "supervise: the claim's issue moved to another tree" --arg registered "api: claim registered" '
     [split("\n")[] | fromjson? | select(type == "object")] as $log
-    | [$log[] | select(.msg == $lost and ((.claim // "") | startswith($prefix))) | .claim] as $losses
-    | [$losses | group_by(.)[] | select(length > 1) | .[0]] as $twice
     | ([$log | to_entries[] | select(.value.msg == $moved and .value.claim == $planner) | .key] | last) as $move
     | [$log | to_entries[] | select(.value.msg == $registered and .value.claim == $planner)] as $registrations
     | ([$registrations[] | select($move != null and .key < $move) | .value.session] | last) as $before
     | ([$registrations[] | select($move != null and .key > $move) | .value.session] | first) as $after
-    | (($losses | index($planner)) != null or any($log[]; .msg == $dropped and .claim == $planner)) as $planner_lost
-    | if ($twice | length) > 0 then "FAIL: the issue'"'"'s volume was logged lost more than once for \($twice | join(", "))"
-      elif $move == null then "FAIL: \($planner) never moved to another tree"
+    | if $move == null then "FAIL: \($planner) never moved to another tree"
       elif $before == null then "FAIL: \($planner) registered no session before its move"
       elif $after == null then "FAIL: \($planner) has not registered since its move"
-      elif $after != $before then
-        if $planner_lost then "fresh" else "FAIL: \($planner) came back as session \($after), not its kept \($before), with no loss of the kept one logged" end
-      elif $planner_lost then "FAIL: \($planner) logged its session \($before) lost, yet came back on it"
+      elif $after != $before then "FAIL: \($planner) came back as session \($after), not its kept \($before), which the session table holds across the move"
       else "kept" end' "$1") || return 1
   case $verdict in
-    fresh | kept) printf '%s\n' "$verdict" ;;
+    kept) printf '%s\n' "$verdict" ;;
     *)
       printf '%s\n' "${verdict#FAIL: }" >&2
       return 1
@@ -1680,9 +1656,9 @@ hold_end_charged() {
 # other form is named and accounts for nothing, so the verdict never judges against a record it
 # cannot read.
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
-# resume that finds the issue's volume lost dies by design (the runtime's detail begins "the issue's
-# volume was lost: ", internal/runtime/sandbox/observe.go), and re-admission and carried-child judge
-# those themselves, tree 1's (issue_lost_lines) and child 3's (carried_child_sessions). A
+# lost-volume detail the verdict exempts (lost_detail) is written by nothing now that an issue's
+# disk dies with its pod (INFRA-80), so it exempts no death; it stays, as the run's greps for a
+# lost-volume line do, because a death carrying it would be a daemon this run did not build. A
 # pod the scheduler never placed is no unexplained death either:
 # the daemon retires a pod still unscheduled at its boot deadline and relaunches the claim, so a
 # death whose pod the watch saw `PodScheduled=False Unschedulable` and never `PodScheduled=True` (nor
@@ -6335,12 +6311,11 @@ begin carried-child
 # in, and takes a free slot. Its planner's claim, retired with its session by that close, is
 # re-pointed to the new tree (retree_msg). Its new architect runs in child 3's own issue pod, under
 # the new tree's label, and is told the tree is carried. Once both have registered, the planner has
-# come back one of two ways (carried_child_sessions): fresh, on a new volume, after tree 1's
-# cleanup deleted the old one; or on its kept session and volume, when the child's launch
-# relabelled its Sandbox before the cleanup took it. Either way its session is given its phase's
-# resume task. On the fresh way, any of child 3's roles may be the one that finds the volume lost
-# (store/claims.go:128-132): the lost-volume lines may name the architect, the planner, or both, in
-# either order, each at most once. Tree 1's lifecycle row says its cleanup confirmed.
+# come back on the very session it registered before the move (carried_child_sessions): a session is
+# a row in the table every tree's pods read, and tree 1's close took only the child's Sandbox and
+# the pod its disk belonged to, so nothing of the move can cost it one. Its session is given its
+# phase's resume task, and the disk it works on in its own tree is its new pod's own. Tree 1's
+# lifecycle row says its cleanup confirmed.
 # (c) Child 3 is taken out, so its pods go and re-admission finds a free slot.
 child3_planner=$(claim_token "$child3" planner)
 handed=$(log_lines "$handed_msg" | jq -c --arg issue "$child3" 'select(.issue == $issue)')
@@ -6429,10 +6404,9 @@ on_issue "$child3" until_true 900 "$child3's planner to register again in its ow
 assert_claim_endpoints "$child3" planner
 on_issue "$child3" until_true 900 "$child3's architect to register in its own tree" issue_worker_live "$child3" architect
 assert_claim_endpoints "$child3" architect
-# Both roles have registered, so every launch of child 3 that found its volume lost has logged it.
-came_back=$(carried_child_sessions "$daemon_log" "$(claim_token "$child3" "")" "$child3_planner" 2>&1) ||
+# Both roles have registered, so the planner's return in its own tree is in the log.
+came_back=$(carried_child_sessions "$daemon_log" "$child3_planner" 2>&1) ||
   fail "$child3's planner in its own tree: $came_back"
-lost3=$(issue_lost_lines "$child3" | jq -s -c 'map(.claim)')
 resume="Issue: $child3. Phase: $child3_phase. Resume the existing phase work."
 child3_resume_given() {
   claim_session_text "$child3" planner | jq -R -s -e --arg want "$resume" \
@@ -6448,19 +6422,13 @@ child3_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail
 # What the carried child keeps is its session, which the session database holds, not its disk:
 # the pod it worked in went when tree 1 closed, and an issue's disk goes with its pod (INFRA-80),
 # so its new tree's first pod brings one of its own and provisions the workspace afresh from what
-# the branch holds. A fresh session would mean the table lost it.
-case $came_back in
-  fresh)
-    fail "$child3's planner came back as a fresh session (the lost-volume lines of $child3's claims: $lost3); want its kept session, which the session database holds whatever became of its pod"
-    ;;
-  kept)
-    [ "$child3_volume" != "$child3_tree1_volume" ] ||
-      fail "$child3's disk ${found%% *} in its own tree is still uid $child3_tree1_volume, the one it had in $tree1: the pod that disk belonged to is gone, and a pod's disk goes with the pod"
-    came_back_note="came back on its kept session, the session database's, on a disk of its new pod's own (uid $child3_volume, not the $child3_tree1_volume it had in $tree1)"
-    ;;
-esac
-# Either way admission starts the planner in its new tree with its phase's resume task (admit's
-# startMidPhaseMembers, workflow.ResumeTask), so both ways must show it.
+# the branch holds. Any other session than the kept one would mean the table lost it, which
+# carried_child_sessions has already failed on.
+[ "$child3_volume" != "$child3_tree1_volume" ] ||
+  fail "$child3's disk ${found%% *} in its own tree is still uid $child3_tree1_volume, the one it had in $tree1: the pod that disk belonged to is gone, and a pod's disk goes with the pod"
+came_back_note="$came_back its session, the session database's, on a disk of its new pod's own (uid $child3_volume, not the $child3_tree1_volume it had in $tree1)"
+# Admission starts the planner in its new tree with its phase's resume task (admit's
+# startMidPhaseMembers, workflow.ResumeTask), which its session must show.
 until_true 300 "$child3's planner session to be given its phase's resume task" child3_resume_given
 came_back_note+=" and was given \"$resume\""
 catchup_carried() { notice_line "$child3" architect "$(notice_needle catch-up "$child3")" | grep -qE 'carried[^A-Za-z0-9]{0,4}true'; }

@@ -151,17 +151,16 @@ func launchOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) launch {
 }
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
-// unless closed says its cleanup confirmed, an issue recorded sessions only when sessions says
-// so, a claim of an issue runs a process only when running names it, in the tree it names, an
-// issue's Sandbox belongs to a tree only when homes names it (to none otherwise), and a claim is
-// stored unretired only when unretired names it. The store's own rule for a Sandbox's home is held
-// by its tests (store.IssueSandboxHome); here a test sets it.
+// unless closed says its cleanup confirmed, a claim of an issue runs a process only when running
+// names it, in the tree it names, an issue's Sandbox belongs to a tree only when homes names it
+// (to none otherwise), and a claim is stored unretired only when unretired names it. The store's
+// own rule for a Sandbox's home is held by its tests (store.IssueSandboxHome); here a test sets it.
 type fakeStore struct {
-	mu               sync.Mutex
-	closed, sessions map[string]bool
-	running          map[string]runningClaim
-	homes            map[string]string
-	unretired        map[claim.Token]bool
+	mu        sync.Mutex
+	closed    map[string]bool
+	running   map[string]runningClaim
+	homes     map[string]string
+	unretired map[claim.Token]bool
 }
 
 // runningClaim is a claim of an issue that runs a process (token:state), in tree.
@@ -169,7 +168,7 @@ type runningClaim struct{ tree, claim string }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{},
+		closed: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{},
 		unretired: map[claim.Token]bool{},
 	}
 }
@@ -199,12 +198,6 @@ func (s *fakeStore) IssueSandboxHome(_ context.Context, _, issue string) (string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.homes[issue], nil
-}
-
-func (s *fakeStore) IssueHasSessions(_ context.Context, _, issue string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessions[issue], nil
 }
 
 func (s *fakeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {

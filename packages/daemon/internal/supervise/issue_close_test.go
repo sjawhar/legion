@@ -8,8 +8,8 @@ package supervise
 import "testing"
 
 // The claim is released as a tree close releases it — with its process where one runs, with no
-// locator where none does — and retires with no session and no recorded loss, in memory and in the
-// store, so IssueHasSessions of its issue reads nothing from it.
+// locator where none does — and retires with no session, in memory and in the store, so nothing
+// of the issue's sessions is left on it.
 func TestAnIssueCloseRetiresTheClaimAndDropsItsSessionWithoutALostWorkspace(t *testing.T) {
 	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended} {
 		t.Run(string(state), func(t *testing.T) {

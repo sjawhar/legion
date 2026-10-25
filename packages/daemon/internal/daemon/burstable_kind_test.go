@@ -160,13 +160,9 @@ func burstableLiveSpec(project, issue string, token claim.Token, bootToken, prom
 }
 
 // firstLaunchStore answers the runtime as the daemon's store does for an issue's first launch:
-// no session recorded, its tree live, no other tree running it, its Sandbox its own tree's, and no
-// controller claim stored.
+// its tree live, no other tree running it, its Sandbox its own tree's, and no controller claim
+// stored.
 type firstLaunchStore struct{}
-
-func (firstLaunchStore) IssueHasSessions(context.Context, string, string) (bool, error) {
-	return false, nil
-}
 
 func (firstLaunchStore) TreeLive(context.Context, string, string) (bool, error) { return true, nil }
 
