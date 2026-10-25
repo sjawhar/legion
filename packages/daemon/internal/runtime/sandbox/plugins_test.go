@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 // testPlugins is the pair an installing launch's spec carries in these tests.
@@ -128,7 +129,7 @@ func TestInstallScriptQuotesShellUnsafeSources(t *testing.T) {
 		t.Skip("no /bin/sh in this environment")
 	}
 	plugins := &runtime.PluginInstall{PiLegion: "/tmp/odd dir/pi-legion's.tgz", PiEnvoy: "/tmp/another 'one'.tgz", Contract: 24}
-	script := startScript("/home/legion/.local/state/tester", 3, plugins, installLockWait(2*time.Second, 3))
+	script := startScript("/home/legion/.local/state/tester", 3, plugins, "", installLockWait(2*time.Second, 3))
 	// The two sources carry a space and a single quote; verified below (sh -n) rather than as a
 	// literal substring, since the quoting itself breaks one.
 	if !strings.Contains(script, "pi-legion") || !strings.Contains(script, "another") {
@@ -172,7 +173,7 @@ func bunInstallArgs(t *testing.T, plugins *runtime.PluginInstall) []string {
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+recorded+"\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := startScript(filepath.Join(dir, "state"), 3, plugins, installLockWait(2*time.Second, 3))
+	script := startScript(filepath.Join(dir, "state"), 3, plugins, "", installLockWait(2*time.Second, 3))
 	if !strings.Contains(script, "/usr/local/bin/bun") {
 		t.Fatalf("the install script does not call bun by the image path:\n%s", script)
 	}
@@ -226,15 +227,58 @@ func TestAnUppercaseSchemeReachesBunVerbatim(t *testing.T) {
 	}
 }
 
-// startArgv returns agent unchanged with neither plugins nor a setup command: a plain launch's
-// argv is never wrapped.
+// startArgv returns agent unchanged with no plugins, no Claude Code directory and no setup
+// command: a plain Oh My Pi launch's argv is never wrapped.
 func TestStartArgvIsAgentUnchangedWithoutPluginsOrSetup(t *testing.T) {
 	agent := []string{"/opt/omp/bin/omp", "--mode", "rpc"}
 	for name, setup := range map[string][]string{"nil": nil, "empty": {}} {
-		got := startArgv("/home/legion/.local/state/tester", 1, nil, setup, agent, installLockWait(2*time.Second, 3))
+		got := startArgv("/home/legion/.local/state/tester", 1, nil, "", setup, agent, installLockWait(2*time.Second, 3))
 		if !slices.Equal(got, agent) {
 			t.Fatalf("startArgv(nil plugins, %s setup) = %q, want %q unchanged", name, got, agent)
 		}
+	}
+}
+
+// A Claude Code launch is wrapped in the start script for one thing: its configuration directory
+// is made before the agent execs. Nothing else makes it — it is on the issue's volume, which the
+// image cannot prepare — and Claude Code is told it as CLAUDE_CONFIG_DIR rather than asked to
+// create it. The script is run here, so the directory it makes is the one the pod would get, and
+// an Oh My Pi launch of the same deployment is left unwrapped.
+func TestAClaudeLaunchsStartScriptMakesItsConfigurationDirectory(t *testing.T) {
+	claudeInKubernetes(t)
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeWorkerSpec(t)
+	l := launchOf(t, r, spec)
+	start := launcherCommand(l, r)
+	agent := start.Argv[slices.Index(start.Argv, "--")+1:]
+	if len(agent) < 5 || agent[0] != "/bin/sh" || agent[1] != "-c" || agent[3] != startName || agent[4] != "0" {
+		t.Fatalf("the agent command is %q, want /bin/sh -c <script> %s 0 <agent argv…>", agent, startName)
+	}
+	if got, want := agent[5:], l.agentArgv(r.agent); !slices.Equal(got, want) {
+		t.Errorf("the wrapped agent argv is %q, want the Claude command %q", got, want)
+	}
+	made := "mkdir -p -- " + shellprefix.Literal(claudeConfigDir(spec.Role))
+	at, execs := strings.Index(agent[2], made), strings.Index(agent[2], `exec "$@"`)
+	if at < 0 || execs < at {
+		t.Errorf("the start script does not make %s before its exec:\n%s", claudeConfigDir(spec.Role), agent[2])
+	}
+	omp := launcherCommand(launchOf(t, r, workerSpec(t)), r)
+	if wrapped := omp.Argv[slices.Index(omp.Argv, "--")+1:]; wrapped[0] == "/bin/sh" {
+		t.Errorf("an Oh My Pi launch of the same deployment is wrapped: %q", wrapped)
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no /bin/sh in this environment")
+	}
+	dir := filepath.Join(t.TempDir(), "state", "tester", "claude")
+	script := startScript("/legion/scratch/state/tester", 1, nil, dir, installLockWait(2*time.Second, 3))
+	if out, err := exec.Command("/bin/sh", "-c", script, startName, "0", "true").CombinedOutput(); err != nil {
+		t.Fatalf("the start script: %v\n%s\n%s", err, out, script)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Errorf("the start script left %s as %v (%v), want the directory made", dir, info, err)
 	}
 }
 
@@ -263,7 +307,7 @@ func installLockProbe(t *testing.T, unlock bool) []string {
 	}
 	var wg sync.WaitGroup
 	for _, id := range []string{"a", "b"} {
-		script := startScript(filepath.Join(dir, "state-"+id), 3, testPlugins(), installLockWait(2*time.Second, 3))
+		script := startScript(filepath.Join(dir, "state-"+id), 3, testPlugins(), "", installLockWait(2*time.Second, 3))
 		script = strings.Replace(script, "/usr/local/bin/bun", stub, 1)
 		if unlock {
 			// Everything from flock's own path through the locked directory goes, so the control
@@ -524,7 +568,7 @@ func runStart(t *testing.T, start, bin, bun, cache string, plugins *runtime.Plug
 	if cache == "" {
 		cache = filepath.Join(dir, "cache")
 	}
-	argv := startArgv(filepath.Join(dir, "state"), 3, plugins, setup, agent, installLockWait(2*time.Second, 3))
+	argv := startArgv(filepath.Join(dir, "state"), 3, plugins, "", setup, agent, installLockWait(2*time.Second, 3))
 	if bun != "" {
 		argv[2] = strings.Replace(argv[2], "/usr/local/bin/bun", bun, 1)
 	}

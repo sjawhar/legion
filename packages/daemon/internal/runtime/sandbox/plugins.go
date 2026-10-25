@@ -269,32 +269,43 @@ if [ "$n" -gt 0 ]; then
 fi
 `
 
-// startScript is the start wrapper an agent argv runs in before Oh My Pi starts when the launch
-// installs a stale-plugin relaunch's pair (plugins set), the deployment names a setup command, or
-// both: the install (installBlock) when plugins is set, then the setup command (setupBlock), then
-// `exec "$@"` into the agent's real command, only once everything before it has succeeded, so the
-// shim's child is Oh My Pi itself from then on. lockWait is the install's flock bound in seconds
-// (installLockWait), which only an installing launch's block renders.
-func startScript(stateHome string, generation uint64, plugins *runtime.PluginInstall, lockWait int) string {
+// startScript is the start wrapper an agent argv runs in before the harness starts when the launch
+// installs a stale-plugin relaunch's pair (plugins set), runs Claude Code (claudeDir set), the
+// deployment names a setup command, or any of them: the one `mkdir -p` of the Claude Code
+// configuration directory first, then the install (installBlock) when plugins is set, then the
+// setup command (setupBlock), then `exec "$@"` into the agent's real command, only once
+// everything before it has succeeded, so the shim's child is the harness itself from then on.
+// lockWait is the install's flock bound in seconds (installLockWait), which only an installing
+// launch's block renders.
+//
+// claudeDir is the launch's CLAUDE_CONFIG_DIR (claudeConfigDir), "" for an Oh My Pi launch. It is
+// made here and nowhere else: it is on the issue's volume, which the image cannot prepare and an
+// init container does not know the role's backend to make, and Claude Code is told it as a
+// variable rather than asked to create it. The path is shell-quoted into the script
+// (shellprefix.Literal), as the install block's paths are, so it travels as literal text.
+func startScript(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, lockWait int) string {
 	script := "set -eu\n"
+	if claudeDir != "" {
+		script += "mkdir -p -- " + shellprefix.Literal(claudeDir) + "\n"
+	}
 	if plugins != nil {
 		script += installBlock(stateHome, generation, plugins, lockWait)
 	}
 	return script + setupBlock + "exec \"$@\"\n"
 }
 
-// startArgv wraps agent in the start wrapper (startScript) when plugins or setup is set:
-// `/bin/sh -c '<script>' legion-start <len(setup)> <setup…> <agent…>`. The setup command and the
-// agent argv ride as positional parameters after $0 (startName), never quoted into the script
-// itself, so none of either is reparsed by the shell. With neither set — every tmux launch, and
-// every Kubernetes launch of a deployment that names no setup command and is not installing a
-// stale-plugin relaunch's pair into a kept pod (relaunch.go) — agent is returned unchanged.
-// lockWait is the install's flock bound in seconds (installLockWait), which only an installing
-// launch renders.
-func startArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, setup, agent []string, lockWait int) []string {
-	if plugins == nil && len(setup) == 0 {
+// startArgv wraps agent in the start wrapper (startScript) when plugins, claudeDir or setup is
+// set: `/bin/sh -c '<script>' legion-start <len(setup)> <setup…> <agent…>`. The setup command and
+// the agent argv ride as positional parameters after $0 (startName), never quoted into the script
+// itself, so none of either is reparsed by the shell. With none of the three — every tmux launch,
+// and every Kubernetes launch of an Oh My Pi role whose deployment names no setup command and
+// which is not installing a stale-plugin relaunch's pair into a kept pod (relaunch.go) — agent is
+// returned unchanged. lockWait is the install's flock bound in seconds (installLockWait), which
+// only an installing launch renders.
+func startArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, setup, agent []string, lockWait int) []string {
+	if plugins == nil && claudeDir == "" && len(setup) == 0 {
 		return agent
 	}
-	argv := []string{"/bin/sh", "-c", startScript(stateHome, generation, plugins, lockWait), startName, strconv.Itoa(len(setup))}
+	argv := []string{"/bin/sh", "-c", startScript(stateHome, generation, plugins, claudeDir, lockWait), startName, strconv.Itoa(len(setup))}
 	return append(append(argv, setup...), agent...)
 }

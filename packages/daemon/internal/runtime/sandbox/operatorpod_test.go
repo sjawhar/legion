@@ -80,6 +80,17 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	}{
 		{name: "a variable the runtime sets", pod: env("LEGION_TREE", "LEGSMOKE-1"), want: envSets("LEGION_TREE", byRuntime)},
 		{name: "the pod's PATH", pod: env("PATH", "/usr/bin"), want: envSets("PATH", byRuntime)},
+		// Claude Code's three: a worker's configuration directory is placed by the launch, on the
+		// issue's volume, and its background tasks and scheduled prompts are off so nothing of the
+		// harness runs after a turn's last result (mainEnvironment).
+		{name: "a Claude Code worker's configuration directory", pod: env("CLAUDE_CONFIG_DIR", "/etc/operator/claude"),
+			want: envSets("CLAUDE_CONFIG_DIR", byRuntime)},
+		{name: "Claude Code's background tasks", pod: env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0"),
+			want: envSets("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", byRuntime)},
+		{name: "Claude Code's scheduled prompts", pod: env("CLAUDE_CODE_DISABLE_CRON", "0"),
+			want: envSets("CLAUDE_CODE_DISABLE_CRON", byRuntime)},
+		// Every other variable of Claude Code's own is the operator's to set, as the model route's are.
+		{name: "an operator's Claude Code setting", pod: env("CLAUDE_CODE_USE_FOUNDRY", "1")},
 		{name: "the image's HOME", pod: env("HOME", "/tmp/elsewhere"), want: envSets("HOME", byImage)},
 		{name: "the image's profile", pod: env("OMP_PROFILE", "other"), want: envSets("OMP_PROFILE", byImage)},
 		{name: "the Oh My Pi the probe proves", pod: env("LEGION_OMP_PATH", "/usr/bin/true"), want: envSets("LEGION_OMP_PATH", byImage)},
@@ -117,7 +128,11 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a mount under a path the image owns", pod: mountAt("/opt/omp/bin"), want: overlaps("/opt/omp/bin", "/opt/omp", true)},
 		{name: "a mount over a database the image owns", pod: mountAt("/home/legion/.omp/profiles/legion/agent/agent.db"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent/agent.db", "/home/legion/.omp/profiles/legion/agent/agent.db", true)},
-		{name: "a mount above the image's gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/gh", true)},
+		// /usr/local/bin holds Claude Code and the bun its MCP server runs on (imageOwnedPaths)
+		// beside gh and jj (the Tools), and the refusal names the first of them it finds.
+		{name: "a mount above the image's Claude Code, gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/claude", true)},
+		{name: "a mount at the image's Claude Code", pod: mountAt("/usr/local/bin/claude"), want: overlaps("/usr/local/bin/claude", "/usr/local/bin/claude", true)},
+		{name: "a mount at the image's bun", pod: mountAt("/usr/local/bin/bun"), want: overlaps("/usr/local/bin/bun", "/usr/local/bin/bun", true)},
 		{name: "a mount at the image's jj", pod: mountAt("/usr/local/bin/jj"), want: overlaps("/usr/local/bin/jj", "/usr/local/bin/jj", true)},
 		{name: "a mount at the image's git", pod: mountAt("/usr/bin/git"), want: overlaps("/usr/bin/git", "/usr/bin/git", true)},
 		{name: "a mount at Legion's reserved state home", pod: mountAt("/home/legion/.local/state"), want: overlapsStateHome("/home/legion/.local/state")},

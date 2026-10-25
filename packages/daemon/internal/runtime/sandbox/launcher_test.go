@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -265,5 +268,54 @@ func TestRejectedLauncherHellosDoNotSpendKubernetesRequests(t *testing.T) {
 		if action.GetVerb() == "get" && action.GetResource().Resource == "secrets" {
 			t.Fatal("unauthenticated launcher hello issued a Kubernetes Secret GET")
 		}
+	}
+}
+
+// A Claude Code launch's start command carries one file beside its credentials: the MCP document
+// its agent command reads, naming the image's bun and the claude-envoy server it runs, with the
+// plugin's data under the role's own Claude Code directory. It travels in Files and not in the
+// spec's secrets, which would point a `<NAME>_FILE` variable at it and be refused for its name
+// besides. An Oh My Pi launch carries no such file.
+func TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile(t *testing.T) {
+	claudeInKubernetes(t)
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeWorkerSpec(t)
+	start := launcherCommand(launchOf(t, r, spec), r)
+	raw, carried := start.Files[claudeMCPFile]
+	if !carried {
+		t.Fatalf("the start command carries the files %v, want %s among them", slices.Sorted(maps.Keys(start.Files)), claudeMCPFile)
+	}
+	var document struct {
+		MCPServers map[string]struct {
+			Command string
+			Args    []string
+			Env     map[string]string
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &document); err != nil {
+		t.Fatalf("the MCP document %q: %v", raw, err)
+	}
+	server, named := document.MCPServers[claudelaunch.MCPServer]
+	if !named || server.Command != "/usr/local/bin/bun" ||
+		!slices.Equal(server.Args, []string{"/opt/legion/claude-envoy/dist/envoy-channel.js"}) ||
+		server.Env["CLAUDE_PLUGIN_DATA"] != claudeConfigDir(spec.Role)+"/envoy-plugin-data" {
+		t.Errorf("the MCP document is %q, want the image's bun running the claude-envoy server with its data under %s", raw, claudeConfigDir(spec.Role))
+	}
+	if got := slices.Index(start.Argv, "--mcp-config"); got < 0 || start.Argv[got+1] != generationDir(spec.Generation)+"/"+claudeMCPFile {
+		t.Errorf("the start command's argv %q does not read the document where the launcher writes it", start.Argv)
+	}
+	// Had the document travelled in spec.Secrets, the worker would be told a `<NAME>_FILE`
+	// pointer at it (mainEnvironment), and ValidateSpawnSpec would refuse the name besides.
+	for _, pair := range start.Env {
+		if name, value, _ := strings.Cut(pair, "="); value == generationDir(spec.Generation)+"/"+claudeMCPFile {
+			t.Errorf("the worker is told %s=%s, the pointer every launch secret gets", name, value)
+		}
+	}
+	omp := launcherCommand(launchOf(t, r, workerSpec(t)), r)
+	if _, carried := omp.Files[claudeMCPFile]; carried {
+		t.Errorf("an Oh My Pi launch carries %s: %v", claudeMCPFile, slices.Sorted(maps.Keys(omp.Files)))
 	}
 }

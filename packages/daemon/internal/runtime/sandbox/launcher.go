@@ -395,9 +395,16 @@ func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod
 // agent's own argv is itself wrapped in the start script (startArgv): the shim's child is then
 // `/bin/sh -c '<script>' legion-start <n> <setup…> <agent argv…>`, which installs the pair, runs
 // the setup command, and execs the agent, so the shim's own preparation (--pod-safety) has
-// already run and no new shim flag is needed; after the script's `exec` the child is Oh My Pi
+// already run and no new shim flag is needed; after the script's `exec` the child is the harness
 // itself, so the shim's pid is unchanged. The setup command runs at every start of the role,
-// a Spawn's, a Resume's and a replaced pod's alike.
+// a Spawn's, a Resume's and a replaced pod's alike. A Claude Code launch is wrapped whatever else
+// it carries, for the one `mkdir -p` of its configuration directory (claudeConfigDir), and adds
+// one file to the generation's credentials: the MCP document its agent command reads
+// (claudeMCPFile), which the launcher writes 0600 into the 0700 private directory it makes for
+// the generation and removes with the rest when the generation ends (internal/launcher). It
+// travels in Files and never in spec.Secrets, which would be two wrongs: every secret name also
+// gets a `<NAME>_FILE` pointer in the worker's environment (mainEnvironment), and
+// ValidateSpawnSpec refuses a credential-shaped name outright.
 func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	dir := generationDir(l.spec.Generation)
 	shim := []string{r.tools.Legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", dir + "/" + bootTokenKey, "--pod-safety", "--stop-grace", r.terminationGrace.String()}
@@ -417,7 +424,12 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 		files = map[string]string{}
 	}
 	files[bootTokenKey] = l.spec.BootToken
-	agentArgv := startArgv(roleStateHome(l.spec.Role), l.spec.Generation, l.spec.Plugins, r.setup, l.agentArgv(r.agent),
+	claudeDir := ""
+	if l.runsClaude() {
+		claudeDir = claudeConfigDir(l.spec.Role)
+		files[claudeMCPFile] = l.claude.mcp
+	}
+	agentArgv := startArgv(roleStateHome(l.spec.Role), l.spec.Generation, l.spec.Plugins, claudeDir, r.setup, l.agentArgv(r.agent),
 		installLockWait(r.bootTimeout, r.registrationIntervals))
 	return shimwire.LauncherStart{
 		ID: "start-" + fmt.Sprint(l.spec.Generation), Generation: l.spec.Generation,

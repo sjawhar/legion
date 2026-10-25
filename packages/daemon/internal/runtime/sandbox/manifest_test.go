@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -1112,12 +1113,13 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}
 }
 
-// runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's
-// and the controller's together: every name mainEnvironment sets with Env empty and no secret of the
-// spec's, every optional value configured. A name added to the environment and not to runtimeOwned
-// is one a spec could override; a name left in runtimeOwned that the environment no longer sets is
-// one a spec is refused for nothing.
+// runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's,
+// a Claude Code worker's and the controller's together: every name mainEnvironment sets with Env
+// empty and no secret of the spec's, every optional value configured. A name added to the
+// environment and not to runtimeOwned is one a spec could override; a name left in runtimeOwned
+// that the environment no longer sets is one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
+	claudeInKubernetes(t)
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -1127,7 +1129,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	told := map[string]bool{}
-	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
+	for _, spec := range []runtime.SpawnSpec{workerSpec(t), claudeWorkerSpec(t), controllerSpec(t)} {
 		spec.Env, spec.Secrets = nil, nil
 		for name := range envOf(workerOf(t, r, spec)) {
 			told[name] = true
@@ -1663,9 +1665,12 @@ func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
 // pod — are exactly what Legion's own pods carry: every volume of every pod a launch or
 // the image probe runs, and every mount and variable of the containers the operator's pieces join
 // (the agent's and the probe's), with every optional piece the runtime adds configured and nothing
-// of a spec's or the operator's. A piece added to a pod and not to its list is one an operator
-// could collide with unrefused; one left in a list that no pod carries is refused for nothing.
+// of a spec's or the operator's. A Claude Code worker joins the goldens' cases here, since three
+// of the variables are its alone and no golden is a Claude pod's. A piece added to a pod and not
+// to its list is one an operator could collide with unrefused; one left in a list that no pod
+// carries is refused for nothing.
 func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
+	claudeInKubernetes(t)
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
@@ -1687,8 +1692,11 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 			env[variable.Name] = true
 		}
 	}
+	specs := []runtime.SpawnSpec{claudeWorkerSpec(t)}
 	for _, tc := range manifestCases(t) {
-		spec := tc.spec
+		specs = append(specs, tc.spec)
+	}
+	for _, spec := range specs {
 		spec.Env, spec.Secrets = nil, nil
 		pod := podOf(t, r, spec)
 		carry(pod, workerOf(t, r, spec))
@@ -1868,5 +1876,93 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	}
 	if !strings.Contains(l.prompt, literal) {
 		t.Fatalf("the system prompt does not carry the instructions as written: %q", l.prompt)
+	}
+}
+
+// uuid is the form a Claude Code session id takes (claudelaunch.NewSessionID), the only word of a
+// Claude launch's agent command that is not fixed.
+var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// A Claude Code role's pod runs the image's Claude Code under `legion claude-bridge`, word for
+// word: the image's own paths, every permission granted, only the MCP document this generation's
+// launcher writes into its private directory, the claude-envoy plugin and the generated Legion
+// plugin, a fresh session, and the one system prompt word — the same text the Oh My Pi branch of
+// the same launch inlines, since a pod cannot read the daemon's prompt files whichever harness it
+// runs. `--resume` of the transcript a replaced pod left is a later change: until it lands every
+// Claude launch starts a session of its own, which is what the fresh uuid here says.
+func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
+	claudeInKubernetes(t)
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	omp := launchOf(t, r, spec)
+	spec.Backend = runtime.BackendClaude
+	l := launchOf(t, r, spec)
+	argv := l.agentArgv(r.agent)
+	if l.prompt != omp.prompt {
+		t.Fatalf("the Claude launch's system prompt is %q, want the Oh My Pi launch's %q", l.prompt, omp.prompt)
+	}
+	session := ""
+	if at := slices.Index(argv, "--session-id"); at < 0 || at+1 == len(argv) {
+		t.Fatalf("the agent command %q names no --session-id", argv)
+	} else if session = argv[at+1]; !uuid.MatchString(session) {
+		t.Errorf("the session is %q, want a version 4 uuid", session)
+	}
+	want := []string{
+		"/opt/legion/bin/legion", "claude-bridge", "--", "/usr/local/bin/claude",
+		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--permission-mode", "bypassPermissions",
+		"--strict-mcp-config", "--mcp-config", generationDir(spec.Generation) + "/claude-mcp.json",
+		"--plugin-dir", "/opt/legion/claude-envoy",
+		"--plugin-dir", "/opt/legion/claude-envoy/legion",
+		"--session-id", session,
+		"--append-system-prompt", omp.prompt,
+	}
+	if !slices.Equal(argv, want) {
+		t.Errorf("the Claude pod's agent command is %q, want %q", argv, want)
+	}
+	// Options.Agent is the Oh My Pi override and nothing else: a Claude role's command is the
+	// image's, as the tmux lane's is the host's boot-resolved one.
+	opts.Agent = []string{"/opt/omp/bin/omp", "--operator"}
+	overriding, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overridden := launchOf(t, overriding, spec).agentArgv(overriding.agent)
+	if slices.Contains(overridden, "--operator") {
+		t.Errorf("with Options.Agent set the Claude pod's command is %q, want the image's Claude Code alone", overridden)
+	}
+}
+
+// A Claude Code role's worker container is told where Claude Code keeps its state and that
+// nothing of Claude Code's own may run after a turn's last result — the harness's analogue of the
+// turn scoping `--pod-safety` writes for Oh My Pi — and an Oh My Pi role's container is told none
+// of the three. The directory is the role's own on the issue's volume, so it outlives the pod and
+// is no sibling role's.
+func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
+	claudeInKubernetes(t)
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeWorkerSpec(t)
+	claude := envOf(workerOf(t, r, spec))
+	for name, want := range map[string]string{
+		"CLAUDE_CONFIG_DIR":                    scratchRoot + "/state/" + string(spec.Role) + "/claude",
+		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+		"CLAUDE_CODE_DISABLE_CRON":             "1",
+	} {
+		if claude[name] != want {
+			t.Errorf("a Claude worker is told %s=%q, want %q", name, claude[name], want)
+		}
+		if omp := envOf(workerOf(t, r, workerSpec(t))); omp[name] != "" {
+			t.Errorf("an Oh My Pi worker is told %s=%q, want nothing", name, omp[name])
+		}
+		if !runtimeOwned[name] {
+			t.Errorf("%s is not runtimeOwned: a spec or an operator could set it", name)
+		}
 	}
 }

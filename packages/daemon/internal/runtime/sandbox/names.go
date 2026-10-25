@@ -87,6 +87,15 @@ const (
 	imagePath = "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
 	// defaultAgent is Oh My Pi, by the path the image installs it at (LEGION_OMP_PATH).
 	defaultAgent = "/opt/omp/bin/omp"
+	// claudeAgent is Claude Code, by the path the image links it at, and claudeBun the bun the
+	// worker's one MCP server runs on; claudePluginDir is the claude-envoy package root the image
+	// carries, whose `legion/` directory is the generated Legion plugin and whose
+	// `dist/envoy-channel.js` is that server (claudelaunch). A Claude role's launch names all
+	// three — the first two in its agent command and its MCP document, the third in both — so
+	// all three are the image's own (imageOwnedPaths).
+	claudeAgent     = "/usr/local/bin/claude"
+	claudeBun       = "/usr/local/bin/bun"
+	claudePluginDir = "/opt/legion/claude-envoy"
 	// envoyPlugin is the packed pi-envoy the image carries, the Envoy plugin every session loads,
 	// whose package.json names its extension and skills; a pod passes it as an explicit extension
 	// before legionPlugin, which claims its role through the interface pi-envoy publishes.
@@ -101,12 +110,15 @@ const (
 )
 
 // imageOwnedPaths are the paths in the worker image a pod runs or loads from, which an operator's
-// mount there would hide: Legion's binaries and plugin (/opt/legion), Oh My Pi
-// (/opt/omp), the profile's installed plugins, and the databases Oh My Pi keeps in the profile's
-// agent directory; CheckPod adds the Tools. An operator's mount may be neither at, under, nor
-// above one.
+// mount there would hide: Legion's binaries and plugins (/opt/legion, the claude-envoy root among
+// them), Oh My Pi (/opt/omp), Claude Code and the bun its MCP server runs on, the profile's
+// installed plugins, and the databases Oh My Pi keeps in the profile's agent directory; CheckPod
+// adds the Tools. An operator's mount may be neither at, under, nor above one.
 func imageOwnedPaths() []string {
-	return []string{"/opt/legion", "/opt/omp", ompProfileDir + "/plugins", ompAgentDir + "/agent.db", ompAgentDir + "/models.db"}
+	return []string{
+		"/opt/legion", "/opt/omp", claudeAgent, claudeBun, claudePluginDir,
+		ompProfileDir + "/plugins", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
+	}
 }
 
 // The keys of a claim's Secret that the runtime fills itself: the boot token and the provisioning
@@ -276,3 +288,9 @@ func labelValue(key string) string {
 func generationDir(generation uint64) string {
 	return LauncherPrivateDir + "/" + shimwire.GenerationDir(generation)
 }
+
+// claudeMCPFile is the one file a Claude launch adds to its generation's credentials
+// (launcherCommand's Files): the MCP document its agent command reads as `--mcp-config`
+// (claudelaunch.MCPConfig), written 0600 into generationDir beside the boot token and removed
+// with it when the generation ends.
+const claudeMCPFile = "claude-mcp.json"
