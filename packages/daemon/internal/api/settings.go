@@ -84,7 +84,8 @@ type RuntimeSettings struct {
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
-// (`kubeconfig`, `context`), its credential source (`session_dsn_secret`) and the operator's `pod`
+// (`kubeconfig`, `context`), the session store's own fields (`session_dsn_secret`, the credential
+// source, and `session_database`, the instance and login behind it) and the operator's `pod`
 // pieces, which every pod reads from its own spec.
 type KubernetesSettings struct {
 	Namespace    string               `json:"namespace"`
@@ -93,7 +94,8 @@ type KubernetesSettings struct {
 	IssueVolume  string               `json:"issue_volume"`
 	Scheduling   SchedulingSettings   `json:"scheduling"`
 	Resources    PodResourcesSettings `json:"resources"`
-	// SessionStore is "postgres" when the file names a session DSN secret, else "pvc".
+	// SessionStore is the settled store's kind — "pvc", "postgres" or "cloudsql-iam" — and nothing
+	// else of it.
 	SessionStore string                `json:"session_store"`
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
 	// Plugins is the settled pair, whatever its source, absent while the daemon knows none.
@@ -292,7 +294,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			Issue:      reservationSettingsOf(block.Resources.Issue),
 			Controller: reservationSettingsOf(block.Resources.Controller),
 		},
-		SessionStore: "pvc",
+		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
@@ -304,9 +306,6 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)
 	for i, toleration := range block.Scheduling.Tolerations {
 		settings.Scheduling.Tolerations[i] = TolerationSettings{Key: toleration.Key, Operator: toleration.Operator, Value: toleration.Value, Effect: toleration.Effect}
-	}
-	if block.SessionDSNSecret != "" {
-		settings.SessionStore = "postgres"
 	}
 	if broker := block.AgentSecrets; broker != nil {
 		settings.AgentSecrets = &AgentSecretsSettings{URL: broker.URL, Audience: broker.Audience, TokenExpirySeconds: broker.TokenExpirySeconds}

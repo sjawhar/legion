@@ -298,7 +298,14 @@ package api
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
 //
-// 36: INFRA-208 -- an issue pod is one container, `roles`, whose PID 1 is one `legion launcher`
+// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
+// issue beneath it is still in the workflow and a merged root's close waits for the rest of its
+// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
+// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
+// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+//
+// 37: INFRA-208 -- an issue pod is one container, `roles`, whose PID 1 is one `legion launcher`
 // serving every workflow role (`--roles-dir /var/run/legion/roles` and one `--role` per role), each
 // role's generation started in namespaces of its own by `legion launcher role-init`; each role's
 // own volumes are mounted under `/var/run/legion/roles/<role>/` and the role homes volume at
@@ -309,8 +316,9 @@ package api
 // a running pod of the layout before it is StaleAddress for every role and replaced once by the
 // next launch of any of them, uncharged. `settings.runtime.kubernetes.resources` is now
 // `{issue, controller}`, the two pods' reservations, rather than one entry per role; the
-// resource-limits capability row names those pods. (Main holds store migration 0050, so this takes
-// 0051. sjawhar/legion#2131 also declares 36 and migration 0051 on its branch: whichever of the two
-// merges second takes the next contract number and renumbers its store migration past the other's,
-// as the collision note says.)
-const DaemonAPIVersion = 36
+// resource-limits capability row names those pods. (This branch took 36; main then landed
+// INFRA-229 at 36, so this branch takes the number above it, as the collision note says. Main
+// holds store migration 0050, so this takes 0051. sjawhar/legion#2131 also declares 37 and migration
+// 0051 on its branch: whichever of the two merges second takes the next contract number and
+// renumbers its store migration past the other's, as the collision note says.)
+const DaemonAPIVersion = 37

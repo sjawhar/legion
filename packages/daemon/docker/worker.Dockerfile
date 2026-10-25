@@ -23,11 +23,12 @@
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
 # TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget,
-# jq, openssh-client (ssh-keygen), util-linux (flock) and chromium (the browser Oh My Pi finds on PATH); and a generic
-# toolchain for the repositories the workers work, specific to none of them: uv and uvx, Node LTS with
-# npm and corepack's pnpm and yarn, the AWS CLI v2 and kubectl — each of these on PATH at /usr/local/bin
-# or /usr/bin; and the license of every third-party piece of all that at
-# /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage).
+# jq, openssh-client (ssh-keygen), util-linux (flock), postgresql-client (psql), redis-tools
+# (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils (dig) and chromium (the browser Oh My Pi
+# finds on PATH); and a generic toolchain for the repositories the workers work, specific to none
+# of them: uv and uvx, Node LTS with npm and corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
+# each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party piece of
+# all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
 # the base, proves jj accepts the image's git with a network-free `jj git clone` of a scratch
 # repository, and links the CodeGraph plugin into the profile, which fetches Oh My Pi's natives; the second
@@ -413,7 +414,7 @@ COPY --from=toolchain /opt/language-servers/node_modules/pyright/LICENSE.txt /in
 COPY --from=toolchain /opt/language-servers/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq, openssh-client and util-linux of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq, openssh-client, util-linux, postgresql-client, redis-tools, sqlite3, netcat-openbsd and bind9-dnsutils of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
@@ -450,8 +451,10 @@ FROM mirror.gcr.io/library/debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 ARG PI_CODEGRAPH_VERSION
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
-# chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen) and util-linux (for flock): what the capability check's
-# browser, eval-python and toolchain rows look for (packages/daemon/internal/capabilities/image.go),
+# chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen), util-linux (for flock),
+# postgresql-client (for psql), redis-tools (for redis-cli), sqlite3, netcat-openbsd (for nc) and
+# bind9-dnsutils (for dig): what the capability check's browser, eval-python and toolchain rows look for
+# (packages/daemon/internal/capabilities/image.go) — the last five join flock in the toolchain row —
 # trixie's since the suite is the apt pin (the note above the ARGs); chromium brings its library
 # closure as its Depends (a font with it: fontconfig-config requires one, fonts-dejavu-core first),
 # and its Recommends stay out with everyone else's — the setuid sandbox (chromium-sandbox) and
@@ -483,6 +486,29 @@ ARG PI_CODEGRAPH_VERSION
 # fails every installing launch. The entry buys nothing today — Debian's priority:required set
 # already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
 # failure the day a base drops it. Do not delete it as redundant.
+# postgresql-client (psql): `bun run e2e`, the Dispatch browser suite this deployment's
+# instructions require before a reader-facing Dispatch change merges, reaches psql through
+# packages/dispatch/e2e/psql.ts, which seed.ts calls for every spec's database reset; and the local
+# stack `bun run dispatch:local` (packages/dispatch/e2e/local-instance.ts) refuses to start without
+# psql on PATH — so a role whose image lacks psql cannot run the suite its own change owes. The
+# Debian psql is a Perl wrapper around the versioned client; perl-base is already in the image, so
+# the wrapper resolves.
+# redis-tools (redis-cli): no repository of the project speaks Redis today. It is carried anyway,
+# at about a megabyte, because a second image roll costs more than a megabyte.
+# sqlite3: a repository's own SQLite fixture or database has no other way to open from a shell, and
+# Oh My Pi's own profile databases under ~/.omp/profiles/legion are SQLite too. A role's session is
+# not one of them: it is results.jsonl, state.json and title under XDG_STATE_HOME, and the session
+# store these pods otherwise use is Postgres.
+# netcat-openbsd (nc): a reachability check otherwise has to be written as an inline Python loop.
+# `nc` is not a file of the package: it ships /usr/bin/nc.openbsd, and the `nc` name comes from the
+# alternatives system, whose script runs as root during this build — so the checks below ask for
+# `nc`, never `nc.openbsd`.
+# bind9-dnsutils (dig): a role whose connection to a service name fails cannot otherwise tell "the
+# name does not resolve" from "the packets are dropped". The package is named rather than the
+# virtual `dnsutils`, which trixie has no candidate for: apt resolves it to this single provider
+# today, and a second provider the day one appears would fail the build on a name that was never
+# the package — and the notices sentence above points at /usr/share/doc/<package>/copyright, which
+# this image has for bind9-dnsutils and not for dnsutils.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so a runtime-user copy into /opt/legion would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
@@ -494,7 +520,7 @@ ARG PI_CODEGRAPH_VERSION
 # volumes over the same paths, as it always has. The final step refuses an image where any is not
 # root's or is not empty.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git jq openssh-client python3 socat util-linux wget \
+RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl git jq netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
     && chmod u-s /usr/lib/openssh/ssh-keysign \
     && chmod g-s /usr/bin/ssh-agent \
@@ -609,6 +635,12 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # generates a throwaway ed25519 key in the scratch directory, which -l fingerprints and the step
 # removes. flock answers --version; it is on this line because an installing launch's rendered
 # install serialises on the issue's shared bun install cache with it.
+# psql, redis-cli and sqlite3 answer --version, psql's being the Debian Perl wrapper, which resolves
+# because perl-base is in the image; nc takes no --version, its -h printing usage and exiting 0, and
+# it is checked under `nc`, the name the alternatives system installs, never nc.openbsd; and dig -v
+# prints its version on stdout, measured in a pod of this image (`dig -v 2>/dev/null` prints
+# `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing), so the step takes it as
+# it comes.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -623,6 +655,7 @@ RUN set -eu; \
     socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
     ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
     flock --version; \
+    psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
     rm -rf "$scratch"
 # The notices stage's file, after the toolchain step so a notices change never reruns it, and before
 # `legion`, which changes on every commit while the notices change only with a dependency or a pin.
@@ -659,7 +692,10 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # toolchain check above and the toolchain capability row all ask only that `flock` be on PATH — so
 # a base that kept flock and moved it would pass every one of those and fail every installing
 # launch. The declaration and the use have to agree on the path, and this is where they are held
-# to it. The Envoy plugin's `dispatch` shim runs its bundled CLI under
+# to it. nc is pinned for the neighbouring reason: it is the one name here the alternatives system
+# supplies rather than its own package (netcat-openbsd ships /usr/bin/nc.openbsd), so the
+# alternatives link is what the name resolves through and a base that changed it would pass every
+# other gate. The Envoy plugin's `dispatch` shim runs its bundled CLI under
 # the image's bun and prints its help, so a pi-envoy packed without bin/ or dist/dispatch.js, or an
 # image without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's
 # own test. Then `legion probe-image` runs the three launch probes through
@@ -675,7 +711,8 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
 # PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
 # CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
-# node, bun, uv, kubectl, jq, ssh-keygen and flock on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
+# node, bun, uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with
+# `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped
 # capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,
@@ -704,6 +741,7 @@ RUN set -eu; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     flock="$(command -v flock)"; echo "flock: $flock"; test "$flock" = /usr/bin/flock; \
+    nc="$(command -v nc)"; echo "nc: $nc"; test "$nc" = /usr/bin/nc; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     gh="$(command -v gh)"; echo "gh: $gh"; test "$gh" = /opt/legion/bin/gh; /usr/local/bin/gh --version; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \

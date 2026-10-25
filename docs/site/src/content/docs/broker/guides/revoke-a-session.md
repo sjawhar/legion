@@ -96,7 +96,11 @@ Deleting the secret (`agent-secrets secret delete NAME`), or moving it out of
 once after a write through `agent-secrets secret` and, after one made any other way, within about ten
 minutes on AWS Secrets Manager (on Google Secret Manager usually as soon, but Google bounds its
 listing's lag only at a few hours, so ask for a reread after a `gcloud` write), it refuses each read of a grant given automatically under the old tags with
-`GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. The
+`GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. One
+reread ends it everywhere: the broker process that answers the call tells every other process
+serving the same database to reread the same name, so the retag is in force across the deployment
+within seconds, except on a process whose database connection has dropped, which catches up at its
+own next five-minute read of the namespace. The
 change applies to every session that got the secret automatically, where revoking a grant of your
 own session in Dispatch withholds it from that session alone.
 

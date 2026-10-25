@@ -37,6 +37,8 @@ import type {
   MyAnswersResponse,
   MyRepliesResponse,
   Project,
+  ProjectDefaultAssignee,
+  ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
   UpdateIssueInput,
@@ -823,6 +825,32 @@ export function putArchitectureSource(
     `/api/v1/projects/${encodeURIComponent(project)}/architecture-source`,
     "PUT",
     input,
+    options
+  );
+}
+
+/** Names the person a project's unowned new issues fall to, or clears it with `assignee: null`. */
+export function putProjectDefaultAssignee(
+  project: string,
+  input: ProjectDefaultAssigneeInput,
+  options: ApiOptions = {}
+): Promise<ProjectDefaultAssignee> {
+  return request<ProjectDefaultAssignee>(
+    `/api/v1/projects/${encodeURIComponent(project)}/default-assignee`,
+    "PUT",
+    input,
+    options
+  );
+}
+
+/** Every project that names a default assignee, as the Settings page reads them. */
+export function listProjectDefaultAssignees(
+  options: ApiOptions = {}
+): Promise<ProjectDefaultAssignee[]> {
+  return request<ProjectDefaultAssignee[]>(
+    "/api/v1/settings/project-default-assignees",
+    "GET",
+    undefined,
     options
   );
 }

@@ -61,8 +61,9 @@ are exactly what Legion's agents can do on GitHub:
 The implement App cannot create a check run, and a review never comes from the App that wrote the
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
-and the checks that branch requires (its rulesets and its branch protection), the set the merger's
-`READY` checks, since only those decide whether CI is red at a head.
+and the checks that branch requires (its rulesets and its branch protection), since only those
+decide whether CI is red at a head, and so where Legion sends the issue. Whether the merge happens
+is GitHub's to decide, under those same rules.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
 `scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
@@ -190,8 +191,11 @@ on the same repositories.
 ## The worker image
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
-(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI and a general toolchain (git, jj, gh,
-Node, uv, the AWS CLI, kubectl).
+(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
+Node, uv, the AWS CLI, kubectl) and the client tools a role's own work needs (`psql`, `redis-cli`,
+`sqlite3`, `nc`, `dig`): `apt` cannot write a system prefix in an unprivileged container, unpacking
+one by hand works for some tools and not others, and what rules out a client a role unpacks onto
+its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,

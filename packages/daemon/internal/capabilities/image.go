@@ -246,9 +246,20 @@ func pluginEnabled(lock, name string) (string, bool) {
 // is on the list because the install Legion renders for an installing launch serialises on the
 // issue's shared bun install cache with it (installBlock,
 // packages/daemon/internal/runtime/sandbox/plugins.go), so a role whose image lacks it
-// fails every installing launch.
+// fails every installing launch. psql is on it because `bun run e2e`, the Dispatch browser suite a
+// reader-facing Dispatch change must pass before it merges, reaches psql through
+// packages/dispatch/e2e/psql.ts, which seed.ts calls for every spec's database reset, and the
+// local stack `bun run dispatch:local` (packages/dispatch/e2e/local-instance.ts) refuses to start
+// without psql on PATH, so a role whose image lacks psql cannot run the suite its own change owes.
+// redis-cli, sqlite3, nc and dig are the clients a role's own work needs and an unprivileged
+// container cannot apt-install for itself: a repository's own SQLite fixture or database (and Oh
+// My Pi's own profile databases, which are SQLite where a role's session is not), a reachability
+// check, a name that does not resolve.
+// A missing tool fails the publish naming the tool; a deployment that layers its own image on the
+// published one inherits the five; a deployment still pinning an older digest keeps the old list,
+// because the probe runs that image's own `legion`.
 func toolchain(ctx context.Context, img Image) (string, bool) {
-	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock")
+	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig")
 	if !ok {
 		return detail, false
 	}

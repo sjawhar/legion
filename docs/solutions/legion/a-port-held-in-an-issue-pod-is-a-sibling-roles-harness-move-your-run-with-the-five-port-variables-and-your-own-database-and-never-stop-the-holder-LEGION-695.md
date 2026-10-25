@@ -40,6 +40,14 @@ applies:
   `create extension vector`) and leaves it running for the roles after it, recording the
   `LD_LIBRARY_PATH`, `PATH` and `DATABASE_URL` it needs in the handoff's `trickyParts`. Two roles
   each built one (55432 and 55433): the first role's note is what spares the next the build.
+  **Note 2026-10-25 (INFRA-221):** the `/tmp` placement is replaced: build the root on the
+  issue's volume, as
+  `docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md`
+  does. `/tmp` is a directory on the container's own filesystem, so a build there fails the first
+  condition of `skills/legion-worker/references/tools.md`, "The test: where it lands, and what it
+  leaves resolving". The hand-over stands: what crosses to the next role is a **note, not an
+  environment**, which that role reads from the `trickyParts` and sets for its own harness
+  commands. Keep it in the handoff rather than in a shell every later command inherits.
 - Stop your own `dispatch:local` before you complete, so its ports are free for the next role; a
   Postgres you built stays up.
 

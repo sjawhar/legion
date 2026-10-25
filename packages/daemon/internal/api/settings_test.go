@@ -95,7 +95,7 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.Scheduling":                          "runtime.kubernetes.scheduling",
 	"Kubernetes.Resources":                           "runtime.kubernetes.resources",
 	"Kubernetes.AgentSecrets":                        "runtime.kubernetes.agent_secrets",
-	"Kubernetes.SessionDSNSecret":                    "runtime.kubernetes.session_store (\"postgres\" iff set, else \"pvc\"; the key itself is never emitted)",
+	"Kubernetes.SessionStore":                        "runtime.kubernetes.session_store (the kind alone: neither the Secret key nor the instance and login behind it is emitted)",
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
@@ -216,7 +216,7 @@ var settingsFixturePlanted = []string{
 // settingsForbiddenKeys are the legion.yaml keys that never appear in `settings`, at any depth.
 var settingsForbiddenKeys = []string{
 	"postgres_dsn", "private_key", "private_key_command", "private_key_secret",
-	"kubeconfig", "context", "session_dsn_secret", "pod", "env", "volumes", "volume_mounts", "service_account",
+	"kubeconfig", "context", "session_dsn_secret", "session_database", "pod", "env", "volumes", "volume_mounts", "service_account",
 }
 
 // The maximal kubernetes file resolves to a settings block whose top-level, runtime.kubernetes and

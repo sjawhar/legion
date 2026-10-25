@@ -237,7 +237,7 @@ func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvV
 	return corev1.Container{
 		Name:            k.container(),
 		Image:           r.image,
-		Command:         append(command, "--stop-grace", r.terminationGrace.String()),
+		Command:         slices.Concat(command, []string{"--stop-grace", r.terminationGrace.String()}, r.sessionProxyFlags()),
 		Env:             resolved,
 		WorkingDir:      l.workspace,
 		VolumeMounts:    homeMountsView(slices.Concat(mounts, providersMounts, r.pod.VolumeMounts)),
@@ -416,11 +416,11 @@ func (k controllerPod) launcherContainer(r *Runtime, l launch, resolved []corev1
 	return corev1.Container{
 		Name:  k.container(),
 		Image: r.image,
-		Command: []string{
+		Command: slices.Concat([]string{
 			r.tools.Legion, "launcher", connectFlag, r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
 			"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
 			"--stop-grace", r.terminationGrace.String(),
-		},
+		}, r.sessionProxyFlags()),
 		Env:             resolved,
 		WorkingDir:      l.workspace,
 		VolumeMounts:    slices.Concat(mounts, providersMounts, agentSecretsMounts(r.agentSecrets, role), r.pod.VolumeMounts),

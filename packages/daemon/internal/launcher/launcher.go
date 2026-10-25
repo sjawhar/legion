@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -52,6 +53,14 @@ type Config struct {
 	// StopGrace is the container shutdown and natural-exit descendant cleanup budget. Every role
 	// of an issue pod's container is given it whole, since they stop together.
 	StopGrace time.Duration
+	// SessionDatabase is the Cloud SQL database every generation keeps its Oh My Pi session in,
+	// which the launcher proxies to over the pod's own cloud identity (internal/sessionproxy). The
+	// zero value is every other session store: no proxy, and the child's session storage is
+	// whatever its environment names.
+	SessionDatabase ompsessions.Database
+	// SessionDialer builds that proxy's upstream dialer. Nil is the Cloud SQL connector's, which
+	// is the only one a pod uses; a test passes a fake.
+	SessionDialer func(ctx context.Context) (sessionproxy.Dialer, error)
 }
 
 // reconnectDelay is the pause between daemon connections. A lost connection never stops the
@@ -61,7 +70,9 @@ const reconnectDelay = time.Second
 // Run serves launcher commands until ctx ends. A stopped child is reported, never restarted by
 // the launcher: the daemon owns generations and decides whether a new generation should start.
 // Only ctx's end (the container's SIGTERM) stops the children the launcher owns, and in an issue
-// pod's container it stops every role's at once, each with the whole stop grace.
+// pod's container it stops every role's at once, each with the whole stop grace. Run returns only
+// once each of those generations has ended (stopActive): its child given its stop grace, and its
+// session database proxy, which served it through that grace, closed.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.StopGrace == 0 {
 		cfg.StopGrace = 30 * time.Second
@@ -249,7 +260,7 @@ func (c Config) validate() error {
 		case !filepath.IsAbs(c.PrivateDir):
 			return fmt.Errorf("launcher: private directory %q is not absolute", c.PrivateDir)
 		}
-		return nil
+		return c.validateSessionDatabase()
 	}
 	switch {
 	case c.Token != "" || c.Role != "" || c.PrivateDir != "":
@@ -269,7 +280,27 @@ func (c Config) validate() error {
 		}
 		seen[role] = true
 	}
-	return nil
+	return c.validateSessionDatabase()
+}
+
+// validateSessionDatabase refuses a session database named only in part: the instance, the database
+// in it and the login together are what opens it, so a generation started without one of them would
+// proxy to nothing. Naming none of them is the other stores, which need no proxy.
+func (c Config) validateSessionDatabase() error {
+	var missing []string
+	for _, named := range []struct{ flag, value string }{
+		{"--session-instance", c.SessionDatabase.Instance},
+		{"--session-database", c.SessionDatabase.Name},
+		{"--session-user", c.SessionDatabase.User},
+	} {
+		if named.value == "" {
+			missing = append(missing, named.flag)
+		}
+	}
+	if len(missing) == 0 || len(missing) == 3 {
+		return nil
+	}
+	return fmt.Errorf("launcher: the session database is named in part: no %s", strings.Join(missing, ", no "))
 }
 
 func tcpAddress(addr string) (string, error) {
@@ -315,7 +346,11 @@ type child struct {
 	// output is the generation's own prefixed stdout and stderr in an issue pod's container,
 	// whose unfinished last lines wait flushes once the generation's process is gone.
 	output []io.Writer
-	done   chan struct{}
+	// proxy is the generation's session database proxy, nil when no session database is
+	// configured. It belongs to the generation: it outlives the child it serves, through the
+	// child's stop grace however the stop arrives, and is closed once the child has exited (wait).
+	proxy *sessionproxy.Proxy
+	done  chan struct{}
 }
 
 // manager serves one role: its own daemon connection, its own launcher id, its own token and
@@ -367,6 +402,13 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 		return shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 	}
 	body, _ := json.Marshal(command)
+	// refuse is how a start that cannot run answers: the refusal is remembered under the command's
+	// id, so a retry of that id is answered with it rather than tried again.
+	refuse := func(message string) shimwire.LauncherStartResult {
+		result := shimwire.LauncherStartResult{ID: command.ID, Error: message}
+		m.remember(command.ID, body, result)
+		return result
+	}
 	m.mu.Lock()
 	if prior, ok := m.requests[command.ID]; ok {
 		result, matches := prior.result.(shimwire.LauncherStartResult)
@@ -386,6 +428,18 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	}
 	m.mu.Unlock()
 	env := mergeEnv(os.Environ(), command.Env)
+	// The generation's own directory comes first, since everything else of the generation lives in
+	// it: the session database's connection file and the socket its proxy binds, which the resume
+	// lookup reaches the table through and which the child must find already bound.
+	dir, err := m.writeFiles(command)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	proxy, clientURL, err := m.startSession(ctx, command.Generation, dir)
+	if err != nil {
+		endSession(proxy, dir)
+		return refuse(err.Error())
+	}
 	recreated := false
 	if command.ResumeFile != "" {
 		// An issue pod's role names its session under its own home, which the container holds
@@ -394,26 +448,16 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 		if m.namespaced {
 			onDisk = containerPath(onDisk)
 		}
-		var err error
-		if recreated, err = resumable(ctx, env, command.ResumeFile, onDisk, m.stderr); err != nil {
-			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
-			m.remember(command.ID, body, result)
-			return result
+		if recreated, err = resumable(ctx, env, command.ResumeFile, onDisk, clientURL, m.stderr); err != nil {
+			endSession(proxy, dir)
+			return refuse(err.Error())
 		}
 	}
 	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
-	dir, err := m.writeFiles(command)
-	if err != nil {
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
-		m.remember(command.ID, body, result)
-		return result
-	}
 	process, err := m.command(command, env)
 	if err != nil {
-		_ = os.RemoveAll(dir)
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
-		m.remember(command.ID, body, result)
-		return result
+		endSession(proxy, dir)
+		return refuse(err.Error())
 	}
 	// The orphan reaper must see this PID as the direct child before it can observe its exit, and
 	// stopActive, which takes the lock, either sees this generation or finds the container
@@ -421,23 +465,19 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	m.mu.Lock()
 	if ctx.Err() != nil {
 		m.mu.Unlock()
-		_ = os.RemoveAll(dir)
+		endSession(proxy, dir)
 		if process.status != nil {
 			_ = process.status.Close()
 			_ = process.write.Close()
 		}
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: "the launcher's container is stopping; no generation starts"}
-		m.remember(command.ID, body, result)
-		return result
+		return refuse("the launcher's container is stopping; no generation starts")
 	}
 	if err := process.start(); err != nil {
 		m.mu.Unlock()
-		_ = os.RemoveAll(dir)
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("start child: %v", err)}
-		m.remember(command.ID, body, result)
-		return result
+		endSession(proxy, dir)
+		return refuse(fmt.Sprintf("start child: %v", err))
 	}
-	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, process: process.cmd.Process, dir: dir, status: process.status, output: process.output, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, process: process.cmd.Process, dir: dir, status: process.status, output: process.output, proxy: proxy, done: make(chan struct{})}
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
@@ -486,6 +526,17 @@ func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProc
 // other exit of an init that reported nothing (a panic's 2, say) is reported as that exit. Once
 // the process and its output copies are done, the last line the generation left unfinished is
 // written out, so it is neither lost nor joined to the next generation's first.
+//
+// The generation's session database proxy is closed only once its process is gone, so the child is
+// served through the whole of its stop grace however the stop arrives, the daemon's stop or the
+// container's own SIGTERM; and after every process of the generation has ended (its PID namespace's
+// init gone in an issue pod, cleanExitedGeneration in the controller's PID 1), and so every
+// connection they held. Close is bounded by sessionDrain however many holders remain: off PID 1
+// cleanExitedGeneration returns at once and a socket holder outside the child's process group
+// outlives it, and Close closes that holder's connection once the drain is over rather than wait on
+// it. It is closed before the generation's directory goes, so nothing is left listening over a
+// socket that has been removed, and between generations nothing is bound at all. active.done is
+// closed last, so endGeneration, and with it Run's stopActive, returns only once the proxy is closed.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	var reported *syscall.WaitStatus
 	if active.status != nil {
@@ -512,6 +563,9 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 		exit = shimwire.LauncherExit{Generation: active.generation, Code: shimwire.LauncherExitSetupFailed}
 		m.logf("launcher: generation %d of role %s: role-init failed before it started the shim; its own lines above say why",
 			active.generation, m.role)
+	}
+	if active.proxy != nil {
+		_ = active.proxy.Close()
 	}
 	m.mu.Lock()
 	if m.child == active {
@@ -588,9 +642,9 @@ func generationDir(private string, generation uint64) string {
 // runs when it is called, so everything already in the private directory — an earlier
 // generation's credentials a crashed launcher never removed, or a directory, file or symlink the
 // previous generation's agent planted toward the shared workspace — is removed without being
-// followed; the directory is made owner-only and each file is created exclusively without
-// following a link, so no credential is written anywhere but that directory. An error names the
-// file, never its bytes.
+// followed; the directory is made owner-only and each file is written as writeCredential writes
+// one, so no credential is written anywhere but that directory. An error names the file, never its
+// bytes.
 func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 	entries, err := os.ReadDir(m.private)
 	if err != nil {
@@ -606,14 +660,7 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 		return "", fmt.Errorf("make credential directory for generation %d: %v", command.Generation, err)
 	}
 	for name, content := range command.Files {
-		file, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-		if err == nil {
-			_, err = file.WriteString(content)
-			if closeErr := file.Close(); err == nil {
-				err = closeErr
-			}
-		}
-		if err != nil {
+		if err := writeCredential(filepath.Join(dir, name), content); err != nil {
 			_ = os.RemoveAll(dir)
 			return "", fmt.Errorf("write credential %s for generation %d: %v", name, command.Generation, err)
 		}
@@ -715,10 +762,97 @@ func (w *prefixWriter) flush() {
 	}
 }
 
+// writeCredential writes content to path the one way anything of a generation's is written: created
+// exclusively, owner-only, and never following a link, so a credential lands in the generation's
+// own directory and nowhere else, and never through a file or symlink already at that path. The
+// error it returns names neither the file nor its bytes; each caller names the file itself.
+func writeCredential(path, content string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = file.WriteString(content)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// startSession gives a generation its session database, when one is configured: the connection URL
+// the child's Oh My Pi reads, written into the generation's own directory the way writeFiles writes
+// a credential, and the proxy bound on the socket beside it, which has proven one upstream
+// connection before Start returns. The URL it answers with is that same endpoint for the launcher's
+// own pgx client, which spells a unix socket differently from the client the agent runs
+// (ompsessions.Endpoint); with no session database it is "", and the launcher looks a resume up
+// through the pointer the child's environment carries instead. A failure leaves nothing bound and
+// names the generation; its caller removes the directory.
+//
+// In an issue pod's container the launcher and the role see the generation's directory at two
+// paths: the launcher binds the socket at dir, under the role's own private directory of the roles
+// directory, and the role's namespaces show that directory at the fixed root (role-init binds it
+// back there), so the URL the agent reads names the socket where the agent finds it. The role's
+// processes run as the launcher's own user, so the socket is theirs to connect to.
+//
+// ctx bounds the proxy's start, so a start still in progress when the container is told to stop is
+// abandoned, and its proof dial is bounded besides by proofTimeout, so an instance that never
+// answers is refused while the daemon still waits for the answer. A started proxy ignores ctx: it
+// serves until the generation's own end closes it (wait), which lets it serve the child through its
+// stop grace after ctx has ended.
+func (m *manager) startSession(ctx context.Context, generation uint64, dir string) (*sessionproxy.Proxy, string, error) {
+	if m.cfg.SessionDatabase == (ompsessions.Database{}) {
+		return nil, "", nil
+	}
+	local := ompsessions.Endpoint{SocketDir: dir, Database: m.cfg.SessionDatabase.Name, User: m.cfg.SessionDatabase.User}
+	agent := local
+	if m.namespaced {
+		agent.SocketDir = generationDir(filepath.Join(roleFixedRoot, RolePrivateDir), generation)
+	}
+	if err := writeCredential(filepath.Join(dir, ompsessions.DSNFileName), agent.AgentURL()); err != nil {
+		return nil, "", fmt.Errorf("write the session database URL for generation %d: %v", generation, err)
+	}
+	proxy, err := sessionproxy.Start(ctx, sessionproxy.Config{
+		Socket: local.Socket(), Instance: m.cfg.SessionDatabase.Instance, NewDialer: m.cfg.SessionDialer,
+		ProofTimeout: m.proofTimeout(), Drain: sessionDrain, Log: m.stderr,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("the session database proxy for generation %d: %v", generation, err)
+	}
+	return proxy, local.ClientURL(), nil
+}
+
+// proofTimeout bounds a generation's proof dial (sessionproxy.Config.ProofTimeout) at half the stop
+// grace, which Run has made positive. The daemon's wait on a start ends at the launcher's connection
+// deadline plus its termination grace (runtime/sandbox's relaunch), and that grace is the
+// --stop-grace it hands the launcher (runtime/sandbox's manifest), so the daemon waits at least
+// StopGrace past the launcher's connection, however late it connected. Half of it bounds the
+// proof; the other half is left for the rest of the start and its answer.
+func (m *manager) proofTimeout() time.Duration { return m.cfg.StopGrace / 2 }
+
+// sessionDrain is how long a generation's proxy lets connections still open at its Close finish
+// (sessionproxy.Config.Drain) before it closes them. Close runs only once the generation's child
+// has exited, and in a pod's PID 1 once every process of the generation is gone, whose connections
+// have then already closed, so anything still connected is no part of the agent's work. One second
+// lets a copy already under way deliver what it holds, and no holder outside the generation can
+// keep the generation, the next one or Run waiting longer.
+const sessionDrain = time.Second
+
+// endSession ends a generation that will not run after all: its proxy stops and its directory goes,
+// so no child ever starts against a half-made generation and nothing of it is left bound or on
+// disk. wait does the same for a generation that ran.
+func endSession(proxy *sessionproxy.Proxy, dir string) {
+	if proxy != nil {
+		_ = proxy.Close()
+	}
+	_ = os.RemoveAll(dir)
+}
+
 // resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
-// a test shortens it. It sits well inside the daemon's wait on a launcher's start, its boot timeout
-// plus its stop grace (130 s by default: runtime/sandbox's relaunch), so a lookup that gives up
-// answers before the daemon stops waiting.
+// a test shortens it. A start's whole budget is the proof dial, at most proofTimeout (StopGrace/2),
+// then this lookup: 35 s at the daemon's defaults, inside its wait on the start, its boot timeout
+// plus its stop grace (120 s + 10 s: runtime/sandbox's relaunch), whenever the launcher is connected
+// as that wait begins, which is every relaunch into a running pod. Only a launcher that connects late
+// in a new pod's boot window has less: at least the grace remains, and the proof's half of it is
+// still inside.
 var resumeLookupTimeout = 30 * time.Second
 
 // resumeLookupBackoff is the wait before each retry of a session table lookup that could not reach
@@ -728,8 +862,10 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
 // agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
 // Oh My Pi will, by the storage the child's environment names: the session table when
-// OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres), through the
-// URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the issue's volume.
+// OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres and
+// cloudsql-iam), through clientURL when the generation has a session database of its own and
+// otherwise the URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the
+// issue's volume.
 //
 // It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
 // session was last written: provisioning recorded its creation later than that write
@@ -737,8 +873,8 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // only what was pushed. A workspace with no record, or a child with no workspace (the controller),
 // was not. A record that cannot be read, which an init container killed mid-write can leave, only
 // decides that notice: it is written to log and taken as no record, and the resume goes ahead.
-func resumable(ctx context.Context, env []string, file, onDisk string, log io.Writer) (recreated bool, err error) {
-	written, err := sessionWritten(ctx, env, file, onDisk)
+func resumable(ctx context.Context, env []string, file, onDisk, clientURL string, log io.Writer) (recreated bool, err error) {
+	written, err := sessionWritten(ctx, env, file, onDisk, clientURL)
 	if err != nil {
 		return false, err
 	}
@@ -760,12 +896,15 @@ func resumable(ctx context.Context, env []string, file, onDisk string, log io.Wr
 // Pi keeps it (resumable), refusing a session nothing holds. A session file is read at onDisk, where
 // this process finds the path the child names (file): in an issue pod the role's home is its own
 // overlay, and the volume holding its sessions is mounted under the home mounts outside it
-// (containerPath). A session table it cannot reach is asked again after each of
-// resumeLookupBackoff's waits until resumeLookupTimeout, the URL file read afresh each time, as a
-// database that is briefly unreachable must not fail the launch; a session the table answers it does
-// not hold, or a URL file that is missing or empty, is refused at once. parent's end (the
-// container's stop) ends the wait as the timeout does.
-func sessionWritten(parent context.Context, env []string, file, onDisk string) (time.Time, error) {
+// (containerPath). clientURL is the generation's own session database through the socket its proxy
+// has already bound; with none it is "" and the table is reached through the URL file the child's
+// environment points at, read afresh at each attempt, since that file is a projection something
+// else may replace. A session table it cannot reach is asked again after each of
+// resumeLookupBackoff's waits until resumeLookupTimeout, as a database that is briefly unreachable
+// must not fail the launch; a session the table answers it does not hold, or a URL file that is
+// missing or empty, is refused at once. parent's end (the container's stop) ends the wait as the
+// timeout does.
+func sessionWritten(parent context.Context, env []string, file, onDisk, clientURL string) (time.Time, error) {
 	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
 		info, err := os.Stat(onDisk)
 		if err != nil {
@@ -778,16 +917,21 @@ func sessionWritten(parent context.Context, env []string, file, onDisk string) (
 		}
 		return info.ModTime(), nil
 	}
-	dsnFile := strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable))
-	if dsnFile == "" {
-		return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+	dsnFile := ""
+	if clientURL == "" {
+		if dsnFile = strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable)); dsnFile == "" {
+			return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+		}
 	}
 	ctx, cancel := context.WithTimeout(parent, resumeLookupTimeout)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
-		dsn, err := ompsessions.ReadDSN(dsnFile)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
+		dsn := clientURL
+		if dsnFile != "" {
+			var err error
+			if dsn, err = ompsessions.ReadDSN(dsnFile); err != nil {
+				return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
+			}
 		}
 		written, found, err := lookupWritten(ctx, dsn, file)
 		switch {

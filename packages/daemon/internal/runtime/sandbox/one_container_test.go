@@ -13,6 +13,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -634,7 +635,7 @@ func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 		"/tmp", "/var/tmp", "/run/lock", "/var/lock", "/dev/shm", "/run", "/dev", "/var/run/legion/roles", "/var/run/legion/roles/tester", "/var/run/legion/roles/.homes",
 		"/var/run/lock", "/run/shm", "/var/run/shm", "/var/run", "/run/legion/roles", "/run/legion/roles/tester/gh", "/run/legion/home",
 	} {
-		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ""); err == nil {
+		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ompsessions.Store{}); err == nil {
 			t.Errorf("a mount at %s passed, want it refused", path)
 		}
 	}
@@ -642,7 +643,7 @@ func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 		"/tmp/cache", "/var/tmp/cache", "/run/lock/operator", "/var/lock/operator", "/dev/shm/operator", "/run/shm/operator", "/home/legion/.cache/operator",
 		"/run/operator", "/var/run/operator",
 	} {
-		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ""); err != nil {
+		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ompsessions.Store{}); err != nil {
 			t.Errorf("a mount at %s was refused: %v; role-init carries it back", path, err)
 		}
 	}

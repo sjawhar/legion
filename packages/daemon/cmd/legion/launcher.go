@@ -8,9 +8,10 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/launcher"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
-const launcherUsage = "usage: legion launcher --connect tcp://host:port --sandbox <name> [--pod-uid <uid>] [--stop-grace <duration>] (--roles-dir <dir> --role <role> [--role <role>…] | --token-file <path> --role <role> --private-dir <dir>)"
+const launcherUsage = "usage: legion launcher --connect tcp://host:port --sandbox <name> [--pod-uid <uid>] [--stop-grace <duration>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] (--roles-dir <dir> --role <role> [--role <role>…] | --token-file <path> --role <role> --private-dir <dir>)"
 
 // roleList collects a repeated --role: an issue pod's container names every resident role, the
 // controller's pod exactly one.
@@ -42,6 +43,9 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	podUID := flags.String("pod-uid", os.Getenv("POD_UID"), "the current Kubernetes pod UID (POD_UID by default)")
 	privateDir := flags.String("private-dir", "", "the controller container's own memory-backed directory for each generation's credentials")
 	stopGrace := flags.Duration("stop-grace", 0, "container shutdown grace (30s when unset)")
+	sessionInstance := flags.String("session-instance", "", "the Cloud SQL instance holding the session database: project:region:instance")
+	sessionDatabase := flags.String("session-database", "", "the session database in that instance")
+	sessionUser := flags.String("session-user", "", "the IAM login this pod signs in to the session database as")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -52,6 +56,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	cfg := launcher.Config{
 		Connect: *connect, Sandbox: *sandbox, PodUID: *podUID, StopGrace: *stopGrace,
 		Stdout: stdout, Stderr: stderr,
+		SessionDatabase: ompsessions.Database{Instance: *sessionInstance, Name: *sessionDatabase, User: *sessionUser},
 	}
 	if *rolesDir != "" {
 		cfg.RolesDir, cfg.Roles = *rolesDir, roles
