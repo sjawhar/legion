@@ -231,6 +231,16 @@ describe("the AskGate decision record", () => {
     expect(dispatch.uploads[0]?.content).not.toContain("cache path");
   });
 
+  test("the record's plugin names the manifest's own package, not a literal that outlives a rename", async () => {
+    const dispatch = fakeDispatch();
+    await harness({ client: dispatch.client }).write(REFUSAL);
+    const record = recordsIn(dispatch.uploads[0]?.content ?? "")[0] as Record<string, unknown>;
+
+    // Both halves come from package.json, so a renamed package cannot leave records naming the old
+    // name; the test above pins what that renders to for the manifest as it stands.
+    expect(record.plugin).toBe(`${pkg.name}@${pkg.version}`);
+  });
+
   test("a rules call that failed records its outcome, its error and what it had to leave out", async () => {
     const dispatch = fakeDispatch();
     await harness({ client: dispatch.client }).write({

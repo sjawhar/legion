@@ -312,6 +312,12 @@ that provider.
 `OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit (90 s, less than the host's limit for one
 `tool_call` handler). `OMP_ASKGATE_DUMP` names a file that gets the two prompts of each model call.
 
+The session's `extensionHandlers.toolCallTimeoutMs` must be at least 17,000 ms. The gate keeps
+7 s of that for the two stops its handler still pays once the review's time limit passes — the
+aborted call's usage report and the decision record — and it does not bind on less than 10 s for
+a verdict. A session set under 17,000 ms gets a gate that does not load, and a gate that did not
+load refuses every Dispatch write it would have reviewed.
+
 **The record.** Every gated call writes one `advisor-gate` entry into the session's transcript.
 Every entry but an `unreadable` one carries `target`, the call's target in readable form: the tool
 name, then each of `issue`, `ask`, `artifact`, `project` and `in_reply_to` that the input carries,

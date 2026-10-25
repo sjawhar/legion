@@ -12,7 +12,11 @@
   and refuses the write when neither is set. A switch that does not parse, and a gate that does
   not load, are said at session start. A gate that does not load (a host module, an
   `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler time limit too short for a
-  verdict) refuses each write it would review, in both modes, naming the error and the switch.
+  verdict) refuses each write it would review, in both modes, naming the error and the switch. The
+  session's `extensionHandlers.toolCallTimeoutMs` must be at least 17,000 ms: the gate keeps 7 s
+  of it for the aborted call's usage report and the decision record, and does not bind on less
+  than 10 s for a verdict. Set below 17,000 ms, the gate does not load, and so refuses every
+  Dispatch write it would have reviewed.
 - AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
   `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
   its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided

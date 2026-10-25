@@ -32,8 +32,8 @@ import pkg from "../../package.json";
 /** The record's own stop: a write that has not answered by then is given up, and never retried. */
 export const RECORD_TIMEOUT_MS = 5_000;
 
-/** The plugin that wrote the record, as the record names it. */
-const PLUGIN = `@sjawhar/pi-envoy@${pkg.version}`;
+/** The plugin that wrote the record, as the record names it: the manifest's own name and version. */
+const PLUGIN = `${pkg.name}@${pkg.version}`;
 
 /** Where the session ran: a Legion role's pod, or a person's own machine. */
 export type RecordSource = "pod" | "machine";

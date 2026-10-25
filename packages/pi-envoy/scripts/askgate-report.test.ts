@@ -568,6 +568,12 @@ describe("parseArgs", () => {
       "--since"
     );
   });
+
+  test("refuses an empty --dispatch-project by name, rather than reading a project with no key", () => {
+    expect(() => parseArgs(["--dispatch-project", "", "--since", SINCE])).toThrow(
+      "--dispatch-project requires a project key"
+    );
+  });
 });
 
 describe("isSentBack and isRefusal", () => {

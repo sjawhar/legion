@@ -178,11 +178,14 @@ passes every other event to the real `pi`, so no call passes between the load an
 load that fails (a module, an `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler
 ceiling too short for a verdict) is no off switch: `loadFailureGate` refuses each write the gate
 would review, in both modes, naming the error and `askgate.enabled`, and records a `load-failed`
-entry. `session_start` waits for the load and shows a load failure or a switch that does not parse
-as a notice. `askgate-core.ts` holds the gate and takes the host through its dependencies, so
-`askgate.test.ts` drives it with fakes. Beside it, `new-asks.ts` finds the new asks a call opens,
-and reads markdown as the Dispatch server does. `rules-check.ts` runs the rules check through the
-model walk and the Dispatch client that the core passes in, so it never imports `askgate-core.ts`.
+entry. The ceiling is too short under 17,000 ms (`MIN_DEADLINE_MS` plus `CEILING_MARGIN_MS` in
+`askgate-core.ts`), so a session's `extensionHandlers.toolCallTimeoutMs` set below that loses
+every Dispatch write the gate would have reviewed. `session_start` waits for the load and shows a
+load failure or a switch that does not parse as a notice. `askgate-core.ts` holds the gate and
+takes the host through its dependencies, so `askgate.test.ts` drives it with fakes. Beside it,
+`new-asks.ts` finds the new asks a call opens, and reads markdown as the Dispatch server does.
+`rules-check.ts` runs the rules check through the model walk and the Dispatch client that the core
+passes in, so it never imports `askgate-core.ts`.
 `decision-record.ts` publishes each rule decision to a Dispatch project document of the session's
 own, through the same Dispatch client, under a 5 s stop of its own and with no ask text in it; it
 too is free of the core, reading the entry's fields structurally, and a write that fails leaves

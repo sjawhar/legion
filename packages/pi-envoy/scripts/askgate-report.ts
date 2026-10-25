@@ -823,6 +823,9 @@ export function parseArgs(argv: string[]): Args {
     i++;
   }
   const project = values["--dispatch-project"];
+  // An empty key would be read as a project name and die on a 404 from Dispatch, so it is refused
+  // here by name, as `scripts/dispatch/ask-census.ts` refuses an empty --project.
+  if (project === "") throw new Error("--dispatch-project requires a project key");
   if (project !== undefined && values["--sessions"] !== undefined) {
     throw new Error("--sessions and --dispatch-project cannot be given together");
   }
