@@ -398,8 +398,10 @@ func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod
 // already run and no new shim flag is needed; after the script's `exec` the child is the harness
 // itself, so the shim's pid is unchanged. The setup command runs at every start of the role,
 // a Spawn's, a Resume's and a replaced pod's alike. A Claude Code launch is wrapped whatever else
-// it carries, for the one `mkdir -p` of its configuration directory (claudeConfigDir), and adds
-// one file to the generation's credentials: the MCP document its agent command reads
+// it carries, for the `mkdir -p` of its configuration directory (claudeConfigDir) and the install
+// of the pinned Claude Code its agent command names (claudeCodeBlock: the image carries the pin
+// and never the binary), and adds one file to the generation's credentials: the MCP document its
+// agent command reads
 // (claudeMCPFile), which the launcher writes 0600 into the 0700 private directory it makes for
 // the generation and removes with the rest when the generation ends (internal/launcher). It
 // travels in Files and never in spec.Secrets, which would be two wrongs: every secret name also

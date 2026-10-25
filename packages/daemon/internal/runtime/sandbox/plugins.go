@@ -86,7 +86,8 @@ const startName = "legion-start"
 
 // installLockWait is how long installBlock's flock waits for the shared bun install cache before
 // giving up, in whole seconds (flock -w takes seconds): a third of the registration deadline the
-// daemon would retire the role at, floored at one second.
+// daemon would retire the role at, floored at one second. claudeCodeBlock's flock on the issue's
+// npm cache waits the same bound, once (its own comment says why that fits).
 //
 // It is a proportion rather than a number because the bound only does its work while it stays in
 // proportion to that deadline. The script runs the install twice, so two timed-out waits have to
@@ -269,24 +270,148 @@ if [ "$n" -gt 0 ]; then
 fi
 `
 
+// claudeCodeRoot is where a Claude role's installed Claude Code generations live, beside its
+// plugin generations (pluginsRoot) under its own state home: <role state home>/legion-claude-code,
+// on the issue's volume, writable by the pod's uid and no other role's.
+func claudeCodeRoot(stateHome string) string {
+	return stateHome + "/legion-claude-code"
+}
+
+// claudeCodeGenDir is one generation's own directory under claudeCodeRoot, named as pluginGenDir
+// names its own (shimwire.GenerationDir: g<generation>): where claudeCodeBlock installs the pinned
+// Claude Code for that generation.
+func claudeCodeGenDir(stateHome string, generation uint64) string {
+	return claudeCodeRoot(stateHome) + "/" + shimwire.GenerationDir(generation)
+}
+
+// claudeCodeBinary is the `claude` a generation's install leaves, and the one that generation's
+// agent command names (claudeArgv): the per-platform package's own executable, a self-contained
+// ELF that needs no node. Never node_modules/.bin/claude: that is the npm package's placeholder
+// stub, `bin/claude.exe`, which only the package's postinstall replaces, and the install runs no
+// scripts. The platform is linux-x64 because the worker image builds for linux/amd64 alone.
+func claudeCodeBinary(stateHome string, generation uint64) string {
+	return claudeCodeGenDir(stateHome, generation) + "/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+}
+
+// claudeCodeCheckScript is the node -e script claudeCodeBlock runs once the install has
+// succeeded: it reads the version the image's package.json pins for @anthropic-ai/claude-code
+// (argv[1], claudeCodePin's), runs the installed binary (argv[2]) with --version, and refuses
+// unless the first word it prints is that version — `2.1.310 (Claude Code)` for a pin of
+// 2.1.310. `npm ci` already holds every tarball to the lockfile's sha512 integrity; this holds
+// what actually runs to the pin as well, so a lockfile regenerated without its package.json, or a
+// binary that is not the pinned release, fails the launch by name. Each failure names what was
+// read and what was wanted.
+const claudeCodeCheckScript = `
+const fs = require('fs');
+const { execFileSync } = require('child_process');
+const pin = process.argv[1];
+const bin = process.argv[2];
+let want;
+try {
+  want = JSON.parse(fs.readFileSync(pin, 'utf8')).dependencies['@anthropic-ai/claude-code'];
+} catch (e) {
+  console.error('legion claude-code: reading the pin from ' + pin + ': ' + e.message);
+  process.exit(1);
+}
+if (typeof want !== 'string' || want === '') {
+  console.error('legion claude-code: ' + pin + ' pins no @anthropic-ai/claude-code');
+  process.exit(1);
+}
+let got;
+try {
+  got = execFileSync(bin, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+} catch (e) {
+  console.error('legion claude-code: running ' + bin + ' --version: ' + e.message);
+  process.exit(1);
+}
+if (got.split(/\s+/)[0] !== want) {
+  console.error('legion claude-code: ' + bin + ' --version printed ' + JSON.stringify(got) + '; ' + pin + ' pins ' + want);
+  process.exit(1);
+}
+`
+
+// claudeCodeBlock is the part of the start wrapper a Claude role's launch runs before Claude Code
+// starts: the worker image carries the pin and never the binary (Claude Code's license reserves
+// every right and grants no redistribution, and the image is public), so every generation fetches
+// the pinned release from npm here and verifies it, and a fetch that fails or does not verify
+// fails the launch, loudly, before anything execs — there is no other Claude Code to fall back
+// to, and a worker that came up without its harness is the failure this exists to prevent.
+//
+// It has installBlock's shape, for installBlock's reasons. It runs in a subshell with its stdout
+// on stderr, since the shim reads the child's stdout as the RPC frame stream, and its cd into the
+// generation's directory ends with it. It first drops every earlier generation's install under the
+// role's root (claudeCodeRoot), so an old generation's copy — some hundreds of megabytes — never
+// accumulates on the issue's volume. It copies the image's package.json and package-lock.json
+// (claudeCodePin) into the generation's directory and runs `npm ci --ignore-scripts --omit=dev`
+// there: the lockfile pins @anthropic-ai/claude-code exactly and carries the sha512 integrity of
+// every tarball, which `npm ci` enforces, and with scripts off the per-platform package's binary
+// is what runs (claudeCodeBinary). npm is called by its image path, as bun is. Then
+// claudeCodeCheckScript holds the installed binary's --version to the pin. A failed copy or
+// install prints the failure line and exits 1, and a failed check prints its own; either exits
+// the subshell non-zero, which `set -e` makes the wrapper's own exit.
+//
+// npm's cache is the issue's, `$XDG_CACHE_HOME/legion-claude-code` on the issue's volume, so the
+// pod's other Claude roles and its later pods reuse the tarballs one already fetched, and neither
+// the cache nor the install is charged to the container's ephemeral storage. XDG_CACHE_HOME is
+// read with no default, as installBlock reads BUN_INSTALL_CACHE_DIR: the runtime sets it for every
+// role container (roleEnvironment) and owns it (runtimeOwned), and its absence is a broken
+// invariant `set -u` should announce. The install takes /usr/bin/flock on that directory with
+// installBlock's bound (lockWait, installLockWait), made (mkdir -p, after the same rm of a regular
+// file an interrupted flock can leave) before the lock so the lock's inode exists, and so a
+// stalled holder fails the launch by the failure branch while the daemon is still watching rather
+// than being retired by the registration deadline. It is tried once: installBlock's retry covers
+// an agent's own `bun install` filling the shared bun cache, and no agent's npm uses this cache.
+// A Claude launch never also installs the plugin pair (specs.stalePluginInstall installs none for
+// the claude backend), so its script spends at most one wait of the deadline, not installBlock's
+// two. Every path is shell-quoted into the script (shellprefix.Literal).
+func claudeCodeBlock(stateHome string, generation uint64, lockWait int) string {
+	root, genDir := claudeCodeRoot(stateHome), claudeCodeGenDir(stateHome, generation)
+	pin, lock := claudeCodePin+"/package.json", claudeCodePin+"/package-lock.json"
+	failMsg := fmt.Sprintf("legion claude-code: installing the Claude Code %s pins into %s failed", lock, genDir)
+	return fmt.Sprintf(`(
+  rm -rf -- %s/g*
+  mkdir -p -- %s
+  cd -- %s
+  cache="$XDG_CACHE_HOME/legion-claude-code"
+  [ -d "$cache" ] || rm -f -- "$cache"
+  mkdir -p -- "$cache"
+  { cp -- %s %s . \
+    && /usr/bin/flock -w %d -- "$cache" /usr/local/bin/npm ci --ignore-scripts --omit=dev --no-audit --no-fund --cache "$cache"; } \
+    || { echo %s; exit 1; }
+  node -e %s %s %s
+) 1>&2
+`,
+		shellprefix.Literal(root),
+		shellprefix.Literal(genDir), shellprefix.Literal(genDir),
+		shellprefix.Literal(pin), shellprefix.Literal(lock),
+		lockWait,
+		shellprefix.Literal(failMsg),
+		shellprefix.Literal(claudeCodeCheckScript),
+		shellprefix.Literal(pin), shellprefix.Literal(claudeCodeBinary(stateHome, generation)),
+	)
+}
+
 // startScript is the start wrapper an agent argv runs in before the harness starts when the launch
 // installs a stale-plugin relaunch's pair (plugins set), runs Claude Code (claudeDir set), the
-// deployment names a setup command, or any of them: the one `mkdir -p` of the Claude Code
-// configuration directory first, then the install (installBlock) when plugins is set, then the
-// setup command (setupBlock), then `exec "$@"` into the agent's real command, only once
-// everything before it has succeeded, so the shim's child is the harness itself from then on.
-// lockWait is the install's flock bound in seconds (installLockWait), which only an installing
-// launch's block renders.
+// deployment names a setup command, or any of them: for a Claude launch the one `mkdir -p` of the
+// Claude Code configuration directory and then the install of Claude Code itself
+// (claudeCodeBlock), then the plugin install (installBlock) when plugins is set, then the setup
+// command (setupBlock), then `exec "$@"` into the agent's real command, only once everything
+// before it has succeeded, so the shim's child is the harness itself from then on. lockWait is
+// the installs' flock bound in seconds (installLockWait), which only a Claude launch's block and
+// an installing launch's render.
 //
-// claudeDir is the launch's CLAUDE_CONFIG_DIR (claudeConfigDir), "" for an Oh My Pi launch. It is
-// made here and nowhere else: it is on the issue's volume, which the image cannot prepare and an
-// init container does not know the role's backend to make, and Claude Code is told it as a
-// variable rather than asked to create it. The path is shell-quoted into the script
-// (shellprefix.Literal), as the install block's paths are, so it travels as literal text.
+// claudeDir is the launch's CLAUDE_CONFIG_DIR (claudeConfigDir), "" for an Oh My Pi launch, which
+// therefore never renders claudeCodeBlock. It is made here and nowhere else: it is on the issue's
+// volume, which the image cannot prepare and an init container does not know the role's backend
+// to make, and Claude Code is told it as a variable rather than asked to create it. The path is
+// shell-quoted into the script (shellprefix.Literal), as the install blocks' paths are, so it
+// travels as literal text.
 func startScript(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, lockWait int) string {
 	script := "set -eu\n"
 	if claudeDir != "" {
 		script += "mkdir -p -- " + shellprefix.Literal(claudeDir) + "\n"
+		script += claudeCodeBlock(stateHome, generation, lockWait)
 	}
 	if plugins != nil {
 		script += installBlock(stateHome, generation, plugins, lockWait)
@@ -300,8 +425,8 @@ func startScript(stateHome string, generation uint64, plugins *runtime.PluginIns
 // itself, so none of either is reparsed by the shell. With none of the three — every tmux launch,
 // and every Kubernetes launch of an Oh My Pi role whose deployment names no setup command and
 // which is not installing a stale-plugin relaunch's pair into a kept pod (relaunch.go) — agent is
-// returned unchanged. lockWait is the install's flock bound in seconds (installLockWait), which
-// only an installing launch renders.
+// returned unchanged. lockWait is the installs' flock bound in seconds (installLockWait), which
+// only a Claude launch and an installing launch render.
 func startArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, claudeDir string, setup, agent []string, lockWait int) []string {
 	if plugins == nil && claudeDir == "" && len(setup) == 0 {
 		return agent

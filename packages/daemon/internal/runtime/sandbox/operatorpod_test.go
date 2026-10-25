@@ -130,10 +130,11 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a mount under a path the image owns", pod: mountAt("/opt/omp/bin"), want: overlaps("/opt/omp/bin", "/opt/omp", true)},
 		{name: "a mount over a database the image owns", pod: mountAt("/home/legion/.omp/profiles/legion/agent/agent.db"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent/agent.db", "/home/legion/.omp/profiles/legion/agent/agent.db", true)},
-		// /usr/local/bin holds Claude Code and the bun its MCP server runs on (imageOwnedPaths)
-		// beside gh and jj (the Tools), and the refusal names the first of them it finds.
-		{name: "a mount above the image's Claude Code, gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/claude", true)},
-		{name: "a mount at the image's Claude Code", pod: mountAt("/usr/local/bin/claude"), want: overlaps("/usr/local/bin/claude", "/usr/local/bin/claude", true)},
+		// /usr/local/bin holds the bun a Claude role's MCP server runs on (imageOwnedPaths) beside
+		// gh and jj (the Tools), and the refusal names the first of them it finds. Claude Code is
+		// not among them: the image carries none, and a role's install of it sits under /legion.
+		{name: "a mount above the image's bun, gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/bun", true)},
+		{name: "a mount at the image's Claude Code pin", pod: mountAt("/opt/legion/claude-code"), want: overlaps("/opt/legion/claude-code", "/opt/legion", true)},
 		{name: "a mount at the image's bun", pod: mountAt("/usr/local/bin/bun"), want: overlaps("/usr/local/bin/bun", "/usr/local/bin/bun", true)},
 		{name: "a mount at the image's jj", pod: mountAt("/usr/local/bin/jj"), want: overlaps("/usr/local/bin/jj", "/usr/local/bin/jj", true)},
 		{name: "a mount at the image's git", pod: mountAt("/usr/bin/git"), want: overlaps("/usr/bin/git", "/usr/bin/git", true)},

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
@@ -79,10 +80,6 @@ const (
 	pluginPackage = "@sjawhar/pi-legion"
 	envoyPackage  = "@sjawhar/pi-envoy"
 	legacyPackage = "@sjawhar/pi-legion-envoy"
-	// claudeBinary is Claude Code on the image's PATH, which the Claude lane runs (verifyClaude).
-	// The claude-envoy plugin beside it is named by the root that lane is given, never by package:
-	// the image carries exactly one copy and no registry publishes it.
-	claudeBinary = "claude"
 	// maxProbeStderr bounds how much of a failed probe's stderr a refusal quotes, keeping the tail,
 	// where the error usually is (MAX_PROBE_STDERR_LENGTH, boot-probes.ts).
 	maxProbeStderr = 2048
@@ -138,11 +135,13 @@ type pluginGate struct {
 	pluginRoot      string
 	envoyPluginRoot string
 	// claudeRoot is the claude-envoy package root the image carries, which a phase worker on the
-	// `claude` backend loads as Claude Code's plugin directory (`legion probe-image --claude-root`,
-	// the worker image's build; packages/daemon/internal/claudelaunch). Empty everywhere else:
-	// only the image runs the Claude lane (verifyClaude), as only the image runs the
-	// session-storage probe.
-	claudeRoot string
+	// `claude` backend loads as Claude Code's plugin directory, and claudeCodePin the directory of
+	// the Claude Code pin a pod installs that worker's Claude Code from at launch (`legion
+	// probe-image --claude-root` and `--claude-code-pin`; packages/daemon/internal/claudelaunch,
+	// internal/runtime/sandbox's claudeCodeBlock). Empty everywhere else: only the image runs the
+	// Claude lane (verifyClaude), as only the image runs the session-storage probe.
+	claudeRoot    string
+	claudeCodePin string
 	// roleReferences are the task agents and skills the role prompts the probed Oh My Pi is handed
 	// name (prompts.RoleReferences), resolved beside the plugin's own. The zero Names resolves the
 	// plugin's alone.
@@ -778,58 +777,62 @@ func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 }
 
 // verifyClaude is the Claude lane, which only the image runs and only when it is given the
-// claude-envoy root (`legion probe-image --claude-root`, the worker image's build): a phase
-// worker on the `claude` backend runs Claude Code with that root as a plugin directory and the
-// root's own `legion/` as a second one, and its `dist/envoy-channel.js` as the worker's one MCP
-// server (packages/daemon/internal/claudelaunch). Three checks, in the order such a worker needs
-// them: `claude` runs; the root holds the two files Claude Code loads, each a regular file (a
-// directory at either path is no file a worker could load); and the root's manifest
-// declares this gate's contract, held exactly as the pod lane holds pi-legion's
-// (readDeclaredContract) — claude-envoy ships in the image alone, so the remedy is always a
-// rebuilt image, never an install.
+// claude-envoy root and the Claude Code pin (`legion probe-image --claude-root --claude-code-pin`).
+// The image carries no Claude Code — its licence grants no redistribution, and the worker image is
+// public — so the lane proves the two facts a phase worker on the `claude` backend needs of it
+// instead. First, the image carries the plugin that worker loads: the root holds the two files
+// Claude Code loads, each a regular file (capabilities.CheckClaudePlugin; a directory at either
+// path is no file a worker could load), and the root's manifest declares this gate's contract,
+// held exactly as the pod lane holds pi-legion's (readDeclaredContract) — claude-envoy ships in the
+// image alone, so the remedy is always a rebuilt image, never an install. Second, a pod can fetch
+// and verify the binary: the pin is readable, names one exact version, and locks that release and
+// its linux-x64 package, the one whose binary the install runs, with the sha512 integrity `npm ci`
+// holds each tarball to (capabilities.ReadClaudeCodePin) — the pin a Claude role's start script
+// installs from and then holds the installed binary's --version to (claudeCodeBlock,
+// internal/runtime/sandbox/plugins.go).
 //
-// None of the three is retried, unlike the probes above: they run a local binary that reads no
-// network and read the image's own filesystem, so a failure is the image's and no further
-// attempt answers differently. A budget kill is reported as what it is.
+// The lane reads the pin and does not perform the install. Performing it once would prove the
+// fetch end to end, but it would make the image's publish and every boot probe of the image — this
+// lane runs in the daemon's probe pod as well as the build — depend on the npm registry, put a
+// download of Claude Code's native binary in front of every boot, and need cleaning up within the
+// same step so no layer of a public image kept a binary the image may not redistribute. And it would
+// prove less than it seems: a registry that answered the build is no promise that it answers a pod
+// days later. So the image proves it is self-consistent — what a pod installs from is here, exact
+// and checksummed — and the fetch itself is proved where it happens: every Claude launch's start
+// script installs and verifies it and fails that launch loudly when it cannot, and the pod e2e
+// (scripts/e2e/claude-backend-sandbox.sh) watches a worker run the binary that fetch installed.
+//
+// None of the checks is retried, unlike the probes above: they read the image's own filesystem
+// and no network, so a failure is the image's and no further attempt answers differently.
 func (g pluginGate) verifyClaude(ctx context.Context) error {
 	if g.claudeRoot == "" {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	root, err := filepath.Abs(g.claudeRoot)
 	if err != nil {
 		return fmt.Errorf("%s: resolve the claude-envoy root %s: %w", g.label(), g.claudeRoot, err)
 	}
-	rebuild := "build the worker image from this daemon's commit"
-	r, err := g.run(ctx, "exec "+claudeBinary+" --version")
-	switch {
-	case err != nil:
-		return fmt.Errorf("%s: run `%s --version`: %w", g.label(), claudeBinary, err)
-	case r.timedOut:
-		return fmt.Errorf("%s: `%s --version` timed out after %s (ran %.1f s): the worker image's Claude Code does not answer; %s",
-			g.label(), claudeBinary, g.timeout, r.elapsed.Seconds(), rebuild)
-	case r.exit != 0:
-		return errors.New(r.quoting(fmt.Sprintf("`%s --version` exited %d: the worker image carries no Claude Code a worker on the `claude` backend could run; %s",
-			claudeBinary, r.exit, rebuild)))
+	pin, err := filepath.Abs(g.claudeCodePin)
+	if err != nil {
+		return fmt.Errorf("%s: resolve the Claude Code pin %s: %w", g.label(), g.claudeCodePin, err)
 	}
-	for _, file := range []string{
-		filepath.Join(root, "dist", "envoy-channel.js"),
-		filepath.Join(root, "legion", ".claude-plugin", "plugin.json"),
-	} {
-		info, err := os.Stat(file)
-		if err == nil && !info.Mode().IsRegular() {
-			err = fmt.Errorf("%s is not a regular file (mode %s)", file, info.Mode())
-		}
-		if err != nil {
-			return fmt.Errorf("the claude-envoy root %s holds no %s (%v): a worker on the `claude` backend loads it as Claude Code's plugin directory; %s",
-				root, filepath.Base(file), err, rebuild)
-		}
+	rebuild := "build the worker image from this daemon's commit"
+	if err := capabilities.CheckClaudePlugin(root); err != nil {
+		return fmt.Errorf("%w; %s", err, rebuild)
 	}
 	manifest := filepath.Join(root, "package.json")
 	if _, err := readDeclaredContract(manifest, "claude-envoy", g.contract, "Build the worker image from this daemon's commit."); err != nil {
 		return err
 	}
-	g.log.Info("boot gate: Claude Code runs and the claude-envoy root speaks this daemon's contract",
-		"root", root, "manifest", manifest, "daemonApiVersion", g.contract, "version", strings.TrimSpace(r.stdout))
+	version, err := capabilities.ReadClaudeCodePin(pin)
+	if err != nil {
+		return fmt.Errorf("%w: a pod on the `claude` backend installs Claude Code from that pin at launch and verifies what it installed against it, so none could start; %s", err, rebuild)
+	}
+	g.log.Info("boot gate: the claude-envoy root speaks this daemon's contract and the Claude Code pin is one a pod can install and verify",
+		"root", root, "manifest", manifest, "daemonApiVersion", g.contract, "pin", pin, "claudeCodeVersion", version)
 	return nil
 }
 
@@ -943,11 +946,14 @@ type ImageProbe struct {
 	// a pod uses. A relative root is resolved against this process's working directory.
 	PluginRoot      string
 	EnvoyPluginRoot string
-	// ClaudeRoot is the claude-envoy package root the image carries, which the Claude lane checks
-	// (verifyClaude): Claude Code runs, the root holds its built channel server and its generated
-	// Legion plugin, and its manifest declares Contract. Empty runs no Claude lane — the worker
-	// image's build passes it; a caller that has no such root does not.
-	ClaudeRoot string
+	// ClaudeRoot is the claude-envoy package root the image carries and ClaudeCodePin the
+	// directory of the Claude Code pin a pod installs Claude Code from at launch, which the Claude
+	// lane checks together (verifyClaude): the root holds its built channel server and its generated
+	// Legion plugin and its manifest declares Contract, and the pin is one a pod can install and
+	// verify. Both empty runs no Claude lane; one without the other is refused. `legion
+	// probe-image` always passes both, the image's own paths unless told others.
+	ClaudeRoot    string
+	ClaudeCodePin string
 	// RoleReferences are the task agents and skills the role prompts a pod is handed name
 	// (prompts.RoleReferences), and are required: the daemon's own, which it inlines into every
 	// Sandbox pod, or the image's when the command is given none.
@@ -979,10 +985,13 @@ func ProbeImage(ctx context.Context, p ImageProbe) error {
 	if p.RoleReferences.Zero() {
 		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
 	}
+	if (p.ClaudeRoot == "") != (p.ClaudeCodePin == "") {
+		return errors.New("image probe: ImageProbe.ClaudeRoot and ImageProbe.ClaudeCodePin go together: the Claude lane checks the claude-envoy plugin and the Claude Code pin a worker on the `claude` backend needs both of")
+	}
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract,
-		pluginRoot: p.PluginRoot, envoyPluginRoot: p.EnvoyPluginRoot, claudeRoot: p.ClaudeRoot,
+		pluginRoot: p.PluginRoot, envoyPluginRoot: p.EnvoyPluginRoot, claudeRoot: p.ClaudeRoot, claudeCodePin: p.ClaudeCodePin,
 		roleReferences: p.RoleReferences, skipAgentModels: p.SkipAgentModels,
 		log: p.Log,
 	}.verifyImage(ctx)

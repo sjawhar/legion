@@ -189,7 +189,8 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 		t.Errorf("the load probe's environment has no LEGION_PROMPT_ROOTS=%s:%s, the plugin roots:\n%s", envoyRoot, root, env)
 	}
 	// Without either plugin root the image probe has no lane a pod uses, and is refused before any
-	// probe runs.
+	// probe runs; so is a Claude lane given the claude-envoy root without the Claude Code pin, or
+	// the pin without the root, since a worker on the `claude` backend needs both.
 	for _, testCase := range []struct {
 		name  string
 		probe ImageProbe
@@ -197,6 +198,8 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 	}{
 		{"no plugin root", ImageProbe{EnvoyPluginRoot: envoyRoot}, "ImageProbe.PluginRoot is required"},
 		{"no Envoy plugin root", ImageProbe{PluginRoot: root}, "ImageProbe.EnvoyPluginRoot is required"},
+		{"a Claude root without a pin", ImageProbe{PluginRoot: root, EnvoyPluginRoot: envoyRoot, ClaudeRoot: t.TempDir()}, "ImageProbe.ClaudeRoot and ImageProbe.ClaudeCodePin go together"},
+		{"a Claude Code pin without a root", ImageProbe{PluginRoot: root, EnvoyPluginRoot: envoyRoot, ClaudeCodePin: t.TempDir()}, "ImageProbe.ClaudeRoot and ImageProbe.ClaudeCodePin go together"},
 	} {
 		f = newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
 		probe := testCase.probe

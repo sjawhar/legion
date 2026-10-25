@@ -38,11 +38,23 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
   the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
   `--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion`;
-- Claude Code (`@anthropic-ai/claude-code`), pinned by the committed lockfile at
-  `packages/daemon/docker/claude-code` and installed with `npm ci --ignore-scripts --omit=dev` into
-  `/opt/claude-code`, with `/usr/local/bin/claude` linked to the platform package's own binary
-  (`node_modules/@anthropic-ai/claude-code-linux-x64/claude`, a self-contained ELF; with scripts
-  off, the npm package's own `bin` stub stays a stub, so the link skips it), and `@sjawhar/claude-envoy`
+- the pin of Claude Code (`@anthropic-ai/claude-code`) and nothing else of it: the committed
+  `package.json` and `package-lock.json` of `packages/daemon/docker/claude-code`, which pin one exact
+  version and carry the npm `sha512` integrity of every tarball, at `/opt/legion/claude-code`. The
+  image carries no Claude Code: its licence reserves every right and grants no redistribution, and
+  `ghcr.io/sjawhar/legion-worker` is public. A pod whose role runs on the `claude` backend installs
+  the pinned release at every launch instead, in its generation's start script
+  (`claudeCodeBlock`, `packages/daemon/internal/runtime/sandbox/plugins.go`): it copies the pin
+  into `<role state home>/legion-claude-code/g<generation>` on the issue's volume, dropping every
+  earlier generation's install there, runs `npm ci --ignore-scripts --omit=dev` from it under a
+  bounded `flock` on the issue's npm cache — `npm ci` holds each tarball to the lockfile's
+  integrity — and then holds the installed binary's `--version` to the pin. The binary the agent
+  command names is that generation's
+  `node_modules/@anthropic-ai/claude-code-linux-x64/claude`, a self-contained ELF (with scripts
+  off, the npm package's own `bin` stub stays a stub). A fetch that fails or does not verify
+  prints a `legion claude-code: …` line and fails that launch loudly, before anything execs, and
+  the daemon charges it as a launch failure; there is no Claude Code in the image to fall back
+  to. And `@sjawhar/claude-envoy`
   from the same commit at `/opt/legion/claude-envoy` — the plugin root a phase worker on the
   `claude` backend loads: its `dist/envoy-channel.js` is that worker's one MCP server, holding the
   `legion` tool, its claim, the Envoy tools and the phase reminder's hook endpoint, and its
@@ -50,12 +62,10 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   Claude Code loads as a second `--plugin-dir`. claude-envoy ships as its committed build, which
   the image's `plugin` stage holds to a fresh one (`bun run check-dist` on the Bun `.bun-version`
   pins) rather than to a pack: no workflow releases that package, so the image is where a
-  Kubernetes deployment gets it. Both are in every image, whatever a deployment's `worker_backends`
-  names — one image serves both harnesses, so every build fetches Claude Code and every probe
-  checks it (`claude --version` in the publish gate, `claude` at that absolute path, and
-  `legion probe-image --claude-root /opt/legion/claude-envoy`, which holds the root's channel
-  server, its generated plugin manifest and its declared `legion.daemonApiVersion` to the daemon's
-  contract exactly as the Oh My Pi lane holds pi-legion's);
+  Kubernetes deployment gets it. The pin and the plugin are in every image, whatever a
+  deployment's `worker_backends` names — one image serves both harnesses — and every probe of the
+  image checks both (`legion probe-image`'s Claude lane, below, and its `claude-code` row);
+  no build and no probe fetches Claude Code;
 - `@bopstack/pi-codegraph` (from npm, pinned), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
@@ -281,14 +291,23 @@ requiring the commit the workflow built, and the plugin's `dispatch` shim
 (`/opt/legion/pi-envoy/bin/dispatch --help`, which needs its bundled `dist/dispatch.js` and the
 image's Bun), then `legion probe-image`: the same two probes, run by the
 daemon's own code, plus two only the image runs — the session-storage probe, which prints
-`session-storage=probed` on the OK line ([The image guard](#the-image-guard)), and, under
-`--claude-root /opt/legion/claude-envoy`, the Claude lane: `claude --version`, that root's built
-channel server (`dist/envoy-channel.js`) and generated Legion plugin
-(`legion/.claude-plugin/plugin.json`), and the root's own declared `legion.daemonApiVersion`, each
-refusal naming a build of the image from this daemon's commit — with the Legion plugin held to
-the daemon API contract (`legion.daemonApiVersion`), the Envoy plugin's interface held to the one the
-Legion plugin speaks, and every task agent and skill Legion's prompts
-name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the Legion plugin ships
+`session-storage=probed` on the OK line ([The image guard](#the-image-guard)), and the Claude
+lane, on `--claude-root /opt/legion/claude-envoy` and `--claude-code-pin /opt/legion/claude-code`
+(the image's own paths, which the flags default to, so the daemon's probe Sandbox below checks
+them too): that root's built channel server (`dist/envoy-channel.js`) and generated Legion plugin
+(`legion/.claude-plugin/plugin.json`), each a regular file, and the root's own declared
+`legion.daemonApiVersion`; and Claude Code's pin, which must name one exact version and lock that
+release and its `linux-x64` package, the one whose binary a pod's install runs, at that version
+with the `sha512` integrity `npm ci` holds each tarball to. The lane reads the pin and fetches
+nothing: installing from it would make the publish and every boot probe depend on the npm
+registry and could not promise a pod's later fetch anyway, so the image proves it is
+self-consistent and the fetch is proved where it happens, by each Claude launch's start script and
+by `scripts/e2e/claude-backend-sandbox.sh` (`verifyClaude`,
+`packages/daemon/internal/daemon/bootgate.go`). Each of the lane's refusals names a build of the
+image from this daemon's commit. The two probes the daemon shares hold the Legion plugin to
+the daemon API contract (`legion.daemonApiVersion`), the Envoy plugin's interface to the one the
+Legion plugin speaks, and resolve every task agent and skill Legion's prompts
+name (`task(agent="…")`, `skill://…`) by name through the same launch (the Legion plugin ships
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
 `ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
@@ -300,7 +319,7 @@ would find each — `omp setup python --check`, the `chromium` on `PATH` (or the
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
 profile's lock, `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`,
 `ssh-keygen`, `flock`, `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` on `PATH` with `go version`
-running, and the `claude` the `claude-code` row reports — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
+running, and the `claude-code` row's claude-envoy root and Claude Code pin, as the Claude lane held them, with the `npm` that installs from the pin and the `node` that checks the installed version on `PATH` — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
 (`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value; the mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My Pi settings — the probe pod's log says why — and the daemon's report shows the row open).
@@ -383,7 +402,8 @@ a ConfigMap `<operator ConfigMap>-missing` that does not exist, mounted at
 `/etc/legion-operator-missing`. The runtime keeps the line's `model-fallback`
 mark for the deployment's capability report ([The deployment's capability report](#the-deployments-capability-report)). To run it yourself:
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
-(both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
+(both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way;
+`--claude-root` and `--claude-code-pin` default to the image's own `/opt/legion/claude-envoy` and `/opt/legion/claude-code`; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
@@ -1437,11 +1457,12 @@ moved address) still replaces a pod on another image as the section above says. 
 child before Oh My Pi starts; the launcher reports it gone, the daemon charges it as a launch
 failure, and the claim is retried until the budget ends it in a `worker-died`.
 
-A role on Claude Code installs nothing. That install is `@sjawhar/pi-legion` and
+A role on Claude Code installs neither plugin. That install is `@sjawhar/pi-legion` and
 `@sjawhar/pi-envoy` from npm, and a phase worker `worker_backends` puts on `claude` loads neither:
 its plugin is the image's own `/opt/legion/claude-envoy`, which no workflow releases. So a
-stale-plugin relaunch of such a claim carries no install at all (`stalePluginInstall`,
-`packages/daemon/internal/daemon/specs.go`); the claim still relaunches, and comes up on the
+stale-plugin relaunch of such a claim carries no plugin install (`stalePluginInstall`,
+`packages/daemon/internal/daemon/specs.go`); the claim still relaunches — its start script
+installing the pinned Claude Code as every Claude launch's does — and comes up on the
 image's plugin, which the image probe already held to the daemon's contract. A plugin-contract
 change for a Claude Code role is answered by a new image, never by an install, and
 `legion start --check-config` says so after its plugin line, naming each role this deployment runs
@@ -1822,8 +1843,10 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
 `omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. A
 `worker_backends` entry that puts a phase worker on `claude` is accepted here as it is under tmux:
-the worker image carries Claude Code and the claude-envoy plugin, and such a role's pod runs
-`legion claude-bridge -- claude -p …` in place of Oh My Pi (the refusal that named
+the worker image carries the claude-envoy plugin and Claude Code's pin, and such a role's pod
+installs the pinned Claude Code at launch, verifies it, and runs `legion claude-bridge -- <that
+claude> -p …` in place of Oh My Pi, its launch failing loudly when the fetch fails or does not
+verify (the image's contents, above; the refusal that named
 `runtime: tmux` is gone; the loader still refuses the architect, whom no harness but Oh My Pi
 runs). What an operator supplies for such a role is its model route (`provider_keys` and
 `pod.env`, above). Every

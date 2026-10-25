@@ -278,8 +278,11 @@ What each part is for:
   Claude Code role resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP
   server runs on from `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
   `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. A Kubernetes daemon
-  resolves none of the three: the worker image carries Claude Code and the plugin at fixed paths,
-  and such a role's pod runs `legion claude-bridge -- claude -p …` in place of Oh My Pi. Give that
+  resolves none of the three: the worker image carries the plugin and the `bun` it runs on at
+  fixed paths, and Claude Code's pin but no Claude Code, whose licence grants no redistribution.
+  Such a role's pod installs the pinned Claude Code at every launch, verifies it against the pin,
+  and runs `legion claude-bridge -- claude -p …` with it in place of Oh My Pi; a fetch that fails
+  or does not verify fails that launch, and the pod needs to reach the npm registry. Give that
   role its model route yourself, as you do Oh My Pi's: `ANTHROPIC_API_KEY` through `provider_keys`,
   and `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` in `runtime.kubernetes.pod.env`. The repository's
   `docs/deployment.md` ("Phase workers on Claude Code") and `docs/kubernetes.md` cover the rest.

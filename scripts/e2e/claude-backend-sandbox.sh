@@ -4,16 +4,20 @@
 # (`worker_backends: {implementer: claude}`) and whose runtime is `kubernetes`, drives one scratch
 # Dispatch issue: a real Oh My Pi architect and planner take it to implementing in the issue's pod,
 # and the implementer then runs in that pod's own container as `legion claude-bridge -- claude -p …`
-# — the worker image's Claude Code, the image's `@sjawhar/claude-envoy` plugin as its MCP server and
-# its Legion plugin, its `mcp.json` written by the launcher into the generation's private directory,
-# and its `CLAUDE_CONFIG_DIR` a directory of the role's state home on the issue's volume. The proof
-# holds, in this order, that the Claude Code implementer's pod launches and its claim registers that
-# pod's Claude Code transcript as its session; that the container's command line holds
-# `claude-bridge --` and `--session-id <id>`; that the endless phase reminder reaches it when a turn
+# — the Claude Code its pod's start script installed at launch from the image's pin (the image
+# carries the pin and no Claude Code), the image's `@sjawhar/claude-envoy` plugin as its MCP server
+# and its Legion plugin, its `mcp.json` written by the launcher into the generation's private
+# directory, and its `CLAUDE_CONFIG_DIR` a directory of the role's state home on the issue's volume.
+# The proof holds, in this order, that the Claude Code implementer's pod launches and its claim
+# registers that pod's Claude Code transcript as its session; that the container's command line
+# holds `claude-bridge --` and `--session-id <id>`, and runs the Claude Code the generation's start
+# script installed into its own directory on the issue's volume — the pinned version, with no
+# /usr/local/bin/claude in the image; that the endless phase reminder reaches it when a turn
 # of its ends with its phase still open; that it completes its phase through the `legion` MCP tool's
 # handoff_complete with a pushed `.legion/<issue>/` handoff commit; and that, the pod deleted, its
-# replacement resumes the same Claude Code session (`--resume <id>`, the transcript's earlier bytes
-# unchanged on the issue's volume, and an earlier marker quoted back out of its context).
+# replacement installs its own generation's copy, drops the deleted one's, and resumes the same
+# Claude Code session (`--resume <id>`, the transcript's earlier bytes unchanged on the issue's
+# volume, and an earlier marker quoted back out of its context).
 #
 # It is the tmux proof's rig (scripts/e2e/claude-backend-tmux.sh) on the cluster proof's cluster
 # (scripts/e2e/stage4a-sandbox-runtime.sh): scratch Postgres, NATS, Envoy listener and Dispatch from
@@ -27,7 +31,7 @@
 # It pins the branch's own published worker image by digest. A pull-request run of
 # .github/workflows/worker-image.yaml publishes `ghcr.io/sjawhar/legion-worker:sha-<the first 12 hex
 # of the built commit>` and records that tag's digest, so the image must be built from the branch
-# under test — the branch carrying this repository's Claude Code lane, Claude Code and the
+# under test — the branch carrying this repository's Claude Code lane, the Claude Code pin and the
 # `@sjawhar/claude-envoy` plugin in the image — before this proof can run, and LEGION_E2E_IMAGE
 # names that published image by its digest, never by a tag. Iteration may run the same script body
 # against a throwaway kind cluster with Agent Sandbox and gVisor (lib/kind-sandbox.sh, the pattern
@@ -270,6 +274,15 @@ claude_argv() {
     case "$1" in bridge) read_from=$bridge ;; *) read_from=$pid ;; esac
     tr "\0" "\n" <"/proc/$read_from/cmdline"' sh "$which"
 }
+# claude_code_root is where the implementer's start script installs Claude Code, one directory per
+# generation, under its state home on the issue's volume (claudeCodeRoot,
+# packages/daemon/internal/runtime/sandbox/plugins.go), and claude_code_pin the pin in the image it
+# installs from (claudeCodePin, names.go). claude_code_binary GENERATION prints the binary that
+# generation's install leaves and its agent command names (claudeCodeBinary): the linux-x64
+# package's own executable, never the npm package's placeholder `bin`.
+claude_code_root=/legion/scratch/state/implementer/legion-claude-code
+claude_code_pin=/opt/legion/claude-code/package.json
+claude_code_binary() { printf '%s/g%s/node_modules/@anthropic-ai/claude-code-linux-x64/claude\n' "$claude_code_root" "$1"; }
 # argv_has_pair ARGV FLAG VALUE: ARGV (one argument per line) holds FLAG immediately followed by VALUE.
 argv_has_pair() { awk -v flag="$2" -v value="$3" 'prev == flag && $0 == value { found = 1 } { prev = $0 } END { exit !found }' <<<"$1"; }
 # argv_value ARGV FLAG prints the argument after FLAG, or nothing when ARGV does not carry it.
@@ -848,21 +861,41 @@ note "its transcript is $transcript, on the issue's volume under CLAUDE_CONFIG_D
 pass
 
 # Check 2. The container's command line is the Claude Code launch: `legion claude-bridge --` running
-# the image's own Claude Code on this generation's session, with the MCP document the launcher wrote
-# into the generation's private directory as its only `--mcp-config`.
+# the Claude Code this generation's start script installed on this generation's session, with the
+# MCP document the launcher wrote into the generation's private directory as its only
+# `--mcp-config`. The image carries no Claude Code, only its pin, so the fetch has to have happened
+# for the worker to run at all, and this holds that it is the fetch the proof expects: the bridge
+# names, and the process under it is, the binary under this generation's own directory of the
+# implementer's install root on the issue's volume (the claim's generation, which Check 1 read),
+# never /usr/local/bin/claude, which the image does not carry; and that binary, run in the pod,
+# prints the version the image's pin names, which is what the start script held it to before it
+# execed.
 begin claude-pod-runs-the-bridge
 bridge_argv=$(claude_argv "$pod" bridge) || fail "the implementer container runs no Claude Code under legion claude-bridge"
 argv_has_pair "$bridge_argv" claude-bridge -- ||
   fail "the implementer container's command line does not run claude-bridge --: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
 argv_has_pair "$bridge_argv" --session-id "$session" ||
   fail "the implementer's claude was not started with --session-id $session: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
+installed=$(claude_code_binary "$generation")
+[ "$(argv_value "$bridge_argv" --)" = "$installed" ] ||
+  fail "the bridge runs $(argv_value "$bridge_argv" --), not the Claude Code generation $generation's start script installed, $installed"
 agent_argv=$(claude_argv "$pod" agent)
-[ "$(sed -n 1p <<<"$agent_argv")" = /usr/local/bin/claude ] ||
-  fail "the process under the bridge is $(sed -n 1p <<<"$agent_argv"), not the image's /usr/local/bin/claude"
+[ "$(sed -n 1p <<<"$agent_argv")" = "$installed" ] ||
+  fail "the process under the bridge is $(sed -n 1p <<<"$agent_argv"), not the Claude Code generation $generation's start script installed, $installed"
+if pod_exec "$pod" implementer test -e /usr/local/bin/claude; then
+  fail "pod $pod's image carries /usr/local/bin/claude; the worker image carries Claude Code's pin and no Claude Code"
+fi
+pinned=$(pod_exec "$pod" implementer cat "$claude_code_pin" | jq -er '.dependencies["@anthropic-ai/claude-code"]') ||
+  fail "pod $pod carries no Claude Code pin at $claude_code_pin naming @anthropic-ai/claude-code"
+installed_version=$(pod_exec "$pod" implementer "$installed" --version) ||
+  fail "the installed Claude Code $installed does not run in pod $pod: $installed_version"
+[ "${installed_version%% *}" = "$pinned" ] ||
+  fail "the installed Claude Code $installed prints --version '$installed_version'; the image's pin names $pinned"
 mcp=$(argv_value "$bridge_argv" --mcp-config)
 [ -n "$mcp" ] || fail "the Claude Code launch carries no --mcp-config: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
 pod_exec "$pod" implementer test -f "$mcp" || fail "the launcher file $mcp the launch reads its MCP document from is not in the pod"
 note "pod $pod, container implementer: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-200)"
+note "its Claude Code is $installed, installed at launch from $claude_code_pin: --version $installed_version, the pin's $pinned"
 note "its MCP document is the launcher file $mcp, written into this generation's private directory"
 pass
 
@@ -919,7 +952,9 @@ pass
 # context with a marker only its implementation instruction carried. The relaunch is the claim's
 # generation in `legion claims list` passing the one it held when the pod was deleted, read just
 # before the deletion along with that pod's uid, so the wait and the uid check both name the
-# process the run deleted.
+# process the run deleted. The replacement fetched Claude Code again at its own launch: its bridge
+# runs the binary under the new generation's directory, and the deleted generation's install, which
+# the new start script drops before it installs, is gone from the issue's volume.
 begin pod-deleted-resumes-the-same-claude-session
 size=$(transcript_size)
 prefix=$(transcript_prefix_sha "$size")
@@ -942,10 +977,18 @@ new_uid=$(claim_pod_uid "$issue" implementer)
 bridge_argv=$(claude_argv "$new_pod" bridge) || fail "the replacement pod runs no Claude Code under legion claude-bridge"
 argv_has_pair "$bridge_argv" --resume "$session" ||
   fail "the relaunched claude was not started with --resume $session: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
+new_generation=$(claim_generation "$issue" implementer) || fail "legion claims list has no generation for the relaunched claim $token"
+reinstalled=$(claude_code_binary "$new_generation")
+[ "$(argv_value "$bridge_argv" --)" = "$reinstalled" ] ||
+  fail "the relaunched bridge runs $(argv_value "$bridge_argv" --), not the Claude Code generation $new_generation's start script installed, $reinstalled"
+pod_exec "$new_pod" implementer test -x "$reinstalled" || fail "the replacement pod holds no executable Claude Code at $reinstalled"
+if pod_exec "$new_pod" implementer test -e "$claude_code_root/g$generation"; then
+  fail "the deleted generation $generation's Claude Code install $claude_code_root/g$generation survived the relaunch on the issue's volume"
+fi
 [ "$(transcript_prefix_sha "$size")" = "$prefix" ] || fail "the transcript's first $size bytes changed across the relaunch"
 send_agent "$issue" implementer "Claude backend sandbox proof after a relaunch: reply with one line starting WAITING that quotes the proof marker your implementation instruction in this session carried. Change nothing and call no tool."
 until_true 600 "the resumed implementer to quote its implementation instruction's marker" resumed_reply_names "$size" "$marker"
-note "deleted pod $pod (uid $pod_uid, generation $generation): generation $(claim_generation "$issue" implementer) runs claude --resume $session in pod $new_pod (uid $new_uid)"
+note "deleted pod $pod (uid $pod_uid, generation $generation): generation $new_generation runs $reinstalled --resume $session in pod $new_pod (uid $new_uid), generation $generation's install dropped"
 note "the transcript kept its $turns earlier turns ($size bytes unchanged on the issue's volume) and the resumed session quoted $marker"
 pass
 

@@ -188,8 +188,9 @@ and each value `omp` or `claude`; a role left out runs on Oh My Pi. What each ha
 one table, `runtime.Backends` (`packages/daemon/internal/runtime/backend.go`): Claude Code runs the
 phase workers alone, since an architect is woken by notices on its Envoy role topic and Claude
 Code's print mode delivers no channel notification, and it runs them under either runtime — a tmux
-pane here, and an issue pod under `runtime: kubernetes`, whose worker image carries Claude Code and
-the claude-envoy plugin (`docs/kubernetes.md`). The loader refuses a role on a harness that does
+pane here, and an issue pod under `runtime: kubernetes`, whose worker image carries the
+claude-envoy plugin and Claude Code's pin, from which the pod installs and verifies the pinned
+Claude Code at every launch (`docs/kubernetes.md`). The loader refuses a role on a harness that does
 not run it, naming both, a role named twice, and any other value. The
 controller always runs on Oh My Pi.
 
@@ -221,11 +222,15 @@ makes the same refusals:
   main").
 
 A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
-resolves nothing, because the worker image carries all three at fixed paths
-(`/usr/local/bin/claude`, `/usr/local/bin/bun`, `/opt/legion/claude-envoy`), which the runtime
-treats as image-owned so no operator mount can hide them. The launch shapes both runtimes build
-from those paths — the agent command, the session id and transcript rules, the MCP document and
-Claude Code's own variables — are one package,
+resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths
+(`/usr/local/bin/bun`, `/opt/legion/claude-envoy`), which the runtime treats as image-owned so no
+operator mount can hide them. Its `claude` is not the image's: the image carries Claude Code's pin,
+`/opt/legion/claude-code`, and no Claude Code, since its licence grants no redistribution and the
+image is public, so the pod's start script installs the pinned release at every launch into the
+generation's own directory on the issue's volume, holds it to the lockfile's integrity and the
+pinned version, and fails the launch, loudly, when the fetch fails or does not verify. The launch
+shapes both runtimes build from those paths — the agent command, the session id and transcript
+rules, the MCP document and Claude Code's own variables — are one package,
 `packages/daemon/internal/claudelaunch`; the pod's side of it is in `docs/kubernetes.md`.
 
 The daemon names no model for Claude Code under either runtime. In a pane its key reaches it the

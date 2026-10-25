@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -30,15 +31,16 @@ esac
 
 // stubs is a worker image in miniature: a bin directory first on PATH with a stub for every
 // binary the image rows look for, a HOME whose legion profile's plugin lock enables the CodeGraph
-// plugin, and an omp that answers the checks' commands.
+// plugin, the claude-envoy root and Claude Code pin the claude-code row reads, and an omp that
+// answers the checks' commands.
 type stubs struct {
-	t              *testing.T
-	bin, home, omp string
+	t                           *testing.T
+	bin, home, omp, claude, pin string
 }
 
 func newStubs(t *testing.T) stubs {
 	t.Helper()
-	s := stubs{t: t, bin: t.TempDir(), home: t.TempDir()}
+	s := stubs{t: t, bin: t.TempDir(), home: t.TempDir(), claude: capabilitiestest.ClaudeRoot(t, "1"), pin: capabilitiestest.ClaudeCodePin(t)}
 	capabilitiestest.InstallBinaries(t, s.bin)
 	s.omp = filepath.Join(t.TempDir(), "omp")
 	if err := os.WriteFile(s.omp, []byte(fakeOmp), 0o755); err != nil {
@@ -85,9 +87,11 @@ func (s stubs) writeLock(content string) {
 // variables extra adds.
 func (s stubs) image(extra ...string) Image {
 	return Image{
-		Launch:  s.omp,
-		Env:     append([]string{"PATH=" + s.bin, "HOME=" + s.home, "OMP_PROFILE=legion"}, extra...),
-		WorkDir: s.t.TempDir(),
+		Launch:        s.omp,
+		Env:           append([]string{"PATH=" + s.bin, "HOME=" + s.home, "OMP_PROFILE=legion"}, extra...),
+		WorkDir:       s.t.TempDir(),
+		ClaudeRoot:    s.claude,
+		ClaudeCodePin: s.pin,
 	}
 }
 
@@ -133,11 +137,14 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 	}
 	got := byName(states)
 	for name, want := range map[Name]string{
-		EvalPython:           "omp setup python --check reports available=true",
-		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
-		LSP:                  s.onPATH("gopls", "typescript-language-server", "pyright-langserver"),
-		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
-		Toolchain:            s.onPATH("go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.1 linux/amd64",
+		EvalPython: "omp setup python --check reports available=true",
+		Browser:    filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
+		LSP:        s.onPATH("gopls", "typescript-language-server", "pyright-langserver"),
+		CodeGraph:  filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
+		Toolchain:  s.onPATH("go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.1 linux/amd64",
+		ClaudeCode: s.claude + " holds dist/envoy-channel.js and legion/.claude-plugin/plugin.json; " +
+			s.pin + " pins @anthropic-ai/claude-code " + capabilitiestest.ClaudeCodeVersion + " with the sha512 integrity of @anthropic-ai/claude-code-linux-x64; " +
+			s.onPATH("npm", "node"),
 		RepositoryExtensions: "each session reports it at start; `legion state` renders it: loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {
@@ -311,6 +318,72 @@ func TestCheckImageNeedsTheCodeGraphCLIAndItsPluginEnabled(t *testing.T) {
 				t.Errorf("CheckImage = %v, want it to name codegraph", err)
 			}
 		})
+	}
+}
+
+// The claude-code row is the image's half of a Claude worker, which carries no Claude Code: the
+// claude-envoy plugin it loads and the pin a pod installs Claude Code from and verifies it
+// against, with the npm that install runs and the node its version check runs. Each failure is
+// named, every one at once, and the row is missing and in CheckImage's error.
+func TestCheckImageNeedsTheClaudePluginThePinAndWhatInstallsFromIt(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		setup func(s *stubs)
+		want  string
+	}{
+		"no root given": {func(s *stubs) { s.claude = "" }, "no claude-envoy root was given to check"},
+		"no pin given":  {func(s *stubs) { s.pin = "" }, "no Claude Code pin was given to check"},
+		"npm off PATH":  {func(s *stubs) { s.remove("npm") }, "npm is not on PATH"},
+		"no channel server": {func(s *stubs) {
+			os.Remove(filepath.Join(s.claude, "dist", "envoy-channel.js"))
+		}, "holds no envoy-channel.js"},
+		"no lockfile": {func(s *stubs) {
+			os.Remove(filepath.Join(s.pin, "package-lock.json"))
+		}, "the Claude Code pin cannot be read: open "},
+		"all three at once": {func(s *stubs) {
+			os.Remove(filepath.Join(s.claude, "legion", ".claude-plugin", "plugin.json"))
+			os.Remove(filepath.Join(s.pin, "package.json"))
+			s.remove("node")
+		}, "holds no plugin.json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newStubs(t)
+			testCase.setup(&s)
+
+			states, err := CheckImage(context.Background(), s.image())
+
+			got := byName(states)[ClaudeCode]
+			if got.Status != StatusMissing || !strings.Contains(got.Detail, testCase.want) {
+				t.Errorf("claude-code state = %+v, want missing saying %q", got, testCase.want)
+			}
+			if name == "all three at once" && strings.Count(got.Detail, "; ") != 2 {
+				t.Errorf("claude-code detail %q, want the plugin, the pin and node named at once", got.Detail)
+			}
+			if err == nil || !strings.Contains(err.Error(), "capability claude-code is missing: ") {
+				t.Errorf("CheckImage = %v, want it to name claude-code", err)
+			}
+		})
+	}
+}
+
+// The pin the worker image ships, packages/daemon/docker/claude-code as committed, is one a pod
+// can install and verify: ReadClaudeCodePin passes it, answering the version its package.json
+// pins, so a regenerated lockfile that dropped the linux-x64 package or its integrity fails here
+// before it fails an image build.
+func TestTheCommittedClaudeCodePinIsOneAPodCanInstall(t *testing.T) {
+	dir := filepath.Join("..", "..", "docker", "claude-code")
+	raw, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pinned struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(raw, &pinned); err != nil {
+		t.Fatal(err)
+	}
+	version, err := ReadClaudeCodePin(dir)
+	if want := pinned.Dependencies[claudeCodePackage]; err != nil || version != want {
+		t.Errorf("ReadClaudeCodePin(%s) = %q, %v, want %q", dir, version, err, want)
 	}
 }
 

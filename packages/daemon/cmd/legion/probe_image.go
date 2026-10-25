@@ -21,6 +21,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
+// imageClaudeRoot and imageClaudeCodePin are where the worker image carries the claude-envoy root
+// and the Claude Code pin (packages/daemon/docker/worker.Dockerfile; claudePluginDir and
+// claudeCodePin, internal/runtime/sandbox/names.go, which a Claude role's pod names): the defaults
+// of --claude-root and --claude-code-pin.
+const (
+	imageClaudeRoot    = "/opt/legion/claude-envoy"
+	imageClaudeCodePin = "/opt/legion/claude-code"
+)
+
 // digits is what --daemon-api-version accepts before it is read as a number.
 var digits = regexp.MustCompile(`^[0-9]+$`)
 
@@ -30,11 +39,16 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // ProbeImage). Both pass --plugin-root and --envoy-plugin-root, the Legion and Envoy plugin
 // directories a pod loads as its two explicit extensions, and the command refuses a run without
 // either (exit 2): the probe certifies the lane a pod uses, so a build line that lost a flag fails
-// the build instead of probing a lane no pod loads. The build also passes --claude-root, the
-// claude-envoy package root the image carries, which adds the Claude lane: `claude --version`,
-// that root's built channel server and generated Legion plugin, and its manifest held to the same
-// contract (daemon.ProbeImage). A run without it probes no Claude lane, so a caller with no such
-// root — the daemon's probe Sandbox until it passes one — is unaffected.
+// the build instead of probing a lane no pod loads. Every run also checks the Claude lane:
+// --claude-root, the claude-envoy package root the image carries, and --claude-code-pin, the
+// directory of the Claude Code pin a pod installs Claude Code from at launch, both defaulting to
+// where the worker image carries them, so the daemon's probe Sandbox, which names neither, checks
+// them as the build does. The image carries no Claude Code — its licence grants no
+// redistribution and the image is public — so the lane holds the root's built channel server and
+// generated Legion plugin, and its manifest to the same contract, and holds the pin to one a pod
+// can install and verify, exact and checksummed (daemon.ProbeImage, whose verifyClaude says why
+// it reads the pin rather than installing from it); the claude-code capability row checks the
+// same two facts.
 // It runs the image's launch probes under the image's own environment (daemon.ProbeImage), then
 // the capability check (capabilities.CheckImage) under the same environment and launch: every
 // image-site capability of the list every worker is held to (LEGION-578), with the whole table
@@ -72,7 +86,8 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		"the daemon API contract the image's pi-legion must declare (the daemon's probe Sandbox passes its own)")
 	pluginRoot := flags.String("plugin-root", "", "the Legion plugin directory a pod loads as an explicit extension, which the load probe loads the same way (required)")
 	envoyPluginRoot := flags.String("envoy-plugin-root", "", "the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way (required)")
-	claudeRoot := flags.String("claude-root", "", "the claude-envoy package root a worker on the `claude` backend loads, which the Claude lane checks (the image build passes it; with none, no Claude lane runs)")
+	claudeRoot := flags.String("claude-root", imageClaudeRoot, "the claude-envoy package root a worker on the `claude` backend loads, which the Claude lane checks")
+	claudeCodePin := flags.String("claude-code-pin", imageClaudeCodePin, "the directory of the package.json and package-lock.json a pod installs Claude Code from at launch, which the Claude lane checks")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
@@ -90,6 +105,10 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	if *envoyPluginRoot == "" {
 		fmt.Fprintln(stderr, "legion probe-image: --envoy-plugin-root is required: the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way")
+		return 2
+	}
+	if *claudeRoot == "" || *claudeCodePin == "" {
+		fmt.Fprintln(stderr, "legion probe-image: --claude-root and --claude-code-pin each name a directory: the claude-envoy plugin and the Claude Code pin a worker on the `claude` backend needs, which the Claude lane checks")
 		return 2
 	}
 	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
@@ -164,7 +183,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
 		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot, EnvoyPluginRoot: *envoyPluginRoot,
-		ClaudeRoot:     *claudeRoot,
+		ClaudeRoot: *claudeRoot, ClaudeCodePin: *claudeCodePin,
 		RoleReferences: references, SkipAgentModels: *skipAgentModels,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
@@ -176,7 +195,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	// and the provider keys' included — so a PATH or a PUPPETEER_EXECUTABLE_PATH the operator's pod
 	// env sets is checked as a worker's Oh My Pi would honour it. The table is printed whole even
 	// when a row is missing: the operator reads what was checked, then why it failed.
-	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
+	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir, ClaudeRoot: *claudeRoot, ClaudeCodePin: *claudeCodePin}
 	lines, err := capabilities.CheckImage(ctx, img)
 	for _, line := range lines {
 		fmt.Fprintln(stdout, line)

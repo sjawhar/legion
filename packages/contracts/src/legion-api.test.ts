@@ -450,8 +450,9 @@ test("the state golden carries each issue's repository and the project's mapping
 // The state's capability report (contract 16): the golden carries a decided row with the operator's
 // reason and an open row with the legion.yaml line that records a decision, beside the present
 // (codegraph among them: the image carries the tooling and a pod's launch loads it with extension
-// discovery on; claude-code too, since one worker image carries Claude Code for a role whose
-// worker_backends names it) and withheld rows, and the six live rows unchecked — no session has reported, so
+// discovery on; claude-code too, since one worker image carries the claude-envoy plugin and the
+// pin a pod installs Claude Code from for a role whose worker_backends names it) and withheld
+// rows, and the six live rows unchecked — no session has reported, so
 // the deployment renders each as `unchecked` with its ruling (contract 21) — and the report is
 // never absent from a state. `installed` left the status set at contract 25: it was codegraph's
 // until LEGION-629, and no row has carried it since. Each deployment row carries `source`

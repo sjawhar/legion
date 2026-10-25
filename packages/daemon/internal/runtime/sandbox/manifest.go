@@ -440,18 +440,20 @@ func (l launch) agentArgv(agent []string) []string {
 }
 
 // claudeArgv is the command the shim runs for a Claude Code role: the agent command
-// claudelaunch.Argv builds from the image's own paths (claudeAgent, claudePluginDir) around the
-// `legion claude-bridge` the pod runs it under, reading the MCP document its launcher writes into
-// this generation's private directory (claudeMCPFile), and then the one system prompt word, which
-// is the same inlined text the Oh My Pi branch carries (l.prompt): a pod cannot read the daemon's
-// prompt files, so neither harness reads them there. The session is the launch's own
-// (claudeInputs): `--resume <uuid>` of the transcript a replaced pod left, by the id prepare read
-// from the recorded path, and `--session-id <fresh uuid>` when the launch starts a session.
-// Claude Code resumes by id and never by path, so the recorded file name itself is never passed.
-// Options.Agent, the operator's Oh My Pi override, does not reach here: the Claude command is the
-// image's, as the tmux lane's is the host's boot-resolved one.
+// claudelaunch.Argv builds around the `legion claude-bridge` the pod runs it under, naming the
+// Claude Code this generation's start script installed (claudeCodeBinary, under the role's state
+// home: the image carries none) and the image's claude-envoy root (claudePluginDir), reading the
+// MCP document its launcher writes into this generation's private directory (claudeMCPFile), and
+// then the one system prompt word, which is the same inlined text the Oh My Pi branch carries
+// (l.prompt): a pod cannot read the daemon's prompt files, so neither harness reads them there.
+// The session is the launch's own (claudeInputs): `--resume <uuid>` of the transcript a replaced
+// pod left, by the id prepare read from the recorded path, and `--session-id <fresh uuid>` when
+// the launch starts a session. Claude Code resumes by id and never by path, so the recorded file
+// name itself is never passed. Options.Agent, the operator's Oh My Pi override, does not reach
+// here: the Claude command is the runtime's, as the tmux lane's is the host's boot-resolved one.
 func (l launch) claudeArgv() []string {
-	paths := claudelaunch.Paths{Legion: l.claude.legion, Claude: claudeAgent, PluginDir: claudePluginDir}
+	claude := claudeCodeBinary(roleStateHome(l.spec.Role), l.spec.Generation)
+	paths := claudelaunch.Paths{Legion: l.claude.legion, Claude: claude, PluginDir: claudePluginDir}
 	argv := claudelaunch.Argv(paths, generationDir(l.spec.Generation)+"/"+claudeMCPFile, l.claude.session, l.claude.resume)
 	return append(argv, "--append-system-prompt", l.prompt)
 }

@@ -7,9 +7,12 @@
 // The package holds no path of its own and resolves none: every executable and directory it names
 // is an argument, because the two runtimes find them in different places. Under tmux they are
 // boot resolved from LEGION_CLAUDE_PATH, LEGION_BUN_PATH and LEGION_CLAUDE_PLUGIN_DIR on the
-// daemon's own host (internal/daemon/launchers.go); under Kubernetes they are the worker image's
-// constants, which the daemon never sees. Nor does anything here touch a file: the MCP document is
-// returned as bytes, and each runtime writes it where that runtime keeps it.
+// daemon's own host (internal/daemon/launchers.go); under Kubernetes the bun and the plugin root
+// are the worker image's constants, which the daemon never sees, and `claude` is the copy the
+// generation's start script installed from the image's pin onto the issue's volume
+// (runtime/sandbox, claudeCodeBlock), since the image carries no Claude Code. Nor does anything
+// here touch a file: the MCP document is returned as bytes, and each runtime writes it where that
+// runtime keeps it.
 package claudelaunch
 
 import (

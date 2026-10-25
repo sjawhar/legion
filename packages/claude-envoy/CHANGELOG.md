@@ -146,6 +146,20 @@
   workflow releases this package, so the image is a Kubernetes deployment's only source of it, and
   a plugin-contract change for such a role is answered by a new image rather than by an install
   (`docs/kubernetes.md`).
+- The worker image carries no Claude Code, only its pin: `packages/daemon/docker/claude-code`'s
+  `package.json` and `package-lock.json` at `/opt/legion/claude-code`. Claude Code's licence grants
+  no redistribution and the image is public, so a pod whose role runs on Claude Code installs the
+  pinned release at every launch, into its generation's own directory on the issue's volume, with
+  `npm ci --ignore-scripts --omit=dev` (the lockfile's `sha512` integrity is the checksum), holds
+  the installed binary's `--version` to the pin, and fails the launch with a
+  `legion claude-code: …` line when the fetch fails or does not verify. The image probe
+  (`legion probe-image`, at the publish and at every boot) now proves what the image carries
+  instead of running `claude --version`: this package's root, its two loaded files and its
+  declared contract, and a pin that names one exact version and locks it and its `linux-x64`
+  package with their integrity; it fetches nothing. The `claude-code` capability row says and
+  measures the same, with the `npm` and `node` the install and its check run, in place of `claude`
+  on `PATH`. `scripts/e2e/claude-backend-sandbox.sh` now holds the worker to the binary its
+  generation's install left.
 
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight

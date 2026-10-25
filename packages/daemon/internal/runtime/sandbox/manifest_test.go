@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1751,12 +1752,14 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 
 // imageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
 // mount there would hide: Oh My Pi, the Envoy and Legion plugins the agent loads, the Go legion
-// every container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
-// profile's agent directory.
+// every container runs, the profile's installed plugins, the databases Oh My Pi keeps in the
+// profile's agent directory, and a Claude role's bun, claude-envoy root and the Claude Code pin its
+// start script installs from. Claude Code itself is not one: the image carries none.
 func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 	for _, used := range []string{
 		defaultAgent, envoyPlugin, legionPlugin, testOptions().Tools.Legion,
 		ompProfileDir + "/plugins/node_modules", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
+		claudeBun, claudePluginDir, claudeCodePin + "/package.json", claudeCodePin + "/package-lock.json",
 	} {
 		if !slices.ContainsFunc(imageOwnedPaths(), func(owned string) bool {
 			return used == owned || strings.HasPrefix(used, owned+"/")
@@ -1910,14 +1913,17 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 // Claude launch's agent command that is not fixed.
 var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
-// A Claude Code role's pod runs the image's Claude Code under `legion claude-bridge`, word for
-// word: the image's own paths, every permission granted, only the MCP document this generation's
-// launcher writes into its private directory, the claude-envoy plugin and the generated Legion
-// plugin, a fresh session, and the one system prompt word — the same text the Oh My Pi branch of
-// the same launch inlines, since a pod cannot read the daemon's prompt files whichever harness it
-// runs. A launch with no recorded session starts a session of its own, which is what the fresh
-// uuid here says; one that resumes names the transcript's id instead
-// (TestAResumingClaudePodContinuesItsTranscriptByItsID).
+// A Claude Code role's pod runs Claude Code under `legion claude-bridge`, word for word: the
+// Claude Code this generation's start script installed under the role's state home on the issue's
+// volume (the image carries none, only the pin it is installed from), the image's claude-envoy
+// root, every permission granted, only the MCP document this generation's launcher writes into its
+// private directory, the claude-envoy plugin and the generated Legion plugin, a fresh session, and
+// the one system prompt word — the same text the Oh My Pi branch of the same launch inlines, since
+// a pod cannot read the daemon's prompt files whichever harness it runs. A launch with no recorded
+// session starts a session of its own, which is what the fresh uuid here says; one that resumes
+// names the transcript's id instead (TestAResumingClaudePodContinuesItsTranscriptByItsID). The
+// binary's path is the generation's own, so a later generation names its own install, never the
+// one its start script has just removed.
 func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 	opts := goldenOptions()
 	r, err := configure(opts)
@@ -1938,8 +1944,12 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 	} else if session = argv[at+1]; !uuid.MatchString(session) {
 		t.Errorf("the session is %q, want a version 4 uuid", session)
 	}
+	claude := func(generation uint64) string {
+		return "/legion/scratch/state/" + string(spec.Role) + "/legion-claude-code/g" + strconv.FormatUint(generation, 10) +
+			"/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+	}
 	want := []string{
-		"/opt/legion/bin/legion", "claude-bridge", "--", "/usr/local/bin/claude",
+		"/opt/legion/bin/legion", "claude-bridge", "--", claude(spec.Generation),
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "bypassPermissions",
 		"--strict-mcp-config", "--mcp-config", generationDir(spec.Generation) + "/claude-mcp.json",
@@ -1951,8 +1961,13 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 	if !slices.Equal(argv, want) {
 		t.Errorf("the Claude pod's agent command is %q, want %q", argv, want)
 	}
+	later := spec
+	later.Generation, later.BootToken = spec.Generation+1, "boot-later"
+	if got := launchOf(t, r, later).agentArgv(r.agent); !slices.Contains(got, claude(later.Generation)) || slices.Contains(got, claude(spec.Generation)) {
+		t.Errorf("generation %d's agent command is %q, want it to name %s and not generation %d's install", later.Generation, got, claude(later.Generation), spec.Generation)
+	}
 	// Options.Agent is the Oh My Pi override and nothing else: a Claude role's command is the
-	// image's, as the tmux lane's is the host's boot-resolved one.
+	// runtime's, as the tmux lane's is the host's boot-resolved one.
 	opts.Agent = []string{"/opt/omp/bin/omp", "--operator"}
 	overriding, err := configure(opts)
 	if err != nil {
@@ -1960,7 +1975,7 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 	}
 	overridden := launchOf(t, overriding, spec).agentArgv(overriding.agent)
 	if slices.Contains(overridden, "--operator") {
-		t.Errorf("with Options.Agent set the Claude pod's command is %q, want the image's Claude Code alone", overridden)
+		t.Errorf("with Options.Agent set the Claude pod's command is %q, want the generation's Claude Code alone", overridden)
 	}
 }
 
