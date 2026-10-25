@@ -799,6 +799,46 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "dispatch_url http://127.0.0.1:8080 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
 		},
 		{
+			name: "envoy_url on a zoned IPv6 loopback",
+			body: kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: \"http://[::1%25lo]:9020\""),
+			want: "envoy_url http://[::1%25lo]:9020 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "daemon_url on localhost with two trailing dots",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localhost..:13370"),
+			want: "daemon_url http://localhost..:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "envoy_url on IPv4's short form",
+			body: kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: http://127.1:9020"),
+			want: "envoy_url http://127.1:9020 names a numeric host that is not an IP address in its standard form, which an HTTP client reads as an IPv4 address (127.1 is 127.0.0.1); write the address in full; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "dispatch_url on IPv4's decimal form",
+			body: kubernetesWith("dispatch_url: https://dispatch.internal.example", "dispatch_url: http://2130706433:8080"),
+			want: "dispatch_url http://2130706433:8080 names a numeric host that is not an IP address in its standard form, which an HTTP client reads as an IPv4 address (127.1 is 127.0.0.1); write the address in full; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "a nats_urls entry on IPv4's hexadecimal form",
+			body: kubernetesWith("nats_urls: [nats://nats.internal.example:4222]", "nats_urls: [nats://0x7f000001:4222]"),
+			want: "nats_urls nats://0x7f000001:4222 names a numeric host that is not an IP address in its standard form, which an HTTP client reads as an IPv4 address (127.1 is 127.0.0.1); write the address in full; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "envoy_url on an IPv4-mapped unspecified address",
+			body: kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: \"http://[::ffff:0.0.0.0]:9020\""),
+			want: "envoy_url http://[::ffff:0.0.0.0]:9020 names the unspecified address, which is no host a pod can dial; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "daemon_url on an IPv4-mapped loopback",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: \"http://[::ffff:127.0.0.1]:13370\""),
+			want: "daemon_url http://[::ffff:127.0.0.1]:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "bind on an IPv4-mapped unspecified address",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: \"::ffff:0.0.0.0\""),
+			want: "bind ::ffff:0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://[::ffff:0.0.0.0]:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
 			name: "daemon_url unspecified",
 			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://0.0.0.0:13370"),
 			want: "daemon_url http://0.0.0.0:13370 names the unspecified address, which is no host a pod can dial; name the host pods reach it at when runtime is kubernetes",
@@ -1065,6 +1105,21 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "an NFS server as an IPv4-mapped IPv6 address",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::ffff:10.0.0.2', path: /share}}]\n",
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "::ffff:10.0.0.2" is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write 10.0.0.2`,
+		},
+		{
+			name: "an NFS server named for the hosts file's loopback",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: localhost.localdomain, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server localhost.localdomain is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server under localhost",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: nas.localhost, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server nas.localhost is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server named ip6-localhost",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: ip6-localhost, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server ip6-localhost is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
 		},
 		{
 			name: "an NFS export with no path",
@@ -1391,12 +1446,31 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 	}
 }
 
+// The plain-http exemption covers what Go's pure resolver answers from the hosts file: a loopback
+// address literal, zoned or IPv4-mapped, and `localhost` written exactly so. Every other spelling a
+// refusal check calls loopback, a trailing dot included, is asked of DNS by a CGO_ENABLED=0 binary,
+// so the token the request carries would go to whatever answers, and plain http is refused for it.
 func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
-	for _, url := range []string{"http://127.0.0.1:13380", "http://LOCALHOST:13380"} {
+	for _, url := range []string{
+		"http://127.0.0.1:13380", "http://LOCALHOST:13380",
+		"http://[::1%25lo]:13380", "http://[::ffff:127.0.0.1]:13380",
+	} {
 		t.Run(url, func(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n"+agentSecretsTokenFile), noEnv)
 			if err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+	for _, url := range []string{
+		"http://localhost.:13380", "http://localhost..:13380", "http://secrets.localhost:13380",
+		"http://localhost.localdomain:13380", "http://ip6-localhost:13380",
+	} {
+		t.Run("refused "+url, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n"+agentSecretsTokenFile), noEnv)
+			want := "runtime.kubernetes.agent_secrets.url must use https unless the host is a loopback address"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err %v, want %q", err, want)
 			}
 		})
 	}
@@ -1514,6 +1588,16 @@ func TestPluginsBlockRefusals(t *testing.T) {
 			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
 		"an http URL with a single slash and no host": {"    plugins:\n      pi_legion: http:/cache/x.tgz\n      pi_envoy: 9.6.1\n",
 			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
+		"an https URL on localhost": {"    plugins:\n      pi_legion: https://localhost/pi-legion.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion https://localhost/pi-legion.tgz names a loopback host, which in a pod is the pod itself"},
+		"an http URL on IPv4 loopback": {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: http://127.0.0.1:8080/pi-envoy.tgz\n",
+			"runtime.kubernetes.plugins.pi_envoy http://127.0.0.1:8080/pi-envoy.tgz names a loopback host"},
+		"an https URL on the unspecified address": {"    plugins:\n      pi_legion: https://0.0.0.0/pi-legion.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion https://0.0.0.0/pi-legion.tgz names the unspecified address"},
+		"an https URL on IPv4's short form": {"    plugins:\n      pi_legion: https://127.1/pi-legion.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion https://127.1/pi-legion.tgz names a numeric host"},
+		"an https URL whose host is not ASCII": {"    plugins:\n      pi_legion: \"https://\\uFF4C\\uFF4F\\uFF43\\uFF41\\uFF4C\\uFF48\\uFF4F\\uFF53\\uFF54/pi-legion.tgz\"\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion host must be an IP address or an ASCII DNS name"},
 		"not a mapping": {"    plugins: yes\n", "runtime.kubernetes.plugins must be a mapping"},
 	} {
 		t.Run(name, func(t *testing.T) {

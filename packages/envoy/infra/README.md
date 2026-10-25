@@ -278,16 +278,27 @@ Deployments that read it so their pods boot on the new value:
 - the `<hostname>-dispatch` Secret's keys, the broker token and the App key: the app alone reads
   them (`kubectl -n <namespace> rollout restart deployment/<hostname>`). `DISPATCH_AGENT_TOKEN`
   is also the `agentToken` output, so a consumer that hands it to its agents passes them the new
-  value too;
+  value too. The broker token has a second holder outside this component: the secrets broker
+  reads the same value as its `BROKER_UI_TOKEN` (or `BROKER_UI_TOKEN_FILE`) once, at boot, and
+  refuses every other value (`401 UI_INVALID`), so restart the broker with the app, or every
+  approval, denial, revoke and list Dispatch relays to it is refused until the two agree. The
+  database password is the one key whose rotation also changes the Cloud SQL user, at the `up`
+  itself, so every new connection the running app opens fails from then until it restarts:
+  restart it right after that `up`;
 - the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
   at start;
 - the listener's bearer, the `<hostname>-listener` Secret's `ENVOY_API_TOKEN`: the listener
   serves with it and the app's `envoy-dispatch` sends it as `ENVOY_TOKEN`, so restarting only one
   leaves the two on different tokens and every call from the app to the listener refused.
 
-For the last two, restart both Envoy Deployments
+For the NATS seed and the listener's bearer, restart both Envoy Deployments
 (`kubectl -n <namespace> rollout restart deployment/<hostname> deployment/<hostname>-listener`).
-The front door reads none of these.
+The front door reads none of these. The tailnet auth key, which the front door reads as
+`TS_AUTHKEY`, needs no restart: the front door runs with `TS_AUTH_ONCE=true` and keeps its node in
+the `<hostname>-tailscale-state` Secret (`TS_KUBE_SECRET`), so it uses the key only to join the
+tailnet the first time, and a restart after a rotation changes nothing but takes the app down
+with it (below). A new key is used only when that node is gone, for example after the state
+Secret is deleted.
 
 The Deployments intentionally have no liveness probe for Dispatch because its health endpoint
 reads Cloud SQL. At one replica an input or image update recreates the app's one pod, which is a

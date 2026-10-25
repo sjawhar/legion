@@ -3,7 +3,7 @@ package bus
 import (
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 )
@@ -63,11 +63,14 @@ func LocalNATSURL(raw string) bool {
 	if err != nil {
 		return false
 	}
-	// A host name is case-insensitive and its root dot is not part of the name.
-	host := strings.TrimSuffix(parsed.Hostname(), ".")
+	// A host name is case-insensitive and its root dot is not part of the name, however many are
+	// written (`localhost..` reads as localhost to a resolver that drops them).
+	host := strings.TrimRight(parsed.Hostname(), ".")
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	// netip reads a zoned address (`[::1%25lo]`, which Go dials as ::1) that net.ParseIP refuses,
+	// and Unmap makes an IPv4-mapped loopback read as the loopback it is.
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.WithZone("").Unmap().IsLoopback()
 }

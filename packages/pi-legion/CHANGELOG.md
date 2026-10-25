@@ -139,9 +139,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `nats_urls` entry and `agent_secrets.url` (`<key> must be an IP address or an ASCII DNS name;
   got "…"`, the character printed as a `\u` or `\U` escape). Go's lower-casing turned `İ` (U+0130)
   into `i` and the Kelvin sign (U+212A) into `k`, so such a host passed the check and then failed
-  to resolve. Nothing checked for ASCII either, and a pod's HTTP client maps a full-width
-  `ｌｏｃａｌｈｏｓｔ` to localhost, so such a URL reached the pod itself. Write an
-  internationalized name there in its `xn--` form. A `runtime.kubernetes.pod.env`
+  to resolve. Nothing checked `bind` or the URL hosts for ASCII either, and a pod's HTTP client
+  maps a full-width `ｌｏｃａｌｈｏｓｔ` to localhost, so such a URL reached the pod itself. Write
+  an internationalized name there in its `xn--` form. A `runtime.kubernetes.pod.env`
   `DISPATCH_PUBLIC_URL` host must be plain ASCII as well: its rule lower-cased `İ` and the Kelvin
   sign into ASCII and let them through, and now refuses them, as it already refused every other
   non-ASCII name and an `xn--` label; its message prints the value with escapes.
@@ -538,7 +538,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 ### Fixed
 
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
-  kubelet has met that answer on two pulls, within about half a minute, naming the image and
+  kubelet has met that answer on two pulls, within about half a minute on kubelet 1.32 and later
+  (later on an older kubelet, whose back-off message carries no pull error), naming the image and
   quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It
   retried such a pull as transient across the probe's six attempts, each waited out to its budget
   (about 40 minutes on a deployment with a six-minute budget) before a booting daemon refused. Only
@@ -547,7 +548,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `… failed to resolve image: <ref>: not found` through containerd's transfer service, the default
   pull from containerd 2.1 — and only on its second pull: containerd 2 also gives that answer for
   one pull whose manifest request the network cut. A pull refused for credentials, a network
-  failure, a rate limit, a server error or any other not-found is still retried.
+  failure, a rate limit, a server error or any other not-found is still retried, and so is a digest
+  Amazon ECR Public does not have, which it answers with `401`.
+- `legion start --check-config` and boot refuse more spellings of loopback in a URL a pod is handed
+  (`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) that they accepted: a zoned
+  IPv6 loopback (`http://[::1%25lo]:9020`, which Go's HTTP client dials as `::1`), `localhost` with
+  more than one trailing dot (`localhost..`), and a numeric host that is not an IP address in its
+  standard form (`127.1`, `2130706433`, `0x7f000001`, each 127.0.0.1 to an HTTP client), the last
+  named as such with the advice to write the address in full. Loopback now also means the names
+  every pod's and node's hosts file resolves to it (`localhost.localdomain`, `ip6-localhost`,
+  `ip6-loopback`) and any name under `localhost.`, so an NFS volume's `server`, `bind` and
+  `advertise_host` refuse them too. An http(s) URL in `runtime.kubernetes.plugins`, which
+  `bun add` fetches inside the pod, is now held to the same rules and to ASCII, where its host was
+  not checked at all. `agent_secrets.url` keeps its own, stricter rule for plain `http`: a loopback
+  address literal, now zoned or IPv4-mapped too, or `localhost` written exactly so. Every other
+  spelling a refusal calls loopback (a trailing dot, `localhost.localdomain`, `ip6-localhost`,
+  `ip6-loopback`, a name under `localhost.`) leaves the machine for DNS in a CGO_ENABLED=0 binary,
+  so that URL, which carries the daemon's and every pod's ServiceAccount token, must be `https` for
+  it. A file that wrote `http://localhost.` is refused and takes `http://localhost`.
 - A reviewer no longer passes a `verdict` to `handoff_complete`, which the daemon refuses from
   every role but the tester (`VERDICT_ROLE_FORBIDDEN`). The reviewer's task names the tester's
   result as `Tester's verdict: pass` rather than `Handoff verdict: pass`; the `legion` tool's

@@ -23,6 +23,8 @@ legion start --config legion.yaml --check-config
 | --- | --- |
 | `runtime.kubernetes.image must be pinned by digest (@sha256:…)` | Pin the image by digest, never a tag ([The worker image](/legion/legion/running-legion/#the-worker-image)). |
 | `bind 127.0.0.1 is not an address a pod can reach, …` (or the same for `daemon_url`, `envoy_url`, `dispatch_url`, a `nats_urls` entry, or `advertise_host`) | Every address handed to a pod must be one a pod reaches: the daemon host's own address, never loopback or `0.0.0.0` — except `bind`, which may be `0.0.0.0` once `advertise_host` names the stable address pods dial instead. |
+| `<key> <url> names a numeric host that is not an IP address in its standard form, …` (for `daemon_url`, `envoy_url`, `dispatch_url`, a `nats_urls` entry or a `runtime.kubernetes.plugins` URL) | An HTTP client reads `127.1`, `2130706433` or `0x7f000001` as an IPv4 address (each is 127.0.0.1). Write the address in full (`10.0.0.5`), or the DNS name. |
+| `runtime.kubernetes.plugins.<key> <url> names a loopback host, …` | `bun add` fetches the tarball inside the pod, where loopback is the pod itself. Serve it from a host the pods reach. |
 | `bind 127.0.0.1 is loopback, where no pod reaches the worker stream, whatever advertise_host names; …` | With `advertise_host` set, `bind` is where the daemon listens: `0.0.0.0`, or the daemon host's own address. |
 | `advertise_host must be an IP address or a DNS name, …` or `advertise_host is not used when runtime is tmux: …` | `advertise_host` is the host alone (no scheme, port, path or brackets), and only `runtime: kubernetes` reads it. |
 | `<key> must be an IP address or an ASCII DNS name; got "…\u212a…"` (for `advertise_host`, `bind`, an NFS volume's `server`, or the host of `daemon_url`, `envoy_url`, `dispatch_url`, a `nats_urls` entry or `agent_secrets.url`) | The host has a character outside ASCII, printed as a `\u` or `\U` escape. Write the name in ASCII letters, digits, hyphens and dots (an internationalized name in its `xn--` form). |
@@ -78,8 +80,9 @@ cluster and the image:
     digest was never pushed, or was pushed to another repository. Point the daemon at a digest the
     registry holds (`docker manifest inspect <image>` answers for one it has); if it does, and your
     nodes pull through a mirror, the mirror lacks it. The probe refuses this once the kubelet has
-    met that answer on two pulls, within about half a minute; a pull refused for credentials, a
-    network failure or a rate limit is retried instead;
+    met that answer on two pulls, within about half a minute on kubelet 1.32 and later (later on an
+    older kubelet); a pull refused for credentials, a network failure or a rate limit is retried
+    instead, and so is a digest Amazon ECR Public does not have, which it answers with `401`;
   - an agent's model does not resolve (`task agent <name> … role <role> is not configured`), or its
     key does not work: name the role in your overlay's `modelRoles`, re-run `apply.sh`, and check
     the credential your `models.yml` reads;

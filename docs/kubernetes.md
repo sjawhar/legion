@@ -225,20 +225,23 @@ One answer is no proof: containerd 2 resolves a digest as a manifest and then as
 reports the blob request's 404 — which a registry such as GHCR answers for a manifest it holds —
 over a manifest request the network cut. The kubelet pulls again about ten seconds after the first
 failure, and the daemon reads the events at most every 15 s, so the refusal comes within about half
-a minute of the first pull (on kubelet 1.32 and later, whose `ImagePullBackOff` message carries the
-failed pull's error; an older kubelet's carries none, so the refusal waits for a read that finds the
-container waiting `ErrImagePull`, later but within the attempt): `worker image sha256:<digest>
-failed its probe: the registry does not have image <image>: …`, quoting the kubelet. Every other
-failed pull — credentials the registry
-refused (`pull access denied`, `401`, `403`; Docker Hub answers a repository it does not have this
-way), a registry the node cannot reach (`i/o timeout`, `connection refused`, `connection reset by
-peer`), a rate limit (`429`, `toomanyrequests`), a server error, containerd's other not-found
-answers (`no resolve hosts`, a manifest past its size limit, a manifest or layer the registry named
-and then did not serve), and a manifest-404 met on one pull — may pass on a later attempt, and
-stays under the six-attempt budget. One exception follows from containerd 2 reporting a 404 over a
-failed request: on a node whose containerd tries a mirror before the registry (`hosts.toml`), a
-mirror without the image is refused as a missing image while the registry behind it stays
-unreachable or keeps refusing the node's credentials. A volume of the operator's pod block
+a minute of the first pull on kubelet 1.32 and later, whose `ImagePullBackOff` message carries the
+failed pull's error (measured on v1.32.2). An older kubelet's carries none, so the refusal waits
+for a read that finds the container waiting `ErrImagePull`: later, and not measured. It reads
+`worker image sha256:<digest> failed its probe: the registry does not have image <image>: …`,
+quoting the kubelet. Every other failed pull — credentials the registry refused (`pull access
+denied`, `401`, `403`; Docker Hub answers a repository it does not have this way, and Amazon ECR
+Public answers the blob request for a digest it does not have with `401`, which containerd 2
+reports over the manifest's 404, so a digest missing there reads as credentials too and is retried
+for the whole budget), a registry the node cannot reach (`i/o timeout`, `connection refused`,
+`connection reset by peer`), a rate limit (`429`, `toomanyrequests`), a server error, containerd's
+other not-found answers (`no resolve hosts`, a manifest past its size limit, a manifest or layer
+the registry named and then did not serve), and a manifest-404 met on one pull — may pass on a
+later attempt, and stays under the six-attempt budget. One exception follows from containerd 2
+reporting a 404 over a failed request: on a node whose containerd tries a mirror before the
+registry (`hosts.toml`), a mirror without the image is refused as a missing image while the
+registry behind it stays unreachable or keeps refusing the node's credentials. A volume of the
+operator's pod block
 (`runtime.kubernetes.pod.volumes`) that a `volume_mounts` entry mounts, naming a ConfigMap or Secret
 that does not exist in the daemon's namespace, or asking a key it lacks, leaves the probe pod
 `Pending` with the kubelet's `FailedMount` (`configmap "<name>" not found` or `configmaps "<name>" not
@@ -1482,8 +1485,15 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 Code (`worker_backends.<role> is claude, which runs only under runtime: tmux`). Every
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
-worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise. `bind`
-and the host of each of those URLs and of `agent_secrets.url` must be ASCII. This is a breaking
+worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
+Loopback is `localhost` with any number of trailing dots, the hosts file's other loopback names
+(`localhost.localdomain`, `ip6-localhost`, `ip6-loopback`), any name under `localhost.`, and a
+loopback address zoned (`[::1%25lo]`) or IPv4-mapped (`::ffff:127.0.0.1`, as `::ffff:0.0.0.0` is the
+unspecified address); and a URL's host may not be a numeric name that is no IP address in its
+standard form (`127.1`, `2130706433`, `0x7f000001`), which an HTTP client reads as an IPv4
+address; write the address in full. An http(s) URL in `runtime.kubernetes.plugins`, which `bun add`
+fetches inside the pod, is held to the same rules. `bind` and the host of each of those URLs and of
+`agent_secrets.url` must be ASCII. This is a breaking
 configuration change for a file that names a host in Unicode; write it in its `xn--` form.
 `envoy_url` and each `nats_urls` entry are endpoints, not request URLs: they refuse a query string
 or fragment. This is a breaking configuration change for a file that has either; put credentials in

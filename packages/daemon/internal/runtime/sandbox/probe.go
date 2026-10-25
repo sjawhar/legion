@@ -46,13 +46,13 @@ const (
 	// probeLogLines is how much of the probe pod's log is read and quoted. The capability table
 	// (internal/capabilities) is one line per row, about twenty, printed before the OK line, so a
 	// 50-line tail would leave a refused image's own messages, printed before the table, out of the
-	// tail the refusal quotes. The
-	// tail probeLog keeps (probeLogBytes) is kept from its end (lastBytes), so the OK line, the
-	// tail's last line, is in reach whatever a line's length: a capability line is its prefix,
-	// the row's own words, and a command's quoted output cut at 300 characters
-	// (capabilities.maxDetail), about 500 bytes at the longest, so a hundred such lines stay near
-	// 50 KiB, and a passing pod prints about twenty. PodLogOptions.LimitBytes is not used for the
-	// bound: it counts from the start of the returned tail too, the same cutoff lastBytes avoids.
+	// tail the refusal quotes. The tail probeLog keeps (probeLogBytes) is kept from its end
+	// (lastBytes), so the OK line, the tail's last line, is in reach whatever a line's length: a
+	// capability line is its prefix, the row's own words, and a command's quoted output cut at 300
+	// characters (capabilities.maxDetail), about 500 bytes at the longest, so a hundred such lines
+	// stay near 50 KiB, and a passing pod prints about twenty. PodLogOptions.LimitBytes is not used
+	// for the bound: it counts from the start of the returned tail too, the same cutoff lastBytes
+	// avoids.
 	probeLogLines = 100
 	// probeLogReadBytes is the most probeLog reads from the API: 100 lines of up to 10 KiB apiece,
 	// comfortably past what probeLogLines ever holds, bounding the read whatever a line's length
@@ -118,7 +118,9 @@ var pullWaiting = map[string]bool{"ErrImagePull": true, "ImagePullBackOff": true
 // NotFound desc = failed to pull and unpack image "<ref>": failed to resolve image: <ref>: not
 // found`, while a repository Docker Hub does not have read `… failed to resolve image: pull access
 // denied, …` with no code. Docker Hub answers such a repository with 401, read as credentials and
-// retried; another runtime's wording (CRI-O's `manifest unknown`) falls to the retry too.
+// retried; Amazon ECR Public answers the blob request for a digest it does not have with 401, which
+// containerd 2 ranks above the manifest's 404, so that miss reads as credentials too and is retried;
+// another runtime's wording (CRI-O's `manifest unknown`) falls to the retry too.
 const imageNotFound = `rpc error: code = NotFound desc = failed to pull and unpack image "([^"]+)": (?:failed to resolve reference "([^"]+)"|failed to resolve image): (.+): not found$`
 
 // pullNotFound matches imageNotFound as a pull's waiting message, alone or after the back-off's
@@ -200,8 +202,7 @@ type ImageProbe struct {
 // which counts against no attempt budget, since a full pool says nothing about the image and the
 // daemon must stay up until it has room — or transient: anything else, a pod the kubelet itself
 // failed included, retried under p.Retry. The report counts the attempts that waited on capacity
-// and keeps the last one's reason, for the
-// pool-capacity row of the capability report.
+// and keeps the last one's reason, for the pool-capacity row of the capability report.
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
 		return bootprobe.ImageReport{}, errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
@@ -245,7 +246,7 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.Image
 // probing one image in a namespace never contend for one Sandbox. A Prober sets a run of its own
 // (newProber), so its Sandbox is never a booting daemon's or another probe-boot's, and neither
 // takes the other's for a leftover (createProbe); a probe-boot leftover ends at its shutdownTime.
-// The project is slugged to fit a DNS label (probePodName), shorter by what the run takes.
+// The project is slugged to fit a DNS label (dnsName), shorter by what the run takes.
 func probeName(project, hex, run string) string {
 	prefix, suffix := "legion-probe-", "-"+hex[:12]
 	if run != "" {
@@ -509,12 +510,12 @@ const mountRecheck = 15 * time.Second
 // can still change it. It stops on an image the kubelet cannot use (definitiveWaiting), the
 // image's own refusal; on an image the registry does not have, from the pod's status and events
 // (registryHasNoImage), which no retry of the pull changes; on a container the kubelet cannot
-// configure, waiting
-// CreateContainerConfigError with a message saying a ConfigMap or Secret the container reads, or a
-// key of one, is missing (missingObject) — the kubelet builds the container's env from those
-// objects at each sync (pkg/kubelet/kubelet_pods.go, makeEnvironmentVariables) and fails the same
-// way until the operator creates what is missing, so this is a refusal quoting the message and not
-// the image's fault, while a CreateContainerConfigError saying anything else is left to the budget;
+// configure, waiting CreateContainerConfigError with a message saying a ConfigMap or Secret the
+// container reads, or a key of one, is missing (missingObject) — the kubelet builds the
+// container's env from those objects at each sync (pkg/kubelet/kubelet_pods.go,
+// makeEnvironmentVariables) and fails the same way until the operator creates what is missing, so
+// this is a refusal quoting the message and not the image's fault, while a
+// CreateContainerConfigError saying anything else is left to the budget;
 // on a pod the pool has no room for, which the scheduler leaves Pending with PodScheduled=False
 // Unschedulable, waited on (bootprobe.Outcome.Waiting) once it has been so for longer than the boot
 // timeout — the same bound the liveness rules give an issue pod (observe.go), long enough for
@@ -1029,19 +1030,18 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 
 // judge is the verdict on a finished probe pod and its log, logErr when the log could not be read
-// (judgeProbeLog), in this order, carrying on a pass what the OK line reported of the image, in
-// Outcome.Report. A pod the kubelet failed for
-// reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
-// unread log is judged by the read's error. A Failed pod past those is one whose probe container
-// exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an
-// image whose CLI predates the contract check prints none, having checked no contract, and is
-// refused, not waved through; one that confirmed another contract is refused naming both. And it
-// must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
-// workers run their agents on their models. It must carry the extensions mark
-// (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
-// roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
-// into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
-// twice. It must carry the capabilities mark too
+// (probeLog), in this order, carrying on a pass what the OK line reported of the image, in
+// Outcome.Report. A pod the kubelet failed for reasons of its own (kubeletFailure) is transient,
+// whatever of its log could be read, and an unread log is judged by the read's error. A Failed pod
+// past those is one whose probe container exited on its own: the image's refusal. The OK line must
+// confirm this daemon's contract: an image whose CLI predates the contract check prints none,
+// having checked no contract, and is refused, not waved through; one that confirmed another
+// contract is refused naming both. And it must say the prompt-named agents' models resolved: any
+// other mark, or none, does not prove the workers run their agents on their models. It must carry
+// the extensions mark (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod
+// lane probed the plugin roots with Oh My Pi's extension discovery disabled, and the image it
+// certified links the plugins into its profile, which a pod of this daemon — discovery on, the two
+// roots explicit — would load twice. It must carry the capabilities mark too
 // (bootprobe.CapabilitiesChecked): a CLI that predates the capability check prints none, having
 // checked no capability, and a current one that found a capability missing exits 1 before the OK
 // line, so the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild. When the

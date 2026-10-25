@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -279,7 +280,7 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	if err := refuseNonASCIIHost(agentSecretsKey+".url host", u.Hostname()); err != nil {
 		return nil, err
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+	if u.Scheme != "https" && !(u.Scheme == "http" && plainHTTPHost(u.Hostname())) {
 		return nil, fmt.Errorf("%s.url must use https unless the host is a loopback address; got %q", agentSecretsKey, block.URL)
 	}
 	block.URL = strings.TrimSuffix(block.URL, "/")
@@ -347,7 +348,9 @@ func readPlugins(value *yaml.Node) (*PluginsConfig, error) {
 // `9.x`, `~9.6`) is refused naming the key and that the pair must be one release's exact versions;
 // a source beginning with `//` is refused by the same message an http(s) URL with no host gets
 // (`https:///x.tgz`, `http:/cache/x.tgz` — the one slash u.Parse still calls absolute) — neither
-// names a host bun can fetch a tarball from.
+// names a host bun can fetch a tarball from. bun fetches a URL inside the pod, so its host is held
+// to every pod URL's rules (checkPodHost): ASCII, neither loopback nor the unspecified address, and
+// no numeric name an HTTP client reads as an IPv4 address.
 func readPluginSource(value *yaml.Node, key string) (string, error) {
 	source, err := requiredString(value, key, "")
 	if err != nil {
@@ -364,6 +367,9 @@ func readPluginSource(value *yaml.Node, key string) (string, error) {
 		if u.Host == "" {
 			return "", noHost
 		}
+		if err := checkPodHost(key, source, u.Hostname()); err != nil {
+			return "", err
+		}
 		return u.String(), nil
 	}
 	if !pluginVersion.MatchString(source) {
@@ -372,13 +378,84 @@ func readPluginSource(value *yaml.Node, key string) (string, error) {
 	return source, nil
 }
 
-// isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
+// hostAddr is host as an IP address with any zone removed (`::1%lo` is `::1`) and an IPv4-mapped
+// address unmapped (`::ffff:0.0.0.0` is `0.0.0.0`), or false when host is no IP address in Go's
+// strict form. net.ParseIP reads a zoned address as no address at all, so a check built on it lets
+// `[::1%25lo]` past, which Go's HTTP client dials as loopback; and netip.Addr.IsUnspecified, unlike
+// net.IP's, does not unmap, so without Unmap `[::ffff:0.0.0.0]` would pass as a reachable host.
+func hostAddr(host string) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.WithZone("").Unmap(), true
+}
+
+// loopbackNames are the names a resolver can answer with a loopback address without the operator
+// having said so: `localhost` and the hosts file entries a pod's or a node's image writes beside it
+// (`ip6-localhost`, `ip6-loopback`, glibc's `localhost.localdomain`). A name under `localhost.` is
+// reserved for loopback too (RFC 6761, section 6.3). A check that refuses an address refuses every
+// one of them; one that trusts an address (plainHTTPHost) trusts none but `localhost` itself, since
+// a CGO_ENABLED=0 binary, which both of Legion's are, asks DNS for every other name
+// (`$GOROOT/src/net/conf.go`: only cgo with myhostname answers them locally).
+var loopbackNames = []string{"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+
+// isLoopbackHost is a loopback name (loopbackNames, or one under `localhost.`), with or without
+// trailing dots (`localhost.`, `localhost..`), or a loopback IP address, zoned or IPv4-mapped. It
+// decides what to refuse, never what to trust.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+	name := strings.ToLower(strings.TrimRight(host, "."))
+	if slices.Contains(loopbackNames, name) || strings.HasSuffix(name, ".localhost") {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	addr, ok := hostAddr(host)
+	return ok && addr.IsLoopback()
+}
+
+// plainHTTPHost is a host a URL may carry credentials to over plain http: a loopback address
+// literal, zoned or IPv4-mapped, or `localhost` written exactly so, which Go's pure resolver
+// answers from the hosts file. Every other spelling leaves the machine: a trailing dot
+// (`localhost.`) misses that entry, which is stored without one (`$GOROOT/src/net/dnsclient.go`,
+// absDomainName adds no dot to a name with no inner dot), and goes to DNS, as a name such as
+// `secrets.localhost` or `localhost.localdomain` does in a CGO_ENABLED=0 binary. Whatever answers
+// would receive the token the request carries, so plain http is refused for all of them.
+func plainHTTPHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, ok := hostAddr(host)
+	return ok && addr.IsLoopback()
+}
+
+// isNumericName is a host that is no IP address in Go's strict form yet ends in an all-digit or a
+// 0x label (numericLastLabel): a pod's HTTP client reads `127.1`, `2130706433` and `0x7f000001` as
+// IPv4 addresses (127.0.0.1 each, the WHATWG URL parser's short, decimal and hexadecimal forms),
+// so such a host can name loopback past isLoopbackHost. No DNS name a service is reached by ends so.
+func isNumericName(host string) bool {
+	_, ok := hostAddr(host)
+	return !ok && numericLastLabel(host)
+}
+
+// checkPodHost holds the host of a URL a pod is handed to the rules every such host meets: ASCII
+// (refuseNonASCIIHost), not loopback, which in a pod is the pod itself, not the unspecified
+// address, which is no host at all, and not a numeric name (isNumericName). key names the URL and
+// raw is the URL as written.
+func checkPodHost(key, raw, host string) error {
+	if err := refuseNonASCIIHost(key+" host", host); err != nil {
+		return err
+	}
+	var why string
+	switch {
+	case isLoopbackHost(host):
+		why = "names a loopback host, which in a pod is the pod itself"
+	case isUnspecifiedHost(host):
+		why = "names the unspecified address, which is no host a pod can dial"
+	case isNumericName(host):
+		why = "names a numeric host that is not an IP address in its standard form, which an HTTP client reads as an IPv4 address (127.1 is 127.0.0.1); write the address in full"
+	default:
+		return nil
+	}
+	return fmt.Errorf("%s %s %s; name the host pods reach it at when runtime is kubernetes", key, raw, why)
 }
 
 // isASCII reports whether s holds no rune above unicode.MaxASCII.
@@ -403,11 +480,11 @@ func refuseNonASCIIHost(key, host string) error {
 	return nil
 }
 
-// isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`): no host at all, which only a
-// listener may bind.
+// isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`, zoned or not): no host at all,
+// which only a listener may bind.
 func isUnspecifiedHost(host string) bool {
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsUnspecified()
+	addr, ok := hostAddr(host)
+	return ok && addr.IsUnspecified()
 }
 
 // readAdvertiseHost is `advertise_host`: an IP address or a DNS-1123 name, the host part alone of
@@ -825,14 +902,16 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 }
 
 // numericLastLabel reports whether host, not an IP address in Go's strict form, still ends in an
-// all-digit label or a 0x one: glibc's resolver reads `010.0.0.2`, `1.2.3` and `0x0a000002` as IPv4
-// addresses (inet_aton's octal, short and hexadecimal forms), so the node would mount another
-// address than the one written. No DNS name a server is reached by ends so.
+// all-digit label or a 0x one followed by hex digits alone: glibc's resolver reads `010.0.0.2`,
+// `1.2.3` and `0x0a000002` as IPv4 addresses (inet_aton's octal, short and hexadecimal forms), as
+// the WHATWG URL parser an HTTP client follows does, so the node would mount, or a pod dial, another
+// address than the one written. A label such as `0xcache`, which neither reads as a number, is a
+// name. No DNS name a server is reached by ends in a numeric label.
 func numericLastLabel(host string) bool {
 	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
 	last := strings.ToLower(labels[len(labels)-1])
-	if strings.HasPrefix(last, "0x") {
-		return true
+	if hex, ok := strings.CutPrefix(last, "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
 	}
 	return last != "" && strings.Trim(last, "0123456789") == ""
 }
@@ -1410,20 +1489,9 @@ func checkPodReachable(cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
-		host := parsed.Hostname()
-		if err := refuseNonASCIIHost(address.key+" host", host); err != nil {
+		if err := checkPodHost(address.key, address.value, parsed.Hostname()); err != nil {
 			return err
 		}
-		var why string
-		switch {
-		case isLoopbackHost(host):
-			why = "names a loopback host, which in a pod is the pod itself"
-		case isUnspecifiedHost(host):
-			why = "names the unspecified address, which is no host a pod can dial"
-		default:
-			continue
-		}
-		return fmt.Errorf("%s %s %s; name the host pods reach it at when runtime is kubernetes", address.key, address.value, why)
 	}
 	return nil
 }

@@ -456,6 +456,42 @@ func TestDispatchRegistersKubernetesResources(t *testing.T) {
 	require.Positive(t, kubernetesResources)
 }
 
+// On a preview that creates <hostname>-tailscale-state, its binding's roleRef name is unknown until
+// the Role has an ID, so pulumi-kubernetes sends the API server no dry run of the binding, which an
+// account without the bind verb would see refused as "not found" while the Role does not exist. On
+// an apply the binding names the Role.
+func TestDispatchTailscaleStateBindingWaitsForItsRoleOnPreview(t *testing.T) {
+	for _, preview := range []bool{false, true} {
+		m := newMocks()
+		m.Preview = preview
+		err := m.Run(func(ctx *pulumi.Context) error {
+			gcpProvider, err := gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
+			if err != nil {
+				return err
+			}
+			randomProvider, err := randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
+			if err != nil {
+				return err
+			}
+			_, err = gcp.NewDispatch(ctx, "example-dispatch", dispatchArgs(), pulumi.Providers(gcpProvider, randomProvider))
+			return err
+		})
+		require.NoError(t, err)
+		binding := m.Named(t, "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding", "example-dispatch-tailscale-state")
+		ref := binding.Inputs["roleRef"].ObjectValue()
+		name := ref["name"]
+		require.Equal(t, "Role", ref["kind"].StringValue())
+		require.Equal(t, "rbac.authorization.k8s.io", ref["apiGroup"].StringValue())
+		if preview {
+			// The mock engine unmarshals inputs without keeping unknowns, so an unknown arrives as
+			// null; the apply arm below holds that the name is not simply dropped.
+			require.True(t, name.IsNull() || name.ContainsUnknowns(), "roleRef name on a preview = %v, want unknown until the Role exists", name)
+			continue
+		}
+		require.Equal(t, "example-dispatch-tailscale-state", name.StringValue())
+	}
+}
+
 // The listener binds 0.0.0.0 in a pod of its own, where its API refuses to start without a
 // bearer, so its credential is a Secret of its own: the listener's pod must not name the Secret
 // holding DATABASE_URL and DISPATCH_SIGNING_KEY.

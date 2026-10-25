@@ -222,7 +222,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return nil, err
 	}
 	stateName := s.hostname + "-tailscale-state"
-	_, err = rbacv1.NewRole(ctx, stateName, &rbacv1.RoleArgs{
+	stateRole, err := rbacv1.NewRole(ctx, stateName, &rbacv1.RoleArgs{
 		Metadata: metadata(stateName),
 		Rules: rbacv1.PolicyRuleArray{
 			rbacv1.PolicyRuleArgs{ApiGroups: pulumi.StringArray{pulumi.String("")}, Resources: pulumi.StringArray{pulumi.String("secrets")}, Verbs: pulumi.StringArray{pulumi.String("create")}},
@@ -232,9 +232,18 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if err != nil {
 		return nil, err
 	}
+	// The binding's roleRef name waits on the Role's ID. On a preview that creates the Role the name
+	// is unknown, so pulumi-kubernetes sends no dry run of the binding: an account without the RBAC
+	// bind verb (a consumer's CI deploy account) would see that dry run refused as the Role "not
+	// found", since the API server admits a binding only after reading the Role it names. On an
+	// apply, and on a preview once the Role exists, the name is the Role's own, so a live binding
+	// shows no diff.
+	stateRoleName := pulumi.All(stateRole.ID(), stateRole.Metadata.Name().Elem()).ApplyT(func(v []any) string {
+		return v[1].(string)
+	}).(pulumi.StringOutput)
 	if _, err := rbacv1.NewRoleBinding(ctx, stateName, &rbacv1.RoleBindingArgs{
 		Metadata: metadata(stateName),
-		RoleRef:  rbacv1.RoleRefArgs{ApiGroup: pulumi.String("rbac.authorization.k8s.io"), Kind: pulumi.String("Role"), Name: pulumi.String(stateName)},
+		RoleRef:  rbacv1.RoleRefArgs{ApiGroup: pulumi.String("rbac.authorization.k8s.io"), Kind: pulumi.String("Role"), Name: stateRoleName},
 		Subjects: rbacv1.SubjectArray{rbacv1.SubjectArgs{Kind: pulumi.String("ServiceAccount"), Name: pulumi.String(s.hostname), Namespace: pulumi.String(s.namespace)}},
 	}, child...); err != nil {
 		return nil, err
