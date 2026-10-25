@@ -64,8 +64,8 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	// Three slots for three roots, so the slot the blocked root does not take stands visibly free.
 	cfg.AdmissionCap = 3
 	// The controller tick admits a root whose blocker is done whatever the event did, so it must
-	// not be what step 6 sees: an hour between ticks leaves the runtime's first tick, a minute
-	// after it starts, the only one this run can ever apply.
+	// not be what step 6 sees: an hour before the runtime's first tick (o.controllerFirstWake,
+	// below) and an hour between ticks mean this run applies no tick at all.
 	cfg.ControllerWakeInterval = time.Hour
 	// With the design gate off, the architect's own registration opens its tree, which is what
 	// makes starting a released child possible at all.
@@ -86,6 +86,7 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	o := fakeRuntime(rt, &built{})
 	o.workflowTokens = &workflowTokenRecorder{}
 	o.githubAPI = blockersGitHub(t)
+	o.controllerFirstWake = time.Hour
 	d := startDaemon(t, cfg, o)
 
 	// The blocker is itself a root Legion works, which is what a blocked_by link between two
@@ -381,9 +382,10 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 		t.Fatalf("Legion keeps a record of %s, which nobody handed to it\nstate %s", outside, body)
 	}
 
-	// The tick cannot be what admits the root: the step waits for the runtime's first tick, the
-	// only one an hour's interval allows this run, before the close, and then judges that no tick
-	// at all was applied between the close and the admission.
+	// The tick cannot be what admits the root: the first tick is an hour after the runtime starts
+	// and the next an hour after that, so no tick runs in this test at all, and the judgement below
+	// that none was applied between the close and the admission holds by construction, not by when
+	// the close happens to land.
 	ticks := func() int {
 		t.Helper()
 		var n int
@@ -393,7 +395,6 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 		}
 		return n
 	}
-	testwait.Eventually(t, "the runtime's first controller tick", func() bool { return ticks() > 0 })
 	ticked := ticks()
 	closed := time.Now()
 	setDispatchStatus(t, baseURL, outside, "done")
