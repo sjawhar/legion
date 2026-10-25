@@ -364,11 +364,13 @@ nothing. To end every session's automatic access to a secret, change its tags
 An approval happens in Dispatch, never in the broker. The broker holds no Dispatch credential and
 sends Dispatch nothing: Dispatch's server reads the broker's pending list and records for the
 person signed in, and when that person clicks **Approve** or **Deny**, Dispatch's server calls the
-broker with the shared UI token (`BROKER_UI_TOKEN`) and that person's email, taken from their
-Dispatch session. The broker then checks that email against the record's approver: anyone else is
-refused `NOT_APPROVER`, whatever state the record is in. A request for a shared human-tier secret,
-or for a shared agent-tier secret its session's operator withheld from it, names the approver
-`anyone`: it waits in every person's Inbox, any person signed in to Dispatch may decide it, and the
+broker as its own Kubernetes ServiceAccount, which the broker lists as a caller
+(`BROKER_API_ACCOUNTS`), with that person's email, taken from their Dispatch session. No secret
+is shared between them. The broker then checks that email against the record's approver: anyone
+else is refused `NOT_APPROVER`, whatever state the record is in. A request for a shared
+human-tier secret, or for a shared agent-tier secret its session's operator withheld from it,
+names the approver `anyone`: it waits in every person's Inbox, any person signed in to Dispatch may
+decide it, and the
 broker records the email of whoever did. A withheld secret is its owner's to approve for that
 session even in a request that was already waiting when the operator withheld it: a request that
 waited on anyone for a shared human-tier secret and the operator's own withheld secret is then the
@@ -404,9 +406,9 @@ approved before it wherever the new tags want the secret approved for that sessi
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
 `RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than
-a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`). Because the UI token
-vouches for whoever Dispatch says is approving, it is an approval credential: only Dispatch's
-server may hold it.
+a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`). Because the broker
+records whoever a listed caller says is approving, a listed account's token is an approval
+credential: list Dispatch's own account and nothing else.
 
 ## The audit record
 

@@ -7,7 +7,9 @@
 #   - the broker (packages/envoy/cmd/broker) on its fake secrets file (internal/broker/secrets'
 #     development stand-in for Secrets Manager), holding one secret, DEMO_API_KEY, owned by
 #     alice@example.com at the human tier, whose value is made up, in a database of its own beside
-#     DATABASE_URL's, created and dropped by this run;
+#     DATABASE_URL's, created and dropped by this run, trusting the ServiceAccount tokens of
+#     packages/envoy/cmd/dev-oidc-issuer, the local stand-in for a cluster's issuer, which keeps
+#     Dispatch's own token in a file and rewrites it before it lapses;
 #   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
 #     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice@example.com`;
 #   - an agent machine whose hostname is example-host-build: agent-secrets-helper (the host side of
@@ -112,7 +114,7 @@ mkdir -p "$work/logs" "$work/bin" "$work/agent"
 
 # What cleanup stops: the pids start_process sets (<name>_pid) and the helper's own, and the
 # broker's database. The ports are pick_port's.
-broker_pid='' fake_envoy_pid='' fake_github_pid='' dispatch_pid='' helper_pid=''
+broker_pid='' issuer_pid='' fake_envoy_pid='' fake_github_pid='' dispatch_pid='' helper_pid=''
 broker_database='' admin_url='' dispatch_port='' fake_envoy_port='' fake_github_port=''
 cleanup() {
   local status=$? pid
@@ -123,7 +125,7 @@ cleanup() {
   # with it. Every other service leads a process group of its own (setsid), signalled whole so its
   # children go too: run-server.sh's `flock … go build`, before it execs the server, is one.
   stop_pid "$helper_pid"
-  for pid in "$dispatch_pid" "$fake_github_pid" "$fake_envoy_pid" "$broker_pid"; do
+  for pid in "$dispatch_pid" "$fake_github_pid" "$fake_envoy_pid" "$broker_pid" "$issuer_pid"; do
     [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true
     stop_pid "$pid"
   done
@@ -137,9 +139,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-# --- Binaries: the broker, and the client and host helper the agent machine runs. -------------
-note "building the broker, agent-secrets and agent-secrets-helper"
-(cd "$root/packages/envoy" && CGO_ENABLED=0 go build -o "$work/bin/" ./cmd/broker ./cmd/agent-secrets ./cmd/agent-secrets-helper)
+# --- Binaries: the broker and its local token issuer, and the client and host helper the agent
+# machine runs. ---------------------------------------------------------------------------------
+note "building the broker, dev-oidc-issuer, agent-secrets and agent-secrets-helper"
+(cd "$root/packages/envoy" && CGO_ENABLED=0 go build -o "$work/bin/" ./cmd/broker ./cmd/dev-oidc-issuer ./cmd/agent-secrets ./cmd/agent-secrets-helper)
 
 # --- The broker's database, beside DATABASE_URL's, named for this run (as dev-broker.sh names
 # its own), so a database another run or anyone else made is never the one dropped. -------------
@@ -161,8 +164,17 @@ cat >"$work/fake-secrets.json" <<EOF
   "tags": {"owner": "${OPERATOR}", "tier": "human"}, "value": "demo-key-not-a-real-secret-7f3a"}]}
 EOF
 chmod 600 "$work/fake-secrets.json"
-# The broker's UI bearer, which Dispatch sends it, reaches both through a file, never an argv.
-(umask 077 && openssl rand -hex 32 >"$work/broker-ui-token")
+# Dispatch calls the broker as its own ServiceAccount, whose token dev-oidc-issuer keeps in a file
+# Dispatch's server reads, never an argv; the broker lists that account as the caller "dispatch".
+# The issuer writes the file before it logs its URL, the issuer the broker discovers at boot.
+dispatch_account="system:serviceaccount:example-ns:example-dispatch"
+broker_audience="legion-broker-pod"
+note "starting dev-oidc-issuer"
+start_process issuer setsid "$work/bin/dev-oidc-issuer" \
+  --token "$broker_audience=$dispatch_account=$work/dispatch-account-token"
+await_start issuer "$issuer_pid" 0 60 "dev-oidc-issuer to report its URL" \
+  grep -q 'issuer listening url=' "$work/logs/issuer.log"
+issuer_url="$(sed -n 's/.*issuer listening url=\([^ ]*\).*/\1/p' "$work/logs/issuer.log" | head -n1)"
 # Dispatch's port is picked before the broker starts, since the broker names Dispatch's
 # machine-login page to every machine that logs in.
 pick_port dispatch_port
@@ -174,7 +186,9 @@ start_process broker setsid env -i PATH="$PATH" \
   BROKER_LISTEN_ADDR=127.0.0.1:0 \
   BROKER_PUBLIC_URL=http://127.0.0.1:0 \
   BROKER_MACHINE_LOGIN_URL="$dispatch_url/credentials/machine" \
-  BROKER_UI_TOKEN_FILE="$work/broker-ui-token" \
+  BROKER_K8S_OIDC_ISSUER="$issuer_url" \
+  BROKER_K8S_OIDC_AUDIENCE="$broker_audience" \
+  BROKER_API_ACCOUNTS="dispatch=$dispatch_account" \
   BROKER_SECRETS_PREFIX="$secrets_prefix" \
   BROKER_SECRETS_KMS_KEY_ARN="$secrets_key" \
   BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.json" \
@@ -195,7 +209,7 @@ pick_port fake_github_port
 export DISPATCH_E2E_PORT=$dispatch_port FAKE_ENVOY_PORT=$fake_envoy_port FAKE_GITHUB_PORT=$fake_github_port
 # The harness's broker switch (packages/dispatch/e2e/harness-broker.ts), exported so seed.ts's
 # reset reads it as run-server.sh does and leaves alone the fake broker this rig never starts.
-export DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE="$work/broker-ui-token"
+export DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE="$work/dispatch-account-token"
 note "starting Dispatch at $dispatch_url"
 start_process fake_envoy setsid bun "$root/packages/dispatch/e2e/fake-envoy.ts"
 start_process fake_github setsid bun "$root/packages/dispatch/e2e/fake-github.ts"
