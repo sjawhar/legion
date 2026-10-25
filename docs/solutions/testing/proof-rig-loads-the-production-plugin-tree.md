@@ -52,8 +52,8 @@ at the pinned versions.
 Two consequences worth knowing before the first run:
 
 - The worker launches under the daemon's real prefix (`secrets GEMINI_API_KEY OPENAI_API_KEY -- omp`),
-  so the rig needs the same key access a pane has. Anthropic uses the profile's key command, which
-  reads a local key file; a static `ANTHROPIC_API_KEY` would bypass that route. `--no-secrets` exists for
+  so the rig needs the same key access a pane has. Anthropic uses the profile's own key command (a
+  `!<command>` in its `models.yml`); a static `ANTHROPIC_API_KEY` would bypass that route. `--no-secrets` exists for
   a shell that already exports the keys; it is not a way around the plugin.
 - Copy once, reuse. The tree copy is the slow step; `RIG_REFRESH_PLUGINS=1` re-copies when the
   source profile has changed.

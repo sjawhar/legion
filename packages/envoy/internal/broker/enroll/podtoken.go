@@ -1,6 +1,7 @@
 // K8sPodVerifier verifies a projected service-account token with the shared internal/oidc
 // verifier (issuer, audience, signature, expiry, subject) and then reads the pod UID claim from
-// the same, already-verified token, so a token minted for another pod is refused. A pod's
+// the same, already-verified token, which the enrollment service compares with the pod it enrolls
+// (enroll.go), so a token minted for another pod is refused. A pod's
 // enrollment needs the token bound to its pod (Verify); a service's token login reads the account
 // and, when the token has one, its pod (VerifyAccount).
 package enroll

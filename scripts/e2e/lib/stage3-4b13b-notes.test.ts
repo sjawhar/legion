@@ -6,7 +6,7 @@ import { scriptFunctions } from "./script-functions";
 
 // The 4b.13b acceptance's own soft and cleanup, taken from the script by name and run after the
 // ending each case names, with the teardown's processes, GitHub and production audit stubbed and a
-// merger starve seeded in the key command's record, so any notes call the trap makes prints.
+// merger's failed call seeded in the key command's record, so any notes call the trap makes prints.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage3-4b13b-notes-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));

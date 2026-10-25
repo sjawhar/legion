@@ -401,10 +401,11 @@ pass
 
 begin gate-refuses-a-skill-only-a-role-prompt-loads
 # The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
-# legion-controller is loaded by roles/controller-root.md alone, so only a gate that reads the
-# daemon's own role prompts can refuse the plugin without it.
+# legion-controller is loaded by roles/controller-root.md and, since the plugin's findings
+# reference names it, by dist/skills/legion-worker/references/findings.md; only a gate that reads
+# the daemon's own role prompts can name roles/controller-root.md among its loaders.
 mv "$work/pi-legion/dist/skills/legion-controller" "$work/controller-skill.aside"
-expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by roles/controller-root.md)"
+expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by dist/skills/legion-worker/references/findings.md, roles/controller-root.md)"
 mv "$work/controller-skill.aside" "$work/pi-legion/dist/skills/legion-controller"
 [ -f "$work/pi-legion/dist/skills/legion-controller/SKILL.md" ] || fail "the legion-controller skill was not restored"
 pass
@@ -705,8 +706,8 @@ for p in $chain_pids; do
     fail "pane process chain runs the dotfiles OMP wrapper: $(tr '\0' ' ' <"/proc/$p/cmdline")"
 done
 shim1=$(first_child "$pane1_pid")
-# LEGION-206 P1 holds with the gateway route: the pane's shell and its OMP keep the daemon's own XDG
-# directories and carry no session bus address (only the key command gets the operator's).
+# LEGION-206 P1: the pane's shell and its OMP keep the daemon's own XDG directories and carry no
+# session bus address.
 for p in "$pane1_pid" "$omp1"; do
   for name in XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME; do
     dir=$(env_of "$p" "$name")

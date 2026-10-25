@@ -260,7 +260,7 @@ describe("stage 4b's verdict line", () => {
     expect(outside.stdout).not.toContain("model-gateway-unserved:");
   });
 
-  test("prints the notes for a checkpoint that failed itself, so the seeded starve is read", () => {
+  test("prints the notes for a checkpoint that failed itself, so the seeded failed call is read", () => {
     const failed = controllerRun("[]", "fail");
     expect(failed.code).toBe(1);
     expect(failed.stdout).toContain(

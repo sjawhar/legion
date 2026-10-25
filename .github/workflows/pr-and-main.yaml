@@ -268,7 +268,7 @@ jobs:
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
-      - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
+      - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model route's key command, the design-gate verdict)
         run: bun test scripts/e2e/lib
 
       - name: Lint the Dispatch census script

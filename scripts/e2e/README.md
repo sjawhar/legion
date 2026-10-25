@@ -193,8 +193,7 @@ What it stands up, all of it the run's own:
   `/proc/<pid>/exe`, and every command in the pane's first-child chain. That proves the wrapper
   cannot replace the configured build while mise still supplies the tool's activation.
 - **The model route**: Anthropic through
-  [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) at setup, while the
-  script's shell still holds the operator's HOME and XDG directories. Its preflight refuses loudly
+  [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) at setup. Its preflight refuses loudly
   before any pane exists on an unreadable or empty key file. Every model role of every pane is
   `anthropic/claude-opus-4-8`, and `anthropic` is the one provider a pane may use, keyed through
   `<work>/model-gateway-key/anthropic-key`, whose log records each call; no Anthropic key reaches
@@ -221,7 +220,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable @sjawhar/pi-legion`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
 | `gate-refuses-without-the-envoy-plugin` | `omp plugin disable @sjawhar/pi-envoy`; `legion start` refuses with "but no pi-envoy is: install the @sjawhar/pi-envoy release", naming the package to install before any skill it ships is reported missing; `omp plugin enable` |
 | `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
-| `gate-refuses-a-skill-only-a-role-prompt-loads` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's own role prompts can say; the skill put back |
+| `gate-refuses-a-skill-only-a-role-prompt-loads` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill no agent definition loads, and the controller's role prompt `roles/controller-root.md` does; `legion start` refuses with "finds no skill legion-controller (loaded by dist/skills/legion-worker/references/findings.md, roles/controller-root.md)", where only a gate reading the daemon's own role prompts can name `roles/controller-root.md`; the skill put back |
 | `gate-refuses-an-unconfigured-model-role` | `modelRoles.oracle` removed from the isolated profile's `config.yml`; `legion start` refuses with "on its model @oracle: role oracle is not configured", naming `task agent oracle` and the prompts that dispatch it; the profile put back byte for byte |
 | `architect-registers-and-is-ready` | `legion start` passes the gate (its log line, `boot gate: pi-legion speaks this daemon's contract and loads with pi-envoy`); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
 | `envoy-role-held` | `GET /v1/roles/<claim token>` on the listener names the claim's session as holder |
@@ -235,7 +234,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `stale-generation-hello-refused` | writes a hello carrying generation 1's boot token to `<state_dir>/worker-stream.sock`: the daemon closes it with nothing written and logs `rejected hello (stale worker generation)` |
 | `unregistered-agent-retired-at-the-deadline` | a second daemon whose `LEGION_OMP_PATH` stub answers the plugin gate and the boot's `config get retry.modelFallback --json`, and otherwise sleeps, with a 10 s registration deadline (5 s × 2): the claim's shim connects and its process lives, the agent never registers, and at the deadline the process is retired and one launch failure counted |
 | `restart-readopts-the-live-panes` | SIGTERM, then start again: `boots` +1, both claims keep their generation, incarnation and pane, no pane opens or closes, and a task delivered after the restart runs once — over the connection the shim's reconnect hello opened |
-| `omp-child-environment` | the boot log names the resolved pinned OMP binary for both probes and panes; the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds that exact executable, never the OMP wrapper that remains first on the ordinary daemon PATH; the pane's shell and that OMP carry all four XDG base directories under `<state_dir>/home` and no `DBUS_SESSION_BUS_ADDRESS` (LEGION-206 P1, with the gateway route in place); OMP carries `GEMINI_API_KEY` (length only) that its shim does not, and no `ANTHROPIC_API_KEY`, `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
+| `omp-child-environment` | the boot log names the resolved pinned OMP binary for both probes and panes; the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds that exact executable, never the OMP wrapper that remains first on the ordinary daemon PATH; the pane's shell and that OMP carry all four XDG base directories under `<state_dir>/home` and no `DBUS_SESSION_BUS_ADDRESS` (LEGION-206 P1); OMP carries `GEMINI_API_KEY` (length only) that its shim does not, and no `ANTHROPIC_API_KEY`, `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
 | `stray-pane-reaped-after-the-grace` | opens a window marked as the daemon's (`@legion_owner`) holding no recorded pane, and an unmarked one beside it: the periodic orphan sweep (every 60 s, 120 s grace) reaps the marked one no sooner than 120 s after it opened, and keeps the unmarked window and both claims' panes |
 | `stop` | `legion claims stop` of the root architect is refused — 409, "the tree's root claim ends only when its tree closes; suspend it to stop its process; no workflow issue backs its tree, so legion claims close ends it" — and moves nothing: its state, generation, and pane are what they were; `legion claims suspend` suspends the root; `legion claims stop` of a second worker, S2-3's tester, retires it and its pane is gone; no workflow issue backs S2-1, so `legion claims close` of its root closes the tree while its first worker is still live: the root and the worker are both retired and the worker's pane is gone; `legion stop` ends the daemon with exit 0 |
 | `every-turn-through-the-route` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the route's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
@@ -1108,8 +1107,9 @@ LEGION_E2E_PROJECT=S4B2 LEGION_E2E_DAEMON_PORT=13370 LEGION_E2E_WORKER_STREAM_PO
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
 Anthropic endpoint (checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), which the
 run writes into its copy of the operator fixture's `models.yml` for the pods.
-`LEGION_E2E_ANTHROPIC_KEY_FILE` (required) is a 0600 file holding a plaintext Anthropic key, the
-operator controller's own model route on the devbox
+`LEGION_E2E_ANTHROPIC_KEY_FILE` (required unless `STAGE4B_SKIP_CONTROLLER` is set; checked at
+`prerequisites`) is a 0600 file holding a plaintext Anthropic key, the operator controller's own
+model route on the devbox
 ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 `LEGION_E2E_DISPATCH_URL`, `LEGION_E2E_ENVOY_URL` and `LEGION_E2E_NATS_URL` are production
 Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified names
@@ -2067,8 +2067,7 @@ no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.
 Prints `LEGION_E2E_MODEL_GATEWAY_URL`, the model gateway's Anthropic endpoint, once it is one a
 stage proof can use. Stage 4a and Stage 4b read the variable through it, for their pods. The
 repository carries no default: the operator
-sets it to the `baseUrl` of the `anthropic` provider in their own gateway route
-(`~/.omp/agent/models.yml`).
+sets it to the Anthropic endpoint of the model gateway the cluster's pods reach.
 
 ```sh
 gateway=$(bash scripts/e2e/lib/model-gateway-url.sh)
@@ -2157,8 +2156,7 @@ An agent is a working directory and an agent field together, so a relaunched pan
 generation, is a new agent. An agent's last call decides whether it went without a key: Oh My Pi
 retries a failed key command 30 s later and after a 401.
 
-The record's outcomes are `served` and `failed`; nothing is minted, so no call runs out of time
-or has a mint killed.
+The record's outcomes are `served` and `failed`.
 
 `--notes` is a stage proof's diagnostic: the `EXIT` trap runs it once it has decided the run
 failed, guarded so that it never changes the exit status, and not after a hangup, an interrupt or
@@ -2168,16 +2166,16 @@ have failed the check for want of a key: when it last got none, from where, and 
 
 - **An agent whose last call got no key is still without one.** It is listed whenever that call
   came, marked when it came before the check began: it had no key when the check asked it.
-- **An agent served again after its last starve recovered.** It is listed, with when it was first
-  served again, when that starve came at or after `<since>` less 30 s. The 30 s is the wait Oh My
+- **An agent served again after its last failed call recovered.** It is listed, with when it was
+  first served again, when that failure came at or after `<since>` less 30 s. The 30 s is the wait Oh My
   Pi keeps before it runs a failed key command again (`COMMAND_FAILURE_RETRY_MS`, 30 s in the Oh My
   Pi `.omp-pin` names): a request inside it fails with no key and runs no command, so it leaves
-  no line, and a check's first calls can fail on a starve from just before the check began.
+  no line, and a check's first calls can fail on a failed call from just before the check began.
 - **An agent served again before that window** held a key through the whole check, and is left out.
 
-A person then sees whether starvation could explain the failure. A run-wide "not scored" would not
-be honest: in Stage 4b the key command's one caller is the operator's controller, while every pod
-uses its projected token, so a worker's failure cannot come from a starved controller.
+A person then sees whether a missing key could explain the failure. A run-wide "not scored" would
+not be honest: in Stage 4b the key command's one caller is the operator's controller, while every
+pod uses its projected token, so a worker's failure cannot come from the controller's key.
 
 `--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make first, before they write
 anything into their evidence directory or set any trap, when the operator's evidence directory

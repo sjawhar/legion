@@ -31,8 +31,8 @@
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
-# The key command's record is read with this script's own reader, and an agent's tool calls with this
-# script's own lib/omp-tool-calls.jq: an ACCEPT_ROOT from before either has none to run.
+# The key command's installer and its record's reader, and an agent's tool calls' lib/omp-tool-calls.jq,
+# are this script's own: an ACCEPT_ROOT from before any of them has none to run.
 script_lib=$(cd "$(dirname "$0")" && pwd)/lib
 unserved_reader=$script_lib/model-gateway-unserved.sh
 base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
@@ -603,7 +603,7 @@ printf '%s\n' "$head_commit" >"$evidence/head.txt"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
+key_command=$(bash "$script_lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
   fail "the agents' model route through the key file could not be installed (the reason is above)"
 note "the agents' model route keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"

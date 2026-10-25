@@ -36,7 +36,7 @@
 #     before it runs a failed key command again (resolve-config-value.ts COMMAND_FAILURE_RETRY_MS,
 #     30 s in the Oh My Pi .omp-pin names).
 #     Inside that wait a request fails with no key and runs no command, so it leaves no line, and
-#     the agent's first calls in the check can fail on a failure just before it.
+#     the agent's first calls in the check can fail on a failed call just before it.
 #   - An agent served again before that window held a key through the whole check, and is left out.
 # It says nothing when no agent is listed, or when <dest> holds no record yet.
 #
@@ -95,29 +95,29 @@ case "${1:-}" in
   lookback=$(date -u -d "$3 $retry_s seconds ago" +%FT%TZ)
   # Per agent: its last outcome, its last failure (time and line), and its first served call after
   # that failure.
-  declare -A last_outcome=() starve_at=() starve_line=() served_after=()
+  declare -A last_outcome=() failed_at=() failed_line=() served_after=()
   while IFS=$'\t' read -r at pid cwd agent outcome detail; do
     known "$outcome" "$detail"
     key="$cwd $agent"
     last_outcome[$key]=$outcome
     if [ "$outcome" = served ]; then
-      [ -z "${starve_at[$key]:-}" ] || [ -n "${served_after[$key]:-}" ] || served_after[$key]=$at
+      [ -z "${failed_at[$key]:-}" ] || [ -n "${served_after[$key]:-}" ] || served_after[$key]=$at
     else
-      starve_at[$key]=$at
-      starve_line[$key]=$(render "$at" "$pid" "$cwd" "$agent" "$outcome" "$detail")
+      failed_at[$key]=$at
+      failed_line[$key]=$(render "$at" "$pid" "$cwd" "$agent" "$outcome" "$detail")
       served_after[$key]=
     fi
   done <"$record"
   lines=()
   without=0
-  for key in "${!starve_at[@]}"; do
+  for key in "${!failed_at[@]}"; do
     before=
-    [[ ! ${starve_at[$key]} < $3 ]] || before=" (before check $4 began)"
+    [[ ! ${failed_at[$key]} < $3 ]] || before=" (before check $4 began)"
     if [ "${last_outcome[$key]}" = served ]; then
-      [[ ! ${starve_at[$key]} < $lookback ]] || continue
-      lines+=("${starve_line[$key]}$before; served again at ${served_after[$key]}")
+      [[ ! ${failed_at[$key]} < $lookback ]] || continue
+      lines+=("${failed_line[$key]}$before; served again at ${served_after[$key]}")
     else
-      lines+=("${starve_line[$key]}$before")
+      lines+=("${failed_line[$key]}$before")
       without=$((without + 1))
     fi
   done

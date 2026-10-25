@@ -41,15 +41,14 @@ set -euo pipefail
 unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_SEED_FILE
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d "/tmp/legion-e2e-user-turns.$$.XXXXXXXX")
-evidence=${DISPATCH_USER_TURNS_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-user-turns-evidence.XXXXXXXX)}
-mkdir -p "$evidence/logs" "$evidence/checks"
 key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
 [ -n "$key_file" ] || {
   echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" >&2
-  rmdir "$work"
   exit 1
 }
+work=$(mktemp -d "/tmp/legion-e2e-user-turns.$$.XXXXXXXX")
+evidence=${DISPATCH_USER_TURNS_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-user-turns-evidence.XXXXXXXX)}
+mkdir -p "$evidence/logs" "$evidence/checks"
 ok=
 listener_pid=
 dispatch_pid=
@@ -85,6 +84,9 @@ tm() { tmux -S "$work/tmux.sock" "$@"; }
 cleanup() {
   local p
   set +e
+  # First, before anything slower can hang: the model route's key command, which bakes in the key
+  # file's resolved path.
+  rm -rf "$work/model-gateway-key"
   tm capture-pane -p -t user >"$evidence/checks/session.pane" 2>/dev/null
   [ -z "$session_file" ] || cp "$session_file" "$evidence/session.jsonl" 2>/dev/null
   tm kill-server >/dev/null 2>&1

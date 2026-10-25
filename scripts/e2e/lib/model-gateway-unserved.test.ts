@@ -180,6 +180,27 @@ describe("the model route's call record", () => {
     expect(unserved("--notes", dest, since, "merge").code).toBe(1);
   });
 
+  test("serves the key alone, without the whitespace around it, and records a key file gone or blank as failed", async () => {
+    const { run, dest, keyFile, keyCommand } = install();
+    writeFileSync(keyFile, " sk-ant-x \r\n");
+    const raw = Bun.spawnSync(["/bin/sh", "-c", `exec ${keyCommand}`], {
+      cwd: run,
+      env: { PATH: process.env.PATH ?? "" },
+    });
+    expect([raw.exitCode, raw.stdout.toString()]).toEqual([0, "sk-ant-x\n"]);
+    writeFileSync(keyFile, "\r\n");
+    expect(
+      (await call(keyCommand, join(run, "blank"), { role: "tester", generation: "1" })).code
+    ).toBe(1);
+    rmSync(keyFile);
+    expect(
+      (await call(keyCommand, join(run, "gone"), { role: "tester", generation: "2" })).code
+    ).toBe(1);
+    const record = readFileSync(join(dest, "anthropic-key.calls"), "utf8");
+    expect(record).toContain(`\ttester/1\tfailed\tempty ${keyFile}\n`);
+    expect(record).toContain(`\ttester/2\tfailed\tcould not read ${keyFile}\n`);
+  });
+
   test("keeps the installer's preflight out of the record, and says why it got no key once", () => {
     const { run, dest, keyFile, result } = install("");
     expect(result.exitCode).toBe(1);

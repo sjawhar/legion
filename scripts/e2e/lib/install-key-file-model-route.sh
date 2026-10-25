@@ -40,10 +40,10 @@
 # No key reaches a pane's own environment or the profile's models.yml, which names only the key
 # command's path (baked in at install time): the key command alone is handed --key-file's path.
 # A pane runs as the operator's own uid, though, so an agent's own bash can still read --key-file
-# directly, or run the key command itself. There is nothing to mint, so there is no preflight
-# budget and no cache: every call is a plain, fast file read, checked for its own permission bits
-# once, here, before any pane exists, so a key file a group or other user can read is refused
-# loudly at install rather than silently leaking the key to them on the first call.
+# directly, or run the key command itself. Every call is a plain, fast file read, its whitespace
+# dropped; the file's permission bits are checked once, here, before any pane exists, so a key file
+# a group or other user can read is refused loudly at install rather than silently leaking the key
+# to them on the first call.
 set -euo pipefail
 
 me=install-key-file-model-route
@@ -166,9 +166,7 @@ key_command=$key_dir/anthropic-key
 #
 # Every agent's call appends its outcome to the record, one tab-separated line: time, caller pid,
 # caller working directory, agent, outcome and detail. What each field holds, and the values agent
-# and outcome take, is stated once, in lib/model-gateway-unserved.sh's header; this route's own
-# outcomes are only served and failed (a key file is never minted and never times out, so there is
-# nothing for timeout or killed to mean here).
+# and outcome take, is stated once, in lib/model-gateway-unserved.sh's header: served or failed.
 EOF
   printf 'log=%q\n' "$log"
   printf 'record=%q\n' "$dest/anthropic-key.calls"
@@ -208,6 +206,9 @@ if key=$(<"$key_file"); then
 else
   detail="could not read"
 fi
+# The key alone: whitespace around it (a CRLF line end, a trailing space) is no part of any key.
+key=${key-}
+key=${key//[[:space:]]/}
 if [ -z "${key:-}" ]; then
   record failed "$detail $key_file"
   TZ=UTC printf '%(%FT%TZ)T no key for pid %s: %s %s\n' -1 "$PPID" "$detail" "$key_file" >>"$log"

@@ -142,15 +142,23 @@ cmd_profile() {
   [ ! -e "$P" ] || fail "$P exists; remove it to rebuild label $label"
   co=$(cd "$2" && pwd -P)
   [ -f "$co/scripts/e2e/lib/install-plugin-profile.sh" ] || fail "$co is not a Legion checkout"
+  [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
   mkdir -p "$P"
   printf '%s\n' "$co" >"$P/checkout"
   printf '%s\n' "$profile" >"$P/profile"
   # What the label runs: the checkout's working-copy commit and a digest of its skills tree, the
   # files the packed plugins stage into their dist/skills, listed in byte order (LC_ALL=C) so the
   # digest is the same in every locale.
+  local commit head
+  if ! commit=$(jj -R "$co" log -r @ --no-graph -T 'commit_id ++ " parents=" ++ parents.map(|c| c.commit_id()).join(",")' 2>/dev/null); then
+    # A git checkout: its HEAD, and `dirty` when the working tree differs from it.
+    head=$(git -C "$co" rev-parse HEAD 2>/dev/null) || fail "$co is neither a jj nor a git checkout, so the label cannot name its commit"
+    commit="$head parents=$(git -C "$co" rev-parse HEAD^ 2>/dev/null)"
+    [ -z "$(git -C "$co" status --porcelain)" ] || commit+=" dirty"
+  fi
   {
     printf 'checkout %s\n' "$co"
-    printf 'commit %s\n' "$(jj -R "$co" log -r @ --no-graph -T 'commit_id ++ " parents=" ++ parents.map(|c| c.commit_id()).join(",")')"
+    printf 'commit %s\n' "$commit"
     printf 'skills %s\n' "$(cd "$co" && find skills -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
   } >"$P/built-from"
   (
@@ -165,11 +173,14 @@ cmd_profile() {
     fail "install-plugin-profile.sh --package pi-envoy failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$P/home" --dest "$P/pi-legion" >>"$P/install.log" 2>&1 ||
     fail "install-plugin-profile.sh --package pi-legion failed; see $P/install.log"
-  # The key command lives as long as the label's profile, since every batch's runs name it; it is
-  # under the work directory, outside any checkout, and goes when the label's directory does.
-  [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
-  bash "$co/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --key-dir "$P/key-command" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" >>"$P/install.log" 2>&1 ||
+  # The key command lives as long as the label's profile, since every batch's runs name it: the
+  # one caller of the installer that keeps --key-dir past its own exit. It is 0700 under the work
+  # directory, outside any checkout, holds the key file's path and not the key, and goes when the
+  # label's directory does. A failed install removes it.
+  bash "$co/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --key-dir "$P/key-command" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" >>"$P/install.log" 2>&1 || {
+    rm -rf "$P/key-command"
     fail "install-key-file-model-route.sh failed; see $P/install.log"
+  }
   cp "$co/.omp-pin" "$P/pin"
   touch "$P/ready"
   cat "$P/built-from"

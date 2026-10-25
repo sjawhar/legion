@@ -2860,8 +2860,15 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
 key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
-[ -n "$skip_controller" ] || [ -n "$key_file" ] ||
-  fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key, the operator controller's model route (or set STAGE4B_SKIP_CONTROLLER for a development run)"
+if [ -z "$skip_controller" ]; then
+  [ -n "$key_file" ] ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key, the operator controller's model route (or set STAGE4B_SKIP_CONTROLLER for a development run)"
+  # The installer's own checks, here rather than hours later at the controller checkpoint.
+  [ -f "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $key_file, which is not a regular file"
+  [[ $(stat -L -c %a -- "$key_file") =~ ^[0-7]00$ ]] ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE $key_file is readable by group or other; chmod 600 it"
+  [ -n "$(tr -d '[:space:]' <"$key_file")" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE $key_file holds no key"
+fi
 # The branch-built daemon links no release plugin pair (only a release workflow build does), so a
 # daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from
 # `--check-config`) unless the run's legion.yaml names runtime.kubernetes.plugins itself. Stage 4b

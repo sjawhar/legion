@@ -416,6 +416,7 @@ key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
 [ -n "$key_file" ] ||
   fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding the Anthropic API key the run's agents reach their model with"
 [ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $key_file, which is not a readable file"
+[[ $(stat -L -c %a -- "$key_file") =~ ^[0-7]00$ ]] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE $key_file is readable by group or other; chmod 600 it"
 refuse_leftovers legion-e2ecc
 for tool in go docker jq curl ss tmux bun mise secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
