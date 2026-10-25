@@ -443,6 +443,46 @@ func TestAFrozenServerTimesOutARequestWithoutDroppingTheConnection(t *testing.T)
 	}
 }
 
+// Two freezes may overlap, and each thaw may be called more than once: neither ends the test
+// binary (a second close of one gate panicked it once), a thaw left over from an earlier freeze
+// does not end a later one, and the traffic resumes once every thaw has run.
+func TestOverlappingFreezesThawInEitherOrderWithoutPanicking(t *testing.T) {
+	for _, secondFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("second thawed first %v", secondFirst), func(t *testing.T) {
+			server, uri := Start(t)
+			conn := Connect(t, uri)
+			defer conn.Close()
+			sub, err := conn.Subscribe("echo", func(msg *natsgo.Msg) { _ = msg.Respond([]byte("answer")) })
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+			defer func() { _ = sub.Unsubscribe() }()
+
+			first, second := server.Freeze(t), server.Freeze(t)
+			if secondFirst {
+				first, second = second, first
+			}
+			first()
+			second()
+			first()
+			second()
+			if _, err := conn.Request("echo", nil, connectTimeout); err != nil {
+				t.Fatalf("request after every thaw: %v", err)
+			}
+
+			later := server.Freeze(t)
+			first()
+			if _, err := conn.Request("echo", nil, time.Second); !errors.Is(err, natsgo.ErrTimeout) {
+				t.Fatalf("a request after a stale thaw of an earlier freeze: %v, want %v", err, natsgo.ErrTimeout)
+			}
+			later()
+			if _, err := conn.Request("echo", nil, connectTimeout); err != nil {
+				t.Fatalf("request after the later thaw: %v", err)
+			}
+		})
+	}
+}
+
 // The anonymous wait ends at once, failing the test, on a server that refuses a client with no
 // credential: that server is up and has no no_auth_user, so waiting out the deadline would only
 // report the same refusal later.
