@@ -68,7 +68,7 @@ begin prerequisites
 for tool in go awk; do
   command -v "$tool" >/dev/null || fail "$tool is not on PATH"
 done
-note "go $(go version | awk '{print $3}'), store $(sed 's#://[^@/]*@#://<credential>@#' <<<"$LEGION_TEST_PG_DSN")"
+note "go $(go version | awk '{print $3}'), store LEGION_TEST_PG_DSN (set; not printed)"
 nats_bin=${LEGION_E2E_NATS_BIN:-}
 if [ -z "$nats_bin" ]; then
   note "LEGION_E2E_NATS_BIN names none; installing nats-server $nats_version into this run's own GOBIN"

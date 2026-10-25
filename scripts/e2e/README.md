@@ -1912,7 +1912,7 @@ the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the scri
 
 | check | what it holds |
 | :--- | :--- |
-| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN is printed with its credential masked), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
+| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
 | `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
 | `driver` | a test binary of `TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive` (`internal/daemon/merged_root_waits_live_test.go`, `-tags e2e`) |
 | `proof` | the seven steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
