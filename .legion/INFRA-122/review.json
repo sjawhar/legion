@@ -2,31 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-122",
-  "completed": "2026-10-25T18:06:30Z",
-  "reviewedHead": "aa58857897400c3bf95688c1834a87152722d9ba",
-  "codeHead": "5bdf16079401da78cf036f243905bad95b356356",
+  "completed": "2026-10-25T19:53:30Z",
+  "round": 2,
+  "reviewedHead": "0b2e878f014922b1f6de04567fc8077a4bdf7eac",
+  "codeHead": "c6889bb0b56b16176234b16a738ea213c35493fa",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
-  "minor": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/bus/nats.go:432",
-      "description": "CoreSubOK reads only Subscription.IsValid, which nats.go v1.50.0 never clears on a server's permission refusal (processTransientError sets the unexported permissionsErr, nats.go:3806-3833; IsValid checks only conn and closed, :4928-4934). After a reconnect onto a server that refuses notifications.>, the live lane delivers nothing while /healthz answers 200 healthy, live_topics: subscribed (cmd/listener/main.go:371). Reproduced by the deep review on the built listener at 5bdf1607 ($TMPDIR/deep-review-live-*/listener.log: 'envoy nats async error name=envoy-live-topics ... Permissions Violation for Subscription to notifications.>' after reconnect, then a publish returned 200 and no prompt). The startup Flush+LastError check (main.go:551-558) runs only at start. Fix: the refusal of the current core subscription makes CoreSubOK false (or ends the listener) until a subscription the server accepts; a regression test restarts the server without the grant."
+      "file": "packages/envoy/internal/session/session.go:74",
+      "description": "The owner-only refusal ErrWrongMachine reaches HandleAgentMessage, which returns Delivered:false, Err:nil (internal/session/handler.go:33,46). agentSubjectDelivery reads that as a missing session and publishes a no_holder exception (cmd/listener/delivery.go:593, publishNoHolderExceptionOrNak; isControlTopic covers notifications.agent.*). The exception goes to the stored subject notifications.envoy.exceptions.notifications.agent.<session>, once per non-owning listener, for every inbox message to a serving-port session that its owner delivered. If that publish fails, the message is NAKed. Second source: the tester's round-3 run shows m2 logging 'listener agent session not found anywhere', the line logged after that publish. Required: a non-owner's ErrWrongMachine is ACKed silently, and the two-listener test asserts that no exception is published."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/api.go:1075",
-      "description": "The PR adds a refusal at a process boundary (POST /v1/interests/subscribe answers 400 for a serving-port registration whose host is not an IP literal or plain host name; config.Load refuses any ENVOY_SUBSCRIBE_ALL_TOPICS other than unset/''/0/1) and its body carries no ## Contract change census. The census must list the search commands and every sender with a disposition, notably packages/envoy-client/src/transport.ts:320 (host: machineID() = ENVOY_MACHINE_ID || os.hostname()), which the OpenCode plugin sends with a port: an ENVOY_MACHINE_ID holding a space now gets every registration refused, including on a compose host whose ENVOY_HOST_BRIDGE would win over the host anyway; and a rollout line (warn-first, or an immediate refusal naming the vulnerability it closes)."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/site/src/content/docs/dispatch/envoy.md:123",
-      "description": "'it reaches every session subscribed to it when it is published, the publisher included' is false for a serve-port publisher: fanoutDelivery skips the source session (cmd/listener/delivery.go:670-679 'listener skip echo', which the tester also observed). The tool description and skills/envoy/SKILL.md attach 'yours included' to own-NATS sessions only; this row should say the same."
+      "file": "packages/envoy/internal/session/session.go:74",
+      "description": "A serving-port session that re-registers through listener B after A keeps its interest's MachineID A (internal/store/kv.go:396 keeps the stored value), while its session entry moves to B (claim_wiring.go sessionEntryFromSubscribe plus mergeForClaim). For a stored topic, Registry.Match selects it only on A. A now gets ErrWrongMachine, which fanoutDelivery treats as retryable while the session is live (cmd/listener/delivery.go:701): it logs 'listener delivery failed' at ERROR and NAKs until the durable's attempts run out. B matches nothing. Before this PR, A dialled B's machine name. This breaks acceptance 2 (nothing else the listener delivers changes). Required: the interest's owner and the session's owner agree (or the owner check reads the same ownership Match uses), with a two-listener re-home regression on a stored topic."
     }
   ],
-  "fastFollow": "Move openLiveTopics and liveDeliveryHandler out of cmd/listener/main.go (now 1058 lines) into a cmd/listener/live_topics.go, beside the durable.go split, in this pull request's next push.",
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title. CI head 5bdf1607 (newest pull_request runs): lint, typecheck, test, pr-title success; envoy-go, envoy-go-race and dispatch in progress in run 40217683605 at 18:05Z. Compare 5bdf1607...aa588578 touches only .legion/.",
-  "thermonuclear": "Both at aa588578 (code 5bdf1607): deep review CHANGES (finding 1); code quality CHANGES (main.go growth, finding 3)."
+  "roundOneThreads": "PRRT_kwDORFy7ds6wDn2M (fixed in 7139c129/d73383ee), PRRT_kwDORFy7ds6wDn2S (census in 6efd412a), PRRT_kwDORFy7ds6wDn2U (envoy.md in 6efd412a): each answered as accepted; the implementer had already resolved all three.",
+  "hardening": "nats.go onAsyncError compares the server's %q-quoted queue with the raw queue name, so a machine id holding a double quote would evade the refusal mark. No host name or deployed machine id holds one.",
+  "fastFollow": "Move onAsyncError, its regexes and the subscription-refusal state out of internal/bus/nats.go (now 1016 lines) into a subscription-focused file, in this pull request's next push.",
+  "specDeparture": "Owner-only delivery departs from the approved spec's sentence that another machine's session is reached at its recorded host, else that machine's name. The architect decided it, and the PR body and census record it. Acceptance 5 still holds through the owner's recorded-host rule.",
+  "ci": "Required set on main: lint, typecheck, test, pr-title. Code head c6889bb0: lint, typecheck and test succeeded (Tests run 40226426511); pr-title succeeded (run 40226524652). Legion Envoy and Contracts run 40226426618 was still running at 19:50Z. The compare from c6889bb0 to 0b2e878f touches only .legion/.",
+  "thermonuclear": "Both run at 0b2e878f (code c6889bb0). Deep review: CHANGES (findings 1 and 2, plus the hardening item). Code quality: CHANGES (finding 1, plus file size)."
 }
