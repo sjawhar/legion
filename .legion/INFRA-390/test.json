@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-390",
+  "completed": "2026-10-25T17:17:30Z",
+  "headSha": "ec9df4741eae36a3002df5a5cd832a808b54042f",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran TestRealGitHubRefReadsALargeHead against sjawhar/legion@scratch/infra-390-large-head with the review App's token (legion-reviewer[bot]): PASS at head (1,239,400 bytes of JSON, Ref = 43aeb35d...), FAIL with 'GitHub response body exceeds the 1048576-byte limit' on a base overlay of client.go+deliveries.go+app.go. Drove the key boots independently on a tester-built binary with a wider matrix (16 forms, head and base). Re-ran the browser suite (architecture.e2e.ts settings.e2e.ts, chromium): 16 passed, server booted from run-server.sh's plain PEM."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Root A3: Client.Ref returns the head SHA on a real branch whose GET /repos/{owner}/{repo}/commits/{branch} answer is over 1 MiB; the code before the change fails on the same branch with the 1048576-byte error",
+      "surface": "the real envoy-dispatch binary (tester-built, go build ./cmd/dispatch at ec9df474) over the pod's Postgres 17 + pgvector, its architecture import driven over Dispatch's API (agent bearer), DISPATCH_GITHUB_API_BASE a loopback proxy that answers only the App endpoints (installation lookup, token mint) and forwards every /repos/sjawhar/legion read to api.github.com unchanged (path, query, Accept) with the review App's installation token",
+      "command": "PUT /api/v1/projects/TSTB/architecture-source {repo: sjawhar/legion, branch: scratch/infra-390-large-head}; POST /api/v1/projects/TSTB/architecture-source/sync; GET /api/v1/projects/TSTB/architecture; then branch main and branch no-such-branch-infra-390 (import.sh); then keepmodel.sh: a good sync, a sync through the proxy with Accept dropped, a sync with it restored (projects TSTD large head, TSTE main)",
+      "observed": "sync 200 last_commit 43aeb35d1676fb2df9d8f36b3afb218368404d8d last_error null, 36 components; proxy log 'forward GET /repos/sjawhar/legion/commits/scratch%2Finfra-390-large-head accept=application/vnd.github.sha -> 200 40 bytes'; main -> last_commit 4792c8fa (equal to gh api branches/main); nonexistent branch -> GitHub 422 to the SHA media type, sync 409 SOURCE_ACCESS 'the branch does not exist'; Accept dropped -> last_error 'commit for sjawhar/legion@main: GitHub answered no commit SHA (31100 bytes)' (large head: the 1 MiB error), last_commit and 36 components kept, cleared on the next good sync. PR comment https://github.com/sjawhar/legion/pull/2202#issuecomment-6400671435",
+      "headSha": "ec9df4741eae36a3002df5a5cd832a808b54042f",
+      "negativeControl": "base binary (go build -overlay with auth/app.go, githubapp/client.go, githubapp/deliveries.go at 83f63201), key as base64, same PUT+sync on scratch/infra-390-large-head -> 200 with last_commit null, last_error 'GET http://127.0.0.1:9029/repos/sjawhar/legion/commits/scratch%2Finfra-390-large-head: GitHub response body exceeds the 1048576-byte limit'; main still imports."
+    },
+    {
+      "criterion": "Dispatch boots the App config from a plain PEM and from base64 of the same PEM; a malformed value still fails with a clear error; the plain-PEM case fails on the code before the change",
+      "surface": "the real envoy-dispatch binary (tester-built) booted with DISPATCH_APP_PEM_B64 in 16 forms, run-server.sh's environment, DISPATCH_NATS_DISABLED=1, /healthz polled",
+      "command": "bash $TMPDIR/tester390/keymatrix.sh $TMPDIR/tester390/dispatch-head head (and dispatch-base base)",
+      "observed": "head: healthz 200 'loaded github app ... source=env' for PKCS#1 PEM, PKCS#8 PEM, PEM with trailing blank lines, CRLF PEM, PEM after a 'Bag Attributes' preamble, base64 -w0, base64 wrapped at 76 columns, base64 of PKCS#8; exit 1 at load for EC key, public key, encrypted key ('DISPATCH_APP_PEM_B64: plain PEM: not a PKCS1 or PKCS8 private key'), literal \\n escapes ('plain PEM: no PEM block found'), base64 of DER ('base64 of a PEM: no PEM block found'), 'not-base64!' and three spaces ('illegal base64 data at input byte N'); empty value boots with no key as before; no 40+ character line of key material in any of 32 logs. Browser suite (architecture.e2e.ts settings.e2e.ts, chromium) 16 passed with run-server.sh's plain PEM.",
+      "headSha": "ec9df4741eae36a3002df5a5cd832a808b54042f",
+      "negativeControl": "base binary: every plain-PEM form exits 1 'DISPATCH_APP_PEM_B64: illegal base64 data at input byte N' (0, or 3 for the preamble); base64 forms boot; base64 of DER passes load and fails later 'BuildAppContext: parse GitHub App private key: no PEM block found', naming no variable."
+    }
+  ],
+  "coverage": "No defect found. The settings table (plain, PKCS#8, base64, 76-column base64, not-base64, base64 of no key, armour around garbage, empty) and TestRefReadsTheHeadOfALargeCommit / TestRefRefusesAnAnswerThatIsNotACommitSHA would catch each break tried here; CRLF and preamble PEMs work through encoding/pem and are not pinned, which no current code path breaks.",
+  "ci": "At ec9df474 when written: Tests 40214617412 in progress, Legion Envoy and Contracts 40214617460 queued, Worker Image 40214617592 queued, Docs 40214617399 success, PR Title 40214617442 success. Not waited on.",
+  "notes": [
+    "PUT architecture-source accepts a nonexistent branch (200) and only the sync refuses it (409 SOURCE_ACCESS); the same on base, outside this change.",
+    "Scratch branch scratch/infra-390-large-head still exists for the reviewer; the implementer deletes it at retro."
+  ]
+}
