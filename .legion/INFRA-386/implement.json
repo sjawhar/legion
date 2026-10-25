@@ -2,10 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T16:45:23Z",
+  "completed": "2026-10-25T17:02:20Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+  "codeHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
   "proof": [
+    {
+      "criterion": "Round 5: the four reviewed sentences no longer claim more than the block or the runs show; A1-A8 hold; no command changed",
+      "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=241f4e1afcee63b80d5d76f5a3852816a6460d35\" -H \"Accept: application/vnd.github.raw\"; plan section 4 checks; hunks5.awk (hunks3 ranges plus 3188-3191)",
+      "observed": "pushed page identical to the checked working copy; A1 0; A2 1 x7; A3 date 4; A4 abe1b4cf... (base); A6 no NONCOMMENT, old-closing 0, old-listing 1; A7 0; A8 0; 'inside the create' 0; A5 seven hunks all ok",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "hunks3.awk (without the deliberate-stop range) prints 'OUT old 3188-3191' and exits 1, so the range check still detects an edit outside its list"
+    },
+    {
+      "criterion": "Second stop during the trap cuts the clean-up short (the mechanism the new sentences state)",
+      "surface": "this issue's role container, bash, a stub of the trap's structure (trap - EXIT INT TERM HUP, set +e, sleep 3 in place of the delete) run under setsid -f",
+      "command": "setsid -f bash stub.sh; kill -TERM -- -<pid> once, or twice 0.5 s apart; read its log after 4 s",
+      "observed": "two TERMs: 'Terminated', 'cleanup: start', nothing after it",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "one TERM: 'cleanup: start', 'cleanup: delete done', 'sequence: exit 143'"
+    },
+    {
+      "criterion": "Round 5 reader probes: a reader treats a missing sequence: exit line as a cut-short clean-up, and finds the failed label delete in the recovery paragraph",
+      "surface": "fresh scout subagents given only the closing comment, the deliberate-stop and recovery paragraphs, and one run's output",
+      "command": "(a) run log ending after two stops with no sequence: exit line: is the workload gone, what to run; (b) run whose label delete failed: can it have left a Job, does the last paragraph name it",
+      "observed": "head: (a) 'No, the workload is not gone ... had its clean-up cut short', then the delete by the printed name; (b) 'Yes ... The last paragraph names this case: a label delete that failed'",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "355ffe8e: (a) 'The text doesn't settle it ... It also doesn't cover a second kill'; (b) 'The last paragraph does not name it'"
+    },
+    {
+      "criterion": "A9, round 5: no private name enters the change",
+      "surface": "the repository at the head, the round's added lines, the live PR body",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over the round's added lines and the PR body before the PATCH",
+      "observed": "check-private-names exit 0; sweep 0 literal, 0 whole-word for each",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "a scratch file holding the reachability label gives literal 1 (same script, round 1)"
+    },
     {
       "criterion": "Round 4: the trap paragraph, the recovery paragraph and the INFRA-232 bullet agree on where the measured stops landed and on what evidence; A1-A8 hold",
       "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
@@ -123,12 +155,19 @@
     "The refusal is quoted with its rule message elided as well as the policy name, since the rule message contains the compute class's name as a word and the sweep counts it.",
     "Round 2: P1 was not re-run; the sequence block is byte-identical to 97e9883b's, where P1 and its control ran, and the architect ruled that no stop is re-measured.",
     "Round 3: P1 was not re-run; no command of the block changed (comment-stripped block cmp-identical to base), and the architect ruled that no stop is re-measured.",
-    "Round 4: the INFRA-232 evidence bullet's two stop placements (base 3278-3282) changed, outside the plan's A5 ranges, under the architect's round-3 ruling that a further sweep finding is fixed in the same round; P1 not re-run (no command changed)."
+    "Round 4: the INFRA-232 evidence bullet's two stop placements (base 3278-3282) changed, outside the plan's A5 ranges, under the architect's round-3 ruling that a further sweep finding is fixed in the same round; P1 not re-run (no command changed).",
+    "Round 5: the deliberate-stop paragraph (base 3188-3191) changed at the reviewer's request, outside the plan's A5 ranges; P1 not re-run (no command changed)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
-  "round": 4,
-  "roundReason": "Tester's round-3 failure: round 3's trap sentence (the 0.33/0.35 s stops' placement is not shown by what they printed) contradicted the unchanged INFRA-232 bullet ('two that landed inside the create', 'kill -KILL that landed inside the create'); secondary: the recovery paragraph's 'SIGKILL ... during the create' left out a SIGKILL after the answer and before the name printed.",
-  "previousCodeHead": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
-  "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body)."
+  "round": 5,
+  "roundReason": "Review at 355ffe8e requested changes on four sentences: the closing comment (no-trap exits, second stop), the recovery paragraph's list (failed label delete, cut-short label-path trap), the trap paragraph's count of label-path runs, the bullet's placement caveat.",
+  "previousCodeHead": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+  "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body).",
+  "threads": [
+    "PRRT_kwDORFy7ds6wDE3_ fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wDE4C fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wDE4D fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wDE4G fixed, replied, resolved"
+  ]
 }
