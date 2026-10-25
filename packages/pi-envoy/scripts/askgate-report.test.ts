@@ -3,13 +3,18 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  computeDispatchReport,
   computeStats,
+  type DispatchReport,
+  dispatchReportLines,
   formatReport,
   type GateRecord,
   isRefusal,
   isSentBack,
   parseArgs,
   parseSessionText,
+  type ReportClient,
+  readDecisionDocuments,
   readSessions,
   sampleLine,
   sampleSentBack,
@@ -529,6 +534,40 @@ describe("parseArgs", () => {
       parseArgs(["--sessions", "d", "--since", SINCE, "--sample", "-1", "--out", "o"])
     ).toThrow("--sample");
   });
+
+  test("parses each mode, and refuses --json outside the Dispatch mode", () => {
+    expect(parseArgs(["--sessions", "d", "--since", SINCE, "--sample", "2", "--out", "o"])).toEqual(
+      { mode: "sessions", sessions: "d", since: Date.parse(SINCE), sample: 2, out: "o", seed: null }
+    );
+    expect(parseArgs(["--dispatch-project", "ACME", "--since", SINCE, "--json"])).toEqual({
+      mode: "dispatch",
+      project: "ACME",
+      since: Date.parse(SINCE),
+      sinceText: SINCE,
+      json: true,
+    });
+    expect(() =>
+      parseArgs(["--sessions", "d", "--since", SINCE, "--sample", "1", "--out", "o", "--json"])
+    ).toThrow("--json is allowed only with --dispatch-project");
+  });
+
+  test("refuses the two modes together, neither of them, and --sample or --out with the project", () => {
+    expect(() =>
+      parseArgs(["--sessions", "d", "--dispatch-project", "ACME", "--since", SINCE])
+    ).toThrow("--sessions and --dispatch-project cannot be given together");
+    expect(() => parseArgs(["--since", SINCE])).toThrow(
+      "one of --sessions and --dispatch-project is required"
+    );
+    expect(() =>
+      parseArgs(["--dispatch-project", "ACME", "--since", SINCE, "--sample", "1"])
+    ).toThrow("--sample is not allowed with --dispatch-project");
+    expect(() => parseArgs(["--dispatch-project", "ACME", "--since", SINCE, "--out", "o"])).toThrow(
+      "--out is not allowed with --dispatch-project"
+    );
+    expect(() => parseArgs(["--dispatch-project", "ACME", "--since", "yesterday"])).toThrow(
+      "--since"
+    );
+  });
 });
 
 describe("isSentBack and isRefusal", () => {
@@ -539,6 +578,261 @@ describe("isSentBack and isRefusal", () => {
     );
     expect(record && isSentBack(record)).toBe(true);
     expect(record && isRefusal(record)).toBe(true);
+  });
+});
+
+const PROJECT = "ACME";
+const POD_SESSION = "ses-pod";
+const MACHINE_SESSION = "ses-machine";
+
+/** One decision record's line, in the wire shape `extensions/askgate/decision-record.ts` writes. */
+function decision(e: {
+  time: string;
+  session: string;
+  source: "pod" | "machine";
+  target?: string;
+  rule?: string;
+  outcome?: string;
+  ruleOutcome?: string;
+  ruleError?: string;
+}): string {
+  return JSON.stringify({
+    time: e.time,
+    session: e.session,
+    source: e.source,
+    project: PROJECT,
+    tool: "bash",
+    target: e.target ?? null,
+    rule: e.rule ?? null,
+    ruleOutcome: e.ruleOutcome ?? (e.rule === undefined ? "none" : "match"),
+    ruleError: e.ruleError ?? null,
+    ruleTextMissing: false,
+    ruleAsksCut: 0,
+    decision: e.rule === undefined ? "allow" : "revise",
+    outcome: e.outcome ?? "verdict",
+    verdictMode: "block",
+    ruleLatencyMs: 1200,
+    charterLatencyMs: null,
+    plugin: "@sjawhar/pi-envoy@0.0.0",
+  });
+}
+
+/** A decision document as the gate uploads one: its header paragraph, then one block per record. */
+function decisionDocument(session: string, lines: readonly string[]): string {
+  const blocks = lines.map((line) => `\`\`\`json\n${line}\n\`\`\``).join("\n\n");
+  return `AskGate rule decisions of session ${session}. One block per decision.\n\n${blocks}\n`;
+}
+
+/** A document of the project: its markdown, or null for one whose read Dispatch refuses. */
+interface ProjectDocument {
+  name: string;
+  markdown: string | null;
+}
+
+/** A Dispatch project holding documents, as the reader's two calls see it. */
+function dispatchProject(documents: readonly ProjectDocument[]): ReportClient {
+  return {
+    listProjectArtifacts: async (key: string) => {
+      expect(key).toBe(PROJECT);
+      return documents.map((held, index) => ({
+        id: `art-${index}`,
+        name: held.name,
+        slug: held.name.replace(/\.md$/, ""),
+      }));
+    },
+    docRead: async (id: string) => {
+      const held = documents[Number(id.slice("art-".length))];
+      if (held === undefined || held.markdown === null) {
+        throw new Error(`artifact ${id} cannot be read`);
+      }
+      return { markdown: held.markdown };
+    },
+  };
+}
+
+// The pod session: a refusal a rebuttal on the same target overrode, a refusal nothing overrode,
+// and a rules call that errored.
+const POD_DOCUMENT = decisionDocument(POD_SESSION, [
+  decision({ time: at(1), session: POD_SESSION, source: "pod", rule: "no_change", target: ASK_1 }),
+  decision({
+    time: at(2),
+    session: POD_SESSION,
+    source: "pod",
+    target: ASK_1,
+    outcome: "rebuttal",
+    ruleOutcome: "none",
+  }),
+  decision({
+    time: at(3),
+    session: POD_SESSION,
+    source: "pod",
+    rule: "untried_access",
+    target: EDIT_2,
+  }),
+  decision({
+    time: at(4),
+    session: POD_SESSION,
+    source: "pod",
+    target: SPEC,
+    ruleOutcome: "error",
+    ruleError: "502 from the provider",
+  }),
+]);
+
+// The machine session: one refusal, and a rules call that timed out with no error text of its own.
+const MACHINE_DOCUMENT = decisionDocument(MACHINE_SESSION, [
+  decision({
+    time: at(1),
+    session: MACHINE_SESSION,
+    source: "machine",
+    rule: "no_change",
+    target: COMMENT_7,
+  }),
+  decision({
+    time: at(2),
+    session: MACHINE_SESSION,
+    source: "machine",
+    target: SPEC,
+    ruleOutcome: "timeout",
+  }),
+  decision({ time: at(3), session: MACHINE_SESSION, source: "machine", target: SPEC }),
+]);
+
+/** The day's project: the two sessions' documents, and one document that is not a decision one. */
+const DAY: ProjectDocument[] = [
+  { name: `askgate-decisions-${POD_SESSION}.md`, markdown: POD_DOCUMENT },
+  { name: "spec.md", markdown: "The project's specification, which holds no decision." },
+  { name: `askgate-decisions-${MACHINE_SESSION}.md`, markdown: MACHINE_DOCUMENT },
+];
+
+const DAY_REPORT: DispatchReport = {
+  project: PROJECT,
+  since: SINCE,
+  documents: 2,
+  unreadableDocuments: 0,
+  sessions: 2,
+  unparsedLines: 0,
+  total: {
+    calls: 7,
+    refusals: 3,
+    byRule: { no_change: 2, untried_access: 1 },
+    overrides: 1,
+    errors: 2,
+  },
+  pod: {
+    calls: 4,
+    refusals: 2,
+    byRule: { no_change: 1, untried_access: 1 },
+    overrides: 1,
+    errors: 1,
+  },
+  machine: {
+    calls: 3,
+    refusals: 1,
+    byRule: { no_change: 1, untried_access: 0 },
+    overrides: 0,
+    errors: 1,
+  },
+};
+
+async function reportOf(documents: readonly ProjectDocument[], since: string) {
+  const read = await readDecisionDocuments(dispatchProject(documents), PROJECT, Date.parse(since));
+  return { read, report: computeDispatchReport(read, PROJECT, since) };
+}
+
+describe("the Dispatch reader", () => {
+  test("two sessions' documents, one pod and one machine, are read into one report", async () => {
+    const { report } = await reportOf(DAY, SINCE);
+    expect(report).toEqual(DAY_REPORT);
+  });
+
+  test("a record before --since is left out, and one at --since is counted", async () => {
+    const documents = [
+      {
+        name: `askgate-decisions-${POD_SESSION}.md`,
+        markdown: decisionDocument(POD_SESSION, [
+          decision({
+            time: at(0),
+            session: POD_SESSION,
+            source: "pod",
+            rule: "no_change",
+            target: ASK_1,
+          }),
+          decision({
+            time: at(1),
+            session: POD_SESSION,
+            source: "pod",
+            rule: "untried_access",
+            target: EDIT_2,
+          }),
+        ]),
+      },
+    ];
+    const { read, report } = await reportOf(documents, at(1));
+    expect(read.records.map((record) => record.time)).toEqual([at(1)]);
+    expect(report.total).toEqual({
+      calls: 1,
+      refusals: 1,
+      byRule: { no_change: 0, untried_access: 1 },
+      overrides: 0,
+      errors: 0,
+    });
+  });
+
+  test("a line that is not a record and a document the read refuses are counted, not fatal", async () => {
+    const documents: ProjectDocument[] = [
+      { name: `askgate-decisions-${POD_SESSION}.md`, markdown: POD_DOCUMENT },
+      {
+        name: `askgate-decisions-${MACHINE_SESSION}.md`,
+        markdown: decisionDocument(MACHINE_SESSION, [
+          '{"time": "2026-10-22T10:00:01.000Z", "session": "ses-machine"',
+          decision({
+            time: at(1),
+            session: MACHINE_SESSION,
+            source: "machine",
+            rule: "no_change",
+            target: COMMENT_7,
+          }),
+        ]),
+      },
+      { name: "askgate-decisions-ses-killed.md", markdown: null },
+    ];
+    const { report } = await reportOf(documents, SINCE);
+    expect({
+      documents: report.documents,
+      unreadableDocuments: report.unreadableDocuments,
+      unparsedLines: report.unparsedLines,
+      sessions: report.sessions,
+    }).toEqual({ documents: 2, unreadableDocuments: 1, unparsedLines: 1, sessions: 2 });
+    expect(report.pod).toEqual(DAY_REPORT.pod);
+    expect(report.machine).toEqual({
+      calls: 1,
+      refusals: 1,
+      byRule: { no_change: 1, untried_access: 0 },
+      overrides: 0,
+      errors: 0,
+    });
+  });
+
+  test("--json prints one object carrying the numbers the plain text prints", async () => {
+    const { report } = await reportOf(DAY, SINCE);
+    const json = dispatchReportLines(report, true);
+    expect(json).toHaveLength(1);
+    expect(JSON.parse(json[0] as string)).toEqual(DAY_REPORT);
+    const text = dispatchReportLines(report, false);
+    expect(text).toContain(`project: ${PROJECT}`);
+    expect(text).toContain(`since: ${SINCE}`);
+    expect(text).toContain("documents: 2");
+    expect(text).toContain("unreadable documents: 0");
+    expect(text).toContain("sessions: 2");
+    expect(text).toContain("unparsed lines: 0");
+    expect(text).toContain("rules calls: 7 (pod 4, machine 3)");
+    expect(text).toContain("refusals: 3 (pod 2, machine 1)");
+    expect(text).toContain("rule no_change: 2 (pod 1, machine 1)");
+    expect(text).toContain("rule untried_access: 1 (pod 1, machine 0)");
+    expect(text).toContain("overrides: 1 (pod 1, machine 0)");
+    expect(text).toContain("rules errors: 2 (pod 1, machine 1)");
+    expect(text).toContain("rules error rate: 28.6% (pod 25.0%, machine 33.3%)");
   });
 });
 
@@ -641,5 +935,24 @@ describe("CLI", () => {
     });
     expect(r.exitCode).toBe(2);
     expect(r.stderr.toString().trim().split("\n")).toHaveLength(1);
+  });
+
+  test("exits 2 naming the flag at fault when both modes are given", () => {
+    const r = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        join(import.meta.dir, "askgate-report.ts"),
+        "--sessions",
+        "d",
+        "--dispatch-project",
+        "ACME",
+        "--since",
+        SINCE,
+      ],
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr.toString()).toContain(
+      "--sessions and --dispatch-project cannot be given together"
+    );
   });
 });

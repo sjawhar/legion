@@ -1,9 +1,15 @@
 // Reports on AskGate's advisor-gate session entries, its rules check included, and samples the
-// reviews it sent back.
+// reviews it sent back. With --dispatch-project it reads instead the decision documents AskGate
+// publishes to a Dispatch project, which is all a standing session holding a Dispatch token and
+// nothing else — no access to the machine a gated session ran on — can read.
 // Usage: bun askgate-report.ts --sessions <dir> --since <RFC 3339> --sample <n> --out <dir>
 //   [--seed <n>]
+//   bun askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
+import type { DecisionRecord } from "../extensions/askgate/decision-record";
 
 /**
  * One advisor-gate entry, with the write's text: the arguments the model reviewed (`reviewedText`),
@@ -88,13 +94,27 @@ export interface Stats {
   rules: RuleStats;
 }
 
-export interface Args {
+/** The report over the session files on disk. */
+export interface SessionsArgs {
+  mode: "sessions";
   sessions: string;
   since: number;
   sample: number;
   out: string;
   seed: number | null;
 }
+
+/** The report over one Dispatch project's decision documents. */
+export interface DispatchArgs {
+  mode: "dispatch";
+  project: string;
+  since: number;
+  /** `--since` as given, which the report prints so a day's numbers name their day. */
+  sinceText: string;
+  json: boolean;
+}
+
+export type Args = SessionsArgs | DispatchArgs;
 
 type Json = Record<string, unknown>;
 
@@ -252,13 +272,26 @@ function tally(values: string[], first: readonly string[] = []): Count[] {
   ];
 }
 
+/** What the override walk reads: a gate entry and a decision record alike. */
+interface Overridable {
+  session: string;
+  target: string | null;
+  rule: string | null;
+  outcome: string;
+}
+
 /**
- * Counts the rules refusals (entries with a rule) that the agent overrode: in each session, in time
- * order, the next entry with the refusal's target is a rebuttal or a breaker.
+ * The rules refusals (records with a rule) that the agent overrode, each with what overrode it:
+ * in each session, in time order, the next record with the refusal's target is a rebuttal or a
+ * breaker. The time is read through `stamp`, since a gate entry carries it as `timestamp` and a
+ * decision record as `time`.
  */
-export function overriddenRefusals(records: GateRecord[]): RuleStats["overridden"] {
-  const overridden = { rebuttal: 0, breaker: 0 };
-  const sessions = new Map<string, GateRecord[]>();
+function overrides<T extends Overridable>(
+  records: readonly T[],
+  stamp: (record: T) => string
+): { refusal: T; by: "rebuttal" | "breaker" }[] {
+  const found: { refusal: T; by: "rebuttal" | "breaker" }[] = [];
+  const sessions = new Map<string, T[]>();
   for (const record of records) {
     const list = sessions.get(record.session) ?? [];
     list.push(record);
@@ -268,7 +301,7 @@ export function overriddenRefusals(records: GateRecord[]): RuleStats["overridden
     // A stable sort by time: entries stamped in the same millisecond keep their file order.
     const ordered = list
       .map((record, index) => {
-        const at = Date.parse(record.timestamp);
+        const at = Date.parse(stamp(record));
         return { record, index, at: Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY };
       })
       .sort((a, b) => a.at - b.at || a.index - b.index);
@@ -279,12 +312,18 @@ export function overriddenRefusals(records: GateRecord[]): RuleStats["overridden
       if (record.target === null) continue;
       if (record.rule !== null) {
         const after = next.get(record.target);
-        if (after === "rebuttal") overridden.rebuttal += 1;
-        else if (after === "breaker") overridden.breaker += 1;
+        if (after === "rebuttal" || after === "breaker") found.push({ refusal: record, by: after });
       }
       next.set(record.target, record.outcome);
     }
   }
+  return found;
+}
+
+/** Counts the rules refusals the agent overrode, by what overrode each. */
+export function overriddenRefusals(records: GateRecord[]): RuleStats["overridden"] {
+  const overridden = { rebuttal: 0, breaker: 0 };
+  for (const { by } of overrides(records, (record) => record.timestamp)) overridden[by] += 1;
   return overridden;
 }
 
@@ -440,35 +479,318 @@ export function sampleLine(record: GateRecord): string {
   });
 }
 
+/** The name and slug every decision document begins with, as the gate's recorder posts them. */
+const DECISION_DOCUMENT_PREFIX = "askgate-decisions-";
+/** A rules call that answered nothing usable, named by its outcome rather than by an error text. */
+const ERROR_OUTCOMES = ["error", "timeout", "no-verdict"];
+
+/**
+ * The fields of one decision record the report counts: a subset of the record
+ * `extensions/askgate/decision-record.ts` writes, taken from its own type, so a change to that
+ * wire shape is a type error here rather than a silently empty count.
+ */
+export type ReportRecord = Pick<
+  DecisionRecord,
+  "time" | "session" | "source" | "target" | "rule" | "ruleOutcome" | "ruleError" | "outcome"
+>;
+
+/** What the reader reads of a project's artifact: the two names it matches, and the id it reads. */
+export interface ReportArtifact {
+  readonly id: string;
+  readonly name: string;
+  readonly slug: string;
+}
+
+/**
+ * What the reader needs of a Dispatch client, which is the two calls it makes. Declared
+ * structurally, over the fields it reads, so the host's own `DispatchClient` satisfies it and a
+ * test drives it with a plain object.
+ */
+export interface ReportClient {
+  listProjectArtifacts(project: string): Promise<readonly ReportArtifact[]>;
+  docRead(id: string): Promise<{ readonly markdown: string }>;
+}
+
+/** One fenced line as a decision record, or null when it is not one. */
+export function parseRecordLine(line: string): ReportRecord | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isObject(value)) return null;
+  // The four fields every count rests on. A line missing one of them belongs in no count at all,
+  // so it is reported as a line that would not parse rather than counted as a decision.
+  const time = str(value.time);
+  const session = str(value.session);
+  const source = value.source;
+  const ruleOutcome = value.ruleOutcome;
+  if (!Number.isFinite(Date.parse(time)) || session === "") return null;
+  if (source !== "pod" && source !== "machine") return null;
+  if (typeof ruleOutcome !== "string") return null;
+  return {
+    time,
+    session,
+    source,
+    target: strOrNull(value.target),
+    rule: strOrNull(value.rule),
+    ruleOutcome,
+    ruleError: strOrNull(value.ruleError),
+    outcome: str(value.outcome),
+  };
+}
+
+/** The records of one decision document, and how many of its fenced lines were not records. */
+export function parseDecisionDocument(markdown: string): {
+  records: ReportRecord[];
+  unparsed: number;
+} {
+  const records: ReportRecord[] = [];
+  let unparsed = 0;
+  let inJson = false;
+  for (const line of markdown.split("\n")) {
+    const text = line.trim();
+    if (text.startsWith("```")) {
+      // A fence either closes the block it is in or opens one, and only a json block holds records.
+      inJson = !inJson && text.slice(3).trim() === "json";
+      continue;
+    }
+    if (!inJson || text === "") continue;
+    const record = parseRecordLine(text);
+    if (record === null) unparsed += 1;
+    else records.push(record);
+  }
+  return { records, unparsed };
+}
+
+/** What a project's decision documents held, with the losses the read leaves visible. */
+export interface DocumentRead {
+  records: ReportRecord[];
+  /** Documents whose markdown was read. */
+  documents: number;
+  /** Documents the read refused: their decisions are missing from every count below. */
+  unreadable: number;
+  /** Fenced lines that were not records: a decision half-written, or something else entirely. */
+  unparsedLines: number;
+}
+
+/**
+ * Reads every decision document of the project, keeping the records at or after since (epoch ms).
+ * A document that cannot be read is counted rather than thrown: one session's loss leaves the
+ * rest of the day's counts standing, and the count says how much of the day is missing.
+ */
+export async function readDecisionDocuments(
+  client: ReportClient,
+  project: string,
+  since: number
+): Promise<DocumentRead> {
+  const read: DocumentRead = { records: [], documents: 0, unreadable: 0, unparsedLines: 0 };
+  const artifacts = (await client.listProjectArtifacts(project)).filter(
+    (artifact) =>
+      artifact.name.startsWith(DECISION_DOCUMENT_PREFIX) ||
+      artifact.slug.startsWith(DECISION_DOCUMENT_PREFIX)
+  );
+  for (const artifact of artifacts) {
+    let markdown: string;
+    try {
+      markdown = (await client.docRead(artifact.id)).markdown;
+    } catch {
+      read.unreadable += 1;
+      continue;
+    }
+    read.documents += 1;
+    const { records, unparsed } = parseDecisionDocument(markdown);
+    read.unparsedLines += unparsed;
+    for (const record of records) if (Date.parse(record.time) >= since) read.records.push(record);
+  }
+  return read;
+}
+
+/** The day's counts over one set of records: one source's, or every source together. */
+export interface DecisionCounts {
+  /** The rules calls, which are the records themselves: the error rate's denominator. */
+  calls: number;
+  /** Records with a rule: the calls the rules check refused. */
+  refusals: number;
+  /** The refusals by rule, the rules the gate ships named even at zero. */
+  byRule: Record<string, number>;
+  /** Refusals a later record on the same target, in the same session, overrode. */
+  overrides: number;
+  /** Rules calls that carried an error text, timed out, or gave no verdict. */
+  errors: number;
+}
+
+/** One day's decisions over one Dispatch project, as both output modes print them. */
+export interface DispatchReport {
+  project: string;
+  /** `--since`, as given. */
+  since: string;
+  documents: number;
+  unreadableDocuments: number;
+  /** Sessions the kept records name: the sessions that made a decision in the day. */
+  sessions: number;
+  unparsedLines: number;
+  total: DecisionCounts;
+  pod: DecisionCounts;
+  machine: DecisionCounts;
+}
+
+/** The counts of one source's records; `overridden` holds the day's overridden refusals. */
+function countDecisions(
+  records: readonly ReportRecord[],
+  overridden: ReadonlySet<ReportRecord>
+): DecisionCounts {
+  const refusals = records.filter((record) => record.rule !== null);
+  return {
+    calls: records.length,
+    refusals: refusals.length,
+    byRule: Object.fromEntries(
+      tally(
+        refusals.map((record) => record.rule as string),
+        RULES
+      ).map((count) => [count.name, count.count])
+    ),
+    overrides: refusals.filter((record) => overridden.has(record)).length,
+    errors: records.filter(
+      (record) => record.ruleError !== null || ERROR_OUTCOMES.includes(record.ruleOutcome)
+    ).length,
+  };
+}
+
+export function computeDispatchReport(
+  read: DocumentRead,
+  project: string,
+  since: string
+): DispatchReport {
+  // The walk runs over the whole day, so a refusal and the rebuttal that overrode it meet even
+  // where one source's records are counted on their own; each override lands on its refusal's.
+  const overridden = new Set(
+    overrides(read.records, (record) => record.time).map(({ refusal }) => refusal)
+  );
+  const of = (source: ReportRecord["source"]): readonly ReportRecord[] =>
+    read.records.filter((record) => record.source === source);
+  return {
+    project,
+    since,
+    documents: read.documents,
+    unreadableDocuments: read.unreadable,
+    sessions: new Set(read.records.map((record) => record.session)).size,
+    unparsedLines: read.unparsedLines,
+    total: countDecisions(read.records, overridden),
+    pod: countDecisions(of("pod"), overridden),
+    machine: countDecisions(of("machine"), overridden),
+  };
+}
+
+function bySource(report: DispatchReport, count: (counts: DecisionCounts) => number): string {
+  return `${count(report.total)} (pod ${count(report.pod)}, machine ${count(report.machine)})`;
+}
+
+export function formatDispatchReport(report: DispatchReport): string[] {
+  return [
+    "A rules call is one decision record: one gated call whose rules check ran.",
+    "A rules refusal is a record with a rule. It was overridden when the next record on its target, in its session, is a rebuttal or a breaker.",
+    "A document that could not be read, and a line that is not a record, are counted below: the decisions they held are missing from every other count.",
+    `project: ${report.project}`,
+    `since: ${report.since}`,
+    `documents: ${report.documents}`,
+    `unreadable documents: ${report.unreadableDocuments}`,
+    `sessions: ${report.sessions}`,
+    `unparsed lines: ${report.unparsedLines}`,
+    `rules calls: ${bySource(report, (c) => c.calls)}`,
+    `refusals: ${bySource(report, (c) => c.refusals)}`,
+    ...Object.keys(report.total.byRule).map(
+      (rule) =>
+        `rule ${rule}: ${report.total.byRule[rule] ?? 0} (pod ${report.pod.byRule[rule] ?? 0}, ` +
+        `machine ${report.machine.byRule[rule] ?? 0})`
+    ),
+    `overrides: ${bySource(report, (c) => c.overrides)}`,
+    `rules errors: ${bySource(report, (c) => c.errors)}`,
+    `rules error rate: ${share(report.total.errors, report.total.calls)} (pod ` +
+      `${share(report.pod.errors, report.pod.calls)}, machine ` +
+      `${share(report.machine.errors, report.machine.calls)})`,
+  ];
+}
+
+/** What the Dispatch mode prints: with --json one object and nothing else, else the plain text. */
+export function dispatchReportLines(report: DispatchReport, json: boolean): string[] {
+  return json ? [JSON.stringify(report)] : formatDispatchReport(report);
+}
+
+/** The session's own Dispatch, as a standing session holding a token and nothing else resolves it. */
+function sessionDispatch(): DispatchClient {
+  const { dispatch, warnings } = sessionDispatchSettings(
+    sessionConfigFile("command", process.env),
+    process.env,
+    { cwd: process.cwd() }
+  );
+  // Said on stderr, so --json keeps stdout to the one object.
+  for (const warning of warnings) console.error(`askgate-report: ${warning}`);
+  if (!dispatch.enabled) {
+    throw new Error(
+      dispatch.error === null
+        ? `Dispatch is not configured: ${dispatch.notice}`
+        : `dispatch config: ${dispatch.error}`
+    );
+  }
+  return new DispatchClient(dispatch.url, dispatch.token, fetch);
+}
+
 function nonNegativeInt(flag: string, value: string): number {
   if (!/^\d+$/.test(value)) throw new Error(`${flag} must be a non-negative integer`);
   return Number(value);
 }
 
-/** Parses the command line. Throws an error naming the flag at fault. */
+/** Parses the command line, in either mode. Throws an error naming the flag at fault. */
 export function parseArgs(argv: string[]): Args {
   const values: Record<string, string> = {};
-  const known = ["--sessions", "--since", "--sample", "--out", "--seed"];
+  let json = false;
+  const known = ["--sessions", "--since", "--sample", "--out", "--seed", "--dispatch-project"];
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i] as string;
+    if (flag === "--json") {
+      json = true;
+      continue;
+    }
     if (!known.includes(flag)) throw new Error(`unknown flag ${flag}`);
     const value = argv[i + 1];
     if (value === undefined || value.startsWith("--")) throw new Error(`${flag} needs a value`);
     values[flag] = value;
     i++;
   }
-  for (const flag of ["--sessions", "--since", "--sample", "--out"]) {
-    if (values[flag] === undefined) throw new Error(`${flag} is required`);
+  const project = values["--dispatch-project"];
+  if (project !== undefined && values["--sessions"] !== undefined) {
+    throw new Error("--sessions and --dispatch-project cannot be given together");
   }
-  const sinceText = values["--since"] as string;
+  if (values["--since"] === undefined) throw new Error("--since is required");
+  const sinceText = values["--since"];
   const rfc3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/i;
   const since = Date.parse(sinceText);
   if (!rfc3339.test(sinceText) || !Number.isFinite(since)) {
     throw new Error("--since must be an RFC 3339 time");
   }
+  if (project !== undefined) {
+    // The Dispatch mode counts what the documents hold: it samples nothing and writes no file.
+    for (const flag of ["--sample", "--out", "--seed"]) {
+      if (values[flag] !== undefined) {
+        throw new Error(`${flag} is not allowed with --dispatch-project`);
+      }
+    }
+    return { mode: "dispatch", project, since, sinceText, json };
+  }
+  if (json) throw new Error("--json is allowed only with --dispatch-project");
+  const sessions = values["--sessions"];
+  if (sessions === undefined) {
+    throw new Error("one of --sessions and --dispatch-project is required");
+  }
+  for (const flag of ["--sample", "--out"]) {
+    if (values[flag] === undefined) throw new Error(`${flag} is required`);
+  }
   const seedText = values["--seed"];
   return {
-    sessions: values["--sessions"] as string,
+    mode: "sessions",
+    sessions,
     since,
     sample: nonNegativeInt("--sample", values["--sample"] as string),
     out: values["--out"] as string,
@@ -483,6 +805,12 @@ async function main(): Promise<void> {
   } catch (error) {
     console.error(`askgate-report: ${(error as Error).message}`);
     process.exit(2);
+  }
+  if (args.mode === "dispatch") {
+    const read = await readDecisionDocuments(sessionDispatch(), args.project, args.since);
+    const report = computeDispatchReport(read, args.project, args.sinceText);
+    for (const line of dispatchReportLines(report, args.json)) console.log(line);
+    return;
   }
   const seed = args.seed ?? (crypto.getRandomValues(new Uint32Array(1))[0] as number);
   const records = await readSessions(args.sessions, args.since);
