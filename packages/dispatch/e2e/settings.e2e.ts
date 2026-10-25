@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject, getIssue, putRepoProject } from "./api";
+import {
+  createIssue,
+  createProject,
+  getIssue,
+  listProjectDefaultAssignees,
+  putRepoProject,
+} from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -349,5 +355,76 @@ test("Settings stays inside the viewport", async ({ browser }, testInfo) => {
     expect(measured.scroll).toBeLessThanOrEqual(measured.client);
   } finally {
     await alice.close();
+  }
+});
+
+test("a person sets, changes and clears a project's default assignee, and a project with none reads Unassigned", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // OPS is the negative control: it never gets a default. Creating it as bob also makes him a
+  // person who has signed in, so he is an option in the control.
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    const ops = page.getByRole("combobox", { exact: true, name: "Default assignee of OPS" });
+    await expect(core).toBeVisible();
+    // The sentence beside the control: an issue from an unmapped repository lands in the default
+    // project, so a default set there catches all of them.
+    await expect(page.getByText("no project mapping")).toBeVisible();
+    await expect(ops).toHaveValue("");
+
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
+    );
+    await core.selectOption("bob");
+    expect((await saved).ok()).toBe(true);
+
+    await page.reload();
+    await expect(
+      page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
+    ).toHaveValue("bob");
+    await page.screenshot({
+      path: testInfo.outputPath("project-default-assignee-settings.png"),
+      fullPage: true,
+    });
+
+    const changed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
+    );
+    await page
+      .getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
+      .selectOption("alice");
+    expect((await changed).ok()).toBe(true);
+    await page.reload();
+    await expect(
+      page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
+    ).toHaveValue("alice");
+    await expect(
+      page.getByRole("combobox", { exact: true, name: "Default assignee of OPS" })
+    ).toHaveValue("");
+
+    const cleared = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
+    );
+    await page
+      .getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
+      .selectOption({ label: "Unassigned" });
+    expect((await cleared).ok()).toBe(true);
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => row.project)).not.toContain("CORE");
+    expect(defaults.map((row) => row.project)).not.toContain("OPS");
+  } finally {
+    await context.close();
   }
 });

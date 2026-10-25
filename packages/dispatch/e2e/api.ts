@@ -827,6 +827,38 @@ export function putArchitectureSource(
   );
 }
 
+/** A project and the person every unowned issue created under it falls to, or null for none. */
+interface ProjectDefaultAssignee {
+  project: string;
+  assignee: string | null;
+}
+
+/** Names the person a project's unowned new issues fall to, or clears it with `assignee: null`. */
+export function putProjectDefaultAssignee(
+  project: string,
+  input: { assignee: string | null },
+  options: ApiOptions = {}
+): Promise<ProjectDefaultAssignee> {
+  return request<ProjectDefaultAssignee>(
+    `/api/v1/projects/${encodeURIComponent(project)}/default-assignee`,
+    "PUT",
+    input,
+    options
+  );
+}
+
+/** Every project that names a default assignee, as the Settings page reads them. */
+export function listProjectDefaultAssignees(
+  options: ApiOptions = {}
+): Promise<ProjectDefaultAssignee[]> {
+  return request<ProjectDefaultAssignee[]>(
+    "/api/v1/settings/project-default-assignees",
+    "GET",
+    undefined,
+    options
+  );
+}
+
 /** Imports the model now; a rejected model answers 200 with the reason in `last_error`. */
 export function syncArchitectureSource(
   project: string,
