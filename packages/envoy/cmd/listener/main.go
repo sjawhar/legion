@@ -171,6 +171,12 @@ func rebuildListenerDependencies(
 // after the stall.
 const disconnectedFailureThreshold = 20
 
+// attemptCacheTTL is how long the attempt cache (below) remembers a (dedupe_key, session_id)
+// pair it recorded before a delivery. It bounds the unplaceable retry window in delivery.go,
+// which clears and re-records one entry per attempt: a window that reached this TTL could let a
+// message's own retries outlive the entry that keeps its redelivery from being swallowed.
+const attemptCacheTTL = 5 * time.Minute
+
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
 // consumer is rebuilt immediately, and a rebuild that reports success is
@@ -704,9 +710,27 @@ func main() {
 	// envelopes with the same EventID but distinct DedupeKeys. The existing
 	// dedupeCache records only successful deliveries (post-delivery) and
 	// cannot catch this slow-204 case. See #389.
-	attemptCache := dedupe.New(5 * time.Minute)
+	//
+	// attemptCacheTTL is named because the unplaceable retry below is bounded against it: a
+	// message whose retries outlived its attempt entry would have each redelivery recorded
+	// afresh instead of clearing one, so the bound is pinned by a test
+	// (TestUnplaceableRetryWindowFitsTheBoundsItDependsOn).
+	attemptCache := dedupe.New(attemptCacheTTL)
 
 	roleQueue := bus.ListenerQueue(cfg.MachineID)
+
+	// The window an agent delivery this listener cannot place is retried within before it is
+	// given up with a record (delivery.go). Read exactly as ENVOY_CI_DEBOUNCE is below: a value
+	// that does not parse is one WARN naming the variable, and the default stands - a listener
+	// never refuses to start over a malformed duration.
+	unplaceableRetryWindow := defaultUnplaceableRetryWindow
+	if v := os.Getenv("ENVOY_UNPLACEABLE_RETRY_WINDOW"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil {
+			unplaceableRetryWindow = d
+		} else {
+			logger.Warn("invalid ENVOY_UNPLACEABLE_RETRY_WINDOW; using default", slog.String("value", v), slog.String("error", perr.Error()))
+		}
+	}
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
@@ -725,6 +749,8 @@ func main() {
 		messagesDelivered: messagesDelivered,
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
+
+		unplaceableRetryWindow: unplaceableRetryWindow,
 	}
 
 	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling

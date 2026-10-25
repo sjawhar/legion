@@ -56,6 +56,13 @@ type listenerDeliveryHandlerConfig struct {
 	messagesDelivered *metrics.Counter
 	messagesNAKed     *metrics.Counter
 	deliveryDuration  *metrics.Histogram
+	// unplaceableRetryWindow is how long an agent delivery this listener cannot place is held
+	// in the stream and redelivered before it is given up with a record of its own
+	// (agentSubjectDelivery). main.go reads it from ENVOY_UNPLACEABLE_RETRY_WINDOW, defaulting
+	// to defaultUnplaceableRetryWindow. A zero window - what a caller that does not set this
+	// field asks for - retries nothing: every unplaceable delivery is given up on its first
+	// attempt.
+	unplaceableRetryWindow time.Duration
 }
 
 type deliveryMode uint8
@@ -73,15 +80,27 @@ type deliveryMessage struct {
 
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
 // durable JetStream message receives an acknowledgement or retry request.
+// A retry takes the standard delay; a path that needs its own asks for it
+// through finalizeAfter.
 func (message deliveryMessage) finalize(retry bool) {
+	if retry {
+		message.finalizeAfter(30 * time.Second)
+		return
+	}
 	if message.mode != durableDelivery {
 		return
 	}
-	if retry {
-		_ = message.msg.NakWithDelay(30 * time.Second)
+	_ = message.msg.Ack()
+}
+
+// finalizeAfter asks the stream to redeliver this message after delay, for a path whose own
+// bound sets the pace of its retries rather than finalize's standard one. Like finalize, it
+// does nothing to a core message: nothing redelivers one, so there is no request to make.
+func (message deliveryMessage) finalizeAfter(delay time.Duration) {
+	if message.mode != durableDelivery {
 		return
 	}
-	_ = message.msg.Ack()
+	_ = message.msg.NakWithDelay(delay)
 }
 
 func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
@@ -517,6 +536,30 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 // open, and the alternative - taking the cache's miss for an answer - ACKs the message away.
 const deliverySessionReadTimeout = 2 * time.Second
 
+// unplaceableRetryDelay is the delay an agent delivery this listener could not place asks for
+// before the stream redelivers it. It is short enough that a window's worth of them is a dozen
+// attempts rather than two - at the 30 s finalize(true) takes, a minute is one retry - and long
+// enough that a session whose record is still propagating, or whose server is still binding its
+// serve port, has time to finish between two of them.
+const unplaceableRetryDelay = 5 * time.Second
+
+// unplaceableMaxDeliveries bounds those retries by delivery count as well as by age, two short
+// of the durable's own MaxDeliver (consumerMaxDeliver, durable.go: 20, so 18 here). JetStream
+// stops redelivering at max_deliver silently - nothing in this repository consumes its advisory
+// - so this listener must give up, and write its give-up record, before the stream does. The
+// two-delivery margin covers the deliveries this handler does not ask for: one whose process
+// died before it finalized and whose AckWait therefore expired still counts against
+// max_deliver.
+const unplaceableMaxDeliveries = consumerMaxDeliver - 2
+
+// defaultUnplaceableRetryWindow is the window main.go uses when ENVOY_UNPLACEABLE_RETRY_WINDOW
+// is unset or unreadable: a minute of retries, which at unplaceableRetryDelay is 12 deliveries,
+// 14 with the margin above and so inside consumerMaxDeliver, and well inside the attempt
+// cache's TTL (attemptCacheTTL, main.go), the entry whose clearing keeps each redelivery from
+// being swallowed as an attempt-dedupe skip. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn
+// pins both.
+const defaultUnplaceableRetryWindow = 60 * time.Second
+
 // agentSubjectDelivery delivers directly to the session named by the topic
 // (notifications.agent.<session>), pushing over HTTP/WebSocket when the
 // session is live and falling back to whatever session.HandleAgentMessage
@@ -556,13 +599,18 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// this listener has not re-read since the reconnect, is in the bucket before it is in the
 	// cache - and a message dropped on that miss is gone, since it is already ACKed away.
 	// nats.ErrKeyNotFound is the bucket's own word that no record exists; any other error is a
-	// read that did not answer, which carries no record either and so is handled here exactly as
-	// no record is.
+	// read that did not answer. Both leave this delivery with no entry to push through, so
+	// session.HandleAgentMessage reports the same ReasonNoSessionRecord for the two, and only
+	// sessionReadUnanswered tells them apart below: the first is evidence the session is gone,
+	// the second is no evidence at all - the bucket was never consulted, so nothing about this
+	// session was learned, and an attempt that learned nothing can never be the ground for
+	// giving a message up.
 	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, registered)
 	var entryPtr *session.SessionEntry
 	if entryErr == nil {
 		entryPtr = &entry
 	}
+	sessionReadUnanswered := entryErr != nil && !errors.Is(entryErr, nats.ErrKeyNotFound)
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
 	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer)
@@ -595,14 +643,81 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			recordDedupe: true,
 		})
 	} else if result.Err == nil {
+		// Nothing placed this message and nothing failed: the session has no record this
+		// listener could find, or its record names nothing to push to. Either can be true of a
+		// session that is about to be placeable - a record still propagating from the bucket, a
+		// server still binding its serve port - so the message is kept in the stream and
+		// redelivered for as long as cfg.unplaceableRetryWindow, and only then given up, with a
+		// record and a counter of its own rather than the ACKed skip that lost it.
+		//
+		// reason names which of the two causes this is, for the operator and for the counter
+		// label. session.ReasonNone shares no_push_target's: reaching here without an error
+		// means an entry was resolved (a nil one is ReasonNoSessionRecord) and the push to it
+		// did not land, which is the same fact an operator acts on - a record exists and
+		// nothing could be pushed to it.
+		reason := "no_push_target"
+		giveUpStatus := "unplaceable_no_push_target"
+		if result.Reason == session.ReasonNoSessionRecord {
+			reason = "no_session_record"
+			giveUpStatus = "unplaceable_no_record"
+		}
+		// Only a durable message is retried: the role lane is this listener's one core
+		// subscription (main.go), and nothing redelivers a core message, so a NAK there would
+		// drop it with no record at all. The JetStream metadata carries the two bounds - the
+		// message's age against the window, and its delivery count against
+		// unplaceableMaxDeliveries - and a message that does not carry it cannot be bounded by
+		// either, so it is given up now rather than retried without end.
+		var metadata *nats.MsgMetadata
+		var age time.Duration
+		if message.mode == durableDelivery {
+			if md, mdErr := message.msg.Metadata(); mdErr == nil {
+				metadata = md
+				age = time.Since(md.Timestamp)
+			}
+		}
+		// A read that did not answer holds the retry open on its own for whatever is left of
+		// the window: it is no evidence of absence, whatever reason this attempt reports. What
+		// does not hold it open is session.ReasonNone, the one outcome here another delivery
+		// cannot change by itself - a record this listener did resolve, with a serve port,
+		// whose push failed on the wire. The interest path NAKs that failure itself
+		// (internal/session/handler.go), so repeating it here would only repeat a refused HTTP
+		// request.
+		placementMayChange := sessionReadUnanswered || result.Reason != session.ReasonNone
+		if metadata != nil && placementMayChange && age < cfg.unplaceableRetryWindow &&
+			metadata.NumDelivered < unplaceableMaxDeliveries {
+			// No exception and no delivery counter: the message is not disposed of yet, and
+			// publishing the no_holder notice per attempt would send a dozen of them, each one
+			// read back by every listener in the fleet. The attempt-cache entry recorded above
+			// must go, or the redelivery this NAK asks for is swallowed as an attempt-dedupe
+			// skip before it reaches the session at all.
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID: sessionID,
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelInfo, "listener agent delivery deferred", sessionID, item.Topic, item.EventID, "deferred",
+						slog.String("reason", reason),
+						slog.Uint64("attempt", metadata.NumDelivered),
+						slog.Int64("age_ms", age.Milliseconds()),
+					)
+				},
+				clearAttempt: true,
+			})
+			cfg.messagesNAKed.Inc()
+			message.finalizeAfter(unplaceableRetryDelay)
+			return
+		}
+		// Given up: the window is spent, the delivery count is reached, the metadata could not
+		// be read, or this is a core delivery nothing would redeliver. The no_holder exception
+		// goes out here, once per message rather than once per attempt.
 		if !publishNoHolderExceptionOrNak(cfg, message, item, sessionID) {
 			return
 		}
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			metricStatus: "skipped",
+			sessionID:    sessionID,
+			metricStatus: giveUpStatus,
 			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener agent session not found anywhere", sessionID, item.Topic, item.EventID, "skipped")
+				logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
 			},
+			clearAttempt: true,
 		})
 	}
 	if result.ShouldNAK {
