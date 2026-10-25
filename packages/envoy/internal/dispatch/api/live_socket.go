@@ -74,9 +74,11 @@ const (
 // liveSocket is one open GET /ws/live socket, the deliveryLiveConn the hub sends to.
 type liveSocket struct {
 	conn *gws.Conn
-	// ctx is the socket's request context: it ends when the socket does, or once its caller no
-	// longer resolves. Each events or agent subscription runs on a context derived from it.
-	ctx context.Context
+	// ctx is the socket's own, derived from its request's: it ends as the writer ends (ended), so
+	// with the socket however it ends, and before that with the request once its caller no longer
+	// resolves. Each events or agent subscription runs on a context derived from it.
+	ctx    context.Context
+	cancel context.CancelFunc
 	// human is whether the caller is a person, signed in by cookie, rather than a bearer.
 	human bool
 	// queue holds the hub's frames and the socket's own refusals (Send).
@@ -108,9 +110,11 @@ type liveSocket struct {
 }
 
 func newLiveSocket(ctx context.Context, conn *gws.Conn, human bool) *liveSocket {
+	ctx, cancel := context.WithCancel(ctx)
 	return &liveSocket{
 		conn:   conn,
 		ctx:    ctx,
+		cancel: cancel,
 		human:  human,
 		queue:  make(chan any, liveSocketQueue),
 		stream: make(chan liveStreamFrame, liveSocketStream),
@@ -157,6 +161,14 @@ func (socket *liveSocket) overflowed() bool {
 	default:
 		return false
 	}
+}
+
+// ended marks the socket ended once its writer has: a subscription waiting for room in stream
+// stops waiting (errLiveSocketClosed), and then every subscription's context ends, before the
+// socket waits for each to return (endLiveSubscriptions).
+func (socket *liveSocket) ended() {
+	close(socket.closed)
+	socket.cancel()
 }
 
 // shutWith asks the writer to close the socket with code and reason.
@@ -293,7 +305,7 @@ func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		defer close(socket.closed)
+		defer socket.ended()
 		socket.write(r.Context(), s.deps.Lifetime.Done(), s.deps.StreamHeartbeat, age, readerDone)
 	}()
 

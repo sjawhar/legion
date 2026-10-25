@@ -79,12 +79,11 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
 // signal with some still running. Hijacked live sockets, the subscriptions they ran, and the
 // delivery hub then finish their Lifetime-driven shutdown. The database pool closes once every
-// request has answered and no
-// connection of the shared or document-rooms pool is in use. While the database answers, nothing
-// but the runtime's kill bounds that wait, so a write in flight commits and is answered if it
-// finishes before the kill. A database that has stopped answering (silentProbes) holds its
-// connections forever, so Dispatch exits without them, and the database rolls back whatever they
-// held open.
+// request has answered and no connection of the shared or document-rooms pool is in use. While the
+// database answers, nothing but the runtime's kill bounds that wait, so a write in flight commits
+// and is answered if it finishes before the kill. A database that has stopped answering
+// (silentProbes) holds its connections forever, so Dispatch exits without them, and the database
+// rolls back whatever they held open.
 func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
 	drained := make(chan struct{})
 	go func() {

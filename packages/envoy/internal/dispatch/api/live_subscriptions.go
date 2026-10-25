@@ -32,13 +32,15 @@ var errLiveSocketClosed = errors.New("dispatch: the live socket closed")
 // liveSubscription is one events or agent subscription, running on a goroutine of its own. stop
 // ends it: it cancels the subscription's context and returns once the goroutine has returned. The
 // socket calls it once, beside its read loop when the page unsubscribes or replaces the sub, or as
-// the socket ends; the subscription may already have ended on its own.
+// the socket ends, once the context start was given has ended; the subscription may already have
+// ended on its own.
 type liveSubscription interface{ stop() }
 
 // liveStreamer is what an events or agent subscription writes through.
 type liveStreamer interface {
-	// SendWait queues frame on the stream queue, waiting for room; it returns ctx's error once
-	// ctx (the subscription's own) ends, and errLiveSocketClosed once the socket ends.
+	// SendWait queues frame on the stream queue, waiting for room; it returns errLiveSocketClosed
+	// once the socket has ended, which ends ctx too, and otherwise ctx's error once ctx (the
+	// subscription's own) ends.
 	SendWait(ctx context.Context, frame any) error
 	// Human reports whether the caller is a person (cookie identity) rather than a bearer.
 	Human() bool
@@ -52,9 +54,9 @@ type liveKind struct {
 	// start checks the view, and either refuses it with an error frame (whose sub the socket sets)
 	// having started nothing, or starts the subscription's goroutine and returns at once. The
 	// goroutine writes the subscription's frames, each naming sub, through stream until ctx ends.
-	// ctx ends when the socket does, and carries a pool mark of the subscription's own
-	// (store.ForConcurrentRead), so it may read the database beside the socket's other
-	// subscriptions; resume is nil when the page sent none.
+	// ctx ends when the socket does, however it ends, before the socket waits for stop, and it
+	// carries a pool mark of the subscription's own (store.ForConcurrentRead), so it may read the
+	// database beside the socket's other subscriptions; resume is nil when the page sent none.
 	start func(ctx context.Context, stream liveStreamer, sub string, view LiveView, resume *EventsLiveResume) (liveSubscription, *LiveError)
 }
 
@@ -80,21 +82,26 @@ type liveStreamFrame struct {
 }
 
 func (stream *liveSubscriptionStream) SendWait(ctx context.Context, frame any) error {
-	if err := ctx.Err(); err != nil {
+	if err := stream.ended(ctx); err != nil {
 		return err
-	}
-	select {
-	case <-stream.socket.closed:
-		return errLiveSocketClosed
-	default:
 	}
 	select {
 	case stream.socket.stream <- liveStreamFrame{from: stream, frame: frame}:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+	case <-stream.socket.closed:
+	}
+	return stream.ended(ctx)
+}
+
+// ended is errLiveSocketClosed once the socket has ended, whose end ends ctx too, so SendWait
+// answers a socket's end the same way whichever it saw first; otherwise it is ctx's error.
+func (stream *liveSubscriptionStream) ended(ctx context.Context) error {
+	select {
 	case <-stream.socket.closed:
 		return errLiveSocketClosed
+	default:
+		return ctx.Err()
 	}
 }
 

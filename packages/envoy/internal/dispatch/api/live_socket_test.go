@@ -34,7 +34,7 @@ type liveSocketRig struct {
 	stop context.CancelFunc
 }
 
-// newDeliverySocketRig starts the rig on options; listen, when given, wraps the server's listener.
+// newLiveSocketRig starts the rig on options; listen, when given, wraps the server's listener.
 // The Lifetime derives from the test's context, which ends before the test's cleanups wait out the
 // sockets and the hub.
 func newLiveSocketRig(t *testing.T, options testServerOptions, listen func(net.Listener) net.Listener) *liveSocketRig {
@@ -73,7 +73,7 @@ func (rig *liveSocketRig) sockets(t *testing.T, n int) []*liveSocket {
 			return open
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%d delivery sockets open on the server, want %d", len(open), n)
+			t.Fatalf("%d live sockets open on the server, want %d", len(open), n)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

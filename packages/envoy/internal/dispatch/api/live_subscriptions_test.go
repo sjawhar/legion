@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
@@ -391,14 +393,25 @@ func TestSendWaitReturnsWhenItsSubscriptionStops(t *testing.T) {
 	})
 
 	t.Run("the socket ends", func(t *testing.T) {
-		socket := &liveSocket{stream: make(chan liveStreamFrame, 1), closed: make(chan struct{})}
+		// The socket's end ends the subscription's context too, which derives from the socket's, and
+		// SendWait answers the socket's end whichever of the two it sees first.
+		socket := newLiveSocket(context.Background(), nil, false)
+		socket.stream = make(chan liveStreamFrame, 1)
 		stream := &liveSubscriptionStream{socket: socket}
-		requireSendWaitWaits(t, stream, context.Background())
-		returned := sendWaitInBackground(stream, context.Background())
+		ctx, cancel := context.WithCancel(socket.ctx)
+		defer cancel()
+		requireSendWaitWaits(t, stream, ctx)
+		returned := sendWaitInBackground(stream, ctx)
 		requireNoReturn(t, returned)
-		close(socket.closed)
+		socket.ended()
 		if err := awaitReturn(t, returned); !errors.Is(err, errLiveSocketClosed) {
 			t.Fatalf("SendWait answered %v once the socket ended, want errLiveSocketClosed", err)
+		}
+		if ctx.Err() == nil {
+			t.Fatal("the socket ended and the subscription's context did not")
+		}
+		if err := stream.SendWait(ctx, "after the end"); !errors.Is(err, errLiveSocketClosed) {
+			t.Fatalf("SendWait after the socket ended answered %v, want errLiveSocketClosed", err)
 		}
 	})
 }
@@ -434,5 +447,72 @@ func awaitReturn(t *testing.T, returned <-chan error) error {
 	case <-time.After(time.Second):
 		t.Fatal("SendWait never returned")
 		return nil
+	}
+}
+
+// contextBoundSubscription is a subscription written to liveKind.start's word, as the events and
+// agent views may be: its goroutine ends only when the context start gave it ends, and its stop
+// waits for that goroutine and cancels nothing of its own, since that context ends with the socket.
+type contextBoundSubscription struct{ done chan struct{} }
+
+func (s *contextBoundSubscription) stop() { <-s.done }
+
+// Every way a socket ends, the page's close and the server's 4001 among them, ends the context its
+// subscriptions run on before the socket waits for them, so a subscription that ends on that
+// context alone ends, and the socket's handler returns.
+func TestASubscriptionsContextEndsWhenItsSocketEnds(t *testing.T) {
+	for name, end := range map[string]func(t *testing.T, rig *liveSocketRig, client *socketClient){
+		"the page closes it": func(t *testing.T, _ *liveSocketRig, client *socketClient) {
+			closing := gws.FormatCloseMessage(gws.CloseGoingAway, "")
+			if err := client.conn.WriteControl(gws.CloseMessage, closing, time.Now().Add(time.Second)); err != nil {
+				t.Fatalf("the page's close: %v", err)
+			}
+		},
+		"the rotate hook closes it": func(t *testing.T, rig *liveSocketRig, _ *socketClient) {
+			if response := dispatchRequest(t, rig.handler, http.MethodPost, "/api/v1/live/_test/rotate", nil, "alice"); response.Code != http.StatusOK {
+				t.Fatalf("POST /api/v1/live/_test/rotate: status=%d body=%s", response.Code, response.Body.String())
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			started := make(chan *contextBoundSubscription, 1)
+			// release ends the goroutine only once the test is over, so a socket that never ends its
+			// subscriptions' context fails the test rather than hanging the cleanups, which wait for
+			// every socket's handler.
+			release := make(chan struct{})
+			bound := liveKind{resumes: true, start: func(ctx context.Context, _ liveStreamer, _ string, _ LiveView, _ *EventsLiveResume) (liveSubscription, *LiveError) {
+				running := &contextBoundSubscription{done: make(chan struct{})}
+				go func() {
+					defer close(running.done)
+					select {
+					case <-ctx.Done():
+					case <-release:
+					}
+				}()
+				started <- running
+				return running, nil
+			}}
+			rig := newLiveSocketRig(t, testServerOptions{testHooks: true, liveKinds: map[string]liveKind{liveEventsView: bound}}, nil)
+			t.Cleanup(func() { close(release) })
+			client := rig.dial(t, asUser("alice"))
+			client.send(t, liveSubscribe("e", eventsView(), ""))
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no subscription started within 5s")
+			}
+
+			end(t, rig, client)
+			returned := make(chan struct{})
+			go func() {
+				rig.served.liveSockets.wait()
+				close(returned)
+			}()
+			select {
+			case <-returned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the socket's handler had not returned 5s after the socket ended: its subscription's context had not ended, so its stop never returned")
+			}
+		})
 	}
 }

@@ -412,7 +412,7 @@ func (h *deliveryHub) catchUpNow() {
 	}
 }
 
-// deliveryLiveRefusal is the error frame refusing sub with code.
+// liveRefusal is the error frame refusing sub with code.
 func liveRefusal(sub, code, message string) LiveError {
 	return LiveError{Type: "error", Sub: sub, Code: code, Message: message}
 }
