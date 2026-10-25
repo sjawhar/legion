@@ -66,14 +66,18 @@ function schemaDOM(node: ProseMirrorNode, document: Document): HTMLElement {
 /** A picture's link as the browser treats a text link's in the editor. ProseMirror makes a leaf
  * node's DOM `contenteditable="false"`, so the anchor around a picture would be a live link in an
  * editable editor where a text link's anchor, inside the editing host, is not: the browser follows
- * none of its clicks there. A Ctrl/Cmd-click still opens it through proof-editor's
- * `markdownLinkClickPlugin` (which reads the closest `a[href]` of the click and prevents nothing it
- * does not open), and a plain click on a `dispatch://` link has already been taken by the host's
- * `followDispatchLink`, in the capture phase. In a read-only editor the plugin opens the link on a
- * plain click, as it opens a text link. */
+ * none of its clicks there. A Ctrl/Cmd-click on an anchor with an address is left to proof-editor's
+ * `markdownLinkClickPlugin`, which reads the closest `a[href]` of the click, opens it and prevents
+ * the browser's own; ProseMirror hands the plugin no event already prevented, so this listener
+ * prevents none of those. A plain click on a `dispatch://` link has already been taken by the
+ * host's `followDispatchLink`, in the capture phase. In a read-only editor the plugin opens the
+ * link on a plain click, as it opens a text link. */
 function followNoClickWhileEditable(link: HTMLElement, editor: PictureEditor): void {
   link.addEventListener("click", (event) => {
-    if (editor.editable()) event.preventDefault();
+    if (!editor.editable()) return;
+    const opensThroughPlugin =
+      (event.ctrlKey || event.metaKey) && (link.getAttribute("href") ?? "") !== "";
+    if (!opensThroughPlugin) event.preventDefault();
   });
 }
 

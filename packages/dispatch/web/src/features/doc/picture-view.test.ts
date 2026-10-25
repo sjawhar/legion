@@ -248,10 +248,13 @@ test("a picture from elsewhere with a link sits in the link's anchor, followed b
   expect(dom.childNodes.length).toBe(1);
   // Events on it are the editor's, as on any picture: a click selects it.
   expect(view.stopEvent).toBeUndefined();
-  // An editable editor's text link is no live link; neither is the picture's, plain or modified
-  // (a Ctrl/Cmd-click opens it through proof-editor's link plugin, not the browser).
+  // An editable editor's text link is no live link; neither is the picture's on a plain click. A
+  // Ctrl/Cmd-click is left unprevented for proof-editor's link plugin, which opens the link and
+  // prevents the browser's own: ProseMirror hands the plugin no event already prevented.
   expect(clickPrevented(img)).toBe(true);
-  expect(clickPrevented(img, { ctrlKey: true })).toBe(true);
+  expect(clickPrevented(img, { ctrlKey: true })).toBe(false);
+  expect(clickPrevented(img, { metaKey: true })).toBe(false);
+  expect(clickPrevented(img, { shiftKey: true })).toBe(true);
   // Read-only, the browser and the plugin take the click, as they take a text link's.
   editable.value = false;
   expect(clickPrevented(img)).toBe(false);
@@ -327,6 +330,9 @@ test("a picture linked to a dispatch:// target carries it as a text link does, f
     expect(dom.getAttribute("href")).toBe("");
     expect(dom.getAttribute("data-dispatch-href")).toBe("dispatch://CORE-2");
     expect(dom.querySelector("img")).not.toBeNull();
+    // Its empty href is no address the link plugin opens, so no click follows it while editable,
+    // a Ctrl/Cmd-click included, which would open the current page in a new tab.
+    expect(clickPrevented(dom.querySelector("img") as Element, { ctrlKey: true })).toBe(true);
   }
 });
 
