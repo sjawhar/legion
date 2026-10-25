@@ -19,6 +19,7 @@ In a Legion tree, the daemon's workflow and your role prompt decide who starts a
 4. **Coaches each agent's loop**: is it measuring, predicting, trying enough designs? Procedure, not solutions.
 5. **Makes the stream faster**: finds where agents lose time and changes the skill, tool or step that causes it.
 6. **Proves its facts with a command.** A claim about what exists or what a thing can do rests on a command and its output, not on a reading. A claim that nothing exists rests on a command whose search could have found it. State the search you ran and why it could match. Its positive control takes the same path as the things claimed absent. A lead's facts about its own stream are the ones nobody else checks.
+7. **Keeps the stream's record of what each agent accepted.** At each check-in, read it against the agents' issues and open asks. An item that is neither done, in progress, nor an open ask is dropped work. The lead finds its owner and has it recorded at once.
 
 ## What a lead does not do
 

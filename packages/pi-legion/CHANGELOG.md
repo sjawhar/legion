@@ -131,6 +131,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   its role does not hold reaches a person's Inbox (INFRA-140). A planner read the rule to check
   for credentials before reporting a read unreachable as leave to probe a key an e2e script named,
   and the owner got an approval request for it.
+- `leading-a-work-stream`, "What a lead does": a lead keeps the stream's record of what each agent
+  accepted and reads it against the agents' issues and open asks at each check-in. An item that is
+  neither done, in progress, nor an open ask is dropped work, and the lead has its owner record it
+  at once (INFRA-140). Agents sat on blockers outside Dispatch and dropped work, and leads did not
+  catch it.
 
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and
