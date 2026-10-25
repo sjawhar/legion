@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-386",
+  "completed": "2026-10-25T15:31:13Z",
+  "plan": "dispatch://INFRA-386/artifact/plan-md",
+  "summary": "One file, docs/kubernetes.md. T1 rewrites the trap paragraph's label-path sentences (base 3153-3165) to say the label delete removes a Job the API server has stored by the time the delete lists the Jobs, dated to the 2026-10-25 INFRA-232 runs (page's 0.33 s and 0.35 s stops, the tester's two more at 0.318 s and 0.320 s, the placed stop after the create's answer), names a create the server finishes after that listing as not measured, and tells every run whose trap printed 'cleanup: no Job name was read' to re-list by label after the sequence ends and delete with the label recovery. T2 narrows two block comments (3022 trailing comment, 3130-3131) without touching a non-comment character; T3 replaces 'exactly as published above' in the INFRA-232 bullet. T4 local checks, T5 push, T6 checks and P1 at the pushed head, T7 PR.",
+  "tasks": [
+    "T1 trap paragraph 3153-3165: measured scope, dated evidence, unmeasured sub-case by mechanism, trigger and full label recovery command",
+    "T2 block comments at 3022 (trailing) and 3130-3131: no total clean-up promise; non-comment lines identical",
+    "T3 INFRA-232 bullet lead 3260-3264: replace 'exactly as published above'",
+    "T4 static checks A1-A9 on the working copy and a local PR-body draft, then commit",
+    "T5 push legion/INFRA-386",
+    "T6 A1-A8 via gh api at the pushed head, sweep, P1 live run plus refused-create negative control",
+    "T7 open PR (Dispatch: INFRA-386, no Thermo line, no simplify pass), sweep the live body"
+  ],
+  "acceptance": [
+    {"id": "A1", "check": "trap paragraph joined: grep -c 'or between its answer and the line that reads it, finds the Job the create made'", "expected": "0", "control": "1 at base"},
+    {"id": "A2", "check": "trap paragraph contains the label delete and get commands with <the printed value>, 'No run measured', '3600 s', 'cleanup: no Job name was read'", "expected": ">=1 each", "control": "first three 0 at base"},
+    {"id": "A3", "check": "trap paragraph: '2026-10-25' count, 'dispatch://INFRA-232', '0.33 s and 0.35 s', '0.318 s and 0.320 s'", "expected": "date >=3, others >=1", "control": "base date 2, others 0"},
+    {"id": "A4", "check": "bash code.sh k-<head>.md | sha256sum (block with comments stripped)", "expected": "abe1b4cf246007dcaeb06de73bff62a3b372ee50b0aa8b1b0e8d77dbe076195c", "control": "code edit at 3020 gives 9a6027cc..."},
+    {"id": "A5", "check": "diff -U0 base head | awk -f hunks.awk (allowed base lines 3022, 3130-3131, 3138-3165, 3260-3264); jj diff --stat", "expected": "exit 0; docs/kubernetes.md and .legion/INFRA-386 only", "control": "edit at 3200 prints OUT and exits 1"},
+    {"id": "A6", "check": "bash a6.sh k-base.md k-<head>.md", "expected": "no NONCOMMENT line; old-closing 0; old-listing 1", "control": "base: old-closing 1, old-listing 2; code edit prints NONCOMMENT"},
+    {"id": "A7", "check": "grep -c 'exactly as published above'", "expected": "0", "control": "1 at base"},
+    {"id": "A8", "check": "trap paragraph lines over 100 characters", "expected": "0", "control": "padded copy gives 1"},
+    {"id": "A9", "check": "check-private-names.sh; sweep with live-source patterns over diff, commit messages, PR body draft then live body; CI check-pr-text", "expected": "exit 0; 0 hits", "control": "scratch file with one pattern gives 1"},
+    {"id": "A10", "check": "P1: edited block run end to end from the role container against the applied cluster", "expected": "run label, generated name, Service, answered, trap listing empty, sequence: exit 0, nothing left", "control": "cpu \"1\" fixture: refused by admission, label path finds nothing, exit 1, re-list No resources found"},
+    {"id": "A11", "check": "fresh-reader probe on the head trap paragraph plus an in-create stop's output; grep -ci -e 'does not hold' -e 'always leaves' -e 'will leave'", "expected": "answer names a late-stored Job and the label re-list/delete; grep 0", "control": "base paragraph answers nothing remains"}
+  ],
+  "helperScripts": "block.awk, code.sh, trap.awk, hunks.awk and a6.sh are given verbatim in plan.md section 4; write them under $TMPDIR/infra-386/, never the checkout",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: push procedure, default-branch identity check, PR template and proof rules (references/pr-body.md); docs-only, so no ce-simplify-code pass and no Thermo line; follow the INFRA-212 and INFRA-232 learnings in docs/solutions/best-practices/ for every sentence"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md tester rules (verify the implementer's proof, own E2E line with negative control, read CI for static checks)"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md, review-threads.md and pr-body.md; read each changed sentence against plan.md section 1's sources and carry the unmeasured sub-case into Not proven / risk"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The block's comments at 3022 and 3130-3131 restate the total clean-up claim while the spec froze the block byte for byte.", "answer": "Sent to the architect, who chose option b: T2 edits the two comments; A4 and A6 hold every non-comment line; P1 runs the edited block; T3 fixes the INFRA-232 bullet's 'exactly as published above'."},
+      {"finding": "The recovery paragraph scopes the label delete to SIGKILL only.", "answer": "Decision 5: the trap paragraph quotes the full label-delete command itself; the recovery paragraph is unchanged."},
+      {"finding": "No output separates the unmeasured case from a clean stop, and no timing is measured.", "answer": "Decision 4: every run whose trap printed 'cleanup: no Job name was read' re-lists by label after the sequence ends and deletes what it finds; no wait is stated."},
+      {"finding": "Neighbour sentences 3153-3155 and 3159-3160 overclaim in the same case.", "answer": "T1 rewrites 3153-3165, including 'finds the Job by this run's label' and the listing's 'No resources found'."},
+      {"finding": "'Already stored' has two readings; the spec says the case 'does not hold' while the records say not measured.", "answer": "Decision 2: stored by the time the delete lists the Jobs, stated by mechanism as not measured; the architect accepted the correction."},
+      {"finding": "The in-create stops are four, not two.", "answer": "Decision 3: cite the page's 0.33 s and 0.35 s and say the tester measured two more (0.318 s, 0.320 s), per the architect."},
+      {"finding": "'Dated' has two readings.", "answer": "Inline date in the narrowed passage, checked by A3."},
+      {"finding": "A client-side create failure also reaches the label path with the request in flight.", "answer": "Decision 2 names 'a stop or a failed connection'."},
+      {"finding": "The block-hash anchor was prose an open PR (#2150) rewrites, and the line counts were inconsistent.", "answer": "block.awk anchors on the fence before 'sequence=$(mktemp'; 134 lines with fences at base; tested."},
+      {"finding": "A docs-only change still needs both E2E lines with negative controls.", "answer": "Section 5: the page via gh api at the pushed head, P1 live, the fresh-reader probe; base as the control."},
+      {"finding": "The manual private-name sweep had no command.", "answer": "A9 and the sweep paragraph, built as INFRA-232's plan section 3, patterns only in shell variables, with a positive control."},
+      {"finding": "Other restatements of the claim.", "answer": "None in the tree outside the block; the merged #2195 body and the INFRA-232 learnings stay as history (Decision 7)."},
+      {"finding": "The leaked Job's duration is a manifest reading, not a measurement; two spec background claims are unsourced.", "answer": "Decision 6 writes it as the 3600 s deadline the Job and pod carry; the background claims change no work."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 3},
+  "specDepartures": [
+    {
+      "spec": "Nothing else in the section changes; the sequence block is byte-identical, so dispatch://INFRA-232's runs still stand and are not re-run.",
+      "plan": "Two comments inside the block (3022 trailing comment, 3130-3131) and the INFRA-232 bullet's 'exactly as published above' (3261) change too; the block is held identical in every non-comment line (A4, A6) and proven by one live end-to-end run of the edited block (P1); no stop measurement is re-run.",
+      "evidence": "docs/kubernetes.md:3022 and 3130-3131 restate the total clean-up claim inside the block a role pastes; the INFRA-71 architect's ruling over Envoy at 2026-10-25T15:23:39Z chose this option and set the non-comment-identity standard.",
+      "outcome": {"kind": "changed", "acceptance": ["Nothing else in the section changes; the sequence block is byte-identical, so dispatch://INFRA-232's runs still stand and are not re-run. -> The block is identical in every non-comment line and one live run of the edited block shows it runs end to end; besides the trap paragraph, only the block's two comments (3022, 3130-3131) and the INFRA-232 bullet's lead change; no stop measurement is re-run."], "scope": "Widens from the trap paragraph to two block comments and the INFRA-232 bullet's lead, plus one live run (P1)."}
+    }
+  ]
+}
