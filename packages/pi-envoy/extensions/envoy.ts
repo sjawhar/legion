@@ -2296,7 +2296,12 @@ export default function envoyExtension(pi: PiApi): void {
           });
         });
     }
+    // The holds whose hand-back failed go back where this loop took them from, except one of the
+    // role this process holds by now: no hold this loop hands back is of the role it holds while
+    // live, so that role is a newer move's claim, which dropped every hand-back of it left pending.
+    // Restored, the hold would reopen what that claim settled.
     for (const { key, topic, id } of failed) {
+      if (topic === claimedRoleTopic) continue;
       if (id === host) pendingHandBacks.set(key, { topic, id });
       else abandonedHolds.set(topic, { id });
     }

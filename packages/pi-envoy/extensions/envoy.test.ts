@@ -6635,6 +6635,80 @@ describe("envoy OMP extension", () => {
     });
   });
 
+  // A settle abandoned mid-hand-back puts the holds whose hand-back failed back where it took
+  // them from, since nothing else will settle them. A claim the move that replaced it made has
+  // already dropped every hand-back of its role, so restoring one of that role undoes the claim's
+  // work: the role the session holds and confirmed reads as unconfirmed again, and the next pass
+  // claims it a second time at the listener. The hold nothing else touched must still come back,
+  // or it leaks with nothing left to hand it back.
+  test("a settle abandoned mid-hand-back restores the failed holds a newer claim did not settle, and only those", async () => {
+    // The waits are real: the role move is abandoned on a real timer, read as the move starts,
+    // and the deadline is long enough for the first hand-back below to fail twice — the client
+    // retries a failure once, 250 ms later — so only the move this case wedges is ever abandoned.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 600 }, async () => {
+      const role = "legion-controller";
+      const {
+        fixture,
+        live,
+        manager,
+        handedBack,
+        holders,
+        claimSessions,
+        roleTool,
+        failHandBacks,
+        gateHandBack,
+        tick,
+      } = await gatedRoleFixture("abandoned-settle-restores-unsettled", "ses_ru");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const beforeMove = fixture.entries.length;
+      expect((await roleTool.execute("", { role: "reviewer" })).isError).not.toBe(true);
+      // A tree navigation back to before the move ends reviewer, whose hand-back the listener
+      // fails: it stays pending under the session's own id, and the pass claims legion-controller.
+      failHandBacks(2);
+      manager.branch = () => fixture.entries.slice(0, beforeMove);
+      await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_ru"));
+      expect(holders.get("reviewer")).toBe("ses_ru");
+      expect(holders.get(role)).toBe("ses_ru");
+
+      // A tree navigation to records naming release-captain ends legion-controller too. Its pass
+      // fails reviewer's hand-back again, and is abandoned at its deadline while the listener
+      // still holds legion-controller's.
+      fixture.pi.appendEntry("envoy-role-claim", { role: "release-captain" });
+      manager.branch = () => [...fixture.entries];
+      failHandBacks(2);
+      const handingBack = gateHandBack(`notifications.role.${role}`, "ses_ru");
+      const navigated = fixture.handlers.get("session_tree")?.(
+        { newLeafId: "leaf-rc" },
+        live("ses_ru")
+      );
+      await handingBack.reached;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      // The model claims legion-controller again, which the listener still names this session
+      // for: that claim settles the hold the abandoned loop is handing back.
+      expect((await roleTool.execute("", { role })).isError).not.toBe(true);
+      expect(holders.get(role)).toBe("ses_ru");
+
+      // The abandoned hand-back fails at last, so both holds the abandoned loop took failed.
+      failHandBacks(2);
+      handingBack.release();
+      await navigated;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      for (let step = 0; step < 10; step += 1) await drain();
+
+      // The next pass hands back reviewer, which nothing else settled, and claims nothing: the
+      // hold the newer claim confirmed stays confirmed.
+      const claimedSoFar = claimSessions.length;
+      const settledSoFar = handedBack.length;
+      tick();
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(handedBack.slice(settledSoFar)).toEqual(["notifications.role.reviewer@ses_ru"]);
+      expect(holders.has("reviewer")).toBe(false);
+      expect(claimSessions.slice(claimedSoFar)).toEqual([]);
+      expect(holders.get(role)).toBe("ses_ru");
+    });
+  });
+
   test("a role the model claims again in a /new before its pass is carried by a fork that follows", async () => {
     const role = "legion-controller";
     const { fixture, live, context, holders, roleTool, holdRegistration } = await gatedRoleFixture(
