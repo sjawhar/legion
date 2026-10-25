@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T19:10:00Z",
+  "completed": "2026-10-25T19:40:00Z",
   "evidenceLinks": [
     "Rounds 1-3: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399449475",
     "Round 4: https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272",
@@ -12,7 +12,8 @@
     "Round 8: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400527686",
     "Round 9: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400760136",
     "Round 10: https://github.com/sjawhar/legion/pull/2173#issuecomment-6401036185",
-    "Round 11: https://github.com/sjawhar/legion/pull/2173#issuecomment-6401890618"
+    "Round 11: https://github.com/sjawhar/legion/pull/2173#issuecomment-6401890618",
+    "Round 12: https://github.com/sjawhar/legion/pull/2173#issuecomment-6402208866"
   ],
   "rounds": [
     {
@@ -76,11 +77,18 @@
       "verdict": "pass",
       "completed": "2026-10-25T19:10:00Z",
       "what": "The rig run against both halves, three sentences read against their paths rather than their predecessors, the fixture inversion stated at its real strength, and the daemon package's gap closed rather than stated: it runs here against a Postgres on this issue's own volume."
+    },
+    {
+      "round": 12,
+      "codeHead": "d8efa0ba2fb0",
+      "verdict": "pass",
+      "completed": "2026-10-25T19:40:00Z",
+      "what": "The enumeration read as three functions rather than as a sentence, SuspendIssue's contract checked against the test that pins it, both skill mirrors compared, and the handoff's own limit claim disproved by execution at this head."
     }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 11: I ran the rig's vector suite myself at this head and then restored the aliasing in an out-of-tree copy to see all nine fail, rather than taking the author's report of 9 of 9; I read each of the three corrected sentences against the code path it describes (Runtime.Release's call to releaseControllerSandbox, check.go's two IssueSuspend enqueue sites, podsafety's controller exception) rather than against the sentence it replaced; and I checked the claim that the daemon package cannot run here instead of recording it, which is how it turned out to be a Postgres rather than Docker. Rounds 1 to 10 were each verified as those rounds record."
+    "how": "Round 12, with one carve-out stated rather than smoothed. The change's own proof is verified: I read the close enumeration as the three functions it is made of (checkLookEnded \u2192 endLook \u2192 endLookPending) rather than as the sentence describing them, checked SuspendIssue's corrected contract against the test that pins it and then neutered deleteStoredSandbox to see that test go red, and compared both skill mirrors rather than trusting a build. The carve-out: the handoff's own limit claim \u2014 that `./internal/daemon` still cannot run in this pod and that last round's fixture inversion therefore has compile and reading evidence only \u2014 is false at this head, by execution. That is recorded as a finding to fix rather than as a failure, since it is a statement about evidence rather than a defect in the change. Rounds 1 to 11 were each verified as those rounds record."
   },
   "failed": 0,
   "failures": [],
@@ -156,21 +164,49 @@
       "observed": "`issueSandbox` builds `spec: {operatingMode: Running}` with no claim template, and `pvcs`/`pvc` are `disks`/`disk`. Both controller goldens still carry `claimTemplates: ['issue']` and the worker golden carries none, so the rename did not erase the split. With the superseded shape restored, all three tests still pass.",
       "headSha": "569486518494",
       "negativeControl": "The restored superseded shape is the control, and its result is the honest half: the inversion adds no test power, it makes the fixture say what the runtime builds."
+    },
+    {
+      "round": 12,
+      "criterion": "The condition for a closed issue's pod going is the queued wake, not how the look ended.",
+      "surface": "The daemon's workflow code, read as the three functions the enumeration is made of.",
+      "command": "Read `workflow/check.go:472-482` (checkLookEnded), `:223-230` (endLook) and `:243-266` (endLookPending) against the new text in `skills/legion-architect/SKILL.md` and `skills/legion-worker/references/merge-gate.md`",
+      "observed": "`checkLookEnded` ends at `endLook`; `endLook` logs 'production check look ended without a report' and returns `endLookPending`, so an unreported look takes the pending path; `endLookPending` returns through `startLook` whenever `check.PendingCauseKind != \"\"`, before the suspend and before the `IssueSuspend`. The condition is therefore the queued wake, and the new text says so including the member nobody had opened: a wake already queued starts the next look on the same pod, again whichever way the look ended.",
+      "headSha": "d8efa0ba2fb0",
+      "negativeControl": "The unreported-look path is the control on the sentence: it is the member that made the previous version wrong, and reading it is what shows the new version is not wrong in the same way. Reading the sentence again would have shown nothing."
+    },
+    {
+      "round": 12,
+      "criterion": "SuspendIssue's contract is true of the code and pinned by a test, not merely accompanied by one.",
+      "surface": "The sandbox package's own suite in this pod.",
+      "command": "`go test ./internal/runtime/sandbox -run TestIssueSuspensionReadmissionResumesTheRetainedSession -count=1 -v`, then again with `deleteStoredSandbox` neutered in an out-of-tree copy",
+      "observed": "The test passes and requires a different Sandbox uid, a different pod uid, modeRunning and the retained session file resumed. With the delete neutered it fails \u2014 're-admission did not resume the session in a Sandbox and pod of its own' \u2014 and passes again once restored. The comment no longer promises a re-admission resumes a Sandbox this path deletes unconditionally.",
+      "headSha": "d8efa0ba2fb0",
+      "negativeControl": "The neutered delete is the control: a test that passed with the Sandbox left standing would be describing the contract rather than pinning it."
+    },
+    {
+      "round": 12,
+      "criterion": "The handoff's limit claim, which the acceptance would carry, is true.",
+      "surface": "The package itself, run in this pod at this head, and the author's own three instruments re-run.",
+      "command": "`go test ./internal/daemon -run '<the three fixture tests>' -count=1 -v` with LEGION_TEST_PG_DSN pointing at the Postgres on this issue's volume; `command -v docker`; `echo $DOCKER_HOST`; `ls /var/run/docker.sock`",
+      "observed": "All three tests PASS in 3.3 s. The author's three instruments are each correct \u2014 no docker on PATH, DOCKER_HOST unset, no socket \u2014 and each is an independent reading of 'this pod has no container runtime', which was never in dispute. The claim drawn from them, that the package cannot run here and that the fixture inversion has compile and reading evidence only, is false at this head. The step skipped is the skip's own text, which names LEGION_TEST_PG_DSN: a database, not a runtime.",
+      "headSha": "d8efa0ba2fb0",
+      "negativeControl": "Re-running the author's own three instruments is the control, and it is what makes this a finding about the question asked rather than about the sources: all three are sound, and all three are about a different proposition."
     }
   ],
   "ciAtCodeHead": {
-    "head": "569486518494",
-    "read": "2026-10-25T19:05:00Z",
-    "state": "lint, typecheck, test and pr-title all success; envoy-go and the other lanes queued or running, cited as such",
-    "previousHead": "At 0d503c1f1b7b the same four were success when the reviewer read them; each head needs its own read.",
-    "note": "Read, not re-run; no lane waited for. The handoff commit 8ad809db carries skip-checks: true and is handoff-only, so the lanes live at the code head 569486518494."
+    "head": "d8efa0ba2fb0",
+    "read": "2026-10-25T19:35:00Z",
+    "state": "typecheck and pr-title success; lint and test in progress; the rest queued \u2014 cited as running, not green",
+    "previousHead": "At 569486518494 all four required lanes read success at 19:05Z, which is a statement about that head and nothing else.",
+    "note": "Read, not re-run; no lane waited for beyond one settling interval."
   },
   "observations": [
     "The previous round's binary still prints the pre-change refusal, and I ran it before noticing. Rebuilding from the head under test is the fourth instance today of the same discipline \u2014 verify the instrument is the one the question is about before reading what it says.",
-    "Round 11, the same rule a fifth time and twice over: `go test -run <one test>` printed `ok` in 0.026s and `-v` showed `--- SKIP`, so an unrun test looked like a passing one; and a mutation of `SuspendIssue`'s delete left the sweep's test green because that test deletes through `ReconcileOrphans`, another path. A test that survives a mutation is a question, and both times the answer was my instrument rather than the test."
+    "Round 11, the same rule a fifth time and twice over: `go test -run <one test>` printed `ok` in 0.026s and `-v` showed `--- SKIP`, so an unrun test looked like a passing one; and a mutation of `SuspendIssue`'s delete left the sweep's test green because that test deletes through `ReconcileOrphans`, another path. A test that survives a mutation is a question, and both times the answer was my instrument rather than the test.",
+    "Round 12, the form this takes when the instruments are sound: three independent readings \u2014 no docker on PATH, DOCKER_HOST unset, no socket \u2014 all correct, all about 'this pod has no container runtime', and all standing in for a claim none of them touches. A second source helps only when it is asked the same question; several asked a different one are not more evidence, they are more confidence. The source that would have settled it was already printed: the skip's own text."
   ],
   "notReachedHere": [
-    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head \u2014 eleven readings of that harness have now found defects in it and nothing of it has been executed.",
+    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head. That negative now rests on two independent sources rather than one: my reading of the scripts, and the repository's own automation \u2014 no file under `.github/` names either script, and the repository's recent runs are Docs, Legion Envoy and Contracts, PR Title, Tests and Worker Image, none of them a stage lane.",
     "One test of `internal/daemon`, TestABootWaitsOutAGitHubRequestThatNeverAnswers, needs rootless Docker and panics, which takes an unfiltered package run down with it. That is the package's remaining limit: one test, not the package, and not the fixture tests this round checked.",
     "Nothing this round ran against the cluster namespace. The admission policy there refused a scratch Postgres Job, saying a smaller build runs in its Legion pod, and that is what I did."
   ],
@@ -183,6 +219,11 @@
       "what": "Round 10's finding is fixed in this round, and its claim is now stated at its real strength.",
       "evidence": "`issueSandbox` builds no claim template and `pvcs`/`pvc` are `disks`/`disk`; both controller goldens keep `claimTemplates: ['issue']` against the worker golden's none, so the rename did not erase the architectural split. Putting the superseded shape back into the fixture leaves all three tests passing.",
       "verdict": "The inversion adds no test power: it makes the fixture say what the runtime builds, and the risk I named in round 10 is closed by construction rather than by any assertion. Each of the three tests was separately mutation-checked and pins its own reason \u2014 two reddened by neutering SuspendIssue's delete, the third by neutering the orphan sweep's own deleteFenced."
+    },
+    {
+      "what": "The implementer's handoff records a limit that is false at this head, and the acceptance would carry it.",
+      "evidence": "`.legion/INFRA-80/implement.json` says `./internal/daemon` 'still cannot run in this pod, checked against a second source rather than inferred from one failure', and concludes last round's fixture inversion 'has compile and reading evidence only, and a tester with Docker should run that package'. At this head, in this pod, its three fixture tests run and pass in 3.3 s against a Postgres on the issue's own volume. The handoff's three instruments are each sound and each about a different proposition: no docker on PATH, DOCKER_HOST unset, no socket.",
+      "verdict": "A finding to fix in this pull request rather than a round failure: it is a statement about evidence rather than a defect in the change, and the change's own proof is verified. It must be fixed rather than noted because an acceptance carries a limit forward, and a limit nobody measured is how the last three wrong limits in this tree's record came to be written."
     }
   ]
 }
