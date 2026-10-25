@@ -2833,6 +2833,43 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "grafana\nalerting\np99 is 3.2s",
 		},
 		{
+			name: "a coloured attachment whose fallback copies its own block",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"attachments": []any{map[string]any{
+						"color":    "#d00",
+						"fallback": "Deploy failed on web-1",
+						"blocks": []any{map[string]any{
+							"type": "section",
+							"text": map[string]any{"type": "mrkdwn", "text": "Deploy failed on web-1"},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Deploy failed on web-1",
+			wantText:    "Deploy failed on web-1",
+		},
+		{
+			name: "an attachment whose fallback says more than its block",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"attachments": []any{map[string]any{
+						"fallback": "PLAIN COPY",
+						"blocks": []any{map[string]any{
+							"type": "section",
+							"text": map[string]any{"type": "mrkdwn", "text": "the real body"},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: the real body",
+			wantText:    "the real body\nPLAIN COPY",
+		},
+		{
 			name: "words only in a block",
 			body: map[string]any{
 				"team_id": "T01234567",
