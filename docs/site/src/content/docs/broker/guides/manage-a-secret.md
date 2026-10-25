@@ -11,8 +11,10 @@ its key and tagged with its owner and tier
 ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
 `agent-secrets secret` manages them. It reads and writes the store itself, under your own cloud
 sign-in, so that cloud's own IAM decides what you may do; the broker never writes a secret. After
-every write the CLI asks the broker to reread that one secret, so the change is served at once
-rather than at the broker's next read of the namespace. The examples on this page are AWS's; GCP's
+every write the CLI asks the broker to reread that one secret, and the broker that answers tells
+every other broker process serving the same database to reread it too, so the change is served
+across the whole deployment within seconds rather than at each process's next read of the
+namespace. The examples on this page are AWS's; GCP's
 backend differs only where this page calls it out.
 
 ## Before you start
@@ -370,7 +372,8 @@ Do not repeat the write. A new value is read at the next grant read anyway, and 
 restore, or a first value for a secret that had none is served on the first request naming it,
 since the broker rereads a name it does not serve before refusing it. A retag or a delete of a
 secret the broker serves takes effect at its next read of the namespace, within about ten minutes,
-or at once when you ask for the reread yourself:
+or at once when you ask for the reread yourself — one call, whichever process it reaches, since
+that process tells the others:
 
 ```sh
 curl -s -X POST "$AGENT_SECRETS_URL/v1/secrets/DEMO_DEPLOY_TOKEN/reread"

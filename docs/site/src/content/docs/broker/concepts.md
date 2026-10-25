@@ -212,9 +212,19 @@ five minutes, a fixed time rather than a setting (`policyRefresh` in
 reread it: `POST /v1/secrets/{name}/reread`, which `agent-secrets secret` sends after each write it
 makes and any caller may send right after writing a secret, and a request naming a secret the
 broker does not serve yet, which makes it reread that one name before refusing it (up to ten such
-rereads at once per session, refilled one every ten seconds: `DefaultMissRereads` in
-`packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
-served on its first request. A reread reads the one secret from
+rereads at once per session in each broker process, refilled one every ten seconds:
+`DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a secret
+created a moment ago is served on its first request.
+
+A reread is the whole broker's, not one process's. A deployment may run several broker processes
+against one database, and the one a reread reaches tells the others to read that same name again,
+so a retag that narrows who may have a secret is in force everywhere within seconds rather than at
+each process's own next five-minute read. One exception is worth stating: a process whose
+connection to the database has dropped hears nothing while it is reconnecting, and nothing is
+replayed to it when it reconnects, so until its own five-minute read it goes on serving what it
+last read. That read is the backstop for everything the telling can miss.
+
+A reread reads the one secret from
 the store (on AWS, `DescribeSecret`, which shows a write at once; on Google Secret Manager,
 `GetSecret`, which Google documents as eventually consistent, so a reread made right after a write
 can still find the old state, usually for seconds) and serves it, or stops serving it,
@@ -268,7 +278,7 @@ reason of at most 400 characters. The broker evaluates every name
   (`mint-target-malformed` for a tag that is not a service account's email, `minted-has-value` for
   one holding a version). A request naming one must ask for at most an hour (`--ttl 1h`), else it
   is refused `MINT_REQUIRES_LIFETIME`. Each release rereads the secret, at most once every 30
-  seconds, so deleting or retagging it stops minting within that. Only the GCP store mints;
+  seconds in each broker process, so deleting or retagging it stops minting within that. Only the GCP store mints;
   [Operating the broker](/legion/broker/operate/) says how to create one.
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
