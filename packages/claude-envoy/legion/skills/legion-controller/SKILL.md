@@ -236,10 +236,8 @@ registered, and none while one of the same kind is still unsent:
 - `slot-free on <KEY>`: the daemon released `<KEY>`'s slot, because its tree finished or left the
   workflow, and no waiting root took it.
 - `awaiting-person on <KEY>`: the root returned its slot while its architect waits only on a
-  person's gate review or answer to its root question. Read `issues.<KEY>.waitingOn`; do not park
-  or re-admit it. The slot it returned is no reason to label or admit anything: count it as
-  **Free slots** says and take nothing. `answeredAt` means a person answered and the root resumes
-  itself at the next free slot, ahead of never-run roots.
+  person. Read `issues.<KEY>.waitingOn`; do not park or re-admit it, and take nothing for the
+  slot ([reading admission](skill://legion-controller/references/admission.md)).
 - `todo on <KEY>`: `<KEY>`, an issue nobody handed to Legion, changed while in `todo` and a slot
   was free; the daemon holds it back half a minute and folds the events of that window into it.
   It is not Legion's: take nothing.
