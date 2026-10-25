@@ -2,40 +2,93 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T18:24:00Z",
+  "completed": "2026-10-25T18:52:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "round": 7,
-  "testedHead": "90eca150f88936e46d1f354cbad83cba5f9e5236",
-  "roundReason": "Architect's standing ruling (PR comments 6400492408, 6400601649, 6400670216, 6400709005): cleanup() ignores further INT/TERM/HUP; the hazard sentences come out. The implementer added 'trap '' INT TERM HUP; set -m' (set -m because kubectl does not keep an ignored SIGTERM).",
+  "round": 8,
+  "testedHead": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+  "roundReason": "Round 7's failure (SIGINT ended the set -m trap). The architect directed: keep the ignore, drop set -m, give the trap's commands a session of their own; the block now runs each trap kubectl under setsid -w.",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Its TERM cases reproduce: two TERMs 0.5 s apart (infra-386-postgres-gspgq) and one TERM into a failed run's trap (b84xv) each finished and printed sequence: exit; the ignore without set -m printed 'cleanup: the Job's delete failed' and left the Job, Service and pod (sdwjw); SIGKILL left them (zlgnj) and the recovery lines removed them in 5.8 s; a plain run ended exit 0 with nothing left. But it drove only SIGTERM as the stop, and the page's claim covers SIGINT and SIGHUP too. SIGINT reaching the trap still kills it (failure below), so the proof does not establish the claim it is cited for."
+    "verdict": "verified",
+    "how": "Drove its cases independently on the head's block with a private TMPDIR: TERM then TERM/INT/HUP, INT and TERM into a failed run's trap, KILL, plain, refused create, and the 40 s tool timeout through this role's own bash tool; all matched. Its negative controls for set -m (zfm6t, 58nrb) reproduce only under a launch that starts the sequence with SIGINT ignored, which the page's set -m sentence does not say."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "The page's claim at docs/kubernetes.md:3211-3216 of 90eca150: 'Once the trap runs, it ignores further SIGINT, SIGTERM and SIGHUP ... a stop sent to the sequence's group while the trap runs — a second stop, or one sent after a failed step or the work's end started the trap — reaches neither the trap nor its commands, and the clean-up runs to its end', and the closing comment that now lists only SIGKILL/pod loss, a failed clean-up step and the late-stored create as ways to leave the workload (the architect's ruling: 'no stop of any kind, from any start, cuts a clean-up short')",
-      "evidence": "A SIGINT that reaches the sequence while its trap runs still ends the trap part-way, with no 'sequence: exit' line, and leaves the Job, its Service and its pod. Reproduced on the real block at the head, filled in, from this issue's role container against the applied cluster, with drive.sh SCRIPT OUT WAITFOR SIG@delay...: starts the filled block (the page's own flock ... setsid -f lines), waits until the sequence's own log matches WAITFOR, then sends each signal to the sequence's process group (kill -SIG -- -<process>) or, as bash:SIG, to its bash alone; run with TMPDIR set to a private directory: (1) work fixture 'sleep 120', kill -TERM -- -<process> once it answered, kill -INT -- -<process> 0.3 s later: 5 of 5 runs (infra-386-postgres-jgczj, mtfmz, tt9kt, qt7df, and the storm run rzxxw) printed 'Terminated' and the first readings, then nothing; Job, Service and pod still there 3 s after the sequence ended. (2) A single stop: work fixture 'false', one kill -INT -- -<process> as the trap's readings began (db4zr): nothing after the readings' first line, Job, Service and pod left. (3) SIGINT to the bash alone: TERM to the group then INT to the bash 0.3 s later (4zc4h) left all three; at 1.2 s (g9bjx) no 'sequence: exit' line (the delete had been sent, so nothing was left). Controls at the same head: TERM then TERM (c8cdf), TERM then HUP (8mhz2) and the TERM-only cases above each printed 'sequence: exit 143' or 'sequence: exit 1' and left nothing; and the same block without 'set -m' (t7-sleep-nom.sh) ignored a SIGINT to its bash and printed 'sequence: exit 143' (d6m5n). So 'set -m' is what makes SIGINT kill the trap's bash; putting 'set -m' before the 'trap '' …' (t7-sleep-swap.sh) did not help (2 of 2 runs, 2rqqc and 47fr8, left all three). Every leftover was removed with the page's two name-based recovery lines. No red test: the block lives in prose, no suite runs it, and the deployment instructions bar tests that assert a file's contents; the drive.sh commands above are the reproduction."
+      "criterion": "Round 8: no stop signal reaching the trap cuts the clean-up short",
+      "surface": "the page's block at the head, filled in, run from this issue's role container against the applied cluster as the page says (flock ... setsid -f), private TMPDIR",
+      "command": "drivem.sh SCRIPT OUT WAITFOR SIG@delay... (starts the block with job control on, so SIGINT is delivered as from a role's bash tool; sends each signal to the sequence's group or, as bash:SIG, its bash alone); work fixture 'sleep 120' with stops after 'answered', or 'false' with stops on the trap's first reading",
+      "observed": "each printed sequence: exit and left nothing: TERM+INT 0.3 s (klcnz, kqslh) exit 143; INT+INT 0.3 s (852zf, pwv5d) exit 130; TERM then bash:INT twice (fpq6g) exit 143; INT into a failed trap (5cqzv) exit 1; INT, TERM, HUP, INT 0.2 s apart into a failed trap (lzx24) exit 1; storm TERM, INT, HUP, TERM, bash:TERM, INT, bash:HUP, TERM (hwqd4) exit 143; the same cases under a launch with SIGINT ignored at entry (drive.sh): all finished, nothing left (pk5zz, m9txc, mszf5, mpwdt, dw2gx, s7x7l, n8v2z, 7hrkj, dlxd6); 8 stop storms at 0.20-0.50 s after 'run:' each ended with an exit line and nothing left",
+      "headSha": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+      "negativeControl": "one INT during the work (4sldr): sequence: exit 130, so the driver's stops reach the sequence; the 90eca150 block (set -m) with one INT into a failed trap under the SIGINT-ignored launch (4mh9c): nothing after the first reading, Job/Service/pod left, removed by name"
+    },
+    {
+      "criterion": "SIGKILL still ends the sequence and the name-based recovery removes what it left; a plain run, a refused create and the 40 s tool timeout end clean",
+      "surface": "same; the timeout run through this role's own bash tool",
+      "command": "drivem.sh t8-sleep.sh ... '^answered' KILL@0, then kubectl delete job <name> --cascade=foreground; kubectl wait --for=delete service/<name> --timeout=60s; plain t8.sh; t8-neg.sh (cpu \"1\"); bash t8-sleep60.sh in the tool's foreground with a 40 s timeout, then flock <file> cat <log>",
+      "observed": "KILL (tbnsw): no trap output, Job, Service and pod left, recovery 1.3 s; plain (hnnvv): exit 0, nothing left; refused create: label path, No resources found, exit 1, re-list No resources found; timeout (s4qjn): call ended at 40 s, re-attach waited and showed answered, deleted, sequence: exit 0, nothing left",
+      "headSha": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+      "negativeControl": "the KILL run is the exception the page keeps"
+    },
+    {
+      "criterion": "Page checks; block identical to base but for the ignore line and setsid -w on the trap's kubectl",
+      "surface": "docs/kubernetes.md fetched with gh api at the head (eb67e657 serves the same bytes)",
+      "command": "plan section 4 checks; diff of code.sh output base vs head; awk over cleanup() for any kubectl without setsid -w",
+      "observed": "A1 0; A2 1 x7; A3 date 4, both timing pairs; A7 0; A8 0; code hash 3277ca66... (base abe1b4cf...); the diff is the ignore line plus setsid -w on ten kubectl lines; no trap kubectl without it; no prose line over 100 characters",
+      "headSha": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+      "negativeControl": "base: A1 1, A2 first four 0 (round 1)"
+    },
+    {
+      "criterion": "A9: no private name enters the change",
+      "surface": "repository at the head, added lines, commit messages, live PR title and body, implement handoff",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over each",
+      "observed": "exit 0 (5005 files); 0 literal, 0 whole-word",
+      "headSha": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+      "negativeControl": "round 5's raw double-stop output, which prints pod labels: literal 1, whole-word 1"
     }
   ],
-  "failed": 1,
-  "otherObservations": [
-    {
-      "what": "Page checks at 90eca150 (d33598f1 serves the same bytes)",
-      "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; comment-stripped block differs from base by exactly one line, 'trap '' INT TERM HUP; set -m' (code hash base abe1b4cf..., head 798bb54b...); every other hunk inside round 5's ranges"
-    },
-    {
-      "what": "Plain run of the filled block",
-      "observed": "infra-386-postgres-ts5sm: answered, job deleted, No resources found, sequence: exit 0, nothing of it left"
-    },
-    {
-      "what": "Minor, for the fix: between the trap's 'trap - EXIT INT TERM HUP' and the new ignore line, the signals are at their defaults for a moment; 'trap - EXIT; trap '' INT TERM HUP' closes that window. Not measured."
-    },
-    {
-      "what": "Interference to know about: a concurrent role's clean-up removed /legion/scratch/tmp/sequence.* files during one of my runs (its sequence log vanished mid-run), so every later run here used a private TMPDIR"
-    }
+  "ci": "At 9d9bcf0e: Tests 40221598914 in progress (typecheck and pi-legion success; lint and test in progress); Legion Envoy and Contracts 40221598983 success; PR Title 40221714979 success. Cited, not waited for.",
+  "notesForReviewer": [
+    "docs/kubernetes.md (stop paragraph): 'a form that put the trap in job control (set -m) let a SIGINT end it' is true only for a sequence started with SIGINT ignored (a background job of a non-interactive shell); started from a role's bash tool, that form finished TERM+INT and a failed run's INT in 4 of 4 runs. Round 7's tester finding carried the same unstated condition; corrected in this handoff and on the PR. The head's block holds under both launches.",
+    "Between 'trap - EXIT INT TERM HUP' and 'trap '' INT TERM HUP' the three signals are at their defaults for a moment; 'trap - EXIT' alone on the first line closes it. Not measured.",
+    "docs/kubernetes.md:3022's code line remains over 100 characters (judged not a defect in review)."
   ],
-  "ci": "At 90eca150: Tests 40218671474 success (lint, typecheck, test, pi-legion), Legion Envoy and Contracts 40218671476 success, PR Title 40218737554 success.",
+  "regressionTests": "Docs-only change: no suite runs the block and the deployment instructions bar content-asserting tests; nothing for a red test to pin.",
   "previousRounds": [
+    {
+      "round": 7,
+      "testedHead": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+      "roundReason": "Architect's standing ruling (PR comments 6400492408, 6400601649, 6400670216, 6400709005): cleanup() ignores further INT/TERM/HUP; the hazard sentences come out. The implementer added 'trap '' INT TERM HUP; set -m' (set -m because kubectl does not keep an ignored SIGTERM).",
+      "implementerProof": {
+        "verdict": "rejected",
+        "how": "Its TERM cases reproduce: two TERMs 0.5 s apart (infra-386-postgres-gspgq) and one TERM into a failed run's trap (b84xv) each finished and printed sequence: exit; the ignore without set -m printed 'cleanup: the Job's delete failed' and left the Job, Service and pod (sdwjw); SIGKILL left them (zlgnj) and the recovery lines removed them in 5.8 s; a plain run ended exit 0 with nothing left. But it drove only SIGTERM as the stop, and the page's claim covers SIGINT and SIGHUP too. SIGINT reaching the trap still kills it (failure below), so the proof does not establish the claim it is cited for."
+      },
+      "failures": [
+        {
+          "criterion": "The page's claim at docs/kubernetes.md:3211-3216 of 90eca150: 'Once the trap runs, it ignores further SIGINT, SIGTERM and SIGHUP ... a stop sent to the sequence's group while the trap runs — a second stop, or one sent after a failed step or the work's end started the trap — reaches neither the trap nor its commands, and the clean-up runs to its end', and the closing comment that now lists only SIGKILL/pod loss, a failed clean-up step and the late-stored create as ways to leave the workload (the architect's ruling: 'no stop of any kind, from any start, cuts a clean-up short')",
+          "evidence": "A SIGINT that reaches the sequence while its trap runs still ends the trap part-way, with no 'sequence: exit' line, and leaves the Job, its Service and its pod. Reproduced on the real block at the head, filled in, from this issue's role container against the applied cluster, with drive.sh SCRIPT OUT WAITFOR SIG@delay...: starts the filled block (the page's own flock ... setsid -f lines), waits until the sequence's own log matches WAITFOR, then sends each signal to the sequence's process group (kill -SIG -- -<process>) or, as bash:SIG, to its bash alone; run with TMPDIR set to a private directory: (1) work fixture 'sleep 120', kill -TERM -- -<process> once it answered, kill -INT -- -<process> 0.3 s later: 5 of 5 runs (infra-386-postgres-jgczj, mtfmz, tt9kt, qt7df, and the storm run rzxxw) printed 'Terminated' and the first readings, then nothing; Job, Service and pod still there 3 s after the sequence ended. (2) A single stop: work fixture 'false', one kill -INT -- -<process> as the trap's readings began (db4zr): nothing after the readings' first line, Job, Service and pod left. (3) SIGINT to the bash alone: TERM to the group then INT to the bash 0.3 s later (4zc4h) left all three; at 1.2 s (g9bjx) no 'sequence: exit' line (the delete had been sent, so nothing was left). Controls at the same head: TERM then TERM (c8cdf), TERM then HUP (8mhz2) and the TERM-only cases above each printed 'sequence: exit 143' or 'sequence: exit 1' and left nothing; and the same block without 'set -m' (t7-sleep-nom.sh) ignored a SIGINT to its bash and printed 'sequence: exit 143' (d6m5n). So 'set -m' is what makes SIGINT kill the trap's bash; putting 'set -m' before the 'trap '' …' (t7-sleep-swap.sh) did not help (2 of 2 runs, 2rqqc and 47fr8, left all three). Every leftover was removed with the page's two name-based recovery lines. No red test: the block lives in prose, no suite runs it, and the deployment instructions bar tests that assert a file's contents; the drive.sh commands above are the reproduction."
+        }
+      ],
+      "failed": 1,
+      "otherObservations": [
+        {
+          "what": "Page checks at 90eca150 (d33598f1 serves the same bytes)",
+          "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; comment-stripped block differs from base by exactly one line, 'trap '' INT TERM HUP; set -m' (code hash base abe1b4cf..., head 798bb54b...); every other hunk inside round 5's ranges"
+        },
+        {
+          "what": "Plain run of the filled block",
+          "observed": "infra-386-postgres-ts5sm: answered, job deleted, No resources found, sequence: exit 0, nothing of it left"
+        },
+        {
+          "what": "Minor, for the fix: between the trap's 'trap - EXIT INT TERM HUP' and the new ignore line, the signals are at their defaults for a moment; 'trap - EXIT; trap '' INT TERM HUP' closes that window. Not measured."
+        },
+        {
+          "what": "Interference to know about: a concurrent role's clean-up removed /legion/scratch/tmp/sequence.* files during one of my runs (its sequence log vanished mid-run), so every later run here used a private TMPDIR"
+        }
+      ],
+      "ci": "At 90eca150: Tests 40218671474 success (lint, typecheck, test, pi-legion), Legion Envoy and Contracts 40218671476 success, PR Title 40218737554 success.",
+      "correction": "Round 7's SIGINT failure was measured with a driver that started the sequence as a '&' job of a non-interactive shell, which starts it with SIGINT ignored. Launched as a role's bash tool launches it (SIGINT delivered; checked from this tool), the 90eca150 block finished TERM then INT (4vrw7, 6k9c2, f4qnb) and one INT into a failed run's trap (jsgls) with sequence: exit and nothing left; under the SIGINT-ignored launch it still failed (4mh9c). The finding holds for that launch only."
+    },
     {
       "round": 6,
       "testedHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
