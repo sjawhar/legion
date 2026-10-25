@@ -683,16 +683,11 @@ func TestAWriteOpenedAsASettlementStartsArmsItWhenItEnds(t *testing.T) {
 			versions := latestVersionNumber(t, service, artifactID)
 
 			// From here every settlement runs within 20 ms of being armed; the one armed now is
-			// the hour-long timer the edit armed. The lock the timer check takes orders the delay's
-			// write before the settlement's goroutines read it.
-			service.settle = 20 * time.Millisecond
-			state := service.room(artifactID)
-			state.mu.Lock()
-			armed := service.isSettleTimerArmed(state.settle)
-			state.mu.Unlock()
-			if !armed {
-				t.Fatal("the edit armed no settlement, so no settlement starts for a write to take over")
-			}
+			// the hour-long timer the edit armed. The hook opens a write as the settlement starts.
+			// The state lock the timer check takes orders the delay's write and the hook's before
+			// the settlement's goroutines read them: settleLastPeer takes that lock before it
+			// settles, and a timer armed after it runs after it, while a browser's leaving reaches
+			// the server only through its socket, which orders nothing.
 			var once sync.Once
 			service.beforeSettleStart = func(room string) {
 				if room != artifactID {
@@ -706,6 +701,14 @@ func TestAWriteOpenedAsASettlementStartsArmsItWhenItEnds(t *testing.T) {
 					}
 					service.finishLiveWrite(write)
 				})
+			}
+			service.settle = 20 * time.Millisecond
+			state := service.room(artifactID)
+			state.mu.Lock()
+			armed := service.isSettleTimerArmed(state.settle)
+			state.mu.Unlock()
+			if !armed {
+				t.Fatal("the edit armed no settlement, so no settlement starts for a write to take over")
 			}
 
 			start.fire(t, service, artifactID, browser)
