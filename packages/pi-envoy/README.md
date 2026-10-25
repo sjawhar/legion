@@ -220,40 +220,45 @@ call judges the write against the rules in `extensions/askgate/rules.md` and ans
 The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name or
 path from a file (`--name-file`, `--path-file`) is decided from the name and path the dry run
 prints. An upload whose name or path holds an expansion (`"$NAME"`) is refused, as any write the
-gate cannot read is. For an upload given with `--path`, the gate reads that file from the directory
-the `dispatch` command resolves it in and reviews its text, as for `--content-file`. The gate
+gate cannot read is. The gate copies each file that the write posts into a private snapshot. It
+reviews the snapshot and changes the command to post that snapshot. The file must be a regular
+file. The gate refuses a missing file, a directory, a device, a FIFO and `/dev/stdin` before it
+reads them. For text from standard input, use `--<field>-file -` with a quoted here-document. The
+gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long document. It
 judges an upload against content failure 10 alone: a plan or a report is long by nature. An upload
 of any other file is not reviewed. A `task` subagent is not reviewed.
 
-**The command forms.** The gate reads a write that stands alone, and a write with these things
+**The command forms.** The gate reads a write that stands alone, and a write with only these things
 around it:
 
-- `\`-newline continuations, and `2>&1`, `>/dev/null` or `2>` to a file on the write
-- a later stage of its pipeline that holds no `dispatch` word (`| head -3`, `| tail -1`)
-- literal `NAME=value` words and one `timeout <duration>` before its program, and a file as its
-  stdin (`< q.md`)
-- before it, joined by `&&`, `;` or a newline: `cd <path>`, `export NAME=value`, read-only
-  commands (`wc`, `cat`, `ls`, `grep`, `head`, `[` …) and `dispatch` calls that do not write
-  (`claim`, `read`, `issue-update` …)
-- after it: any command that holds no second write
-- `$NAME` in the write when an earlier command of the call sets NAME to a literal, and a `~/`
-  path to `dispatch`
+- `\`-newline continuations, and output redirects on the write: `2>&1`, `>/dev/null`, or `>` and
+  `2>` to a literal file
+- `cd <literal path>`, literal assignments and `export NAME=value` before the write, joined by
+  `&&` or a newline when each step must succeed
+- read-only commands before the write, joined by `;` or a newline: `wc`, `cat`, `ls`, `grep`,
+  `head`, `tail`, `cut`, `stat`, `date`, `echo`, `printf` without `-v`, and `true`
+- `dispatch` calls before the write that do not write (`claim`, `read`, `issue-update` …)
+- later pipeline stages that pass the same read-only rule (`| head -3`, `| cut -c1-80`)
+- after the write: any statement that holds no second write
+- `$NAME` in the write when an earlier kept assignment sets NAME to a literal
 
-The dry run keeps the `cd`, the assignments, the prefixes and the stdin, and leaves out the rest.
-The gate refuses, before anything in the call runs, a write after a command that can change a file
-or the text (`python3`, `sed -i`, `cat > f`, `make`), with a command or process substitution, sent
-to the background with `&`, beside a second write, or with a variable the call does not set. The
+The dry run keeps the setup statements and runs the same control flow as the call. The gate refuses,
+before anything in the call runs, any form where the posted bytes can differ from the reviewed
+bytes. This includes a write after a command that can change a file, a dropped conditional `cd`,
+`CDPATH`, `printf -v`, a command or process substitution, an expanding here-document, a program or
+subcommand named by an expansion, a later stage that can write a file, and a second write. The
 refusal tells the agent to send the write again on its own.
 
-**The switch.** AskGate runs in each session that has Dispatch on, unless the session's envoy.json
-turns it off. Write this top-level section beside `dispatch`:
+**The switch.** AskGate runs in each session unless the session's own envoy.json turns it off.
+Write this top-level section beside `dispatch`:
 
 ```json
 { "askgate": { "enabled": false } }
 ```
 
-No section, or `enabled: true`, keeps it on. A checkout's `.envoy/envoy.json` cannot set it. A
-section that does not parse keeps AskGate on, and the start notice names the file.
+No section, or `enabled: true`, keeps it on. A checkout's `.envoy/envoy.json` cannot set it, and a
+checkout's `dispatch.enabled: false` does not turn it off. A section that does not parse keeps
+AskGate on, and the start notice names the file.
 
 **The modes.** In `block` mode a write that the gate sends back does not post. In `warn` mode the
 write posts, and the reason comes back to the agent as context. `OMP_ASKGATE=warn` or

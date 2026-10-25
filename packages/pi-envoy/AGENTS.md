@@ -168,8 +168,9 @@ left on when the switch's event runs, and a wake dropped there would be lost.
 AskGate (`extensions/askgate/`) reviews each Dispatch write of a main agent before it posts. The
 README's "AskGate" section says what it reviews, the switch, the modes and the model role.
 `envoy.ts` reads the switch at load (`askgateSetting` in `@legion/envoy-client/envoy-config`, the
-top-level `askgate` section of the session's envoy.json) and calls `registerAskGate` only with
-Dispatch on and the switch not off. `registerAskGate` (`askgate.ts`) registers the gate's one
+top-level `askgate` section of the session's envoy.json) and calls `registerAskGate` unless that
+switch is off. It does not use the checkout-merged Dispatch setting, because a later command can
+reach Dispatch with `DISPATCH_URL`. `registerAskGate` (`askgate.ts`) registers the gate's one
 `tool_call` handler at once, in the factory, after `envoy.ts`'s own, and starts the load of Oh My
 Pi's own modules through string-literal `import()`, declared in `../pi-shared/src/omp-host.d.ts`.
 Each call waits for the load. Once the modules load, the core binds to a `pi` that keeps its

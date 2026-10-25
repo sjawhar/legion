@@ -5,27 +5,29 @@
 ### Added
 
 - AskGate reviews each Dispatch write of a session's main agent before the write posts, and sends
-  back a write that breaks its rules with the reason and the fix. It runs in each session with
-  Dispatch on. `{"askgate":{"enabled":false}}` in the session's envoy.json turns it off.
-  `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry does
-  (`block` when there is none). The gate asks the `askgate` model role, else the `default` role,
-  and refuses the write when neither is set. A switch that does not parse, and a gate that does
-  not load, are said at session start. A gate that does not load (a host module, an
+  back a write that breaks its rules with the reason and the fix. It runs in each session unless
+  `{"askgate":{"enabled":false}}` in the session's own envoy.json turns it off. A checkout cannot
+  turn it off. `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry
+  does (`block` when there is none). The gate asks the `askgate` model role, else the `default`
+  role, and refuses the write when neither is set. A switch that does not parse, and a gate that
+  does not load, are said at session start. A gate that does not load (a host module, an
   `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler time limit too short for a
   verdict) refuses each write it would review, in both modes, naming the error and the switch.
 - AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
   `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
   its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
-  from the dry run, and one that holds an expansion is refused. For `--path` it reads the file from
-  the directory the `dispatch` command resolves it in. Its rules now also send back a fact the
-  reader does not need and text longer than its decision needs, and a claim about what the person
-  said is sourced only by a link to where they wrote it.
-- AskGate reads the common safe forms of a `dispatch` write. These are `\`-newline continuations,
-  output redirects and a `| head` on the write, literal assignments and a `timeout` before it, and a
-  file as its stdin. Before it, `cd`, `export`, read-only commands and `dispatch` calls that do not
-  write. After it, any command that holds no second write. The dry run keeps only what can change
-  the arguments. A write after a command that can change a file or its text, or with a command
-  substitution, is still refused.
+  from the dry run, and one that holds an expansion is refused. Each posted file is reviewed and
+  posted from a private snapshot. A missing or non-regular file is refused before AskGate reads it.
+  The gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long
+  document. Its rules now also send back a fact the reader does not need and text longer than its
+  decision needs, and a claim about what the person said is sourced only by a link to where they
+  wrote it.
+- AskGate reads a write only when it can prove the posted bytes equal the reviewed bytes. It reads
+  output redirects and later pipeline stages that only read the write's output, literal setup
+  steps, read-only commands before the write, and statements after the write that hold no second
+  write. It refuses conditional or state-changing setup that the dry run cannot repeat,
+  `printf -v`, expanding here-documents, unproved program names, later stages that can write a
+  file, and second writes.
 
 ### Fixed
 
