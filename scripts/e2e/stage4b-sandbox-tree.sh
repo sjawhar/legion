@@ -973,16 +973,46 @@ session_text() {
   [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
   printf '%s' "${out%$'\n'}"
 }
-# session_copy PREFIX DIR writes every session the table holds under the key prefix PREFIX into DIR,
-# each at its key after PREFIX, so the copy keeps the layout the files would have had.
+# session_copy PREFIX DIR copies every session the table holds under the key prefix PREFIX into DIR,
+# one file a session, at a name derived from the key, never at the key: an agent writes its own
+# session rows, so a key is not trusted, and one holding `..`, a `/` after PREFIX or a newline would
+# otherwise place a file anywhere on this machine. The name is the key after PREFIX with every byte
+# outside [A-Za-z0-9._-] made `_` (bytes, so LC_ALL=C), so it holds no `/` and cannot name a
+# directory: a subagent's <id>/<sub>.jsonl is written as <id>_<sub>.jsonl. A key whose name would be
+# empty, `.` or `..`, or one an earlier key of this call already took, is refused by name, as is a
+# name that does not resolve directly inside DIR resolved with pwd -P, a symlink already there
+# followed, so the guarantee holds even if the derivation is wrong. Every key is checked before any
+# session is written, and a refusal names the key, never the session's bytes. The listing gives each
+# key as hex, one line a key even when the key holds a newline, decoded here byte for byte.
 session_copy() {
-  local prefix=$1 dir=$2 paths path
-  paths=$(session_psql prefix "$prefix" <<<"SELECT path FROM omp_session_files WHERE left(path, length(:'prefix')) = :'prefix' ORDER BY path;") || return 1
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    mkdir -p "$(dirname "$dir/${path#"$prefix"}")"
-    session_text "$path" >"$dir/${path#"$prefix"}" || return 1
-  done <<<"$paths"
+  local prefix=$1 dir=$2 LC_ALL=C hex line path name dest resolved i
+  local -a keys=() names=()
+  local -A taken=()
+  hex=$(session_psql prefix "$prefix" <<<"SELECT encode(convert_to(path, 'UTF8'), 'hex') FROM omp_session_files WHERE left(path, length(:'prefix')) = :'prefix' ORDER BY path;") || return 1
+  [ -n "$hex" ] || return 0
+  mkdir -p -- "$dir" && dest=$(cd -- "$dir" && pwd -P) || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf -v path '%b' "$line"
+    name=${path#"$prefix"}
+    name=${name//[!A-Za-z0-9._-]/_}
+    case $name in
+      "" | . | ..)
+        echo "the session key $path names no file of its own in $dest (its name would be '$name'); no session is copied" >&2
+        return 1 ;;
+    esac
+    [ -z "${taken[$name]+x}" ] ||
+      { echo "the session key $path would be written as $name in $dest, as the key ${taken[$name]} is; no session is copied" >&2; return 1; }
+    taken[$name]=$path
+    resolved=$(realpath -m -- "$dest/$name") || return 1
+    [ "${resolved%/*}" = "${dest%/}" ] ||
+      { echo "the session key $path would be written at $resolved, outside $dest; no session is copied" >&2; return 1; }
+    keys+=("$path")
+    names+=("$name")
+  done < <(sed 's/../\\x&/g' <<<"$hex")
+  for i in "${!keys[@]}"; do
+    session_text "${keys[$i]}" >"$dest/${names[$i]}" || return 1
+  done
 }
 # claim_session_file ISSUE ROLE prints the session file the newest claim of ROLE on ISSUE records,
 # the session's key in the session database.
@@ -2485,10 +2515,10 @@ remove_run_branches() {
   return 0
 }
 # collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: every
-# pod's, from the session database, each at its key under pod_sessions_dir (a pod already gone, a
-# child's included), and the operator's controller's, which lives in the run's own profile on this
-# machine and goes with that profile at teardown (transcripts/controller). It runs before the
-# teardown removes the database's container.
+# pod's, from the session database, each at the name session_copy derives from its key under
+# pod_sessions_dir, <cwd dir>_<file> (a pod already gone, a child's included), and the operator's
+# controller's, which lives in the run's own profile on this machine and goes with that profile at
+# teardown (transcripts/controller). It runs before the teardown removes the database's container.
 collect_transcripts() {
   session_copy "$pod_sessions_dir/" "$evidence/transcripts" ||
     note "the pods' sessions could not be copied from the session database $session_db_container into $evidence/transcripts"
@@ -5577,8 +5607,8 @@ jq -e '.wrong == []' <<<"$up" >/dev/null || fail "the daemon logged a liveness l
 note "negative control: after line $up_mark of the daemon log, for $watched s with $launched_session holding the role, neither line"
 claim=$(claim_by_token "$controller_token")
 pod=$(jq -r .locator.sandbox.name <<<"$claim")
-# Its sessions are the session database's under its session file's directory, copied in the layout
-# its pod's sessions directory would have held.
+# Its sessions are the session database's under its session file's directory, each at the name
+# session_copy derives from its key there, a subagent's <stem>/<id>.jsonl as <stem>_<id>.jsonl.
 launched_file=$(jq -r '.sessionFile // ""' <<<"$claim")
 launched_dir=$(dirname "$launched_file")
 mkdir -p "$evidence/transcripts/daemon-controller"
