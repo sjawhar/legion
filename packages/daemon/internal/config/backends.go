@@ -73,15 +73,3 @@ func readWorkerBackends(value *yaml.Node, key string) (map[claim.Role]runtime.Ba
 	}
 	return backends, nil
 }
-
-// checkWorkerBackends refuses a role on a backend the configured runtime does not launch
-// (runtime.Backends): every pod runs the worker image's Oh My Pi.
-func checkWorkerBackends(cfg Config) error {
-	for _, role := range claim.Roles {
-		backend := cfg.BackendFor(role)
-		if info := runtime.Backends[backend]; !info.LaunchedBy(cfg.Runtime.Name) {
-			return fmt.Errorf("worker_backends.%s is %s, which runs only under runtime: %s", role, backend, strings.Join(info.Runtimes, " or "))
-		}
-	}
-	return nil
-}

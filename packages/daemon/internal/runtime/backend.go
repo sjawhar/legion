@@ -38,11 +38,11 @@ type BackendInfo struct {
 	PromptPart string
 }
 
-// Backends is every harness a launch can run on. Oh My Pi runs every role under either runtime.
-// Claude Code runs the phase workers under tmux alone, since the worker image carries no Claude
-// Code; it is told claude-mechanics.md, the role prompts' Oh My Pi tool names as Claude Code names
-// them. A harness is added here, as a tmux Launcher (runtime/tmux), and as a boot resolver
-// (daemon's launchers.go).
+// Backends is every harness a launch can run on. Oh My Pi runs every role under either runtime,
+// and Claude Code the phase workers under either, since the worker image carries Claude Code and
+// its Legion plugin; it is told claude-mechanics.md, the role prompts' Oh My Pi tool names as
+// Claude Code names them. A harness is added here, as a tmux Launcher (runtime/tmux), and as a
+// boot resolver (daemon's launchers.go).
 var Backends = map[Backend]BackendInfo{
 	BackendOmp: {Name: "OMP", Runtimes: []string{"tmux", "kubernetes"}},
 	BackendClaude: {
@@ -50,7 +50,7 @@ var Backends = map[Backend]BackendInfo{
 		Roles: []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger},
 		Why: "an architect is woken by notices on its Envoy role topic and the controller by its own, " +
 			"and Claude Code's print mode delivers no channel notification",
-		Runtimes:   []string{"tmux"},
+		Runtimes:   []string{"tmux", "kubernetes"},
 		PromptPart: "claude-mechanics.md",
 	},
 }

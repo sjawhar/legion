@@ -277,7 +277,6 @@ func TestRejectedLauncherHellosDoNotSpendKubernetesRequests(t *testing.T) {
 // spec's secrets, which would point a `<NAME>_FILE` variable at it and be refused for its name
 // besides. An Oh My Pi launch carries no such file.
 func TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile(t *testing.T) {
-	claudeInKubernetes(t)
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)

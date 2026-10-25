@@ -234,7 +234,6 @@ func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesSessions(t *testing.T) 
 // onto the transcript. An Oh My Pi role of the same deployment is told both under a session
 // database and neither without one.
 func TestAClaudeWorkerIsToldNeitherOhMyPiSessionVariable(t *testing.T) {
-	claudeInKubernetes(t)
 	for _, tc := range []struct {
 		store string
 		key   string
@@ -270,7 +269,6 @@ func TestAClaudeWorkerIsToldNeitherOhMyPiSessionVariable(t *testing.T) {
 // that resumes nothing: the issue's retained sessions are read and hold it to the volume, where
 // under that store an Oh My Pi one is not held to them at all (issuePod.provision).
 func TestAClaudeClaimExpectsItsVolumeUnderASessionDatabase(t *testing.T) {
-	claudeInKubernetes(t)
 	opts := testOptions()
 	opts.SessionDSNKey = "SESSION_DSN"
 	r, err := configure(opts)

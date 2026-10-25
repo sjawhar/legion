@@ -911,9 +911,6 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		cfg.Capabilities = *file.Capabilities
 	}
 	cfg.WorkerBackends = file.WorkerBackends
-	if err := checkWorkerBackends(cfg); err != nil {
-		return Config{}, err
-	}
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {
 			return Config{}, err

@@ -1021,7 +1021,6 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		"provisioning secret": {func(s *runtime.SpawnSpec) { s.Secrets[provisionTokenKey] = "x" }, "a key the runtime writes itself"},
 		"dispatch secret":     {func(s *runtime.SpawnSpec) { s.Secrets[dispatchTokenKey] = "x" }, "DISPATCH_TOKEN_FILE is a variable the runtime sets itself"},
 		"prompt too large":    {func(s *runtime.SpawnSpec) { s.Prompt.Addressing = strings.Repeat("x", maxArgBytes) }, "the value of --append-system-prompt"},
-		"claude backend":      {func(s *runtime.SpawnSpec) { s.Backend = runtime.BackendClaude }, "its role runs on claude, which the worker image does not carry"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := workerSpec(t)
@@ -1119,7 +1118,6 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 // environment and not to runtimeOwned is one a spec could override; a name left in runtimeOwned
 // that the environment no longer sets is one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
-	claudeInKubernetes(t)
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -1696,7 +1694,6 @@ func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
 // to its list is one an operator could collide with unrefused; one left in a list that no pod
 // carries is refused for nothing.
 func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
-	claudeInKubernetes(t)
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
@@ -1918,7 +1915,6 @@ var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a
 // uuid here says; one that resumes names the transcript's id instead
 // (TestAResumingClaudePodContinuesItsTranscriptByItsID).
 func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
-	claudeInKubernetes(t)
 	opts := goldenOptions()
 	r, err := configure(opts)
 	if err != nil {
@@ -1970,7 +1966,6 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 // of the three. The directory is the role's own on the issue's volume, so it outlives the pod and
 // is no sibling role's.
 func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
-	claudeInKubernetes(t)
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -2001,7 +1996,6 @@ func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 // is applied, so a Claude claim still recording an Oh My Pi session is refused there, naming the
 // backend change that left it recorded.
 func TestAResumingClaudePodContinuesItsTranscriptByItsID(t *testing.T) {
-	claudeInKubernetes(t)
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)

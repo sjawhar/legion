@@ -290,24 +290,6 @@ func claudeResumeSpec(t *testing.T) runtime.SpawnSpec {
 	return spec
 }
 
-// claudeInKubernetes lets a test reach the pod's Claude Code lane while the runtime still refuses
-// one: runtime.Backends names tmux alone as Claude Code's runtime, and prepare refuses a backend
-// whose entry does not name this one. The pod's path is built before that entry is widened — the
-// refusal is lifted once the whole of it is in place — so a test that drives the lane adds this
-// runtime to the entry for its own duration and puts the entry back after. It is a no-op once the
-// entry names this runtime itself. No test of this package runs in parallel with another.
-func claudeInKubernetes(t *testing.T) {
-	t.Helper()
-	entry := runtime.Backends[runtime.BackendClaude]
-	if entry.LaunchedBy(configName) {
-		return
-	}
-	restored := entry
-	entry.Runtimes = append(slices.Clone(entry.Runtimes), configName)
-	runtime.Backends[runtime.BackendClaude] = entry
-	t.Cleanup(func() { runtime.Backends[runtime.BackendClaude] = restored })
-}
-
 func childSpec(t *testing.T) runtime.SpawnSpec {
 	return testSpec(t, childToken, claim.RoleImplementer, "LEGION-209")
 }

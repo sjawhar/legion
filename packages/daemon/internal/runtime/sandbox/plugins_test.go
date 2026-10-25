@@ -245,7 +245,6 @@ func TestStartArgvIsAgentUnchangedWithoutPluginsOrSetup(t *testing.T) {
 // create it. The script is run here, so the directory it makes is the one the pod would get, and
 // an Oh My Pi launch of the same deployment is left unwrapped.
 func TestAClaudeLaunchsStartScriptMakesItsConfigurationDirectory(t *testing.T) {
-	claudeInKubernetes(t)
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
