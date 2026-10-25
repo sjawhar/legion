@@ -1,23 +1,42 @@
 /**
- * Markdown bodies with the `dispatch://` references each one cites, in order of first appearance,
- * as read against the server origin `https://dispatch.test`, or the row's `origin` where it names
- * one. Two readers are tested against it - the dashboard's `composerReferences` (its composer's
- * reference pills and its unfurl cards; the rendered-text linkifier shares its scanner) and the Go
- * reader `text.Extract`, which writes the reference graph, through its JSON copy in
- * `packages/envoy/internal/dispatch/text/testdata` - so neither where a reference ends nor what it
- * names can change on one side only. A reference ends at whitespace (Unicode space separators
- * included, a vertical tab and U+FEFF not), an angle or square bracket, a quote, a backtick or a
- * pipe; the sentence punctuation, emphasis and strikethrough delimiters and unbalanced closing
- * parenthesis after it are dropped. External URLs cite nothing.
+ * Markdown bodies with the references each one cites, in order of first appearance, as read
+ * against the server origin `https://dispatch.test`, or the row's `origin` where it names one.
+ * Three readers are tested against it - the dashboard's `composerReferences` (its composer's
+ * reference pills and its unfurl cards, which read `dispatch://` and dashboard addresses only), the
+ * dashboard's markdown renderers (what they link), and the Go reader `text.Mentions`, which writes
+ * the reference graph, through its JSON copy in `packages/envoy/internal/dispatch/text/testdata` -
+ * so neither where a reference ends nor what it names can change on one side only.
+ *
+ * A reference ends at whitespace (Unicode space separators included, a vertical tab and U+FEFF
+ * not), an angle or square bracket, a quote, a backtick or a pipe; the sentence punctuation,
+ * emphasis and strikethrough delimiters and unbalanced closing parenthesis after it are dropped.
+ * External URLs cite nothing.
+ *
+ * A text also cites what it writes bare: an issue key (`CORE-12`) that names an existing issue, as
+ * `dispatch://CORE-12`, and `#` with a question block's id of the text's document, as that
+ * question's ask. Either stands alone: after the start of the text, whitespace (or the numeric
+ * reference `&#32;` stored markdown writes it as), or one of ( [ " ' * _ > ` ~ |. A key ends at the
+ * end of the text or a character that is not a letter, a digit, `-`, `/`, `#` or `@`, and the
+ * sentence punctuation and delimiters `.` `,` `:` `;` `_` `*` `~` end it only when no letter or
+ * digit follows them. A `#id` is the longest run of `[A-Za-z0-9_-]`, or that run without its
+ * trailing `_` and `-` when no question holds the whole run. Neither is read inside an address.
+ * The server reads both in code and in a link's destination, where no renderer links them.
  */
 export const DISPATCH_TEXT_REFERENCES: readonly {
   body: string;
   origin?: string;
+  /** The issue keys that name an existing issue; a row without it has none. */
+  issues?: readonly string[];
+  /** The question block ids of the text's document, each to its ask's reference. */
+  questions?: Readonly<Record<string, string>>;
+  /** What the server indexes. */
   refs: readonly string[];
+  /** What a renderer links, which is none inside code or a link; omitted, it is `refs`. */
+  links?: readonly string[];
 }[] = [
   { body: "Tied to dispatch://CORE-1 here.", refs: ["dispatch://CORE-1"] },
   { body: "Tied to **dispatch://CORE-1** here.", refs: ["dispatch://CORE-1"] },
-  { body: "Tied to `dispatch://CORE-1` here.", refs: ["dispatch://CORE-1"] },
+  { body: "Tied to `dispatch://CORE-1` here.", refs: ["dispatch://CORE-1"], links: [] },
   {
     body: "_dispatch://CORE-1/spec_, ~~dispatch://CORE-2~~ and __dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222__.",
     refs: [
@@ -29,6 +48,7 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "`dispatch://CORE-5`/`dispatch://CORE-6`",
     refs: ["dispatch://CORE-5", "dispatch://CORE-6"],
+    links: [],
   },
   // How a document stores the autolink `<dispatch://CORE-7/spec>`.
   {
@@ -74,6 +94,7 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "`https://dispatch.test/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444`;",
     refs: ["dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444"],
+    links: [],
   },
   // A query is read as the browser reads it, pairs parted at `&` alone, so an id holding a `;`
   // keeps it (and is written escaped), a version holding one is no version, and an `ask` holding
@@ -141,5 +162,186 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "![shot.png](dispatch://LEGION-1/artifact/shot-png@v1)",
     refs: ["dispatch://LEGION-1/artifact/shot-png@v1"],
+  },
+  // A bare key that names an existing issue cites it, at each character it may follow.
+  { body: "CORE-1 is blocked.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on CORE-1 today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked (CORE-1) today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked [CORE-1] today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: 'Blocked on "CORE-1" today.', issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on 'CORE-1' today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on **CORE-1** today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on _CORE-1_ today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: ">CORE-1 is blocked.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Blocked on ~~CORE-1~~ today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  {
+    body: "|issue|state|\n|---|---|\n|CORE-1|open|",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+  },
+  // Stored markdown writes the space at a mark's edge as its numeric reference.
+  { body: "Blocked on&#32;CORE-1 today.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "See XCORE-1 here.", issues: ["XCORE-1"], refs: ["dispatch://XCORE-1"] },
+  { body: "CORE-1's spec is done.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  { body: "Done in CORE-1.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"] },
+  // A link's destination is a key the server reads and no renderer links: it is inside a link.
+  {
+    body: "See [the blocker](CORE-1).",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  // A key that does not stand alone, or that names no issue, cites nothing.
+  { body: "See legion/CORE-1 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See xCORE-1 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See core-1 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1abc here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1-2 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1/spec here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1.5 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1_x here.", issues: ["CORE-1"], refs: [] },
+  {
+    body: "See CORE-1#q2 here.",
+    issues: ["CORE-1"],
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: [],
+  },
+  { body: "Blocked on CORE-404.", issues: ["CORE-1"], refs: [] },
+  { body: "Blocked on CORE-1, which no issue holds.", refs: [] },
+  // `#` and the id of a question block in the text's document cites that question's ask.
+  {
+    body: "See #q2 for the rollout.",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: ["dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"],
+  },
+  {
+    body: "As agreed, _see #q2_.",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: ["dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"],
+  },
+  {
+    body: "Answered in #q2.",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: ["dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"],
+  },
+  // An id no question holds, a `#` that does not stand alone and a block's own declaration cite
+  // nothing.
+  {
+    body: "See #nope here.",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: [],
+  },
+  {
+    body: "See owner/repo#1 here.",
+    questions: { "1": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: [],
+  },
+  {
+    body: ":::ask{#q2}\nWhich region first?\n:::",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: [],
+  },
+  // A key or `#id` inside an address is part of that address.
+  {
+    body: "See https://example.com/search?q=(CORE-1) and https://example.com/docs(#q2).",
+    issues: ["CORE-1"],
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: [],
+  },
+  // Each of them in code: the server reads it there, as it reads an address in code, and no
+  // renderer links inside code.
+  { body: "`CORE-1` is blocked.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"], links: [] },
+  {
+    body: "Blocked on `CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked `(CORE-1)` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked `[CORE-1]` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: 'Blocked on `"CORE-1"` today.',
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked on `'CORE-1'` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked on `**CORE-1**` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked on `_CORE-1_` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  { body: "`>CORE-1` is blocked.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"], links: [] },
+  {
+    body: "Blocked on `~~CORE-1~~` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Cells are written `|CORE-1|open|`.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "Blocked on `&#32;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  { body: "See `XCORE-1` here.", issues: ["XCORE-1"], refs: ["dispatch://XCORE-1"], links: [] },
+  {
+    body: "`CORE-1's` spec is done.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  { body: "Done in `CORE-1.`", issues: ["CORE-1"], refs: ["dispatch://CORE-1"], links: [] },
+  {
+    body: "See `[the blocker](CORE-1)`.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+  },
+  {
+    body: "See `#q2` for the rollout.",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: ["dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"],
+    links: [],
+  },
+  {
+    body: "As agreed, `_see #q2_`.",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: ["dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"],
+    links: [],
+  },
+  {
+    body: "Answered in `#q2.`",
+    questions: { q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: ["dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"],
+    links: [],
   },
 ];

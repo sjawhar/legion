@@ -96,19 +96,24 @@ func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
 }
 
 // The Go reader's half of the shared text table: each body cites the references its row lists, in
-// order of first appearance, and nothing else, so the reference graph and the dashboard composer
-// agree on what a text cites. The table is generated from `DISPATCH_TEXT_REFERENCES` in
-// `@legion/contracts`, which `packages/contracts/src/dispatch-text-references.test.ts` holds this
-// file to; the composer walks the same rows.
+// order of first appearance, and nothing else, so the reference graph and the dashboard agree on
+// what a text cites. A row names the issues that exist and the question ids of its text's
+// document; text.Mentions reads it against a resolver that knows those, and text.Extract, which
+// reads addresses alone, is Mentions with no resolver. The table is generated from
+// `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, which
+// `packages/contracts/src/dispatch-text-references.test.ts` holds this file to; the composer and
+// the renderers walk the same rows.
 func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 	raw, err := os.ReadFile("testdata/dispatch-text-references.json")
 	if err != nil {
 		t.Fatalf("read table: %v", err)
 	}
 	var rows []struct {
-		Body   string   `json:"body"`
-		Origin string   `json:"origin"`
-		Refs   []string `json:"refs"`
+		Body      string            `json:"body"`
+		Origin    string            `json:"origin"`
+		Issues    []string          `json:"issues"`
+		Questions map[string]string `json:"questions"`
+		Refs      []string          `json:"refs"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("parse table: %v", err)
@@ -117,6 +122,23 @@ func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 		t.Fatal("the shared text table is empty")
 	}
 
+	cited := func(located []Located) []Ref {
+		refs := []Ref{}
+		for _, item := range located {
+			if item.Kind != "url" && !slices.Contains(refs, item.Ref) {
+				refs = append(refs, item.Ref)
+			}
+		}
+		return refs
+	}
+	reference := func(t *testing.T, raw, server string) Ref {
+		t.Helper()
+		parsed := Extract(raw, server)
+		if len(parsed) != 1 || parsed[0].Kind == "url" {
+			t.Fatalf("%s is not a reference: %#v", raw, parsed)
+		}
+		return parsed[0]
+	}
 	for _, row := range rows {
 		t.Run(row.Body, func(t *testing.T) {
 			server := row.Origin
@@ -125,20 +147,37 @@ func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 			}
 			want := []Ref{}
 			for _, ref := range row.Refs {
-				parsed := Extract(ref, server)
-				if len(parsed) != 1 || parsed[0].Kind == "url" {
-					t.Fatalf("%s is not a reference: %#v", ref, parsed)
-				}
-				want = append(want, parsed[0])
+				want = append(want, reference(t, ref, server))
 			}
-			got := []Ref{}
-			for _, ref := range Extract(row.Body, server) {
-				if ref.Kind != "url" && !slices.Contains(got, ref) {
-					got = append(got, ref)
+			var resolver Resolver
+			if row.Issues != nil || row.Questions != nil {
+				table := mapResolver{issues: map[string]bool{}, questions: map[string]Ref{}}
+				for _, key := range row.Issues {
+					table.issues[key] = true
 				}
+				for id, ref := range row.Questions {
+					table.questions[id] = reference(t, ref, server)
+				}
+				resolver = table
 			}
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("Extract() cites %#v; want %#v", got, want)
+			mentions, err := Mentions(row.Body, server, resolver)
+			if err != nil {
+				t.Fatalf("Mentions() error: %v", err)
+			}
+			if got := cited(mentions); !reflect.DeepEqual(got, want) {
+				t.Errorf("Mentions() cites %#v; want %#v", got, want)
+			}
+			unresolved, err := Mentions(row.Body, server, nil)
+			if err != nil {
+				t.Fatalf("Mentions(nil) error: %v", err)
+			}
+			if extracted := ExtractAt(row.Body, server); !reflect.DeepEqual(unresolved, extracted) {
+				t.Errorf("Mentions(nil) = %#v; ExtractAt() = %#v", unresolved, extracted)
+			}
+			if resolver == nil {
+				if got := cited(ExtractAt(row.Body, server)); !reflect.DeepEqual(got, want) {
+					t.Errorf("Extract() cites %#v; want %#v", got, want)
+				}
 			}
 		})
 	}

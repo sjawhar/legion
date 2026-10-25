@@ -93,10 +93,15 @@ func Extract(body, serverURL string) []Ref {
 // ExtractAt is Extract with each reference's byte offset into body, so a caller can find the
 // block a mention sits in. Trailing punctuation the grammar trims never moves the start.
 func ExtractAt(body, serverURL string) []Located {
+	return extractSpans(body, serverURL, referencePattern.FindAllStringIndex(body, -1))
+}
+
+// extractSpans reads each reference span of body, as referencePattern finds them.
+func extractSpans(body, serverURL string, spans [][]int) []Located {
 	refs := []Located{}
 	var base *url.URL
 	baseParsed := false
-	for _, span := range referencePattern.FindAllStringIndex(body, -1) {
+	for _, span := range spans {
 		raw := trimReference(body[span[0]:span[1]])
 		if raw == "" {
 			continue
