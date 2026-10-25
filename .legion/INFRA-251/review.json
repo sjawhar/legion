@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-251",
+  "completed": "2026-10-25T12:08:00Z",
+  "round": 3,
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundType": "A new round, not a fingerprint confirmation. The conflict procedure's rule is that a confirmation needs the unchanged-diff fingerprint to be equal at the approved head and the new head. I computed it myself at both and it moved: 799d32d6236e9245 at 57dab0eff220 and cb5c1756176e802a at this head, 7538 against 7548 lines. So this round ran the thermonuclear pair again and carries its own review, as the rule says. The architect asked for a confirmation; I say why it is not one, and the answer is the same APPROVE either way.",
+  "theDifference": {
+    "howRead": "jj diff --from 'fork_point(\"main\"@origin | <sha>)' --to <sha> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d', computed at 57dab0eff220a76bb733c5dda60c76da329f4019 and at 6385851061d086e86e4b66566e5da6fb8a9921cf after a jj git fetch, then the two diffs diffed against each other (185 lines of diff-of-diff).",
+    "content": "Exactly two things, and I read every hunk of them. (1) The daemon API contract renumber 36 -> 37, at packages/daemon/internal/api/version.go (the constant and a history paragraph explaining the collision and pointing at the new docs/solutions entry), packages/contracts/fixtures/daemon-api/version.json, packages/claude-envoy/package.json, packages/pi-legion/package.json, packages/contracts/src/legion-api.test.ts's comment, and prose in both CHANGELOGs and the docs. (2) The relocation of this branch's edited design-changes-requested row out of skills/legion-architect/SKILL.md into skills/legion-architect/references/wake-routing.md, where main's INFRA-376 moved the Wake routing table, in the source and in the generated mirror. No file of this issue's product change, no test of it and none of its scripts is in the difference.",
+    "whyTheRenumberIsRight": "main released contract 36 for INFRA-229's shapes without this branch's, so two different wire shapes would otherwise share one number. The boot gate takes api.DaemonAPIVersion and accepts only exact equality, and the controller mint and the claim registration refuse another contract, so a 36 plugin and a 37 daemon cannot meet; version_test.go, pi-legion's daemon-api-version.test.ts and claude-envoy's pin the equality."
+  },
+  "verified": {
+    "ci": {
+      "requiredSet": ["lint", "typecheck", "test", "pr-title"],
+      "ciHead": "9d688fa557a18fbec8c9832df7ee954ec1252cd5",
+      "checkRuns": "Waited ten minutes for the lanes to settle rather than approving a running head: lint, typecheck, test and pr-title are each completed and success. A second pr-title check-run at that commit is cancelled, the attempt its own concurrency group killed when the next push arrived; the later one is the success. Worker Image's build, which is not in main's required set, failed at the previous code head ea350c3a on a transient toolchain download (curl: (92) HTTP/2 stream 1 was not closed cleanly, downloading uv/node/awscli/go/kubectl) and is success at this head, so nothing of this branch broke it and nothing needed a re-run.",
+      "compare": "repos/sjawhar/legion/compare/9d688fa...6385851: ahead, the only file is .legion/INFRA-251/test.json, so those checks stand for the code under review."
+    },
+    "retroScope": "The two retro commits are inside what the merge gate allows above an approved head: 9e08310414d8 adds only two files under docs/solutions/, and 6b323ab66e82 only removes .legion/INFRA-251/. The handoffs below it are this round's, written again as the gate expects after retro's removal.",
+    "mirrors": "The deep-review pair derived every changed mirror path from jj diff --name-only against the head's fork point and ran cmp on all five source/mirror pairs (architect SKILL.md and references/wake-routing.md, controller SKILL.md, references/admission.md and references/parked-decisions.md): byte-identical. jj resolve --list reports no conflict and a tree search finds no conflict marker.",
+    "branchHunksSurvived": "The branch's other two architect-skill hunks are in place (skills/legion-architect/SKILL.md:161-176 and :450-453), and the relocated row appears once, in the reference, with SKILL.md pointing at it and holding no table.",
+    "threads": "No thread was opened this round. The three from round 1 remain mine, answered by the implementer and resolved, and I accept them as before.",
+    "thermonuclear": "Both ran once at this head, scoped to the delta. thermonuclear-deep-review: APPROVE, no finding — renumber completeness (every site naming this branch's shapes at 37, every site naming INFRA-229's at 36, no hard-coded floor), the handshake's exact-equality refusal, the relocation, the merges, retro's scope and private names all clean. thermonuclear-code-quality: APPROVE, no finding."
+  },
+  "standing": {
+    "productHead": "c3955ada8e44a4851e791918423d4d745751ab25, unchanged since round 1, so rounds 1 and 2's proofs and approvals stand on code that has not moved.",
+    "fastFollow": "Round 1's two items, plus one the architect ruled this round: packages/claude-envoy/CHANGELOG.md's Unreleased section now reads contract 36 above contract 37, because the merge prepended main's entry above this branch's. No check reads that prose, both manifests declare 37, and the section is rewritten at the next release; a push to reorder two lines would cost a tester round and an approval. A one-line tidy on the next claude-envoy change.",
+    "notProvenRisk": "Unchanged. A3 and A4 still wait on the one developer-machine run of scripts/e2e/parked-decision-devbox.sh at the approved head, which must end 'parked decision devbox e2e: PASS'.",
+    "gateG1": "READY still waits until sjawhar/legion#2131's content is in main."
+  }
+}
