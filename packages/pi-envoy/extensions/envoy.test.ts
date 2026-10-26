@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  setSystemTime,
+  spyOn,
+  test,
+} from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -167,7 +176,15 @@ const natsState = {
   heldConnect: undefined as Promise<void> | undefined,
   drainHangs: false,
   drainStarted: false,
+  /** Each mocked connection's `status()` readers: a push hands every one of them the status, as
+   *  nats.js reports a reconnect to every reader of the connection's status iterator. */
+  statusReaders: [] as ((status: { readonly type: string; readonly data: unknown }) => void)[],
 };
+
+/** Reports `{ type }` to every reader of a mocked connection's `status()`. */
+function pushNatsStatus(type: string): void {
+  for (const read of natsState.statusReaders) read({ type, data: "" });
+}
 
 const targetedDispatchPayload = readFileSync(
   new URL("../../contracts/fixtures/dispatch-targeted-delivery.json", import.meta.url),
@@ -182,8 +199,9 @@ const clipboardState = {
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
 // that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
 // before the mock replaces it: a static import's live bindings would read the mock.
-const { connect: realConnect, nkeyAuthenticator, nkeys } = await import("nats");
+const { connect: realConnect, Events, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  Events,
   nkeyAuthenticator,
   nkeys,
   connect: async (options: {
@@ -213,6 +231,34 @@ mock.module("nats", () => ({
       drain: async () => {
         natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
+      },
+      // An async iterable of the connection's status events, which a test feeds through
+      // `pushNatsStatus`; it ends once the connection is closed.
+      status: () => {
+        const queued: { readonly type: string; readonly data: unknown }[] = [];
+        let wake: (() => void) | undefined;
+        const reader = (status: { readonly type: string; readonly data: unknown }) => {
+          queued.push(status);
+          wake?.();
+          wake = undefined;
+        };
+        natsState.statusReaders.push(reader);
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async (): Promise<
+              IteratorResult<{ readonly type: string; readonly data: unknown }>
+            > => {
+              for (;;) {
+                if (closed) return { done: true, value: undefined };
+                const status = queued.shift();
+                if (status !== undefined) return { done: false, value: status };
+                const pending = Promise.withResolvers<void>();
+                wake = pending.resolve;
+                await pending.promise;
+              }
+            },
+          }),
+        };
       },
       publish: (subject: string, data?: Uint8Array) => {
         if (natsState.failPublishes > 0) {
@@ -437,6 +483,7 @@ afterEach(async () => {
   natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
+  natsState.statusReaders.length = 0;
   hostBuiltins.length = 0;
 });
 
@@ -756,8 +803,8 @@ function acceptResponse(
  * message call. `entries` are what the session's file already holds, as a restarted session reads
  * them, and `branch` its active branch (the entries by default); every entry the session appends
  * is read back with them. `delivered(n)` resolves once the session has taken `n` deliveries, cards
- * and user turns together, and `recordedWhenDelivered` says how many entries the session had
- * appended when each went out.
+ * and user turns together, and `recordedWhenDelivered` says how many handled-attempt entries the
+ * session had appended when each went out.
  */
 async function bootDirectSession(
   query: string,
@@ -828,6 +875,10 @@ async function bootDirectSession(
   const fixture = createPi();
   const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
   const recordedWhenDelivered: number[] = [];
+  // The attempt records alone: the replay cursors and ledger the session also appends are not
+  // what a delivery has to follow.
+  const handledRecords = () =>
+    fixture.entries.filter((entry) => entry.customType === "envoy-dispatch-handled-attempt").length;
   const inputs: { readonly text: string; readonly options: unknown }[] = [];
   const taken = () => {
     const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
@@ -841,20 +892,20 @@ async function bootDirectSession(
     ...fixture.pi,
     sendMessage: (message: never, sendOptions: unknown) => {
       options.beforeSend?.();
-      recordedWhenDelivered.push(fixture.entries.length);
+      recordedWhenDelivered.push(handledRecords());
       fixture.pi.sendMessage(message, sendOptions);
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
       options.beforeSend?.();
-      recordedWhenDelivered.push(fixture.entries.length);
+      recordedWhenDelivered.push(handledRecords());
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
     ...(run !== undefined && {
       sendUserInput: (text: string, inputOptions: unknown) => {
         options.beforeSend?.();
-        recordedWhenDelivered.push(fixture.entries.length);
+        recordedWhenDelivered.push(handledRecords());
         inputs.push({ options: inputOptions, text });
         taken();
         return run(text, inputOptions);
@@ -905,12 +956,30 @@ function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
 
+/** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
+function emptyReplay(init: RequestInit | undefined): Response {
+  const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+    readonly subjects?: readonly { readonly subject: string }[];
+  };
+  return response({
+    stream: { created: "2026-10-01T00:00:00Z", first_seq: 0, last_seq: 0 },
+    subjects: (body.subjects ?? []).map(({ subject }) => ({
+      subject,
+      messages: [],
+      next_after: 0,
+      more: false,
+    })),
+  });
+}
+
 function responseWithRegistration(
   input: string | URL | Request,
   init: RequestInit | undefined,
   fallback: unknown
 ): Response {
-  if (new URL(input.toString()).pathname !== "/v1/interests/subscribe") return response(fallback);
+  const path = new URL(input.toString()).pathname;
+  if (path === "/v1/replay") return emptyReplay(init);
+  if (path !== "/v1/interests/subscribe") return response(fallback);
   const body = JSON.parse(init?.body?.toString() ?? "{}") as {
     readonly session_id: string;
     readonly dir: string;
@@ -1415,8 +1484,11 @@ describe("envoy OMP extension", () => {
       expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
     ]);
     expect(session.asked[0]?.signal?.aborted).toBe(false);
-    // The arming period lives in memory only: nothing about it reaches the transcript.
-    expect(session.fixture.entries).toEqual([]);
+    // The arming period lives in memory only: nothing about it reaches the transcript, whose only
+    // entries are the replay cursors.
+    expect(
+      session.fixture.entries.filter((entry) => !entry.customType.startsWith("envoy-replay-"))
+    ).toEqual([]);
   });
 
   test("runs the stop-time check on the managed timer, after agent_end has returned", async () => {
@@ -2855,6 +2927,11 @@ describe("envoy OMP extension", () => {
           capabilities: ["aside", "steer"],
           host: machineID(),
         },
+      },
+      // The opened agent subject's first sweep, which starts its cursor.
+      {
+        path: "/v1/replay",
+        body: { session_id: "ses_omp", subjects: [{ subject: "notifications.agent.ses_omp" }] },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
       { path: "/v1/interests/ses_omp", body: undefined },
@@ -9495,8 +9572,11 @@ describe("envoy OMP extension", () => {
       expect(fixture.deliveries).toEqual([]);
       expect(posts).toEqual([]);
       // The attempt is in the transcript before the turn goes out, so no crash in between leaves
-      // a delivered attempt a forged frame could still have accepted.
-      expect(fixture.entries).toEqual([
+      // a delivered attempt a forged frame could still have accepted. (The replay cursors and
+      // ledger are the session's other entries.)
+      expect(
+        fixture.entries.filter((entry) => !entry.customType.startsWith("envoy-replay-"))
+      ).toEqual([
         {
           customType: "envoy-dispatch-handled-attempt",
           data: { attempt: 1, message_id: DIRECT_MESSAGE_ID },
@@ -13363,6 +13443,8 @@ describe("envoy OMP extension", () => {
     expect(drainHadStartedAtDeregistration).toBe(false);
     expect(requests).toEqual([
       { method: "POST", path: "/v1/interests/subscribe" },
+      // The opened agent subject's first sweep.
+      { method: "POST", path: "/v1/replay" },
       { method: "DELETE", path: "/v1/sessions/ses_shutdown" },
     ]);
   });
@@ -13437,7 +13519,9 @@ describe("envoy OMP extension", () => {
 
   test("the heartbeat heals a stale registration when the session ID drifts", async () => {
     const registered: string[] = [];
-    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      // The sweep the opened agent subject starts is answered as an empty stream, not counted.
+      if (new URL(input.toString()).pathname === "/v1/replay") return emptyReplay(init);
       if (init?.body !== undefined) {
         const body = JSON.parse(init.body.toString());
         if (typeof body.session_id === "string") registered.push(body.session_id);
@@ -13610,5 +13694,748 @@ describe("envoy OMP extension", () => {
     // A markdown paragraph merge (the bug's actual symptom) would join
     // adjacent lines onto one row; plain-text rendering keeps them apart.
     expect(rendered).not.toContain("- one - two");
+  });
+});
+
+describe("messages missed while the subscription was down", () => {
+  const ISSUE = "INFRA-9";
+  const ISSUE_TOPIC = dispatchIssueSubject(ISSUE, ">");
+  const ISSUE_SUBJECT = dispatchIssueSubject(ISSUE, "issue.updated");
+  const HOUR_MS = 60 * 60 * 1_000;
+  const DAY_MS = 24 * HOUR_MS;
+
+  interface StoredFrame {
+    readonly seq: number;
+    readonly subject: string;
+    readonly time: string;
+    readonly data: string;
+  }
+
+  interface ReplayRequest {
+    readonly session_id: string;
+    readonly subjects: readonly { readonly subject: string; readonly after?: number }[];
+  }
+
+  // Lets every promise and I/O callback queued so far run: a sweep's listener call and its
+  // deliveries settle within a few turns, since nothing in the mocked path waits on a clock.
+  async function settle(): Promise<void> {
+    for (let turn = 0; turn < 25; turn += 1) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    }
+  }
+
+  // Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
+  // (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms here), which no fake clock reaches; the deadline is
+  // measured on the monotonic clock, which `setSystemTime` leaves alone.
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 2_000;
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await settle();
+    }
+  }
+
+  // NATS subject matching: `*` is one token, `>` one or more trailing tokens.
+  function subjectMatches(pattern: string, subject: string): boolean {
+    const want = pattern.split(".");
+    const got = subject.split(".");
+    for (const [index, token] of want.entries()) {
+      if (token === ">") return got.length > index;
+      if (index >= got.length || (token !== "*" && token !== got[index])) return false;
+    }
+    return want.length === got.length;
+  }
+
+  /**
+   * `ENVOY_NOTIFICATIONS` as the listener's replay route reads it, and the listener's interest
+   * registry: stored messages with their sequence, subject and time, the first sequence retention
+   * left, and the stream's creation time. It keeps agent and Dispatch subjects only, as the
+   * deployed stream keeps no team topic.
+   */
+  class StreamModel {
+    readonly created = "2026-10-20T00:00:00Z";
+    firstSeq = 1;
+    lastSeq = 0;
+    messages: StoredFrame[] = [];
+    /** False is a listener without the route, which answers 404. */
+    served = true;
+    replays = 0;
+    readonly interests = new Map<string, Set<string>>();
+
+    store(subject: string, data: string, time = new Date().toISOString()): number {
+      this.lastSeq += 1;
+      this.messages.push({ seq: this.lastSeq, subject, time, data });
+      return this.lastSeq;
+    }
+
+    /** Retention drops every message up to `seq`. */
+    expireThrough(seq: number): void {
+      this.messages = this.messages.filter((message) => message.seq > seq);
+      this.firstSeq = seq + 1;
+    }
+
+    /** The route's rules: the watermark, a cursor started without `after`, the eligibility. */
+    answer(request: ReplayRequest) {
+      const watermark = this.lastSeq;
+      const registered = this.interests.get(request.session_id) ?? new Set<string>();
+      return {
+        stream: { created: this.created, first_seq: this.firstSeq, last_seq: watermark },
+        subjects: request.subjects.map(({ subject, after }) => {
+          const refused =
+            subject !== `notifications.agent.${request.session_id}` && !registered.has(subject)
+              ? "not_followed"
+              : !subject.startsWith("notifications.agent.") &&
+                  !subject.startsWith("notifications.dispatch.")
+                ? "not_retained"
+                : undefined;
+          if (refused !== undefined) {
+            return { subject, messages: [], next_after: after ?? 0, more: false, refused };
+          }
+          const messages =
+            after === undefined
+              ? []
+              : this.messages.filter(
+                  (message) =>
+                    message.seq > after &&
+                    message.seq <= watermark &&
+                    subjectMatches(subject, message.subject)
+                );
+          return { subject, messages, next_after: watermark, more: false };
+        }),
+      };
+    }
+  }
+
+  function listenerFetch(
+    model: StreamModel,
+    dispatch?: (url: URL) => Promise<Response | undefined>
+  ): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      const answered = await dispatch?.(url);
+      if (answered !== undefined) return answered;
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+        readonly session_id: string;
+        readonly dir?: string;
+        readonly topics: readonly string[];
+      };
+      if (url.pathname === "/v1/replay") {
+        model.replays += 1;
+        if (!model.served) {
+          return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+        }
+        return response(model.answer(body as unknown as ReplayRequest));
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        const topics = model.interests.get(body.session_id) ?? new Set<string>();
+        for (const topic of body.topics) topics.add(topic);
+        model.interests.set(body.session_id, topics);
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: body.dir,
+          topics: [...topics],
+        });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        for (const topic of body.topics) model.interests.get(body.session_id)?.delete(topic);
+        return response({});
+      }
+      if (url.pathname.startsWith("/v1/interests/")) {
+        const id = url.pathname.slice("/v1/interests/".length);
+        return response({
+          session_id: id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [...(model.interests.get(id) ?? [])],
+        });
+      }
+      return response({});
+    }) as typeof fetch;
+  }
+
+  /** A peer session's message to `sessionID`, under a dedupe key minted once for it. */
+  function peerMessage(sessionID: string, label: string): string {
+    const minted = createHash("sha256").update(label).digest("hex").slice(0, 32);
+    return JSON.stringify({
+      event_id: `evt-${label}`,
+      source: "agent",
+      source_event_id: `source-${label}`,
+      source_session: "ses_peer",
+      topic: `notifications.agent.${sessionID}`,
+      dedupe_key: `agent.ses_peer.${minted}`,
+      issued_at: 1,
+      payload_summary: `peer message ${label}`,
+      trace_id: `trace-${label}`,
+    });
+  }
+
+  /** Dispatch's outbox copy of event `id` on `topic`: every copy carries one event id and key. */
+  function issueEvent(topic: string, id: number, notify = true): string {
+    return JSON.stringify({
+      event_id: `dispatch-${id}`,
+      source: "dispatch",
+      source_event_id: String(id),
+      topic,
+      dedupe_key: `dispatch-${id}`,
+      issued_at: 1,
+      payload_summary: `${ISSUE} moved (${id})`,
+      trace_id: `trace-dispatch-${id}`,
+      payload: JSON.stringify({
+        issue_key: ISSUE,
+        type: "issue.updated",
+        actor: { kind: "user", id: "alice" },
+        notify,
+        payload: { status: "in_progress" },
+      }),
+    });
+  }
+
+  const isNotice = (content: string) => content.includes("message not shown");
+
+  /**
+   * Boots a top-level session against `model`, its transcript `entries` already written (a
+   * restart), with a heartbeat the test ticks. `beforeSend` sees every `pi.sendMessage` first and
+   * may throw, the host refusing it.
+   */
+  async function bootReplay(
+    query: string,
+    model: StreamModel,
+    options: {
+      readonly sessionID?: string;
+      readonly entries?: readonly unknown[];
+      readonly beforeSend?: (content: string) => void;
+      readonly dispatch?: (url: URL) => Promise<Response | undefined>;
+    } = {}
+  ) {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = listenerFetch(model, options.dispatch);
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const fixture = createPi();
+    const notifications: string[] = [];
+    const intervals: (() => void)[] = [];
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message: { readonly content: string }, sendOptions: unknown) => {
+        options.beforeSend?.(message.content);
+        fixture.pi.sendMessage(message, sendOptions);
+      },
+    });
+    const sessionID = options.sessionID ?? "ses_replay";
+    const prior = options.entries ?? [];
+    const base = sessionContext(sessionID);
+    const context: SessionContext = {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [...prior, ...fixture.entries],
+        getEntries: () => [...prior, ...fixture.entries],
+      },
+      setInterval: (callback) => {
+        intervals.push(callback);
+      },
+      ui: { ...base.ui, notify: (message) => notifications.push(message) },
+    };
+    const before = model.replays;
+    await fixture.handlers.get("session_start")?.({}, context);
+    await until(() => model.replays > before, "the session's first sweep");
+    await settle();
+    const tool = (name: string) => {
+      const found = fixture.tools.find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`${name} was not registered`);
+      return found;
+    };
+    const session = {
+      fixture,
+      notifications,
+      agentSubject: `notifications.agent.${sessionID}`,
+      entries: () => [...prior, ...fixture.entries],
+      /** The `envoy-message` cards naming `eventID`, failure notices aside. */
+      cards: (eventID: string) =>
+        fixture.deliveries.filter(
+          (delivery) =>
+            delivery.customType === "envoy-message" &&
+            delivery.content.includes(eventID) &&
+            !isNotice(delivery.content)
+        ),
+      /** The failure notices naming `eventID`. */
+      notices: (eventID: string) =>
+        fixture.deliveries.filter(
+          (delivery) => isNotice(delivery.content) && delivery.content.includes(eventID)
+        ),
+      /** One heartbeat tick, and the sweep it starts run to its end. */
+      tick: async () => {
+        const sweeps = model.replays;
+        for (const interval of intervals) interval();
+        await until(() => model.replays > sweeps, "a heartbeat sweep");
+        await settle();
+      },
+      /** nats.js reports a reconnect, and the sweep it starts runs to its end. */
+      reconnect: async () => {
+        const sweeps = model.replays;
+        pushNatsStatus("reconnect");
+        await until(() => model.replays > sweeps, "a reconnect sweep");
+        await settle();
+      },
+      /** Follows `topic` with envoy_subscribe; its cursor starts at the stream's end. */
+      follow: async (topic: string) => {
+        const sweeps = model.replays;
+        await tool("envoy_subscribe").execute("", { topics: [topic] });
+        await until(() => model.replays > sweeps, "the new follow's sweep");
+        await settle();
+      },
+      unfollow: (topic: string) => tool("envoy_unsubscribe").execute("", { topics: [topic] }),
+      stop: () => fixture.handlers.get("session_shutdown")?.({}, context),
+      live: (subject: string) => {
+        const controls = natsState.controls.get(subject);
+        if (controls === undefined) throw new Error(`${subject} was never subscribed`);
+        return controls;
+      },
+      /** Two more heartbeat sweeps and the live copy pushed too: the frame is still shown once. */
+      stillOnce: async (subject: string, data: string, eventID: string) => {
+        await session.tick();
+        await session.tick();
+        expect(session.cards(eventID)).toHaveLength(1);
+        session.live(subject).push(data);
+        await settle();
+        expect(session.cards(eventID)).toHaveLength(1);
+      },
+    };
+    return session;
+  }
+
+  describe("on the session's own topic", () => {
+    test("a frame stored while its subscription's iterator was down is shown once it resubscribes", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-own-iterator", model);
+      const frame = peerMessage("ses_replay", "own-iterator");
+
+      session.live(session.agentSubject).fail(new Error("connection lost"));
+      model.store(session.agentSubject, frame);
+      await until(() => session.cards("evt-own-iterator").length > 0, "the replayed card");
+
+      const [card] = session.cards("evt-own-iterator");
+      expect(card?.content).toContain("while this session's connection was down");
+      expect(card?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      await session.stillOnce(session.agentSubject, frame, "evt-own-iterator");
+    });
+
+    test("a frame stored while NATS was away is shown once nats.js reports its reconnect", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-own-reconnect", model);
+      const frame = peerMessage("ses_replay", "own-reconnect");
+
+      model.store(session.agentSubject, frame);
+      await session.reconnect();
+
+      expect(session.cards("evt-own-reconnect")).toHaveLength(1);
+      await session.stillOnce(session.agentSubject, frame, "evt-own-reconnect");
+    });
+
+    test("a frame stored while the session was stopped is shown once by a fresh instance restoring its entries", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-own-restart-a", model);
+      await first.stop();
+      const frame = peerMessage("ses_replay", "own-restart");
+      model.store(first.agentSubject, frame);
+
+      const second = await bootReplay("replay-own-restart-b", model, { entries: first.entries() });
+
+      expect(second.cards("evt-own-restart")).toHaveLength(1);
+      await second.stillOnce(second.agentSubject, frame, "evt-own-restart");
+    });
+
+    test("a frame delivered live is not shown again when the same envelope arrives after a restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-own-repeat-a", model);
+      const frame = peerMessage("ses_replay", "own-repeat");
+      model.store(first.agentSubject, frame);
+      first.live(first.agentSubject).push(frame);
+      await until(() => first.cards("evt-own-repeat").length > 0, "the live card");
+      await first.stop();
+
+      const second = await bootReplay("replay-own-repeat-b", model, {
+        entries: first.entries(),
+      });
+      second.live(second.agentSubject).push(frame);
+      await settle();
+      await second.tick();
+
+      expect(first.cards("evt-own-repeat")).toHaveLength(1);
+      expect(second.cards("evt-own-repeat")).toHaveLength(0);
+    });
+
+    test("a listener without the replay route shows nothing and says so once", async () => {
+      const model = new StreamModel();
+      model.served = false;
+      const session = await bootReplay("replay-own-not-served", model);
+      model.store(session.agentSubject, peerMessage("ses_replay", "own-not-served"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("evt-own-not-served")).toHaveLength(0);
+      expect(
+        session.notifications.filter((message) =>
+          message.includes("messages published while its connection is down are not recovered")
+        )
+      ).toHaveLength(1);
+    });
+  });
+
+  describe("on a followed issue topic", () => {
+    test("a frame stored while the topic's iterator was down is shown once it resubscribes", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-iterator", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 1);
+
+      session.live(ISSUE_TOPIC).fail(new Error("connection lost"));
+      model.store(ISSUE_SUBJECT, frame);
+      await until(() => session.cards("dispatch-1").length > 0, "the replayed card");
+
+      expect(session.cards("dispatch-1")).toHaveLength(1);
+      await session.stillOnce(ISSUE_TOPIC, frame, "dispatch-1");
+    });
+
+    test("a frame stored while NATS was away is shown once nats.js reports its reconnect", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-reconnect", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 2);
+
+      model.store(ISSUE_SUBJECT, frame);
+      await session.reconnect();
+
+      expect(session.cards("dispatch-2")).toHaveLength(1);
+      await session.stillOnce(ISSUE_TOPIC, frame, "dispatch-2");
+    });
+
+    test("a frame stored while the session was stopped is shown once by a fresh instance restoring its entries", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-restart-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      const frame = issueEvent(ISSUE_SUBJECT, 3);
+      model.store(ISSUE_SUBJECT, frame);
+
+      const second = await bootReplay("replay-issue-restart-b", model, {
+        entries: first.entries(),
+      });
+
+      expect(second.cards("dispatch-3")).toHaveLength(1);
+      await second.stillOnce(ISSUE_TOPIC, frame, "dispatch-3");
+    });
+
+    test("the issue topic's copy and the agent subject's copy of one event are shown once together", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-both-copies", model);
+      await session.follow(ISSUE_TOPIC);
+
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 4));
+      model.store(session.agentSubject, issueEvent(session.agentSubject, 4));
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-4")).toHaveLength(1);
+    });
+
+    test("a notify:false issue copy does not keep the eligible agent-subject copy from showing, once", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-notify-false", model);
+      await session.follow(ISSUE_TOPIC);
+
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 5, false));
+      model.store(session.agentSubject, issueEvent(session.agentSubject, 5));
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-5")).toHaveLength(1);
+      expect(session.cards("dispatch-5")[0]?.content).toContain("you (ses_replay)");
+    });
+
+    test("a topic followed after a frame was stored shows nothing older than the follow", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-followed-later", model);
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 6));
+
+      await session.follow(ISSUE_TOPIC);
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-6")).toHaveLength(0);
+    });
+
+    test("a restart after the listener reaped the session's interests follows the topic again from the transcript and recovers it", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-reaped-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      model.interests.clear();
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 7));
+
+      const second = await bootReplay("replay-issue-reaped-b", model, {
+        entries: first.entries(),
+      });
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(true);
+      expect([...(model.interests.get("ses_replay") ?? [])]).toContain(ISSUE_TOPIC);
+      expect(second.cards("dispatch-7")).toHaveLength(1);
+    });
+
+    test("a session back four days later shows a frame from an hour before its restart once, and says older ones may be missing", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-four-days-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        // Three days on, retention has dropped what was stored while the session was away.
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 8));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(
+          ISSUE_SUBJECT,
+          issueEvent(ISSUE_SUBJECT, 9),
+          new Date(restartAt - HOUR_MS).toISOString()
+        );
+
+        const second = await bootReplay("replay-issue-four-days-b", model, {
+          entries: first.entries(),
+        });
+        await second.tick();
+        await second.tick();
+
+        expect(second.cards("dispatch-9")).toHaveLength(1);
+        expect(second.cards("dispatch-9")[0]?.content).toContain(
+          new Date(restartAt - HOUR_MS).toISOString()
+        );
+        expect(second.cards("dispatch-8")).toHaveLength(0);
+        expect(
+          second.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          )
+        ).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a topic the session unfollowed stays unfollowed after a restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-unfollowed-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.unfollow(ISSUE_TOPIC);
+      await first.stop();
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 10));
+
+      const second = await bootReplay("replay-issue-unfollowed-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(false);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+      expect(second.cards("dispatch-10")).toHaveLength(0);
+    });
+
+    test("a replayed removal closes the topic only when it was stored after the session followed it", async () => {
+      const removal = (id: number) =>
+        JSON.stringify({
+          event_id: `dispatch-${id}`,
+          source: "dispatch",
+          source_event_id: String(id),
+          topic: "notifications.agent.ses_replay",
+          dedupe_key: `dispatch-${id}`,
+          issued_at: 1,
+          payload_summary: `unsubscribed from ${ISSUE}`,
+          trace_id: `trace-dispatch-${id}`,
+          payload: JSON.stringify({
+            issue_key: ISSUE,
+            type: "subscription.removed",
+            actor: { kind: "user", id: "alice" },
+            notify: true,
+            payload: {
+              session_id: "ses_replay",
+              by: { kind: "user", id: "alice" },
+              topics: [ISSUE_TOPIC],
+            },
+          }),
+        });
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-removal", model);
+
+      // A removal from before the session followed the topic (again) says nothing of that follow.
+      model.store(session.agentSubject, removal(11));
+      await session.follow(ISSUE_TOPIC);
+      expect(session.live(ISSUE_TOPIC).active()).toBe(true);
+
+      model.store(session.agentSubject, removal(12));
+      await session.reconnect();
+
+      expect(session.live(ISSUE_TOPIC).active()).toBe(false);
+      await session.tick();
+      expect(session.live(ISSUE_TOPIC).active()).toBe(false);
+    });
+  });
+
+  describe("a frame the host cannot show", () => {
+    test("is shown by the next sweep after one failed try", async () => {
+      let refusals = 1;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-once", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-fail-once") && refusals > 0) {
+            refusals -= 1;
+            throw new Error("host busy");
+          }
+        },
+      });
+      model.store(session.agentSubject, peerMessage("ses_replay", "fail-once"));
+
+      await session.reconnect();
+      expect(session.cards("evt-fail-once")).toHaveLength(0);
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("evt-fail-once")).toHaveLength(1);
+      expect(session.notices("evt-fail-once")).toHaveLength(0);
+    });
+
+    test("gets one notice naming it on its third failure, and none after another sweep or a restart", async () => {
+      const model = new StreamModel();
+      const refuseCards = (content: string) => {
+        if (content.includes("evt-fail-always") && !isNotice(content)) {
+          throw new Error("host refuses the card");
+        }
+      };
+      const first = await bootReplay("replay-fail-always-a", model, { beforeSend: refuseCards });
+      model.store(first.agentSubject, peerMessage("ses_replay", "fail-always"));
+
+      await first.reconnect();
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(0);
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(1);
+      expect(first.notices("evt-fail-always")[0]?.content).toContain("host refuses the card");
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-fail-always-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.notices("evt-fail-always")).toHaveLength(0);
+      expect(second.cards("evt-fail-always")).toHaveLength(0);
+    });
+
+    test("whose notice fails too warns in the UI, and the next sweep shows the notice", async () => {
+      let noticesFail = true;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-notice", model, {
+        beforeSend: (content) => {
+          if (!content.includes("evt-fail-notice")) return;
+          if (!isNotice(content) || noticesFail) throw new Error("host refuses everything");
+        },
+      });
+      model.store(session.agentSubject, peerMessage("ses_replay", "fail-notice"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(0);
+      expect(
+        session.notifications.filter(
+          (message) => message.includes("evt-fail-notice") && message.includes("was not shown")
+        )
+      ).toHaveLength(1);
+
+      noticesFail = false;
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(1);
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(1);
+    });
+
+    test("a live role forward that fails after its receipt gets the notice at once and is never replayed", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-role-forward", model, {
+        beforeSend: (content) => {
+          if (!isNotice(content)) throw new Error("host refuses the card");
+        },
+      });
+      const forward = forwardedRoleEnvelope("reviewer", "review this", "role-forward");
+      // The stream captures the agent subject, so it keeps the forward too.
+      model.store(session.agentSubject, forward);
+
+      session.live(session.agentSubject).push(forward, "_INBOX.role-forward");
+      await until(() => session.notices("evt-role-forward").length > 0, "the notice");
+
+      expect(natsState.published.map((message) => message.subject)).toContain(
+        "_INBOX.role-forward"
+      );
+      await session.tick();
+      await session.tick();
+      expect(session.notices("evt-role-forward")).toHaveLength(1);
+      expect(session.cards("evt-role-forward")).toHaveLength(0);
+    });
+
+    test("a live frame still pending while its stored copy is swept, then failing, is shown once later", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const accepting = Promise.withResolvers<void>();
+      let accepts = 0;
+      let refusals = 1;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-pending", model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          if (!url.pathname.endsWith("/accept")) return undefined;
+          accepts += 1;
+          await accepting.promise;
+          return new Response(JSON.stringify({ code: "ACCEPT_ALREADY_ACCEPTED", error: "no" }), {
+            status: 409,
+          });
+        },
+        beforeSend: (content) => {
+          if (content.includes("dispatch-held") && refusals > 0) {
+            refusals -= 1;
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const held = directDispatchEnvelope("steer", "held");
+      model.store(session.agentSubject, held);
+      session.live(session.agentSubject).push(held);
+      await until(() => accepts === 1, "the held accept");
+      model.store(session.agentSubject, peerMessage("ses_delivery", "newer"));
+
+      // The sweep leaves the frame the live path holds, and shows the newer one past it.
+      await session.reconnect();
+      expect(session.cards("evt-newer")).toHaveLength(1);
+      expect(session.cards("dispatch-held")).toHaveLength(0);
+
+      // The held delivery fails: the stream's copy is the next sweep's to show.
+      accepting.resolve();
+      await until(() => refusals === 0, "the failed live injection");
+      await settle();
+      expect(session.notices("dispatch-held")).toHaveLength(0);
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-held")).toHaveLength(1);
+      expect(session.cards("dispatch-held")[0]?.content).toContain(
+        "while this session's connection was down"
+      );
+      expect(session.cards("evt-newer")).toHaveLength(1);
+      // The replayed copy is a card alone: Dispatch is asked nothing more.
+      expect(accepts).toBe(1);
+    });
   });
 });
