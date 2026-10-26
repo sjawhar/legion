@@ -27,6 +27,9 @@ import {
   DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
+  type Handoff,
+  HandoffRecordedPayloadSchema,
+  type HandoffSummary,
   IssueDeployedEventPayloadSchema,
   IssueEventPayloadSchema,
   MessageDeliveryEventPayloadSchema,
@@ -129,6 +132,39 @@ test("models the deployed event exactly as the delivery timeline writes it", () 
     IssueDeployedEventPayloadSchema.safeParse({ ...payload, completed_at: "yesterday" }).success
   ).toBe(false);
   expect(IssueDeployedEventPayloadSchema.safeParse({ ...payload, number: 0 }).success).toBe(false);
+});
+
+test("models a handoff record and its event, which never carries the body", () => {
+  const summary = {
+    author: { id: "implementer-session", kind: "session" },
+    created_at: "2026-10-26T12:00:00Z",
+    id: "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c",
+    issue_key: "DSP-1",
+    phase: "implement",
+    version: 2,
+  } satisfies HandoffSummary;
+  const handoff = { ...summary, body: '{\n  "schemaVersion": 1\n}' } satisfies Handoff;
+  expect(handoff.body).toBe('{\n  "schemaVersion": 1\n}');
+
+  const payload = { handoff_id: summary.id, phase: "implement", version: 2 };
+  expect(HandoffRecordedPayloadSchema.parse(payload)).toEqual(payload);
+  const event: DispatchEvent = {
+    actor: summary.author,
+    created_at: summary.created_at,
+    id: 92,
+    issue_key: "DSP-1",
+    notify: false,
+    payload,
+    seq: 5,
+    type: "handoff.recorded",
+  };
+  expect(event.type).toBe("handoff.recorded");
+  // Strict: a body (or any field the Go writer does not emit) is refused, as is a version below 1.
+  expect(HandoffRecordedPayloadSchema.safeParse({ ...payload, body: "{}" }).success).toBe(false);
+  expect(HandoffRecordedPayloadSchema.safeParse({ ...payload, version: 0 }).success).toBe(false);
+  expect(
+    HandoffRecordedPayloadSchema.safeParse({ ...payload, handoff_id: undefined }).success
+  ).toBe(false);
 });
 
 test("models Dispatch's own start and the subject it is published on", () => {

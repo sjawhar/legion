@@ -1851,6 +1851,45 @@ export const IssueDeployedEventPayloadSchema = z.strictObject({
 export type IssueDeployedEventPayload = z.infer<typeof IssueDeployedEventPayloadSchema>;
 
 /**
+ * One phase handoff without its body: what `GET /api/v1/issues/{key}/handoffs` lists, newest
+ * first, and what `POST /api/v1/issues/{key}/handoffs/{phase}` answers. `phase` is a lowercase slug
+ * (Legion writes `plan`, `implement`, `test` and `review`), `version` counts from 1 within the
+ * issue and phase, and `author` is the session that wrote it.
+ */
+export interface HandoffSummary {
+  readonly id: string;
+  readonly issue_key: string;
+  readonly phase: string;
+  readonly version: number;
+  readonly author: Actor;
+  readonly created_at: string;
+}
+
+/**
+ * One phase handoff with its body, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
+ * `GET /api/v1/handoffs/{id}` answer it. `body` is the exact text the session wrote: one JSON
+ * object of at most `DISPATCH_HANDOFF_BODY_MAX` bytes, never reformatted.
+ */
+export interface Handoff extends HandoffSummary {
+  readonly body: string;
+}
+
+/**
+ * `handoff.recorded`: a session recorded version `version` of the issue's `phase` handoff, the
+ * record `handoff_id`. It never carries the body; a reader fetches the record by id. Appended in
+ * the write's own transaction and published on the issue's subject as every issue event is.
+ * Strict: the Go writer (`HandoffRecordedEventPayload` in
+ * `packages/envoy/internal/dispatch/model`) emits exactly these three fields.
+ */
+export const HandoffRecordedPayloadSchema = z.strictObject({
+  handoff_id: z.string(),
+  phase: z.string(),
+  version: z.number().int().positive(),
+});
+
+export type HandoffRecordedPayload = z.infer<typeof HandoffRecordedPayloadSchema>;
+
+/**
  * The subject Dispatch publishes its own start on, directly on the bus rather than through the
  * outbox (it is no issue's, document's or project's event), as an Envoy envelope with `source`
  * `dispatch` whose payload is `DispatchServerStartedPayload`. Mirrored by `startup.Subject` in
@@ -1931,6 +1970,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "issue.deployed";
       readonly payload: IssueDeployedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "handoff.recorded";
+      readonly payload: HandoffRecordedPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.created";

@@ -17,6 +17,7 @@ import {
 } from "../src/dispatch-api";
 import {
   DISPATCH_BODY_MAX,
+  DISPATCH_HANDOFF_BODY_MAX,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   SEARCH_KIND_DEPTH,
@@ -164,6 +165,12 @@ const IssueTitleMax = ${ISSUE_TITLE_MAX}
 // accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = ${DISPATCH_BODY_MAX}
+
+// DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
+// POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
+// packages/contracts so the server's 413 and the \`dispatch handoff-write\` command's pre-send
+// refusal cannot drift apart.
+const DispatchHandoffBodyMax = ${DISPATCH_HANDOFF_BODY_MAX}
 
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the

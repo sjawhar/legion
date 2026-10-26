@@ -5,6 +5,7 @@ import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
   DISPATCH_BODY_MAX,
+  DISPATCH_HANDOFF_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
@@ -111,6 +112,8 @@ const validCalls = {
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
   dispatch_whoami: {},
+  dispatch_handoff_write: specFor("dispatch_handoff_write").example,
+  dispatch_handoff_read: { issue: "DSP-1", phase: "implement", version: 2 },
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
@@ -175,6 +178,8 @@ describe("dispatchToolSpecs", () => {
       "dispatch_architecture_sync",
       "dispatch_open_asks",
       "dispatch_whoami",
+      "dispatch_handoff_write",
+      "dispatch_handoff_read",
     ]);
 
     for (const [name, args] of Object.entries(validCalls) as Array<
@@ -398,6 +403,44 @@ describe("dispatchToolSpecs", () => {
 
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_handoff_write takes one JSON object body up to the byte cap, and a phase slug", () => {
+    const schema = schemaFor("dispatch_handoff_write");
+    const refusals = (args: Record<string, unknown>) =>
+      schema.safeParse(args).error?.issues.map((issue) => issue.message);
+    const call = { issue: "DSP-1", phase: "implement" };
+
+    // A body of exactly the cap, counted in UTF-8 bytes: "é" is two of them.
+    const filler = "é".repeat((DISPATCH_HANDOFF_BODY_MAX - '{"a":""}'.length) / 2);
+    expect(schema.safeParse({ ...call, body: `{"a":"${filler}"}` }).success).toBe(true);
+    expect(refusals({ ...call, body: `{"a":"${filler}x"}` })).toEqual([
+      `body is 1 bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${DISPATCH_HANDOFF_BODY_MAX + 1}/${DISPATCH_HANDOFF_BODY_MAX})`,
+    ]);
+    for (const body of ["[1]", '"text"', "null", "{not json", "{} {}"]) {
+      expect(refusals({ ...call, body }), body).toEqual([
+        'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}',
+      ]);
+    }
+    for (const phase of ["Implement", "1plan", "", "a".repeat(33), "plan/x"]) {
+      expect(refusals({ ...call, phase, body: "{}" }), phase).toEqual([
+        "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement",
+      ]);
+    }
+    expect(schema.safeParse({ ...call, body: "{}", session_id: "other" }).success).toBe(false);
+    expect(specFor("dispatch_handoff_write").description).toContain(
+      `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED`
+    );
+  });
+
+  test("dispatch_handoff_read takes an issue, a phase slug and an optional positive version", () => {
+    const schema = schemaFor("dispatch_handoff_read");
+
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review" }).success).toBe(true);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", version: 0 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", version: 1.5 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "Review" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", body: "{}" }).success).toBe(false);
   });
 
   test("dispatch_project takes a key and a name and nothing else", () => {

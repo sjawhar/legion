@@ -279,6 +279,55 @@ export const ASK_QUESTION_MAX = 800;
 export const DISPATCH_BODY_MAX = 32000;
 
 /**
+ * Longest phase handoff body the Dispatch server accepts on
+ * `POST /api/v1/issues/{key}/handoffs/{phase}`, in UTF-8 bytes: the text of one JSON object,
+ * stored exactly as sent and read back byte for byte. Generated into Go as
+ * `contracts.DispatchHandoffBodyMax`, which the server enforces as `413 CAP_EXCEEDED` naming it.
+ */
+export const DISPATCH_HANDOFF_BODY_MAX = 262144;
+
+/** A handoff's phase, the `{phase}` segment of the handoff routes: a lowercase slug. Legion writes
+ *  `plan`, `implement`, `test` and `review`. The server holds the same rule (`handoffs.phase`). */
+const HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+const HANDOFF_PHASE_RULE =
+  "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+
+/** Whether text is exactly one JSON object, the only body a handoff holds. */
+function isJsonObjectText(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/** The refusal of the first rule a handoff call breaks, or undefined when it keeps them: the phase
+ *  slug, then (on a write) the body's byte cap and its being one JSON object. */
+function handoffProblem(value: unknown): string | undefined {
+  const { phase, body } = value as { readonly phase?: unknown; readonly body?: unknown };
+  if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase)) return HANDOFF_PHASE_RULE;
+  if (typeof body !== "string") return undefined;
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
+    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
+  }
+  if (!isJsonObjectText(body)) {
+    return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
+  }
+  return undefined;
+}
+
+const HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+
+const handoffValidation: NonNullable<DispatchToolSpec["validation"]> = {
+  check: (value) => handoffProblem(value) === undefined,
+  message: HANDOFF_RULE,
+  refusal: (value) => handoffProblem(value) ?? HANDOFF_RULE,
+};
+
+/**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
  * query rides in the URL beside `project`, `limit` and `offset`, so this refusal and `project`'s
  * key rule are what keep the tool's URL under the load balancer's limit;
@@ -1382,6 +1431,58 @@ export const dispatchToolSpecs = [
     description:
       "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
+    strict: true,
+  },
+  {
+    name: "dispatch_handoff_write",
+    example: {
+      issue: "DSP-1",
+      phase: "implement",
+      body: '{"schemaVersion":1,"phase":"implement","issue":"DSP-1"}',
+    },
+    description:
+      "Record this session's handoff for one phase of an issue: the body, one JSON object, is " +
+      "stored on the issue exactly as sent, under this session, and read back byte for byte. Each " +
+      "write is the next version (1, 2, ...) of that phase's handoff; earlier versions stay. Write " +
+      "the body to a file outside your workspace and pass it with --body-file (- reads stdin). A " +
+      "closed issue refuses it with 409 ISSUE_CLOSED, and a body over " +
+      `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED. Read it back with dispatch ` +
+      `handoff-read. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z
+        .string()
+        .describe(
+          "The phase the handoff ends: a lowercase slug such as plan, implement, test or review."
+        ),
+      body: z
+        .string({ min: 1 })
+        .describe(
+          `The handoff: one JSON object, at most ${DISPATCH_HANDOFF_BODY_MAX} bytes, stored and read back exactly as sent.`
+        ),
+    }),
+    validation: handoffValidation,
+    strict: true,
+  },
+  {
+    name: "dispatch_handoff_read",
+    example: { issue: "DSP-1", phase: "implement" },
+    description:
+      "Read the newest handoff recorded for one phase of an issue, or the version you name: one " +
+      "line naming the phase, version, id, the session that wrote it and when, then the body " +
+      "exactly as stored. A closed issue's handoffs read too. A phase with no handoff, or no " +
+      `such version, is 404 HANDOFF_NOT_FOUND. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z
+        .string()
+        .describe("The handoff's phase: a lowercase slug such as plan, implement, test or review."),
+      version: z
+        .number({ int: true, min: 1 })
+        .describe("The version to read, from 1; omit it to read the newest.")
+        .optional(),
+    }),
+    validation: handoffValidation,
     strict: true,
   },
 ] as const satisfies readonly DispatchToolSpec[];

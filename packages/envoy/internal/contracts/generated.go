@@ -206,6 +206,12 @@ const IssueTitleMax = 1000
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = 32000
 
+// DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
+// POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
+// packages/contracts so the server's 413 and the `dispatch handoff-write` command's pre-send
+// refusal cannot drift apart.
+const DispatchHandoffBodyMax = 262144
+
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.
