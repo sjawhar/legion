@@ -688,7 +688,10 @@ test("Send stays open with text while an earlier send is out or late, and each p
   await onFakeClock(async () => {
     await sendFromLiveView("try the other branch");
     const [held] = screen.getAllByTestId("agent-send-held");
-    expect(within(held as HTMLElement).getByText("try the other branch")).toBeTruthy();
+    // The pending turn names the message as the reader's own, at a glance and to a screen reader.
+    expect(
+      within(held as HTMLElement).getByText("Your message: “try the other branch”")
+    ).toBeTruthy();
     expect(within(held as HTMLElement).getByRole("status").textContent).toBe("Sending…");
 
     // The field cleared on the press, and the next message goes out as its own press.
@@ -1624,7 +1627,7 @@ test("a refused send keeps the message on screen and says why", async () => {
     "Could not send: Dispatch refused it"
   );
   expect(
-    within(screen.getByTestId("agent-send-held")).getByText("try the other branch")
+    within(screen.getByTestId("agent-send-held")).getByText("Your message: “try the other branch”")
   ).toBeTruthy();
   expect(composerInput().value).toBe("");
 });
@@ -1667,7 +1670,9 @@ test("a refusal that lands after switching sessions stays with the session that 
   expect((await screen.findByTestId("agent-send-error")).textContent).toBe(
     "Could not send: Dispatch refused it"
   );
-  expect(within(screen.getByTestId("agent-send-held")).getByText("hold this")).toBeTruthy();
+  expect(
+    within(screen.getByTestId("agent-send-held")).getByText("Your message: “hold this”")
+  ).toBeTruthy();
 });
 
 // Messages to one session go out one after another, in press order: Send stays open while one is

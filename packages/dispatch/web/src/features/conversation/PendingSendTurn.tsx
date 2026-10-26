@@ -8,7 +8,6 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
-import { MarkdownBody } from "../refs/MarkdownBody";
 import { SendStoppedError } from "../writes/keyed-write";
 import { StopTrying } from "../writes/StopTrying";
 import type { HeldSend } from "./held-sends";
@@ -16,12 +15,13 @@ import { KEYED_SEND_LATE_TEXT } from "./send-request";
 import type { SessionSends } from "./useSessionSends";
 
 /**
- * One message of the viewer's to a session that Dispatch has not yet made, as its own turn: its
- * text, and where it stands - waiting for the message before it, never sent, with Discard;
- * sending; still being tried past its deadline with Stop trying; or refused with why, Retry and
- * Discard. The session's live view and its Agents row both show it, and either's controls act on
- * the same write (`useSessionSends`). It leaves once Dispatch makes it, and the stored message
- * takes its place.
+ * One message of the viewer's to a session that Dispatch has not yet made, as its own turn: the
+ * text named as theirs - `Your message: “…”`, at a glance and to a screen reader, since it is not
+ * yet the session's conversation - and where it stands: waiting for the message before it, never
+ * sent, with Discard; sending; still being tried past its deadline with Stop trying; or refused
+ * with why, Retry and Discard. The session's live view and its Agents row both show it, and
+ * either's controls act on the same write (`useSessionSends`). It leaves once Dispatch makes it,
+ * and the stored message takes its place.
  */
 export function PendingSendTurn({
   held,
@@ -39,7 +39,7 @@ export function PendingSendTurn({
       <div
         className={`max-w-[80%] rounded-xl px-3 py-2 text-sm opacity-80 ${surfaceMutedBg} ${textPrimaryOnCanvas}`}
       >
-        <MarkdownBody markdown={held.draft.draft.body} softBreaks="line" />
+        <p className="whitespace-pre-wrap break-words">Your message: “{held.draft.draft.body}”</p>
       </div>
       <div className="flex max-w-[80%] flex-wrap items-center justify-end gap-x-3 gap-y-1">
         {held.status === "refused" ? (
