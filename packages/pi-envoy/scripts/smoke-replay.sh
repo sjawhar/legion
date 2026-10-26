@@ -31,6 +31,15 @@
 #            goes back, a turn streams again, the listener comes back, and omp holds all three
 #            again; omp is SIGKILLed and resumed, and once idle each shows once, still once three
 #            heartbeats later, and legs 4 and 5's still once each.
+#   leg 7    in a fresh session the proxy is killed and a Dispatch BTW (a person's message to the
+#            session in delivery mode btw) is published to it; a long turn starts and the proxy
+#            comes back, so the replay sweep finds the BTW mid-turn. For three heartbeats of that
+#            turn omp holds nothing for it (queuedMessageCount 0) and the session file no card; the
+#            turn ends on its own, and within two heartbeats of idle exactly one entry carries the
+#            BTW's body and the inert note ("runs no side turn and needs no answer"), still one
+#            three heartbeats later. omp's RPC output shows one agent_start and one turn_start
+#            since the long turn's prompt, and no assistant message follows the card: no turn ran
+#            for it.
 #   control  leg 1 again with a session running the released plugin (SMOKE_REPLAY_CONTROL_PLUGIN):
 #            it ends with no entry for its publish, while a frame published live afterwards shows
 #            once, so the session was connected and writing cards all along.
@@ -434,6 +443,12 @@ rpc_frame() {
     'first(inputs | fromjson? | select(.type == $type and .id == $id))' "$rpc_log"
 }
 
+# rpc_events TYPE: how many TYPE events (agent_start, turn_start, ...) this launch's omp has written
+# to its RPC output so far.
+rpc_events() {
+  jq -nR --arg type "$1" '[inputs | fromjson? | select(.type == $type)] | length' "$rpc_log"
+}
+
 omp_alive() {
   [[ -n "$omp_pid" ]] && running "$omp_pid"
 }
@@ -568,6 +583,22 @@ all_shown() {
   for id in "$@"; do has_card "$id" || return 1; done
 }
 
+# card_text ID: the text of each envoy-message entry carrying ID.
+card_text() {
+  card_entries "$1" | jq -r '.content | if type == "string" then . else map(.text? // empty) | join("\n") end'
+}
+
+# assistant_after ID: the assistant messages the session file holds after the first envoy-message
+# entry carrying ID, in file order or by timestamp, as a JSON array.
+assistant_after() {
+  jq -cnR --arg id "$1" '[inputs | fromjson?] as $entries
+    | first($entries | to_entries[] | select(.value.type == "custom_message" and .value.customType == "envoy-message"
+        and (.value.content | if type == "string" then . else tostring end | contains($id))) | .key) as $at
+    | [$entries | to_entries[] | select(.value.type == "message" and .value.message.role == "assistant"
+        and (.key > $at or .value.timestamp > $entries[$at].timestamp))
+      | {timestamp: .value.timestamp, stopReason: .value.message.stopReason}]' "$session_file"
+}
+
 # ---- omp's view of its turn (get_state over RPC) ----------------------------------------------
 # omp_state: whether a turn streams, and how many messages omp holds in memory for the turn to take
 # (a card handed over while a turn streams is one of them until omp writes it). Sets omp_view.
@@ -662,6 +693,18 @@ dispatch_event() {
       payload: {id: "smoke-replay-comment-\($id)", body: "smoke-replay \($label)"}}'
 }
 
+# dispatch_message BODY DELIVERY: a person's Dispatch message to this session, sent in delivery
+# mode DELIVERY (btw, aside, steer), as Dispatch's targeted delivery frames it: {event, delivery}
+# (targetedDispatchEnvelope in extensions/envoy.test.ts).
+dispatch_message() {
+  jq -nc --arg body "$1" --arg delivery "$2" --arg id "$(</proc/sys/kernel/random/uuid)" \
+    --arg target "session:${sid}" --arg created "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
+    '{event: {type: "message.created", issue_key: "SMOKE-1", actor: {kind: "user", id: "smoke-replay"},
+        payload: {id: $id, issue_key: "SMOKE-1", author: {kind: "user", id: "smoke-replay"}, body: $body,
+          created_at: $created, deliveries: [], in_reply_to: null, target: $target}},
+      delivery: {attempt: 1, mode: $delivery}}'
+}
+
 # replay_watermark: the stream's last sequence as the listener's /v1/replay reports it for this
 # session's subject (remote mode's way to find the publish in the stream afterwards).
 replay_read() {
@@ -685,12 +728,21 @@ take_watermark() {
   note "/v1/replay starts a cursor for ${subject} at ${watermark}"
 }
 
-# publish N LABEL: publishes one Dispatch-shaped envelope to the session's agent subject and shows
-# the stream stored it; sets event_id.
+# publish N LABEL [DELIVERY]: publishes one Dispatch-shaped envelope to the session's agent subject
+# and shows the stream stored it; sets event_id. With DELIVERY, the envelope is a person's message
+# to the session in that delivery mode (dispatch_message), whose body, smoke-replay-<DELIVERY>-<n>,
+# it sets in message_body; without, a comment event (dispatch_event).
+message_body=""
 publish() {
-  local n=$((id_base + $1)) event summary
-  event="$(dispatch_event "$n" "$2")"
-  summary="SMOKE-1: comment by smoke-replay (${2})"
+  local n=$((id_base + $1)) delivery=${3:-} event summary
+  if [[ -n "$delivery" ]]; then
+    message_body="smoke-replay-${delivery}-${n}"
+    event="$(dispatch_message "$message_body" "$delivery")"
+    summary="SMOKE-1: ${delivery} message from smoke-replay (${2})"
+  else
+    event="$(dispatch_event "$n" "$2")"
+    summary="SMOKE-1: comment by smoke-replay (${2})"
+  fi
   if [[ "$mode" == local ]]; then
     event_id="dispatch-${n}"
     local envelope result msg_id
@@ -1024,6 +1076,64 @@ fi
 stop_session_gracefully
 kill_proxy
 
+# Leg 7: a BTW the replay sweep finds while a turn streams starts no turn. omp steers a card handed
+# to a streaming turn into that turn, whatever triggerTurn says, and runs another model turn for it
+# at the turn's end; the plugin holds the inert card until omp is idle with nothing queued.
+begin leg-7-btw-mid-turn
+prepare_session btw "$turn_note"
+open_session "$plugin"
+take_watermark
+break_connection
+publish 23 "leg 7, a BTW published while the connection was down" btw
+btw_event="$event_id"
+btw_body="$message_body"
+(($(cards "$btw_body") == 0)) || fail "the BTW ${btw_event} reached the session while its connection was down"
+starts_before=$(rpc_events agent_start)
+turns_before=$(rpc_events turn_start)
+note "before the long turn omp's RPC output holds ${starts_before} agent_start and ${turns_before} turn_start event(s)"
+start_long_turn long-btw
+restore_connection
+while ((SECONDS < restored_at + 3 * heartbeat_s)); do
+  omp_state
+  jq -e '.isStreaming' <<<"$omp_view" >/dev/null ||
+    fail "the long turn stopped streaming $((SECONDS - restored_at))s after the restart, before three heartbeats passed, so the check did not run mid-turn; get_state: ${omp_view}"
+  jq -e '.queuedMessageCount == 0' <<<"$omp_view" >/dev/null || {
+    show_cards "$btw_body"
+    fail "omp holds a message for its streaming turn $((SECONDS - restored_at))s after the restart: the BTW's card was handed mid-turn; get_state: ${omp_view}; $(card_counts "$btw_body")"
+  }
+  (($(cards "$btw_body") == 0)) || {
+    show_cards "$btw_body"
+    fail "the session file holds a card for the BTW while the turn streams, $((SECONDS - restored_at))s after the restart; get_state: ${omp_view}"
+  }
+  sleep 1
+done
+if [[ "$mode" == local ]]; then
+  subscribed >/dev/null ||
+    fail "natsd shows the session not resubscribed to ${subject} three heartbeats after the restart, so its replay sweep may not have run mid-turn: $(session_connections)"
+  note "natsd /connz?subs=1 after the restart: $(session_connections)"
+fi
+note "three heartbeats ($((3 * heartbeat_s))s) after the restart the turn still streams with nothing queued and no card for the BTW; get_state: ${omp_view}; $(card_counts "$btw_body")"
+await_idle 300
+idle_at=$SECONDS
+note "the long turn ended on its own $((SECONDS - restored_at))s after the restart; get_state: ${omp_view}; $(card_counts "$btw_body")"
+expect_once "$btw_body" "$idle_at"
+card_entries "$btw_body" | jq -e '.content | if type == "string" then . else tostring end
+  | contains("runs no side turn and needs no answer")' >/dev/null ||
+  fail "the entry for the BTW ${btw_event} is not the inert card: it has no \"runs no side turn and needs no answer\" note"
+while IFS= read -r line; do note "the BTW's card ends: ${line}"; done < <(card_text "$btw_body" | tail -n 2)
+btw_starts=$(($(rpc_events agent_start) - starts_before))
+btw_turns=$(($(rpc_events turn_start) - turns_before))
+omp_state
+note "since the long turn's prompt omp's RPC output holds ${btw_starts} agent_start and ${btw_turns} turn_start event(s); get_state: ${omp_view}"
+((btw_starts == 1 && btw_turns == 1)) ||
+  fail "a turn ran for the BTW: ${btw_starts} agent_start and ${btw_turns} turn_start events since the long turn's prompt, want one each (the long turn's)"
+btw_after="$(assistant_after "$btw_body")"
+note "assistant messages in the session file after the BTW's card: ${btw_after}"
+jq -e 'length == 0' <<<"$btw_after" >/dev/null ||
+  fail "the session file holds an assistant message written after the BTW's card: ${btw_after}"
+stop_session_gracefully
+kill_proxy
+
 begin control
 prepare_session control
 leg_one "$control_plugin" 3 "control, published while the connection was down"
@@ -1096,4 +1206,4 @@ leg6_result="leg 6 (local mode only) did not run"
 ((${#leg6_events[@]} == 0)) ||
   leg6_result="showed ${leg6_events[*]} (held for a streaming turn, dropped unwritten by new_session, absent from the new session, held again after switch_session back, SIGKILLed unwritten, then resumed) exactly once each once idle, still once three heartbeats later"
 passed=1
-printf 'SMOKE REPLAY PASS: %s\n' "the plugin under test showed ${leg1_event} (published while its NATS connection was down) and ${leg2_event} (published while omp was stopped, then resumed) exactly once each, still once three heartbeats later, and showed ${turn_events[*]} (two published live and two replayed after a reconnect while a turn streamed, held by omp and SIGKILLed unwritten, then resumed) exactly once each once idle, still once three heartbeats later; it showed ${leg4_events[*]} (held for a streaming turn, withdrawn unwritten by abort_and_restore_queue) and ${leg5_events[*]} (held, then a plain abort) exactly once each in the same process, still once three heartbeats later; ${leg6_result}; the released plugin (${control_version}) showed nothing for ${control_event}, published the same way, showed its live ${live_event}, lost ${lost[*]} published live while a turn streamed and SIGKILLed unwritten, and showed none of ${control_interrupt_events[*]}, held for a streaming turn and withdrawn by abort_and_restore_queue, in the same process"
+printf 'SMOKE REPLAY PASS: %s\n' "the plugin under test showed ${leg1_event} (published while its NATS connection was down) and ${leg2_event} (published while omp was stopped, then resumed) exactly once each, still once three heartbeats later, and showed ${turn_events[*]} (two published live and two replayed after a reconnect while a turn streamed, held by omp and SIGKILLed unwritten, then resumed) exactly once each once idle, still once three heartbeats later; it showed ${leg4_events[*]} (held for a streaming turn, withdrawn unwritten by abort_and_restore_queue) and ${leg5_events[*]} (held, then a plain abort) exactly once each in the same process, still once three heartbeats later; ${leg6_result}; it held the BTW ${btw_event} (published while its connection was down, replayed while a turn streamed) unhanded and unwritten for three heartbeats of that turn, then showed it once as an inert card within two heartbeats of the turn's own end, still once three heartbeats later, with no turn run for it (one agent_start and one turn_start since the long turn's prompt, no assistant message after the card); the released plugin (${control_version}) showed nothing for ${control_event}, published the same way, showed its live ${live_event}, lost ${lost[*]} published live while a turn streamed and SIGKILLed unwritten, and showed none of ${control_interrupt_events[*]}, held for a streaming turn and withdrawn by abort_and_restore_queue, in the same process"

@@ -154,6 +154,18 @@ real JetStream NATS, and the session reaches NATS only through a `socat` proxy t
   the plugin released them rather than recording them shown. The listener is down across the
   switch so that the switch's own sweep cannot hand the cards to the idle session before the turn
   streams; remote mode cannot stop the listener, so it skips this leg and says so.
+- **Leg 7, a BTW replayed while a turn streams:** in a fresh session the proxy is killed and a
+  Dispatch BTW (a person's message to the session, `message.created` with `delivery.mode: btw`) is
+  published to it. A long turn starts and the proxy comes back, so the replay sweep finds the BTW
+  mid-turn. omp steers any card handed to a streaming turn into that turn, whatever `triggerTurn`
+  says, and runs another model turn for it, so the plugin holds the inert card until omp is idle
+  with nothing queued. For three heartbeats of the turn `get_state` shows nothing queued and the
+  session file holds no card for the BTW. The turn ends on its own; within two heartbeats exactly
+  one entry carries the BTW's body and the inert note ("runs no side turn and needs no answer"),
+  still one three heartbeats later. omp's RPC output holds one `agent_start` and one `turn_start`
+  since the long turn's prompt, and no assistant message follows the card: no turn ran for it.
+  Remote mode sends the BTW through `/v1/messages/send`, which the listener takes only for a
+  session that advertises `btw`.
 - **Negative control, same run:** leg 1 again with a session running the released plugin
   (`SMOKE_REPLAY_CONTROL_PLUGIN`) ends with no entry for its publish, and a frame published live
   afterwards shows once, so that session was connected and writing cards the whole time.
@@ -187,8 +199,9 @@ Env overrides:
   the run also proves the route and its grant there. The script cannot stop a remote NATS or read
   its monitoring endpoint: it breaks the session's connection by killing the local proxy that
   fronts the remote NATS (leg 3 included), and leg 2 SIGKILLs omp, since `/v1/messages/send`
-  needs the registration a clean exit drops. Legs 4 and 5 and their control run as in local mode;
-  leg 6 needs the listener stopped and does not run. This is the production check after a rollout.
+  needs the registration a clean exit drops. Legs 4, 5 and 7 and the leg 4 control run as in
+  local mode; leg 6 needs the listener stopped and does not run. This is the production check
+  after a rollout.
 - `SMOKE_REPLAY_ENVOY_TOKEN_FILE` — remote mode only: a file holding the listener's bearer, sent
   from a 0600 header file and handed to the session as `ENVOY_TOKEN_FILE`.
 - `SMOKE_REPLAY_CONTROL_PLUGIN` — the released plugin the control runs (default
@@ -201,9 +214,9 @@ Env overrides:
 Prerequisites, each checked before anything starts: `go` (local mode), `bun` with the checkout's
 dependencies installed, `socat`, `setsid`, `pgrep`, `omp`, `curl`, `jq`, and every variable
 `SMOKE_REPLAY_PROVIDER_ENV` names. Every model call is real and costs tokens: one prompt per
-session start and one turn per card, and legs 3 to 6 and the controls of legs 3 and 4 each start
-a long answer (about a thousand lines, cut short by the kill, interrupt, abort or switch), which a
-resumed session may write again.
+session start and one turn per card, and legs 3 to 7 and the controls of legs 3 and 4 each start
+a long answer (about a thousand lines, cut short by the kill, interrupt, abort or switch, and
+left to finish in leg 7), which a resumed session may write again.
 
 No process it starts inherits the caller's environment: each gets `PATH`, the provider variables
 (omp only) and what the script sets — a scratch `HOME` holding the session's `envoy.json` (the
@@ -216,20 +229,21 @@ it, with each session's RPC log and session file, after anything else.
 
 ### Timing
 
-A local run takes about six and a half minutes (measured on omp 18.8.9 with the default model):
-about 10 s to build and start the services, 25 s for leg 1, 20 s for leg 2, 65 s for leg 3 (35 s of
-it the resumed session's answer), 30 s for leg 4, 20 s for leg 5, 90 s for leg 6 (45 s of it the
-resumed session's answer), 45 s for each control. Each wait is bounded: registration 90 s, a
-replayed card two heartbeats (10 s), the long turn's start 30 s, omp holding the live cards two
-heartbeats and the replayed ones (leg 3, and leg 6 once the listener is back) four, a card after
-leg 4's interrupt or leg 5's abort two heartbeats, a session going idle after them 300 s, and the
-resumed session of legs 3 and 6 300 s to show every card and 300 s more to go idle.
+A local run takes about seven minutes (measured on omp 18.12.2 with the default model, Go modules
+cached): about 10 s to build and start the services, 25 s for leg 1, 20 s for leg 2, 35 s for
+leg 3, 30 s for leg 4, 20 s for leg 5, 45 s for leg 6, 95 s for leg 7 (most of it the long turn
+running to its end), 45 s for each control. Each wait is bounded: registration 90 s, a replayed
+card two heartbeats (10 s), the long turn's start 30 s, omp holding the live cards two heartbeats
+and the replayed ones (leg 3, and leg 6 once the listener is back) four, a card after leg 4's
+interrupt or leg 5's abort two heartbeats, a session going idle after them, and leg 7's long turn
+ending, 300 s, and the resumed session of legs 3 and 6 300 s to show every card and 300 s more to
+go idle.
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | `SMOKE REPLAY PASS:` legs 1 to 6 showed each event exactly once (leg 6 in local mode only), the control showed none of its missed publish, the leg 3 control lost at least one of its live cards, and the leg 4 control showed none of the cards its interrupt withdrew. |
+| 0 | `SMOKE REPLAY PASS:` legs 1 to 6 showed each event exactly once (leg 6 in local mode only), leg 7 showed its BTW once as an inert card after the turn and ran no turn for it, the control showed none of its missed publish, the leg 3 control lost at least one of its live cards, and the leg 4 control showed none of the cards its interrupt withdrew. |
 | 1 | `SMOKE REPLAY FAIL (<step>):` an observation failed; the line names the step and what was seen. |
 | 2 | Refused: a prerequisite is missing, the configuration is invalid, or the model provider did not answer the session's first prompt (its error is printed). |
 | 129, 130, 143 | Interrupted by SIGHUP, SIGINT or SIGTERM; cleanup still ran. |
