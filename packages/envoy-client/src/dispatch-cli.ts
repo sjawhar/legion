@@ -77,7 +77,7 @@ function stateWriteFailed(problem: string): string {
 
 /** How a gated write gets AskGate's marker, as a refusal or a warn-mode warning tells the agent. */
 const LITERAL_FORM =
-  "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words…>`, with at most one `cd <path> &&` before it, one `2>&1` after it and one here-document opened with a quoted delimiter (`<<'EOF'`). A pipe, a loop, a variable, xargs, a script, an alias, or a process a program or an eval cell starts carries no marker.";
+  "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words…>`. Each word is plain text, text in single quotes (also over more than one line), or text in double quotes with no `$`, backtick or `\\`. A `\\` at the end of a line continues the command. Before it, one `cd <path> &&` is permitted; after it, one `2>&1`, one here-document opened with a quoted delimiter (`<<'EOF'`) and one `| head -n N` or `| tail -n N`. For text with `$` or a backtick in it, use `--<field>-file - <<'EOF'`. A variable, `~`, a glob, an assignment, another redirect (`2>/dev/null`, `> file`), another pipe, another command (`;`, `&&`, `||`), a loop, xargs, `bash -c`, a script, an alias, or a process that a program or an eval cell starts carries no marker.";
 
 /** A line that refuses a call before it reaches Dispatch, each at the start of the line:
  *  `dispatch <command> was not called: …` (exit 1, `ToolInputError` and the refusals

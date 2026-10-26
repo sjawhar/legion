@@ -6,6 +6,7 @@ import * as path from "node:path";
 import {
   argsDigest,
   argvDigest,
+  consumeMarker,
   openStore,
   processStart,
   writeAskgateRecord,
@@ -1731,13 +1732,8 @@ console.log(JSON.stringify(args, null, 2));
       "dispatch_comment",
     ],
     [
-      "a backslash-newline continuation",
-      "dispatch comment --issue X-1 \\\n  --body hi",
-      "dispatch_comment",
-    ],
-    [
-      "a later pipeline stage",
-      "dispatch comment --issue X-1 --body hi 2>&1 | tail -1",
+      "a later pipeline stage other than head or tail",
+      "dispatch comment --issue X-1 --body hi 2>&1 | grep -v warning",
       "dispatch_comment",
     ],
     [
@@ -3167,6 +3163,233 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls[0].user).not.toContain(uploadRule);
     });
   });
+});
+
+// The round at cf3f1e021, ruling item 2: the literal grammar takes every form whose words bash
+// passes as written, with no expansion, and a call outside it gets a note that names its cause.
+describe("the literal grammar, widened to forms with no expansion", () => {
+  // A stand-in `dispatch` that prints the argv it gets as one JSON line, so real bash shows what
+  // the CLI would receive for each form.
+  const bin = fs.mkdtempSync(path.join(tmpdir(), "askgate-argv-"));
+  fs.writeFileSync(
+    path.join(bin, "dispatch"),
+    `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`,
+    { mode: 0o755 }
+  );
+  afterAll(() => fs.rmSync(bin, { recursive: true, force: true }));
+  /** The argv real bash gives the stand-in for `command`. */
+  const bashArgv = (command: string): unknown => {
+    const run = Bun.spawnSync(["bash", "-c", command], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(run.exitCode).toBe(0);
+    return JSON.parse(run.stdout.toString());
+  };
+  const LITERAL: Array<[string, string, string]> = [
+    [
+      "a single-quoted word over several lines, which may hold $, a backtick and \\",
+      "dispatch comment --issue X-1 --body 'First line.\nSecond line keeps $HOME, `date` and \\n as text.'",
+      "dispatch comment --dry-run --issue X-1 --body 'First line.\nSecond line keeps $HOME, `date` and \\n as text.'",
+    ],
+    [
+      "a double-quoted word over several lines with no $, backtick or \\",
+      'dispatch message --issue X-1 --body "First line.\n\nThird line, after a blank one."',
+      'dispatch message --dry-run --issue X-1 --body "First line.\n\nThird line, after a blank one."',
+    ],
+    [
+      "backslash-newline continuations between words",
+      "dispatch ask --issue X-1 \\\n  --question 'Which one? Recommendation: A.' \\\n  --option 'A: the first' \\\n  --option 'B: the second'",
+      "dispatch ask --dry-run --issue X-1 --question 'Which one? Recommendation: A.' --option 'A: the first' --option 'B: the second'",
+    ],
+    [
+      "a continuation inside a word, which bash removes",
+      "dispatch comment --issue X-1 --bo\\\ndy hi",
+      "dispatch comment --dry-run --issue X-1 --bo\\\ndy hi",
+    ],
+    [
+      "continuations before a here-document opener",
+      "dispatch ask --issue X-1 --question-file - \\\n  --option 'A: a' \\\n  --option 'B: b' <<'EOF'\nWhich one?\nEOF",
+      "dispatch ask --dry-run --issue X-1 --question-file - --option 'A: a' --option 'B: b' <<'EOF'\nWhich one?\nEOF",
+    ],
+    [
+      "a trailing | head -n N",
+      "dispatch comment --issue X-1 --body hi | head -n 5",
+      "dispatch comment --dry-run --issue X-1 --body hi",
+    ],
+    [
+      "a trailing | tail -nN after 2>&1",
+      "dispatch comment --issue X-1 --body hi 2>&1 | tail -n2",
+      "dispatch comment --dry-run --issue X-1 --body hi",
+    ],
+    ["a trailing | head -N", "dispatch comment --issue X-1 --body hi | head -3", "dispatch comment --dry-run --issue X-1 --body hi"],
+    ["a trailing | tail alone", "dispatch comment --issue X-1 --body hi | tail", "dispatch comment --dry-run --issue X-1 --body hi"],
+    [
+      "a here-document, 2>&1 and | head on the opener's line",
+      "cd /tmp && dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1 | head -n 20\nText.\nEOF",
+      "cd /tmp >/dev/null && dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nText.\nEOF",
+    ],
+  ];
+  for (const [form, command, dryRun] of LITERAL)
+    test(`in the literal grammar: ${form}; its argv is the one bash passes, and its dry run has no pipe`, () => {
+      const scoped = core.scopedCommand(command);
+      expect(scoped).toBeDefined();
+      expect(scoped?.dryRunScript).toBe(dryRun);
+      expect(core.commandArgv(command)).toEqual(bashArgv(command) as string[]);
+      // A rewritten command (a rebuttal removed) passes the same argv.
+      expect(core.commandArgv(scoped?.command)).toEqual(core.commandArgv(command));
+    });
+  test("a rebuttal is removed from a call over several lines, and the argv stays the rest", () => {
+    const command =
+      "dispatch comment --issue X-1 \\\n  --advisor-rebuttal 'The link is the ask.' \\\n  --body 'See it.\nThanks.' | tail -n 1";
+    const scoped = core.scopedCommand(command);
+    expect(scoped?.rebuttal).toBe("The link is the ask.");
+    expect(core.commandArgv(scoped?.command)).toEqual(
+      bashArgv("dispatch comment --issue X-1 --body 'See it.\nThanks.'") as string[]
+    );
+  });
+  // Each of these holds an expansion, or a stage or option the grammar does not take: still
+  // outside it, so no marker, and the CLI refuses the write.
+  const STILL_OUTSIDE = [
+    'dispatch comment --issue X-1 --body "Done.\nSee $URL"',
+    'dispatch comment --issue X-1 --body "Done.\nSee `cat url`"',
+    'dispatch comment --issue X-1 --body "Done.\\\nmore"',
+    "dispatch comment --issue X-1 --body hi | head -c 10",
+    "dispatch comment --issue X-1 --body hi | head -n $N",
+    "dispatch comment --issue X-1 --body hi | head | cat",
+    "dispatch comment --issue X-1 --body hi | grep -v x",
+    "dispatch comment --issue X-1 --body hi |& tail",
+    "dispatch comment --issue X-1 --body hi | tail -n 2 2>&1",
+    "dispatch comment --issue X-1 --body hi \\\n; make",
+    "dispatch comment --issue X-1 --body hi | head -n 5 <<'EOF'\nx\nEOF",
+    "dispatch comment --issue X-1 --body 'unterminated\nquote",
+  ];
+  test("a form with an expansion in a value, or another stage, stays outside the grammar", () => {
+    for (const command of STILL_OUTSIDE) {
+      expect(core.scopedCommand(command)).toBeUndefined();
+      expect(core.commandArgv(command)).toBeUndefined();
+    }
+  });
+
+  const CAUSES: Array<[string, core.NonLiteralCause, string]> = [
+    ['dispatch comment --issue X-1 --body "Done.\nSee $URL"', "lines-expansion", '"Done.'],
+    ['dispatch comment --issue X-1 --body "$BODY"', "expansion", "$BODY"],
+    ["cd $X && dispatch ask --issue X-1 --question q", "expansion", "$X"],
+    ["dispatch comment --issue X-1 --body-file ~/note.md", "expansion", "~"],
+    ["printf '%s\\n' X-1 | xargs -I % dispatch comment --issue % --body hi", "wrapper", "xargs"],
+    ["bash -c 'dispatch comment --issue X-1 --body hi'", "wrapper", "bash"],
+    ["eval 'dispatch comment --issue X-1 --body hi'", "wrapper", "eval"],
+    ["timeout 60 dispatch comment --issue X-1 --body hi", "wrapper", "timeout"],
+    ["python3 - <<'EOF'\nimport os\nos.system('dispatch comment --issue X-1 --body hi')\nEOF", "wrapper", "python3"],
+    ["dispatch comment --issue X-1 --body hi | jq .", "pipe", "jq ."],
+    ["echo hi | dispatch comment --issue X-1 --body-file -", "pipe", "echo"],
+    ["make && dispatch comment --issue X-1 --body hi", "commands", "&&"],
+    ["dispatch comment --issue X-1 --body hi; echo done", "commands", ";"],
+    ["dispatch comment --issue X-1 --body hi || true", "commands", "||"],
+    ["cd sub\ndispatch comment --issue X-1 --body hi", "commands", "a new line"],
+    ["FOO=1 dispatch comment --issue X-1 --body hi", "assignment", "FOO="],
+    ["D=dispatch; $D comment --issue X-1 --body hi", "assignment", "D="],
+    ["dispatch comment --issue X-1 --body hi 2>/dev/null", "redirect", "2>/dev/null"],
+    ["dispatch comment --issue X-1 --body hi > out.json", "redirect", "> out.json"],
+    ["dispatch ask --issue X-1 --question-file - <<EOF\nWhich one?\nEOF", "redirect", "<<EOF"],
+    ["dispatch comment --issue X-1 --body h\\i", "other", "h\\i"],
+    ["dispatch comment --issue X-1 --body hi # posted", "other", "#"],
+  ];
+  for (const [command, cause, detail] of CAUSES)
+    test(`a call outside the grammar names its cause: ${cause} (${JSON.stringify(command)})`, () => {
+      expect(core.nonLiteralCause(command)).toEqual({ cause, detail });
+    });
+  test("a literal call, and a call with no dispatch write in it, have no cause", () => {
+    for (const command of [
+      "dispatch comment --issue X-1 --body hi | tail -n 1",
+      "ls -la",
+      "dispatch search --query x",
+      "rg -n dispatch src",
+    ])
+      expect(core.nonLiteralCause(command)).toBeUndefined();
+  });
+
+  /** What the CLI prints for a gated write with no marker, built on consumeMarker's own reason. */
+  const unmarked = (mode: "block" | "warn") => {
+    const spent = consumeMarker([], ["comment"], {}, Date.now());
+    if (spent.ok) throw new Error("an empty store gave a marker");
+    return mode === "block"
+      ? `dispatch comment was not called: AskGate is on for this session, and ${spent.why}. Send the write again in that form.`
+      : `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed.`;
+  };
+  const textOf = (result: Result) =>
+    (result?.content ?? []).map((block) => (typeof block.text === "string" ? block.text : ""));
+  test("the CLI's refusal of a call outside the grammar gets a note that names the cause, in both modes and in a subagent", async () => {
+    for (const [mode, kind] of [
+      ["block", "main"],
+      ["warn", "main"],
+      ["block", "sub"],
+    ] as const) {
+      const g = bind({ env: { OMP_ASKGATE: mode }, kind });
+      const command = 'dispatch comment --issue X-1 --body "$BODY"';
+      expect(await g.bash("c1", command)).toBeUndefined();
+      expect(g.entries).toHaveLength(0);
+      expect(g.calls).toHaveLength(0);
+      const refusal = { type: "text", text: unmarked(mode === "block" ? "block" : "warn") };
+      const result = await g.event("tool_result", { toolCallId: "c1", content: [refusal] });
+      const [first, note] = textOf(result);
+      expect(first).toBe(refusal.text);
+      expect(note).toContain("AskGate note");
+      expect(note).toContain("The value `$BODY` is an expansion");
+      expect(note).toContain("--<field>-file - <<'EOF'");
+      // Delivered once.
+      expect(await g.event("tool_result", { toolCallId: "c1", content: [refusal] })).toBeUndefined();
+    }
+  });
+  test("no note when the result holds no refusal, or the call is in the grammar", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" } });
+    await g.bash("mention", 'git commit -m "fix: dispatch comment names the issue"');
+    expect(
+      await g.event("tool_result", {
+        toolCallId: "mention",
+        content: [{ type: "text", text: "[main 1a2b3c] fix" }],
+      })
+    ).toBeUndefined();
+    const sub = bind({ env: { OMP_ASKGATE: "block" }, kind: "sub" });
+    await sub.bash("literal", "dispatch search --query 'dispatch comment'");
+    expect(
+      await sub.event("tool_result", {
+        toolCallId: "literal",
+        content: [{ type: "text", text: unmarked("block") }],
+      })
+    ).toBeUndefined();
+  });
+
+  // Ruling item 3: each skill example of a gated write is one the gate reads as literal, as
+  // written (placeholders included), so an agent that copies it gets a marker.
+  const REPO = path.resolve(import.meta.dir, "../../../..");
+  /** The example in `file` that starts with the line `first`, up to its block's closing fence,
+   * with the fence's indentation removed, as an agent sends it. */
+  const example = (file: string, first: string): string => {
+    const lines = fs.readFileSync(path.join(REPO, file), "utf8").split("\n");
+    const start = lines.findIndex((line) => line.trim().startsWith(first));
+    expect(start).toBeGreaterThan(-1);
+    const fence = lines.slice(0, start).findLastIndex((line) => line.trim().startsWith("```"));
+    const indent = /^ */.exec(lines[fence])?.[0].length ?? 0;
+    // The command ends at its block's closing fence, or at the end of its here-document.
+    const end = lines.findIndex(
+      (line, index) => index > start && (line.trim() === "```" || lines[index - 1].trim() === "EOF")
+    );
+    return lines
+      .slice(start, end)
+      .map((line) => line.slice(Math.min(indent, /^ */.exec(line)?.[0].length ?? 0)))
+      .join("\n");
+  };
+  for (const [file, first, tool] of [
+    ["skills/dispatch/references/asks.md", "dispatch ask --issue", "dispatch_ask"],
+    ["skills/legion-worker/references/findings.md", "dispatch ask --issue", "dispatch_ask"],
+    ["skills/legion-worker/references/findings.md", "dispatch comment --issue", "dispatch_comment"],
+    ["skills/legion-retro/SKILL.md", "dispatch message --issue", "dispatch_message"],
+  ])
+    test(`the skill example in ${file} that starts \`${first}\` is in the literal grammar`, () => {
+      expect(core.scopedCommand(example(file, first))?.tool).toBe(tool);
+    });
 });
 
 // The attack review at 0cf9f1902, A1: an eval cell that starts the CLI as a process of its own
