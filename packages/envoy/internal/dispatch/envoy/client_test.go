@@ -56,6 +56,38 @@ func TestSendDistinguishesAReceiptTimeoutFromARefusal(t *testing.T) {
 	}
 }
 
+// A send the listener refuses with its 404 - no live session under the target, and no daemon it
+// handed the message to - is ErrNotFound carrying the listener's own text, the one refusal Dispatch
+// may answer with the listener's resolution of the route. Any other refusal is not.
+func TestSendSeparatesNoLiveSessionFromOtherRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		notFound bool
+	}{
+		{name: "no live session", status: http.StatusNotFound, body: `{"error":"no live session s1"}`, notFound: true},
+		{name: "a 404 with no reason", status: http.StatusNotFound},
+		{name: "a capability refusal", status: http.StatusForbidden, body: `{"error":"session s1 (planner) does not advertise steer"}`},
+		{name: "the listener broke", status: http.StatusInternalServerError, body: `{"error":"nats: timeout"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer listener.Close()
+			_, err := New(listener.URL).Send(context.Background(), SendInput{TargetSession: "s1", Message: "hello"})
+			if err == nil || errors.Is(err, ErrNotFound) != tc.notFound {
+				t.Fatalf("send = %v, want ErrNotFound %v", err, tc.notFound)
+			}
+			if tc.notFound && err.Error() != "no live session s1" {
+				t.Fatalf("send error = %q, want the listener's own text", err)
+			}
+		})
+	}
+}
+
 // LEGION-271. The listener answers a send JetStream already held with duplicate: true: the stream
 // stored nothing new, and the publish still reached the agent's subject. That flag is the only
 // thing telling Dispatch its retry was a repeat. An older listener omits the field, which reads as
@@ -379,13 +411,42 @@ func TestRoleAndSendPreserveTheListenerDeliveryContract(t *testing.T) {
 func TestRolePreservesListenerNotFoundText(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"no holder for role legion-planner"}`))
+		_, _ = w.Write([]byte(`{"error":"no holder for role legion-planner","reason":"unclaimed"}`))
 	}))
 	defer listener.Close()
 
 	_, err := New(listener.URL).Role(context.Background(), "legion-planner")
 	if err == nil || err.Error() != "no holder for role legion-planner" {
 		t.Fatalf("role error = %v, want listener error text", err)
+	}
+	if !errors.Is(err, ErrNoHolder) || errors.Is(err, ErrUnavailable) {
+		t.Fatalf("role error = %v, want ErrNoHolder and not ErrUnavailable", err)
+	}
+}
+
+// Only the listener's 404 says the role has no holder. A failure the listener names in its body
+// under any other status - its role read failing on NATS, say - says nothing about the holder.
+func TestRoleReportsOnlyTheListener404AsNoHolder(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "a NATS failure", status: http.StatusServiceUnavailable, body: `{"error":"nats: timeout"}`},
+		{name: "a 404 naming nothing", status: http.StatusNotFound, body: ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer listener.Close()
+
+			_, err := New(listener.URL).Role(context.Background(), "legion-planner")
+			if err == nil || errors.Is(err, ErrNoHolder) {
+				t.Fatalf("role error = %v, want a failure that is not ErrNoHolder", err)
+			}
+		})
 	}
 }
 

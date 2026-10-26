@@ -18,6 +18,18 @@
   hand-off is stored. Otherwise every path answers exactly as before. The daemon writes the
   answering record through the new `PUT /v1/legion/projects/{legion_project}`
   `{answering, updated_at}`, stored as `project.<legion_project>` in the `legion_agents` bucket.
+- Dispatch records a stopped Legion agent as a delivery's recipient (INFRA-204). A targeted
+  message (on an issue or on the agent's conversation page) or a mention whose session the
+  listener holds no live record of, or whose role has no live holder, is looked up in the
+  listener's Legion agent registry (`GET /v1/legion/agents/sessions/{id}`, or for a role its
+  token's newest entry from `GET /v1/legion/agents/roles/{token}`). A session the registry names
+  is the attempt's session, whatever the delivery mode (the capability check is skipped), the
+  send goes to it through the listener, which hands it to the agent's daemon, so the attempt is
+  `sent`, and the reply the daemon posts as that session on that attempt is accepted. A target
+  the registry does not name still fails `no live session <id>` (or the listener's no-holder
+  text), and a registry read that does not answer is logged and changes nothing. The Dispatch
+  Envoy client's `Role` now reports the listener's 404 as an error matching `ErrNoHolder`, its
+  text unchanged.
 - A Dispatch project imports its component model from any number of architecture sources, one
   per repository, each on its own branch, and its model is every source's components together
   (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
