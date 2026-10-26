@@ -85,6 +85,9 @@ func TestAChangesRequestBeforeRegistrationKeepsTheSlotAndTellsTheArchitect(t *te
 			admission := newAdmission(t, 1, nil)
 			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
+			// The architect runs a turn it took, so nothing but the review the read carries keeps the
+			// root from waiting on the person.
+			seedArchitectSession(t, pool, "LEGION-100", architect.ID)
 			if tc.prior != nil {
 				seedGate(t, pool, *tc.prior)
 			}
@@ -96,10 +99,11 @@ func TestAChangesRequestBeforeRegistrationKeepsTheSlotAndTellsTheArchitect(t *te
 				Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, ChangesRequestedVersion: 4, ChangesReason: "name the rollback path",
 			})
 
-			if root := issue(t, pool, "LEGION-100"); root.Phase != phase.Admitted {
-				t.Fatalf("root after registering a version a person already asked changes of = %#v, want admitted", root)
+			if root := issue(t, pool, "LEGION-100"); root.Phase != phase.Admitted || root.Awaiting != nil {
+				t.Fatalf("root after registering a version a person already asked changes of = %#v, want admitted with no wait", root)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
+			assertNoAwaitingEffects(t, pool, "LEGION-100")
 			told := gateNotices(t, pool, "LEGION-100", "design-changes-requested")
 			if len(told) == 0 || told[len(told)-1].Version != 4 || told[len(told)-1].Reason != "name the rollback path" {
 				t.Fatalf("design-changes-requested notices = %#v, want the last at version 4 with the reason", told)
@@ -270,7 +274,8 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 
 // A registration whose read of Dispatch began before a review the daemon has already applied at
 // that version is the older reader: the person acted after it. The gate keeps that review — a
-// told changes request is not told again, an approval is not rolled back.
+// told changes request is not told again, an approval is not rolled back — and no wait starts,
+// since only the person's next act could answer one.
 func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 	reviewed := record.EventMark{Seq: 11, At: reviewedAt.Add(time.Minute)}
 	for _, tc := range []struct {
@@ -295,6 +300,7 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 			admission := newAdmission(t, 1, nil)
 			seedSlotted(t, pool, "LEGION-100", "A")
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
+			seedArchitectSession(t, pool, "LEGION-100", architect.ID)
 			seedGate(t, pool, tc.gate)
 
 			applyFact(t, pool, admission, "register-v4", intake.GateRegistered{
@@ -304,8 +310,8 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 				Since:                record.EventMark{Seq: 10},
 			})
 
-			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted {
-				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it admitted", got)
+			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted || got.Awaiting != nil {
+				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it admitted with no wait", got)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
 			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
@@ -362,6 +368,18 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 			}
 			if gate := storedGate(t, pool, "LEGION-100"); classify.DesignGateOpen(*gate) != tc.open || !reflect.DeepEqual(*gate, tc.gate) {
 				t.Fatalf("gate after the superseded review = %#v, want it unchanged: %#v", gate, tc.gate)
+			}
+		})
+		// The same late review on a root waiting on its gate from a later hand-back answers nothing:
+		// the person gave it before that wait began.
+		t.Run(tc.name+", the root waiting on its gate", func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: record.EventMark{Seq: 20, At: reviewedAt.Add(time.Minute)}})
+			seedGate(t, pool, tc.gate)
+			applyFact(t, pool, admission, "superseded-review", tc.late)
+			if got := issue(t, pool, "LEGION-100"); got.Answered() {
+				t.Fatalf("root after a review the person had already followed with another = %#v, want it still waiting", got)
 			}
 		})
 	}
@@ -438,7 +456,9 @@ func TestAnArtifactEventChangesNoGateWhenTheDesignGateIsOff(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmissionWithGate(t, 1, config.DesignGateOff, nil)
 	seedSlotted(t, pool, "LEGION-100", "A")
-	applyFact(t, pool, admission, "register-v4", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4})
+	seedArchitectSession(t, pool, "LEGION-100", architect.ID)
+	applyFact(t, pool, admission, "register-v4", intake.GateRegistered{Issue: "LEGION-100", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		Since: record.EventMark{Seq: 10}, RequestAsk: "ask-approval"})
 	changes := intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root",
 		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: reviewedAt}}
 	applyFact(t, pool, admission, "changes-v4", changes)
@@ -450,6 +470,9 @@ func TestAnArtifactEventChangesNoGateWhenTheDesignGateIsOff(t *testing.T) {
 	}
 	if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 1 || told[0].Version != 4 || told[0].Reason != "name the rollback path" {
 		t.Fatalf("design-changes-requested notices with the design gate off = %#v, want the request told once", told)
+	}
+	if got := issue(t, pool, "LEGION-100"); got.AwaitingPerson() {
+		t.Fatalf("root with the design gate off = %#v, want it still admitted: no approval is asked for", got)
 	}
 }
 
