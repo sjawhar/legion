@@ -37,3 +37,35 @@ func TestACallbackReplyDecodesAsTheReplyItIs(t *testing.T) {
 		})
 	}
 }
+
+// Settlement restoring a decision block it retracted appends ask.answered with the answer given
+// before the retraction, credited to the person whose edit restored it, and marks it restored: no
+// one answered anything, so it decodes to no fact, while a person's own answer still decodes.
+func TestARestoredAnswerIsNoPersonsAnswer(t *testing.T) {
+	at := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		restored bool
+	}{{name: "a person's answer"}, {name: "settlement's restoration", restored: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{"id": "ask-question", "kind": "question", "state": "answered"}
+			if tc.restored {
+				payload["restored"] = true
+			}
+			event, err := json.Marshal(map[string]any{
+				"id": 41, "issue_key": "LEGION-7", "seq": 13, "type": "ask.answered", "notify": true, "created_at": at,
+				"actor": map[string]any{"kind": "user", "id": "alice"}, "payload": payload,
+			})
+			if err != nil {
+				t.Fatalf("encode the event: %v", err)
+			}
+			fact, err := DecodeDispatchEvent("LEGION", "LEGION-7", event)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if tc.restored != (fact == nil) {
+				t.Fatalf("%s decoded to %#v, want a fact %t", tc.name, fact, !tc.restored)
+			}
+		})
+	}
+}

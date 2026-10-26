@@ -296,14 +296,21 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		return DispatchAskOpened{Key: event.IssueKey, Ask: ask.ID, Kind: ask.Kind, AuthorSession: session, Mark: event.mark()}, nil
 	case "ask.answered", "ask.resolved":
 		var ask struct {
-			ID   string `json:"id"`
-			Kind string `json:"kind"`
+			ID       string `json:"id"`
+			Kind     string `json:"kind"`
+			Restored bool   `json:"restored"`
 		}
 		if err := json.Unmarshal(event.Payload, &ask); err != nil {
 			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
 		}
 		if ask.ID == "" {
 			return nil, fmt.Errorf("Dispatch %s payload has no id", event.Type)
+		}
+		// Settlement restoring a decision block it retracted appends ask.answered with the answer
+		// given before the retraction, credited to the editor who restored the block: no one
+		// answered anything, so it is no fact.
+		if ask.Restored {
+			return nil, nil
 		}
 		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID, Kind: ask.Kind, State: strings.TrimPrefix(event.Type, "ask."),
 			Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil

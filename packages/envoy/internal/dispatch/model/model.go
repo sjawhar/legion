@@ -789,10 +789,14 @@ type AskLastReply struct {
 // AskEventPayload is the wire payload of every `ask.*` event that carries the ask row: the ask
 // itself, flat, plus what the write moved in the reference graph. NewAskEventPayload is the only
 // way to build one, and it takes the changes, so a producer whose question text can cite
-// something cannot append an event that stays silent about it.
+// something cannot append an event that stays silent about it. Restored marks the `ask.opened` or
+// `ask.answered` settlement appends when a person's edit restores a decision block it retracted:
+// the ask returns to the state it had, and the event records no new answer (an `ask.answered`
+// restore carries the answer given before the retraction, credited to the editor who restored it).
 type AskEventPayload struct {
 	Ask
 	ReferenceChangesPayload
+	Restored bool `json:"restored,omitempty"`
 }
 
 // NewReferenceChangesPayload states what a write moved on a typed event payload.

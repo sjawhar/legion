@@ -4,6 +4,10 @@
 
 ### Added
 
+- The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
+  block it retracted carries `restored: true`: the ask returns to the state it had, and the event
+  records no new answer, so a reader that takes an `ask.answered` for a person's answer (the Legion
+  daemon waking a root waiting on a person) can tell the two apart.
 - Dispatch's approval read (`approval` on every document read) names the latest review's event
   sequence, `seq`, beside its `at`: each review keeps the sequence of the `artifact.approved` or
   `artifact.changes_requested` event it appended on its document's owner

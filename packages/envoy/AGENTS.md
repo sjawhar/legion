@@ -1808,7 +1808,9 @@ carried as a hard break; surrounding whitespace is trimmed, as the parser trims 
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
 person's or a session's retract stands however the document moves, which is why `resolve`
-refuses a caller reason beginning `removed from the document in version`.
+refuses a caller reason beginning `removed from the document in version`. The `ask.opened` or
+`ask.answered` a restore appends carries `restored: true` (`model.AskEventPayload.Restored`): it
+records the ask's return to the state it had, never a new answer.
 An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
 attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
