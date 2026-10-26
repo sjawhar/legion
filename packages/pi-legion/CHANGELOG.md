@@ -13,7 +13,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   agents and judges read the key where the operator keeps it and no key is copied into a profile.
   A judge's container mounts that file's directory read-only. Every transcript names the block as
   the provider that served each turn. The rig's Postgres, NATS and judge containers now run under
-  CPU and memory limits.
+  CPU and memory limits, and every run and profile probe names its label's pinned omp binary by
+  path, so an `omp` wrapper earlier on the caller's PATH never stands in for the pin.
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
