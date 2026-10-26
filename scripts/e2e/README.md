@@ -1244,7 +1244,11 @@ changes; the revision raises a block; the human answers it; and the architect ha
 back, or requests approval again, which opens a new request since Request changes answered the old
 one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
-`<issue>-gate-verdict.json`.
+`<issue>-gate-verdict.json`. While tree 1 waits on the human (its question, or a closed gate it
+registered) it is in `awaiting_person` with no slot and its architect suspended; once the gate
+opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the
+run's one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how
+many times the daemon logged the root giving its slot back.
 
 `LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the
 `runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`,
@@ -2722,10 +2726,6 @@ its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND`
 line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
 that quotes it.
 
-`request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
-tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
-the Legion footer naming its own session, as its role ends every review. The daemon sets aside a
-review-App review whose footer does not name the session recorded on the reviewer's claim, and that
 With the design gate armed (`gates.design: root-issues`), a root whose architect registers a closed
 gate while no worker of its tree runs waits on a person: `drive_gate ISSUE LABEL [SECONDS]` runs
 `architect_registers_gate`, then `await_gate_wait` (the root in `awaiting_person` with
@@ -2741,6 +2741,10 @@ then does it wait for planning. `wait_for_architect ISSUE` and so `architect_reg
 an architect already suspended in `awaiting_person`, whose pane the watcher checked at its launch,
 since a proof may look after the root's wait began.
 
+`request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
+tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
+the Legion footer naming its own session, as its role ends every review. The daemon sets aside a
+review-App review whose footer does not name the session recorded on the reviewer's claim, and that
 session is recorded at the reviewer's first completion, so a round from the second on that told the
 reviewer to post a body verbatim, footer-less, would decide nothing and leave the issue in
 `reviewing`. `NOTE` is a further step the round asks of the reviewer, never part of the review. The

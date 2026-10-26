@@ -3209,14 +3209,20 @@ gate_open() {
 # (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
 # approval request it made on the spec named a version holding one open or came before a human
-# answered one raised before the human's turn on that request.
+# answered one raised before the human's turn on that request. While the root waits on the human (a
+# question, or a closed gate it registered) it is in awaiting_person without a slot and its
+# architect is suspended; the approval answers it, and nothing of its tree advances until it holds a
+# slot again. Tree 1 is the run's one root under admission_cap 2, so a slot stands free for it.
 drive_gated_spec() {
-  local issue=$1 artifact approved asks events version verdict request early blocks requested_versions
+  local issue=$1 artifact approved asks events version verdict request early blocks requested_versions waits
   local -a requested=()
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
+  wait_for_architect "$issue"
   until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
   until_true 43200 "a human to approve the $issue spec in Dispatch, opening its design gate" gate_open "$issue" "$artifact"
+  await_root_slot "$issue" "the $issue"
+  waits=$(jq -R -s --arg issue "$issue" '[split("\n")[] | fromjson? | select(.msg == "workflow: root waits on a person and returns its admission slot" and .issue == $issue)] | length' "$daemon_log")
+  note "$issue: it waited on the human without a slot $waits times before the approval, and holds a slot again"
   approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
   asks=$(dispatch_get "issues/$issue/asks")
   events=$(dispatch_events "$issue")
