@@ -13,17 +13,19 @@
   `#b-` fragment carries it (every byte but ASCII letters, digits and `-` percent-encoded, so `@` is
   `%40` and a raw `@` is only the pin), tested with Go's `text.EncodeBlockID` against
   `DISPATCH_BLOCK_ID_ENCODINGS`; `decodeBlockId` and `parseBlockFragment` read a fragment's id and
-  pin back, for the dashboard and the client alike. As Go reads them, an id holds at most
-  `MAX_BLOCK_ID_BYTES` (256 UTF-8 bytes, decoded; Go's `text.MaxBlockIDBytes`) and a pin at most
-  9223372036854775807, and a longer id or a larger pin names no block. Every reference's target
-  id, the id the server stores its edge under (an issue's key, a document's
-  `<KEY or PROJECT>/<slug>`, a block's `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a
-  comment's or a message's id), holds at most `MAX_REFERENCE_TARGET_BYTES` (2048 UTF-8 bytes; Go's
-  `text.MaxTargetBytes`), as `referenceTargetFits` tests it: a reference past it names nothing, a
-  live document page whose block is past it is its document, and one whose document or item is
-  past it names nothing. `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin
-  past 2^53 is rounded. `DISPATCH_TEXT_REFERENCES` gains the block, pin and target-bound rows both
-  reference readers are held to.
+  pin back, for the dashboard and the client alike, an id of any length, as Go's `text.ParseRef`
+  reads a request's reference; a pin holds at most 9223372036854775807, and a larger one names no
+  block. Two bounds decide only what text cites, which is what the server's graph indexes: a block
+  id of at most `MAX_BLOCK_ID_BYTES` (256 UTF-8 bytes, decoded; Go's `text.MaxBlockIDBytes`), and
+  a target id, the id the server stores its edge under (Go's `text.TargetID`: an issue's key, a
+  document's `<KEY or PROJECT>/<slug>`, a block's `<KEY or PROJECT>/<slug>#<block id>`, an ask's,
+  a comment's or a message's id), of at most `MAX_REFERENCE_TARGET_BYTES` (2048 UTF-8 bytes; Go's
+  `text.MaxTargetBytes`), as `referenceTargetFits` tests it. `utf8Bytes` counts a string's UTF-8
+  bytes as Go's `len` does, by code point, for every bound the server shares. A reader of text
+  holds a reference to both: past either it names nothing, a live document page whose block is
+  past them is its document, and one whose document or item is past them names nothing.
+  `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin past 2^53 is rounded.
+  `DISPATCH_TEXT_REFERENCES` gains the block, pin and bound rows both readers of text are held to.
 - `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
   one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
   parameters whose absence makes the server answer every match
@@ -157,7 +159,9 @@
 ### Changed
 
 - `DISPATCH_HREF_REFERENCES`: a live document page's `#b-<id>` href names that block,
-  `dispatch://…#b-<id>`, where it named the document; any other fragment still names the document.
+  `dispatch://…#b-<id>`, where it named the document; any other fragment still names the document,
+  and a version page names that version whatever its fragment (`/issues/KEY/spec?v=N` is
+  `dispatch://KEY/artifact/spec@vN`), rows the table now carries.
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the
   already-merged sentence, for a pull request a person merged before READY, and the by-hand

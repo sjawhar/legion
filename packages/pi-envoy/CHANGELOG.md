@@ -9,7 +9,8 @@
   `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
   last changed in, its text, for a pinned reference its text at that version and whether it
   changed or was removed since, and what cites it. The skill's reference forms teach the block
-  forms, the id's percent-encoding and its 256-byte bound, the pin and `GET /api/v1/block-links`.
+  forms, the id's percent-encoding, the 256-byte bound past which a block is no graph node, the pin
+  and `GET /api/v1/block-links`.
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the

@@ -232,24 +232,24 @@ settlement repairs it) refuse anything. Only a typed block's markdown can name i
 
 The graph bounds a block id at `text.MaxBlockIDBytes`, 256 bytes of UTF-8 (`MAX_BLOCK_ID_BYTES` in
 `@legion/contracts`): it keys a block by its id, and a Postgres B-tree key holds at most 2704
-bytes. The same caller markdown is refused when it names a longer id that the document it
-replaces whole does not already carry (`pmdoc.LongBlockID`, run by `pmdoc.ParseForWrite`):
-`400 INVALID_OP` for an `insert`, `400 INVALID_MARKDOWN` for the rest, quoting the id's start and
-naming its length and the bound. An insert or an accepted suggestion replaces no document, so any
-such id it names is refused. A browser's edit can still write a long id; the document stores,
-renders and versions it as any other, and an upload that keeps it, or an insert elsewhere, is
-written. A reference is bounded as a whole too: its target id (`refs.ToID`: an issue's key, a
-document's `<KEY or PROJECT>/<slug>` or `agent/<session id>/<slug>`, a block's
-`<KEY or PROJECT>/<slug>#<block id>`, an ask's, a comment's or a message's id, a component's
-`<project>/<id>`), which `refs.to_id` and `block_refs.to_id` hold in B-tree keys, is at most
-`text.MaxTargetBytes`, 2048 bytes (`MAX_REFERENCE_TARGET_BYTES`, `referenceTargetFits` in
-`@legion/contracts`), since neither a slug nor an item id has a bound of its own: `text.Extract`
-drops one past it (`targetFits`), so the text citing it is written with no edge, and a route
-given one answers `400 INVALID_REFERENCE`. At that bound the widest such key, `block_refs_pkey`
-with a 256-byte source block id, is about 2360 bytes. An ask block's row and a comment's or an
-ask's anchor key their block id by `block_id_key`, its SHA-256 (migrations 0123 and 0124), so a
-block id of any length, a long one a browser's edit wrote included, is written there, and a
-settlement never fails on one.
+bytes. The bound decides only which blocks the graph keys, never whether a write is taken: a
+seeded spec, an upload, an `insert`, a rebuild from markdown, an accepted suggestion or a
+browser's edit naming a longer id is written, and the document stores, renders and versions it as
+any other; its block is no graph node (`refs.IndexBlocks`, below). A reference is bounded as a
+whole too: its target id (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`
+or `agent/<session id>/<slug>`, a block's `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a
+comment's or a message's id, a component's `<project>/<id>`), which `refs.to_id` and
+`block_refs.to_id` hold in B-tree keys, is at most `text.MaxTargetBytes`, 2048 bytes
+(`MAX_REFERENCE_TARGET_BYTES`, `referenceTargetFits` in `@legion/contracts`), since neither a slug
+nor an item id has a bound of its own. Both bounds hold only what text cites: `text.Extract` drops
+a reference past either (`inBound`), so the text citing it is written with no edge. A request's
+reference is read whatever its length (`text.ParseRef`): `?to=`, `?from=` and
+`GET /api/v1/block-links` read a node of any name, a block whose id is past `text.MaxBlockIDBytes`
+is `404 NOT_FOUND`, no node, and no route answers `400` for a reference's length. At the target
+bound the widest such key, `block_refs_pkey` with a 256-byte source block id, is about 2360 bytes.
+An ask block's row and a comment's or an ask's anchor key their block id by `block_id_key`, its
+SHA-256 (migrations 0123 and 0124), so a block id of any length is written there, and a settlement
+never fails on one.
 
 Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
 another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
@@ -1376,7 +1376,7 @@ with the block's own excerpt (below), so the excerpt on the `refs` row is what a
 no block holds is shown with: one in a document the block index has not reached.
 
 Each identified block of a document is a graph node too: kind `block`, id
-`<document ref_key>#<block id>` (`refs.ToID`), its reference the document's with `#b-` and the id
+`<document ref_key>#<block id>` (`text.TargetID`), its reference the document's with `#b-` and the id
 as `text.EncodeBlockID` writes it (`refs.BlockRef`). `refs.IndexBlocks` indexes a version's blocks
 in the version writer's transaction, from the same render and extraction as its references: the
 blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first
@@ -1421,7 +1421,7 @@ a block target with its document as the artifact.
 
 A block reference may be pinned to version N of its document, `#b-<id>@v<N>`, with N at most
 9223372036854775807 (Go's `int`; a larger N makes the text no reference); the pin is no part
-of the edge (`refs.ToID` drops it), and it is read when the reference is.
+of the edge (`text.TargetID` drops it), and it is read when the reference is.
 `GET /api/v1/references?to=<block reference>` names the block node with `text`, its whole current text
 (`refs.CurrentBlockText`); a pinned reference adds `pin` (`model.BlockPin`), read by
 `refs.BlockTextAt`: the text of the latest `document_block_texts` row at or before N, read only
@@ -1490,7 +1490,8 @@ the spec's innermost block holding the citation (a `block` node whose `document`
 the spec itself while the block index has not reached it.
 Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
 which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
-scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
+scanning with `referenceSpans` from `refs/reference-spans.ts` and parsing with
+`referenceRouteFromHref`), behind its reference
 pills, unfurl cards and linked text. `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, whose
 JSON copy is `text/testdata/dispatch-text-references.json`, is the table both are tested against,
 so a change to the rule changes both readers and the table: `**dispatch://KEY**`,
@@ -1502,12 +1503,16 @@ document page (`documentPage`); a version page's fragment names no block. The id
 percent-encoding, and every writer writes it as `text.EncodeBlockID` and `encodeBlockId`
 (`@legion/contracts`) do: each UTF-8 byte but ASCII letters, digits and `-` percent-encoded in
 upper-case hex, so `@` is `%40` and a raw `@` in the fragment is only ever the `@v<N>` pin. A
-fragment whose id decodes to more than `text.MaxBlockIDBytes` (`MAX_BLOCK_ID_BYTES`), 256 bytes,
-or whose pin is past 9223372036854775807 names no block: after `dispatch://` the text is no
-reference, and on a live document page it names the document. A block whose target id
-`<KEY or PROJECT>/<slug>#<block id>` is past `text.MaxTargetBytes` (`MAX_REFERENCE_TARGET_BYTES`),
-2048 bytes, the bound every reference's target id is held to, names nothing the same way, and a
-live document page whose document or item is past it names nothing. `parseBlockFragment` carries
+fragment whose pin is past 9223372036854775807 names no block: after `dispatch://` the text is no
+reference, and on a live document page it names the document. Text cites only within the bounds
+the graph keys (`text.inBound`; the dashboard's `routeInBound`, `refs/target-id.ts`): a block id
+that decodes to more than `text.MaxBlockIDBytes` (`MAX_BLOCK_ID_BYTES`), 256 bytes, or a target id
+(`text.TargetID`) past `text.MaxTargetBytes` (`MAX_REFERENCE_TARGET_BYTES`), 2048 bytes, cites
+nothing: after `dispatch://` the text is no reference, a live document page whose block is past
+them names the document (`pageInBound`), and one whose document or item is past them names
+nothing. A request's reference is read whatever its length: `text.ParseRef` for an API route, the
+dashboard's `parseNodeReference` and `nodeRouteFromHref` for what the server returned, and the
+client's `parseDispatchRef` and `dispatchRefFromUrl`. `parseBlockFragment` carries
 a pin as its digits, so the browser never rounds one past 2^53. The two encoders are tested against
 `DISPATCH_BLOCK_ID_ENCODINGS`, whose JSON copy is
 `text/testdata/dispatch-block-id-encodings.json`. The Go reader parses a reference as the browser

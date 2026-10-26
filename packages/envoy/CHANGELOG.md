@@ -8,26 +8,28 @@
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
   `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
-  pins it to version N of the document. A reference names a block id of at most 256 bytes,
-  decoded (`text.MaxBlockIDBytes`), and N of at most 9223372036854775807: a longer id or a larger
-  N is no reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every
-  version the document has is `404 NOT_FOUND` `no version N of <document>`. A seeded spec, an
-  upload, an `insert` or an accepted suggestion that names a new block id past the bound is
-  refused, naming the bound (`400 INVALID_MARKDOWN`, `400 INVALID_OP` for an insert); an id the
-  document already holds is kept. A block carrying such an id, which a browser's edit can write,
-  is no graph node: its version is written, a mention inside it starts at the block holding it,
-  and the server logs a warning naming the document, the longest id's length and the bound. An
-  ask block, a comment anchored in a block and an ask anchored in one are written under a block
-  id of any length, so a settlement never fails on one. Every reference, a block's or any other,
-  names its target only while the target id the graph stores its edge under (`refs.ToID`: an
-  issue's key, a document's `<KEY or PROJECT>/<slug>`, a block's
+  pins it to version N of the document. N is at most 9223372036854775807: a larger N is no
+  reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every version the
+  document has is `404 NOT_FOUND` `no version N of <document>`. A block id of any length is
+  written, by a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion or a
+  browser's edit; the graph keys a block by its id, so one longer than 256 bytes, decoded
+  (`text.MaxBlockIDBytes`), is no graph node: its version is written, a mention inside it starts
+  at the block holding it, the server logs a warning naming the document, the longest id's length
+  and the bound, and a read of its reference is `404 NOT_FOUND`. An ask block, a comment anchored
+  in a block and an ask anchored in one are written under a block id of any length, so a
+  settlement never fails on one. Text cites a reference, a block's or any other, only while its
+  block id is within that bound and the target id the graph stores its edge under
+  (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`, a block's
   `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a comment's or a message's id) holds at most
-  2048 bytes (`text.MaxTargetBytes`), since a slug or an item id has no bound of its own: past it
-  the text is written and cites nothing, the API answers `400 INVALID_REFERENCE` for it, and a
-  live document page whose block is past it names the document, one whose document or item is
-  past it nothing. A new artifact's name, and the reference key `<owner>/<slug>` it gives the
-  artifact, hold at most 2692 bytes: an upload past either is `400 INVALID_ARTIFACT` naming the
-  bound, and an artifact already stored past it keeps taking versions and edits. A
+  2048 bytes (`text.MaxTargetBytes`), since a slug or an item id has no bound of its own: past
+  either the text is written and cites nothing, and a live document page whose block is past them
+  names the document, one whose document or item is past them nothing. The bounds decide only
+  what the graph indexes: `GET /api/v1/references?to=|from=` and `GET /api/v1/block-links` read
+  the reference they are given whatever its length (`text.ParseRef`), so a node of any name is
+  read, and no reference's length answers `400`. A new artifact's name, and the reference key
+  `<owner>/<slug>` it gives the artifact, hold at most 2692 bytes: an upload past either is
+  `400 INVALID_ARTIFACT` naming the bound, and an artifact already stored past it keeps taking
+  versions and edits. A
   mention written inside a block starts at the innermost block holding it: `GET /api/v1/references`
   names that block as the source (`kind: "block"`, with
   `block_id`, `document`, `changed_version` and `changed_at`, the version its text last changed

@@ -36541,15 +36541,17 @@ function itemFromSearch(search) {
 }
 
 // ../contracts/src/dispatch-block-ref.ts
+var encoder = new TextEncoder;
 function encodeBlockId(id) {
   let encoded = "";
-  for (const byte of new TextEncoder().encode(id)) {
-    const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
-    encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  for (const character of id) {
+    for (const byte of encoder.encode(character)) {
+      const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
+      encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }
   }
   return encoded;
 }
-var MAX_BLOCK_ID_BYTES = 256;
 function decodeBlockId(encoded) {
   if (encoded === "" || encoded.includes("@")) {
     return;
@@ -36560,7 +36562,7 @@ function decodeBlockId(encoded) {
   } catch {
     return;
   }
-  return id === "" || hasControlCharacter(id) || new TextEncoder().encode(id).length > MAX_BLOCK_ID_BYTES ? undefined : id;
+  return id === "" || hasControlCharacter(id) ? undefined : id;
 }
 var MAX_BLOCK_PIN = 9223372036854775807n;
 function parseBlockFragment(encoded) {
@@ -36628,15 +36630,6 @@ function snippetText(snippet) {
 // ../contracts/src/dispatch-text-rules.ts
 var SESSION_ID_PATTERN = "[^/?#\\s\\p{Z}\\p{Cc}<>\"'`\\[\\]|]+";
 var sessionIdOnly = new RegExp(`^${SESSION_ID_PATTERN}$`, "u");
-var MAX_REFERENCE_TARGET_BYTES = 2048;
-function referenceTargetFits(target) {
-  let bytes = 0;
-  for (const character of target) {
-    const code = character.codePointAt(0) ?? 0;
-    bytes += code < 128 ? 1 : code < 2048 ? 2 : code < 65536 ? 3 : 4;
-  }
-  return bytes <= MAX_REFERENCE_TARGET_BYTES;
-}
 function pictureCaption(name) {
   return name.replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
 }
@@ -38326,7 +38319,7 @@ function dispatchChildRef(ownerRef, kind, id) {
 }
 function parseBlockRef(document, fragment) {
   const target = parseBlockFragment(fragment);
-  const parsed = parseRef(document);
+  const parsed = parseDispatchRef(document);
   if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
@@ -38340,31 +38333,7 @@ function parseBlockRef(document, fragment) {
     ...target.pin === undefined ? {} : { pin: target.pin }
   };
 }
-function refTarget(ref) {
-  const owner = ref.owner.kind === "issue" ? ref.owner.issue : ref.owner.project;
-  switch (ref.kind) {
-    case "spec":
-    case "artifact":
-      return `${owner}/${ref.id}`;
-    case "block":
-      return `${owner}/${ref.id}#${ref.block}`;
-    case "ask":
-    case "comment":
-    case "message":
-      try {
-        return decodeURIComponent(ref.id);
-      } catch {
-        return ref.id;
-      }
-    default:
-      return owner;
-  }
-}
 function parseDispatchRef(ref) {
-  const parsed = parseRef(ref);
-  return parsed !== null && referenceTargetFits(refTarget(parsed)) ? parsed : null;
-}
-function parseRef(ref) {
   const hash2 = ref.indexOf("#");
   if (hash2 !== -1 && ref.startsWith("b-", hash2 + 1)) {
     return parseBlockRef(ref.slice(0, hash2), ref.slice(hash2 + 3));
@@ -40527,7 +40496,7 @@ var pictureSendingTools = {
   dispatch_comment: true,
   dispatch_message: true
 };
-function refTarget2(ref, kind, id) {
+function refTarget(ref, kind, id) {
   const ownerRef = ref.owner.kind === "issue" ? dispatchIssueRef(ref.owner.issue) : dispatchDocumentRef(ref.owner.project, `${ref.artifact}`);
   return dispatchChildRef(ownerRef, kind, id);
 }
@@ -40790,9 +40759,9 @@ function dispatchRefFromUrl(value, serverUrl) {
     const value2 = url2.searchParams.get(name);
     return value2 !== null && /^[1-9][0-9]*$/.test(value2) ? `@v${value2}` : "";
   };
-  const blockOf = (versionName, owner, slug2) => {
+  const blockOf = (versionName) => {
     const id = url2.hash.startsWith("#b-") ? decodeBlockId(url2.hash.slice(3)) : undefined;
-    return id === undefined || url2.searchParams.get(versionName) || !referenceTargetFits(`${owner}/${slug2}#${id}`) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || url2.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -40808,12 +40777,12 @@ function dispatchRefFromUrl(value, serverUrl) {
     if (page === "spec" && version2 !== "")
       return `dispatch://${key}/artifact/spec${version2}`;
     if (page === "spec")
-      return `dispatch://${key}/spec${blockOf("v", key, "spec")}`;
+      return `dispatch://${key}/spec${blockOf("v")}`;
     if (page !== undefined)
       return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
       const slug2 = decodeURIComponent(artifact);
-      return `dispatch://${key}/artifact/${slug2}${version2}${blockOf("v", key, slug2)}`;
+      return `dispatch://${key}/artifact/${slug2}${version2}${blockOf("v")}`;
     }
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
@@ -40841,7 +40810,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   const item = itemFromSearch(url2.search);
   if (item === null)
     return;
-  return item === undefined ? `${document}${versionOf("version")}${blockOf("version", project ?? "", decodedSlug)}` : `${document}/${item.kind}/${item.id}`;
+  return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
 var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
@@ -42654,7 +42623,7 @@ ${trailer.join(`
         const ref = ownerArguments.ref;
         const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks(await documentIdOf(ref), "all"));
         await refuseItemOffRef(input.tool, "ask", ref, stringArg(args, "ref"), askRead.ask, () => documentIdOf(ref));
-        const askRef = refTarget2(ref, "ask", askRead.ask.id);
+        const askRef = refTarget(ref, "ask", askRead.ask.id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(askTexts(askRead)),
           graphSections(client, askRef)
@@ -42670,7 +42639,7 @@ ${trailer.join(`
         const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments(await documentIdOf(ref)));
         const comment = await client.getComment(id);
         await refuseItemOffRef(input.tool, "comment", ref, stringArg(args, "ref"), comment.comment, () => documentIdOf(ref));
-        const commentRef = refTarget2(ref, "comment", id);
+        const commentRef = refTarget(ref, "comment", id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(datedBodies([comment.comment, ...comment.replies])),
           graphSections(client, commentRef)

@@ -168,6 +168,10 @@ lists blocks while `GET /api/v1/references?to=<document>&kind=part_of` lists non
 `documents=<n> indexed=<n> not_indexed=<n>`, then each not-indexed document's reference. A document
 with no blocks counts as indexed, since it owes no nodes.
 
+Both source `e2e/acceptance/lib.sh`, the preamble they share: it refuses an unset input or a
+missing command with exit 2, and reads the bearer from `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`
+without printing it, unsetting both so no process the script starts inherits it.
+
 ## Acceptance run against the deployed image
 
 The `dispatch.acceptance.compose.yml` Compose file builds a Dispatch image from this tree and runs

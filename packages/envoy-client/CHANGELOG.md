@@ -23,13 +23,12 @@
   arguments for its document, and every read's reference row on a document ends
   `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
   gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
-  so a pin past 2^53 is never rounded. As the server reads it, a block id longer than 256 bytes
-  decoded, or a pin past 9223372036854775807, is no reference. `parseDispatchRef` and
-  `dispatchRefFromUrl` hold every reference's target id, the issue key, `<KEY or PROJECT>/<slug>`,
-  a block's `<KEY or PROJECT>/<slug>#<block id>` or the ask, comment or message id, to 2048 bytes
-  (`referenceTargetFits`), as the server does: a longer one is no reference, and a live document
-  page URL whose block is past it names its document, one whose document or item is past it
-  nothing.
+  so a pin past 2^53 is never rounded. As the server reads it, a pin past 9223372036854775807 is
+  no reference. `parseDispatchRef` and `dispatchRefFromUrl` read a reference of any length, as the
+  server reads a request's (`text.ParseRef`): the 256-byte block-id and 2048-byte target-id bounds
+  decide only what text the server indexes, so a document of any name is read by its own
+  reference, and a block whose id is past 256 bytes, no graph node, reads as
+  `No block <id> in <document>.`
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying
