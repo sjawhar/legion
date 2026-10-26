@@ -12,6 +12,22 @@
 
 ### Added
 
+- `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
+  pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
+  `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
+  that uploads a markdown document); the owner-only `askgate.json` record a live Oh My Pi process
+  keeps in a session's state directory, naming its pid, its Linux start time and its marker store
+  (an owner whose process is gone, or whose pid another process holds, is inert); and single-use
+  markers, minted exclusively and owner-only, keyed by the argv's digest and bound to the dry
+  run's arguments for a reviewed write. Before a gated write posts, after `--help`, `--dry-run`
+  and the session and Dispatch settings, the CLI reads the session's record; with a live one it
+  consumes one matching marker by unlinking it, and in block mode refuses a write with none
+  (`dispatch <command> was not called: AskGate is on for this session, …`, logged to the ledger
+  with an `askgate` field). In warn mode it posts with a `dispatch: warning:` line and logs the
+  same field. A record that cannot be read, or names a store that is gone, is a refusal; a
+  session no live record names needs no marker, so a terminal, CI, Claude Code, OpenCode and a
+  pod without pi-envoy are unchanged. `pruneSessions` keeps a directory whose record is live.
+
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
   the move rides along with any other change in the same call, and the printed result gains

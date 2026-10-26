@@ -1,4 +1,11 @@
-import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./dispatch-command";
+import { askgateState, consumeMarker, gatedWrite } from "./askgate-marker";
+import {
+  commandHelp,
+  commandName,
+  commandsHelp,
+  type ParsedCommand,
+  parseCommand,
+} from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
@@ -54,6 +61,10 @@ const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's
 function stateWriteFailed(problem: string): string {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
+
+/** How a gated write gets AskGate's marker, as a refusal or a warn-mode warning tells the agent. */
+const LITERAL_FORM =
+  "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words…>`, with at most one `cd <path> &&` before it, one `2>&1` after it and one here-document opened with a quoted delimiter (`<<'EOF'`). A pipe, a loop, a variable, xargs, a script, an alias, or a process a program or an eval cell starts carries no marker.";
 
 /** A line that refuses a call before it reaches Dispatch, each at the start of the line:
  *  `dispatch <command> was not called: …` (exit 1, `ToolInputError` and the refusals
@@ -181,7 +192,12 @@ export async function runDispatchCli(
   // The host need not be known for the session to be: a Python `subprocess.run(["dispatch", …])`
   // inherits the session id without `DISPATCH_HOST`. A ledger that cannot be written changes
   // nothing here: the refusal is already printed, and the caller is exiting.
-  const refuse = (text: string, code: number, tool?: string): number => {
+  const refuse = (
+    text: string,
+    code: number,
+    tool?: string,
+    askgate?: ResultInput["askgate"]
+  ): number => {
     print(text);
     const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
@@ -189,6 +205,7 @@ export async function runDispatchCli(
         appendResult(sessionDirectory(env, sessionId), {
           tool: tool ?? "dispatch",
           error: text.trimEnd(),
+          ...(askgate === undefined ? {} : { askgate }),
         });
       } catch {
         // The session's directory is unusable; the printed refusal stands on its own.
@@ -286,6 +303,49 @@ export async function runDispatchCli(
   }
   const config: ActiveDispatchConfig = resolution;
 
+  // AskGate: a session a live Oh My Pi process records with its gate bound (`askgate.json` in
+  // this directory) posts a gated write only with one marker the gate minted for this exact argv,
+  // whatever ran the CLI. A session no live process records needs none.
+  let unmarked: ResultInput["askgate"];
+  if (gatedWrite(parsed.tool, parsed.args)) {
+    const notCalled = `dispatch ${commandName(parsed.tool)} was not called:`;
+    try {
+      const gate = askgateState(dir);
+      if (gate.kind === "broken") {
+        return refuse(
+          `${notCalled} AskGate's record for this session, ${gate.problem}, so whether AskGate reviewed this write cannot be told.`,
+          REFUSED,
+          parsed.tool,
+          { mode: "block", why: gate.problem }
+        );
+      }
+      if (gate.kind === "on") {
+        const spent = consumeMarker(gate.stores, argv, parsed.args, Date.now());
+        if (!spent.ok && gate.mode === "block") {
+          return refuse(
+            `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.`,
+            REFUSED,
+            parsed.tool,
+            { mode: "block", why: spent.why }
+          );
+        }
+        if (!spent.ok) {
+          unmarked = { mode: "warn", why: spent.why };
+          print(
+            `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.`
+          );
+        }
+      }
+    } catch (error) {
+      return refuse(
+        `${notCalled} AskGate's marker for this call could not be checked: ${messageFor(error)}.`,
+        REFUSED,
+        parsed.tool,
+        { mode: "block", why: messageFor(error) }
+      );
+    }
+  }
+
   // A result names an owner the session is not subscribed to, or the line that subscribes it,
   // only from the listener's record of the session's topics, read (Envoy's settings with it) once,
   // when a result first asks; with Envoy off, or no answer from it, a result says nothing about
@@ -357,11 +417,15 @@ export async function runDispatchCli(
       follows.add(followed.ask);
       notes.push(followNoticeText(followed, await subscriptions()));
     }
-    entry = { tool, details: result.details };
+    entry = {
+      tool,
+      details: result.details,
+      ...(unmarked === undefined ? {} : { askgate: unmarked }),
+    };
     code = OK;
   } catch (error) {
     text = messageFor(error);
-    entry = { tool, error: text };
+    entry = { tool, error: text, ...(unmarked === undefined ? {} : { askgate: unmarked }) };
     code = REFUSED;
   }
   try {
