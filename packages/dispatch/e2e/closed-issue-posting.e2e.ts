@@ -5,6 +5,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  getIssueArtifactText,
   getMessage,
   listComments,
   listIssueMessages,
@@ -18,6 +19,7 @@ import {
   expectMark,
   marginCard,
   selectEditorQuote,
+  typeAtEnd,
 } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -308,6 +310,37 @@ test("a margin comment on a spec whose issue closed while the page was open post
           .map((comment) => comment.anchor?.quote)
       )
       .toEqual(["lazy"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A closed issue's page is admitted to its document read-only. Reopened from that page, the issue
+// takes edits again, so its document does too, without a reload: the person who reopened it to
+// change its spec can.
+test("a spec opened while its issue was closed takes edits once the issue is reopened from its page", async ({
+  browser,
+}) => {
+  const { issueKey } = await seedClosedIssue();
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issueKey}/spec`);
+    await expect(documentEditor(page)).toContainText(spec);
+    await expect(documentEditor(page)).toHaveAttribute("contenteditable", "false");
+
+    await page.getByRole("button", { name: "Reopen issue" }).click();
+    await expect(page.getByText("This issue is closed.", { exact: true })).toHaveCount(0);
+    await expect(documentEditor(page)).toHaveAttribute("contenteditable", "true");
+    await selectEditorQuote(page, "brown");
+    await expect(
+      actionBar(page).getByRole("button", { exact: true, name: "Suggest" })
+    ).toBeVisible();
+    await typeAtEnd(page, "Edited after the reopen.");
+    await expect
+      .poll(async () => (await getIssueArtifactText(issueKey, "spec")).markdown)
+      .toContain("Edited after the reopen.");
   } finally {
     await alice.close();
   }
