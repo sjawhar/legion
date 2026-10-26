@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T01:25:00Z",
+  "completed": "2026-10-26T03:35:00Z",
   "proof": [
+    {
+      "criterion": "Review round 1, Important (refs/blocks.go): a version write succeeds whatever its block ids are; a block id past the bound is refused where it is written (400 naming the bound), is no reference and no graph node, and a document already holding one is still written and indexed",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_r3) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r3-proof.sh",
+      "command": "PORT=8777 bash $TMPDIR/infra366/r3-proof.sh (a spec and an insert edit naming a 3200-character random-hex callout id, a spec naming a 256-byte id, ?to= of the 256- and 257-byte ids, a comment citing #b-<3200 chars>, pins @v9223372036854775807 and @v9223372036854775808); then block-graph.sh on the same server",
+      "observed": "spec: exit 1 'block id too long: the id starting \"c2a048ec…\" is 3200 bytes, past the 256 bytes a block id may hold'; insert edit: the same refusal as 'invalid document operation field \"markdown\"'; 256-byte id: ?to= 200 kind block, block_id 256 bytes; 257 bytes: 400 INVALID_REFERENCE; comment citing the long id: 'Posted comment …' exit 0; @v9223372036854775807: 404 'no version 9223372036854775807 of dispatch://CORE-2/spec'; @v9223372036854775808: 400 INVALID_REFERENCE; driver: exit 0, 37 PASS. The existing-document and long-id-inside-a-block cases are in Go tests TestAVersionHoldingABlockIDPastTheBoundIsWrittenAndIndexed and TestADocumentAlreadyHoldingABlockIDPastTheBoundIsIndexedAndLeavesOwed (both pass).",
+      "headSha": "9d4fb04e99cd68d25477e60ace050f7cc9c5983c",
+      "negativeControl": "The same script against the previous build (042c0195 code, port 8779, fresh database infra366_r3prev): the 3200-character spec, the insert and the comment each answer 500 'internal server error', and @v9223372036854775807 answers 500"
+    },
+    {
+      "criterion": "Review round 1, Important (ReferencedBy.tsx): one source citing two blocks of the shown document is two Referenced by rows, each keyed by and linked to its block (deployment instructions: a browser test that fails before the change)",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server built from the head",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r3?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/block-references.e2e.ts",
+      "observed": "8 passed (44.0s), including 'a comment citing two blocks of the shown document is two rows, each linked to the block it cites' on both projects",
+      "headSha": "9d4fb04e99cd68d25477e60ace050f7cc9c5983c",
+      "negativeControl": "The new test against the panel as committed before the change (ReferencedBy.tsx from 13430a18): 2 failed, 'expect(locator).toHaveCount(1) … Received: 0' for the row linked to block ship_it; the unit test with the old key logs 'Encountered two children with the same key, comment:c1:mentions:in' and the expanded state moves to the wrong row"
+    },
     {
       "criterion": "Pin reading (plan design 1, 'Reading a pin'; A15, R1): a pin to a version the document lacks, including one past the largest version number Postgres stores, answers 404 NOT_FOUND 'no version N of <doc ref>' (the tester's round-1 failure and its red test TestAPinPastEveryVersionNumberAnswers404)",
       "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_pin) and the real dispatch CLI",
@@ -58,15 +74,26 @@
     "packages/claude-envoy/dist: regenerated",
     "docs, skills/dispatch, CHANGELOGs",
     "packages/contracts/CHANGELOG.md and skills/dispatch/references/reading.md: forward-merge resolution against main 81a3b5ef (042c0195)",
-    "packages/envoy/internal/dispatch/refs/block_texts.go (round 2): BlockTextAt answers a version past math.MaxInt32 as one the document lacks, without querying (73e2394d)"
+    "packages/envoy/internal/dispatch/refs/block_texts.go (round 2): BlockTextAt answers a version past math.MaxInt32 as one the document lacks, without querying (73e2394d)",
+    "Round 3 (review round 1): packages/envoy/internal/dispatch/api/block_references_test.go (block tests moved out of references_test.go, 787ca603)",
+    "Round 3: text/refs.go MaxBlockIDBytes, refs/blocks.go uniqueBlocks skip + warning, pmdoc/block_ids.go LongBlockID, pmdoc/parse.go, docs/tree.go, api and docs block_id_bound_test.go, contracts MAX_BLOCK_ID_BYTES and shared table rows (1436d0f6)",
+    "Round 3: contracts parseBlockFragment pin as digits bounded at 2^63-1; envoy-client ParsedDispatchRef.pin string; dashboard routes (383ffe51)",
+    "Round 3: packages/dispatch/web/src/features/refs/block-reference.ts (moved out of routes.ts, 13430a18)",
+    "Round 3: ReferencedBy.tsx row key and cited-block link, ReferencedBy.test.tsx, e2e/block-references.e2e.ts (446d1f3b)",
+    "Round 3: AGENTS.md, CHANGELOGs, skills/dispatch, docs/site, claude-envoy dist; shared text table's long-id rows written as literals so bundles leave the table out (9d4fb04e)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
-    "A12 needs every build on one public origin (text.Extract keeps a link outside DISPATCH_SERVER_URL a plain URL); the throwaway driver fronts the second build with a Host-rewriting proxy, as one load balancer does in production."
+    "A12 needs every build on one public origin (text.Extract keeps a link outside DISPATCH_SERVER_URL a plain URL); the throwaway driver fronts the second build with a Host-rewriting proxy, as one load balancer does in production.",
+    "Bun keeps an exported array in a bundle when any element is a non-literal expression (a template with a computed value), so the long-id fixture rows of DISPATCH_TEXT_REFERENCES are written out as literals; otherwise the test table ships in claude-envoy's dist."
   ],
   "deviations": [
     "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes).",
-    "Round 2: the earlier proof entries ran at 042c0195; this round changes only refs.BlockTextAt, so I re-ran the block-graph driver (37 PASS) at 73e2394d and did not repeat the browser and A12 runs."
+    "Round 2: the earlier proof entries ran at 042c0195; this round changes only refs.BlockTextAt, so I re-ran the block-graph driver (37 PASS) at 73e2394d and did not repeat the browser and A12 runs.",
+    "Round 3: the Referenced by row now also shows a 'block <id>' link to the block of the shown document it cites. Without it, a source's two rows are identical. The reviewer's row-key finding asked only for the key; the link is what makes the two rows tell apart, and the browser test covers it.",
+    "Round 3: pmdoc's three timing tests (TestUpdateIsLinearInTheBlockCount, TestBareURLShapesParseAndRenderLinearly, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText) fail on this pod on main 81a3b5ef too (10 ms clock granularity); claude-envoy's tmux SIGTERM timing test failed once in the full suite as before."
   ],
-  "openQuestions": []
+  "openQuestions": [
+    "For the tree's architect: the same B-tree overflow exists on main for every id and slug the reference grammar reads (a comment citing dispatch://CORE-1/artifact/<3200 chars> gets 500 on main 81a3b5ef, 'index row size 3280 exceeds … refs_pkey'), plus unbounded artifact slugs and the ask/anchor block-id indexes. Outside INFRA-366; evidence and recommendation in dispatch://INFRA-366/comment/85ee2d5a-64ec-4fe7-9a2e-2c55ee09f44f."
+  ]
 }
