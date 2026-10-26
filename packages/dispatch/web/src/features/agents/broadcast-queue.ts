@@ -36,11 +36,13 @@ export interface QueuedSend extends BroadcastSend {
 /** One send as its row shows it: waiting its turn and never sent (`queued`, which the reader may
  *  discard), on the wire within its deadline (or sent before and waiting to go again), still being
  *  tried under its key past it (`stopping` once the reader pressed Stop trying), sent with the
- *  broadcast it made, or failed with what refused it. */
+ *  broadcast it made, or failed with what refused it; one not yet made is held, and says so,
+ *  while the sender's sign-out in another tab is out (`signingOutElsewhere`). */
 export type BroadcastSendRow = {
   readonly id: number;
   readonly send: QueuedSend;
   readonly submittedAt: number;
+  readonly signingOutElsewhere: boolean;
 } & (
   | { readonly status: "queued" }
   | { readonly status: "sending" }
@@ -106,6 +108,7 @@ export function broadcastRows(rows: readonly Write[]): BroadcastSendRow[] {
     const base = {
       id: write.id,
       send: { input, key: write.key, picked, pressed, selected },
+      signingOutElsewhere: write.signingOutElsewhere,
       submittedAt: write.pressedAt,
     };
     switch (write.status) {

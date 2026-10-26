@@ -3,7 +3,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
-import { ApiError, NetworkError, type WriteBounds, type WriteRequest } from "../../api/client";
+import { answerSends } from "../../__tests__/send-answers";
+import { ApiError, NetworkError, type WriteRequest } from "../../api/client";
 import { useSendMarkOnce } from "./useSendMarkOnce";
 import { writesOf } from "./write-store";
 
@@ -16,18 +17,24 @@ interface Props {
 const refused = new ApiError(400, { code: "MARK_INPUT", error: "refused" });
 
 /** Mounts the hook against `send`, recording every value it sends and the key each went under;
- *  a mark's value is its key. */
+ *  a mark's value is its key. Each mark goes out as the request it names (`api.send`), which
+ *  `send` answers; unmounting the hook puts `api.send` back. */
 function renderMark(send: (value: string) => Promise<void>, initial: Props) {
   const sent: string[] = [];
   const keys: string[] = [];
   let succeeded = 0;
+  const sends = answerSends();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
-  const request = (value: string): WriteRequest => ({
-    body: { value },
-    method: "PUT",
-    path: "/api/v1/me/threads/t/read",
-  });
+  const request = (value: string): WriteRequest =>
+    sends.answer(
+      { body: { value }, method: "PUT", path: "/api/v1/me/threads/t/read" },
+      (bounds) => {
+        sent.push(value);
+        keys.push(bounds.key);
+        return send(value);
+      }
+    );
   const hook = renderHook(
     (props: Props) =>
       useSendMarkOnce({
@@ -35,16 +42,9 @@ function renderMark(send: (value: string) => Promise<void>, initial: Props) {
         onSuccess: () => {
           succeeded += 1;
         },
-        // A mark waiting its turn is kept as its request, and nothing of `send` runs until its
-        // turn comes (`Writes`).
+        // A mark waiting its turn is kept as its request, and that request is what goes out once
+        // its turn comes (`Writes`).
         request,
-        send: (value: string, bounds: WriteBounds) => {
-          // As every client write does, the request is told to `sent` before it goes out.
-          bounds.sent?.(request(value));
-          sent.push(value);
-          keys.push(bounds.key);
-          return send(value);
-        },
         shouldSend: props.shouldSend,
         target: "read:test",
         wake: props.wake,
@@ -55,7 +55,11 @@ function renderMark(send: (value: string) => Promise<void>, initial: Props) {
         createElement(QueryClientProvider, { client }, children),
     }
   );
-  return { client, hook, keys, sent, succeeded: () => succeeded };
+  const unmount = () => {
+    hook.unmount();
+    sends.restore();
+  };
+  return { client, hook: { ...hook, unmount }, keys, sent, succeeded: () => succeeded };
 }
 
 async function settle(): Promise<void> {

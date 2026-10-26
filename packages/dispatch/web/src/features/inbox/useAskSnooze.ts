@@ -121,7 +121,6 @@ export function useAskSnoozeMany(): AskSnoozeManyWrite {
             presentation: "indicator",
             request: askSnoozeRequest(id, until),
             target: `ask-snooze:${id}`,
-            write: (bounds) => api.snoozeAsk(id, until, bounds),
           })
         )
       );

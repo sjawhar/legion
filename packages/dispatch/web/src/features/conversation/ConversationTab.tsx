@@ -11,7 +11,6 @@ import type {
   Message,
   MessageDelivery,
   MessageDeliveryMode,
-  UserIssueState,
   UserState,
 } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
@@ -1020,17 +1019,13 @@ export function ConversationTab({
   });
   useSendMarkOnce({
     mark: read === undefined ? undefined : { key: `${read.issueKey} ${read.seq}`, value: read },
-    onSuccess: ({ issueKey: marked, next }: { issueKey: string; next: UserIssueState }) =>
+    onSuccess: (next, mark) =>
       queryClient.setQueryData<UserState>(["user-state"], (current) => ({
         ...current,
-        [marked]: next,
+        [mark.issueKey]: next,
       })),
     request: (mark: { issueKey: string; seq: number }) =>
       issueStateRequest(mark.issueKey, { last_read_seq: mark.seq }),
-    send: async (mark: { issueKey: string; seq: number }, bounds) => ({
-      issueKey: mark.issueKey,
-      next: await api.putIssueState(mark.issueKey, { last_read_seq: mark.seq }, bounds),
-    }),
     shouldSend: read !== undefined && read.seq > lastReadSeq,
     target: `read:issue:${issueKey}`,
     wake: lastReadSeq,

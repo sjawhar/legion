@@ -12,7 +12,7 @@ import {
   type WriteBounds,
   type WriteRequest,
 } from "../../api/client";
-import { onReachable, type Reachable } from "../../api/reachability";
+import { onReachable, type Reachable, routeOf } from "../../api/reachability";
 
 /**
  * How long a write may go unanswered before the page says so: past it the write is late, still
@@ -133,7 +133,7 @@ function pause(
   ms: number,
   wakes: boolean,
   signal: AbortSignal | undefined,
-  regained: (how: Reachable, path: string | undefined) => boolean
+  regained: (how: Reachable, route: string | undefined) => boolean
 ): Promise<boolean> {
   if (signal?.aborted === true) return Promise.resolve(false);
   const { promise, resolve } = Promise.withResolvers<boolean>();
@@ -149,8 +149,8 @@ function pause(
     end(false);
   }
   const stopWaking = wakes
-    ? onReachable((how, path) => {
-        if (!regained(how, path)) return;
+    ? onReachable((how, route) => {
+        if (!regained(how, route)) return;
         clearTimeout(timer);
         const floor = Math.min(ms, FIRST_BACKOFF_MS) - (Date.now() - startedAt);
         timer = setTimeout(() => end(true), Math.max(0, floor));
@@ -231,16 +231,17 @@ export async function writeUnderKey<T>(
     }
     sent?.(request);
   };
-  // Whether Dispatch became reachable again on this write's route since the backoff last grew -
-  // the browser's `online`, the live socket reopening, an answer on the write's own path after a
-  // request there could not reach it: the backoff starts over. Another route's answer says nothing
-  // of this one, and an answer while it was reachable all along (this route's 5xx) changes nothing,
-  // so a route that keeps failing backs off to its cap.
-  const ownRoute = (how: Reachable, path: string | undefined) =>
-    how !== "answer" || (first !== undefined && path === first.path);
+  // Whether Dispatch became reachable again on this write's route - its method and path - since
+  // the backoff last grew: the browser's `online`, the live socket reopening, an answer on the
+  // write's own route after a request there could not reach it: the backoff starts over. Another
+  // route's answer says nothing of this one - a read of the same path included - and an answer
+  // while it was reachable all along (this route's 5xx) changes nothing, so a route that keeps
+  // failing backs off to its cap.
+  const ownRoute = (how: Reachable, route: string | undefined) =>
+    how !== "answer" || (first !== undefined && route === routeOf(first.method, first.path));
   let regained = false;
-  const stopListening = onReachable((how, path) => {
-    if (ownRoute(how, path)) regained = true;
+  const stopListening = onReachable((how, route) => {
+    if (ownRoute(how, route)) regained = true;
   });
   // Whether the last attempt was answered `401` although the sign-in check, read again, still
   // named the person: a second such answer is Dispatch's refusal, not a lapse.

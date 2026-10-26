@@ -1,7 +1,7 @@
 import { type QueryKey, useQueryClient } from "@tanstack/react-query";
 import { useRef } from "react";
 
-import { api, issuePatchRequest } from "../../api/client";
+import { issuePatchRequest } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import { inboxQuery } from "../../api/queries";
 import type { InboxRow, IssueDetails, IssueSummary, UpdateIssueInput } from "../../api/types";
@@ -68,8 +68,7 @@ export function useIssueFieldWrite<Value>(
     inline: true,
     label: (value: Value) => field.label(value),
     target: () => `issue:${issueKey}`,
-    request: (value) => issuePatchRequest(issueKey, field.patch(value)),
-    write: (value: Value, bounds) => api.patchIssue(issueKey, field.patch(value), bounds),
+    request: (value: Value) => issuePatchRequest(issueKey, field.patch(value)),
     onMutate: async (value): Promise<Snapshot> => {
       await Promise.all(
         [detailKey, projectListsKey, inboxKey].map((queryKey) =>

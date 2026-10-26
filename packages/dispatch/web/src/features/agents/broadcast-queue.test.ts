@@ -222,3 +222,63 @@ test("a refused broadcast does not hold the line, and its Retry takes a new key"
     createBroadcast.mockRestore();
   }
 });
+
+// W51. A broadcast the sender's sign-out in another tab holds says so on its row, and is not
+// offered Stop trying, since nothing of it is being tried; it goes on once that tab's hold lifts.
+test("a broadcast held for a sign-out in another tab says so, and goes on once released", async () => {
+  const first = Promise.withResolvers<BroadcastCreated>();
+  const createBroadcast = spyOn(api, "createBroadcast")
+    .mockReturnValueOnce(first.promise)
+    .mockImplementation(async (input) => created(input));
+  const client = signedIn();
+  const writes = new Writes(client, keptTab().page(), memoryFiles());
+  const strip = () =>
+    render(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(
+          MemoryRouter,
+          null,
+          createElement(BroadcastSends, {
+            onDiscard: () => {},
+            onRestore: () => {},
+            onRetry: () => {},
+            onStop: () => {},
+            restoreRefusal: null,
+            rows: broadcastRows(writes.rows()),
+          })
+        )
+      )
+    );
+  try {
+    enqueueBroadcast(writes, press("First.", "key-1"));
+    enqueueBroadcast(writes, press("Second.", "key-2"));
+    await settle();
+    writes.holdFor("alice");
+    first.reject(new ApiError(503, { code: "UNAVAILABLE", error: "down" }));
+    await settle();
+    expect(broadcastRows(writes.rows()).map((row) => row.signingOutElsewhere)).toEqual([
+      true,
+      true,
+    ]);
+    const held = strip();
+    try {
+      expect(screen.getAllByRole("status").map((status) => status.textContent)).toEqual([
+        "Waiting for a sign-out in another tab: to 1 agent",
+        "Waiting for a sign-out in another tab: to 1 agent",
+      ]);
+      expect(screen.queryByRole("button", { name: "Stop trying" })).toBeNull();
+    } finally {
+      held.unmount();
+    }
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+
+    writes.release("alice");
+    await waitFor(() =>
+      expect(broadcastRows(writes.rows()).map((row) => row.status)).toEqual(["sent", "sent"])
+    );
+  } finally {
+    createBroadcast.mockRestore();
+  }
+});

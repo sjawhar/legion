@@ -12,38 +12,43 @@ import { retriesUnderItsKey } from "./keyed-write";
 import { plainWrite, useWrites } from "./write-store";
 
 /** A write a surface makes for the reader: `useMutation`'s options, but for `mutationFn`, which
- *  the write path makes from `write` and `label`. Its data is Dispatch's answer, or `null` for a
- *  write Dispatch made and has no answer to give for (`409 KEY_COMMITTED`, or a replay of an answer
- *  it did not keep): a landing all the same, which `onSuccess` handles - a create form lets go of
- *  its draft and says what was made (`LandedWithoutAnswer`) rather than opening it. */
+ *  the write path makes from `write` or `request` and `label`. Its data is Dispatch's answer, or
+ *  `null` for a write Dispatch made and has no answer to give for (`409 KEY_COMMITTED`, or a
+ *  replay of an answer it did not keep): a landing all the same, which `onSuccess` handles - a
+ *  create form lets go of its draft and says what was made (`LandedWithoutAnswer`) rather than
+ *  opening it. */
 export type KeyedWriteOptions<TData, TVariables, TContext> = Omit<
   UseMutationOptions<TData | null, DefaultError, TVariables, TContext>,
   "mutationFn" | "networkMode"
 > & {
   /** What the shell's pending-writes indicator names this write, in the reader's words. */
   readonly label: (variables: TVariables) => string;
-  /** One attempt of the write, under the bounds the store gives it: its key, its login and its
-   *  deadline. */
-  readonly write: (variables: TVariables, bounds: WriteBounds) => Promise<TData>;
   /** Whether this surface shows a refusal itself (a form the reader is in front of): the
    *  indicator then shows the write only while it is out. A function decides it per write. */
   readonly inline?: boolean | ((variables: TVariables) => boolean);
   /** An upload's file, kept across a reload with the write. */
   readonly file?: (variables: TVariables) => File | undefined;
-  /** Whether the write ends the person's session (a sign-out): a lapse of it lets the write go
+  /** Whether the write ends the person's session (a sign-out): a lapse of that session lands it
    *  rather than holding it for the next sign-in (`WriteSpec.endsWithSession`). */
   readonly endsWithSession?: boolean;
-} & KeyedWriteLine<TVariables>;
+} & KeyedWriteMade<TData, TVariables>;
 
-/** What a write is ordered on, and the request it makes there: writes to one target - one issue's
- *  fields - go out in press order, so an older one never lands after a newer one, and one waiting
- *  its turn is kept as its `request` - the one `write` makes - for a reload, with nothing of
- *  `write` run until its turn comes (`WriteSpec.request`). A write with no target names neither. */
-export type KeyedWriteLine<TVariables> =
-  | { readonly target?: undefined; readonly request?: undefined }
+/** How a write is made: by an attempt of its own (`write`, under the bounds the store gives it:
+ *  its key, its login and its deadline), or, on a line, from its request alone. Writes to one
+ *  target - one issue's fields - go out in press order, so an older one never lands after a newer
+ *  one; each names the request its client method's builder makes (`issuePatchRequest`), which is
+ *  what goes out (`api.send`) and what a write waiting its turn is kept as for a reload, so the
+ *  two can never differ, and nothing of it runs until its turn comes (`WriteSpec.request`). */
+export type KeyedWriteMade<TData, TVariables> =
   | {
+      readonly write: (variables: TVariables, bounds: WriteBounds) => Promise<TData>;
+      readonly target?: undefined;
+      readonly request?: undefined;
+    }
+  | {
+      readonly write?: undefined;
       readonly target: (variables: TVariables) => string | undefined;
-      readonly request: (variables: TVariables) => WriteRequest;
+      readonly request: (variables: TVariables) => WriteRequest<TData>;
     };
 
 /** Whether `a` and `b` are the same variables: one value, or two that serialise alike (a form
@@ -118,32 +123,32 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
       setUnanswered(undefined);
       const key =
         again !== undefined && sameVariables(again.variables, variables) ? again.key : newSendKey();
-      return writes
-        .run({
-          detail: null,
-          endsWithSession,
-          file: file?.(variables),
-          inline: typeof inline === "function" ? inline(variables) : inline,
-          key,
-          kind: plainWrite,
-          label: label(variables),
-          presentation: "indicator",
-          request: request?.(variables),
-          target: target?.(variables),
-          write: (bounds) => write(variables, bounds),
-        })
-        .then(
-          (answer) => {
-            if (answer === null) setUnanswered({ at: Date.now(), variables });
-            return answer;
-          },
-          (error: unknown) => {
-            if (retriesUnderItsKey(error instanceof Error ? error : undefined)) {
-              stopped.current = { key, variables };
-            }
-            throw error;
+      const press = {
+        detail: null,
+        endsWithSession,
+        file: file?.(variables),
+        inline: typeof inline === "function" ? inline(variables) : inline,
+        key,
+        kind: plainWrite,
+        label: label(variables),
+        presentation: "indicator",
+      } as const;
+      return (
+        write === undefined
+          ? writes.run({ ...press, request: request(variables), target: target(variables) })
+          : writes.run({ ...press, write: (bounds) => write(variables, bounds) })
+      ).then(
+        (answer) => {
+          if (answer === null) setUnanswered({ at: Date.now(), variables });
+          return answer;
+        },
+        (error: unknown) => {
+          if (retriesUnderItsKey(error instanceof Error ? error : undefined)) {
+            stopped.current = { key, variables };
           }
-        );
+          throw error;
+        }
+      );
     },
     networkMode: "always",
   });

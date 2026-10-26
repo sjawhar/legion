@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { agentMessageRequest, api, apiErrorMessage } from "../../api/client";
+import { agentMessageRequest, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import type { Message } from "../../api/types";
 import {
@@ -135,8 +135,6 @@ export function AgentConversationPage(): ReactNode {
     target: ({ session }) => `session:${session}`,
     request: ({ request, session }) =>
       agentMessageRequest(session, { body: switchCommand(request), delivery: "steer" }),
-    write: ({ request, session }, bounds) =>
-      api.createAgentMessage(session, { body: switchCommand(request), delivery: "steer" }, bounds),
   });
   // Each message is a write of its own in the app's write store, held for its session rather than
   // this view, so every attempt carries its key and a refusal stays for Retry or Discard. The

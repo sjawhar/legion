@@ -1,7 +1,8 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import { keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
+import { answerSends, type SendAnswers } from "../../__tests__/send-answers";
 import {
   ApiError,
   api,
@@ -10,7 +11,7 @@ import {
   type WriteBounds,
   type WriteRequest,
 } from "../../api/client";
-import { reachable, unreachable } from "../../api/reachability";
+import { reachable, routeOf, unreachable } from "../../api/reachability";
 import {
   KEYED_SEND_ATTEMPT_MS,
   OneRequestPerWriteError,
@@ -77,22 +78,30 @@ const patch: WriteRequest = {
   path: "/api/v1/issues/CORE-1",
 };
 
+/** The answers of this file's writes made from their request alone: a test's own spy on
+ *  `api.send` takes over from it for that test. */
+let sends: SendAnswers;
+beforeEach(() => {
+  sends = answerSends();
+});
+afterEach(() => sends.restore());
+
 /** A status pick on CORE-1, as the indicator shows it, its attempts answered by `answer`. One on a
- *  line names its request, as every plain write on a line does. */
+ *  line is made from its request alone, as every plain write on a line is. */
 function statusWrite(
   writes: Writes,
   answer: () => Promise<unknown>,
   fields: { target?: string; label?: string } = {}
 ): Promise<unknown> {
-  return writes.run({
+  const press = {
     detail: null,
     kind: plainWrite,
     label: fields.label ?? "CORE-1 set to done",
     presentation: "indicator",
-    request: fields.target === undefined ? undefined : patch,
-    target: fields.target,
-    write: attemptOf(patch, answer),
-  });
+  } as const;
+  return fields.target === undefined
+    ? writes.run({ ...press, write: attemptOf(patch, answer) })
+    : writes.run({ ...press, request: sends.answer({ ...patch }, answer), target: fields.target });
 }
 
 const unavailable = new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" });
@@ -577,9 +586,10 @@ test("a write answered 401 again while its person is still signed in is refused"
   });
 });
 
-// W32. A sign-out still out when the session lapses has done what it was for: it goes, rather than
-// waiting to sign the person out again the moment they sign back in.
-test("a sign-out still out is let go when the session lapses", async () => {
+// W32, W50. A sign-out still out when the session lapses has done what it was for: it lands, with
+// no answer, rather than waiting to sign the person out again the moment they sign back in, or
+// being refused and leaving its surface to keep what the person chose to discard.
+test("a sign-out still out lands when the session lapses", async () => {
   await onFakeClock(async () => {
     const { writes } = storeOf();
     let attempts = 0;
@@ -599,7 +609,7 @@ test("a sign-out still out is let go when the session lapses", async () => {
       .catch((error: unknown) => error);
     await settle();
     writes.signedIn(undefined);
-    expect(await signOut).toBeInstanceOf(SendStoppedError);
+    expect(await signOut).toBeNull();
     expect(writes.rows()).toEqual([]);
     writes.signedIn("alice");
     await tick(5_000);
@@ -968,13 +978,16 @@ test("two writes on one line survive a reload and land once each, in press order
     const tab = keptTab();
     const before = new Writes(signedIn(), tab.page(), memoryFiles());
     const landed: unknown[] = [];
+    const failing = new WeakSet<WriteRequest>();
     const send = spyOn(api, "send").mockImplementation(async (request) => {
+      if (failing.has(request)) throw dropped();
       landed.push(request.body);
       return {} as never;
     });
     try {
       for (const status of ["backlog", "done"]) {
         const request: WriteRequest = { ...patch, body: { status } };
+        failing.add(request);
         void before
           .run({
             detail: null,
@@ -983,7 +996,6 @@ test("two writes on one line survive a reload and land once each, in press order
             presentation: "indicator",
             request,
             target: "issue:CORE-1",
-            write: attemptOf(request, () => Promise.reject(dropped())),
           })
           .catch(() => {});
       }
@@ -1001,6 +1013,9 @@ test("two writes on one line survive a reload and land once each, in press order
       expect(landed).toEqual([{ status: "backlog" }, { status: "done" }]);
       expect(after.rows()).toEqual([]);
     } finally {
+      // The page the reload replaced is gone with it: its writes stop rather than go on trying
+      // through the real client once this test's answers are taken back.
+      before.clear();
       send.mockRestore();
       tab.close();
     }
@@ -1049,14 +1064,14 @@ test("a route that keeps answering 503 backs off to its cap while other requests
     }).catch(() => {});
     for (let elapsed = 0; elapsed < 91_500; elapsed += 500) {
       // Another route's 2xx, while Dispatch was reachable all along.
-      reachable("answer", "/api/v1/projects");
+      reachable("answer", routeOf("GET", "/api/v1/projects"));
       await tick(500);
     }
     const gaps = times.slice(1).map((at, index) => at - (times[index] ?? 0));
     expect(gaps.map((gap) => Math.round(gap / 1_000))).toEqual([1, 2, 4, 8, 16, 30, 30]);
 
-    unreachable(patch.path);
-    reachable("answer", patch.path);
+    unreachable(routeOf(patch.method, patch.path));
+    reachable("answer", routeOf(patch.method, patch.path));
     const made = times.length;
     await tick(2_200);
     expect(times.length).toBe(made + 2);
@@ -1067,7 +1082,9 @@ test("a route that keeps answering 503 backs off to its cap while other requests
 // socket reopens, or Dispatch answers on the write's own route. A route whose requests keep failing
 // at the connection - a proxy dropping one request shape - backs off 1 s, 2 s, 4 s … to its 30 s
 // cap however often the page's other routes answer meanwhile, even a route that came back after
-// failing too; an answer on its own route, after it failed there, starts it over.
+// failing too; an answer on its own route, after it failed there, starts it over. W52: a route is
+// its method and its path, so a read of the issue the write changes - which the page makes on
+// every live event - says nothing of the write's own route.
 test("a route that keeps failing at the connection backs off to its cap while other routes answer", async () => {
   await onFakeClock(async () => {
     const { writes } = storeOf();
@@ -1079,7 +1096,8 @@ test("a route that keeps failing at the connection backs off to its cap while ot
       init?: RequestInit
     ) => {
       const path = String(input);
-      if (path === patch.path && init?.method === "PATCH") {
+      const key = new Headers(init?.headers).get("Idempotency-Key");
+      if (path === patch.path && init?.method === "PATCH" && key !== "another press") {
         times.push(Date.now() - start);
         throw new TypeError("Failed to fetch");
       }
@@ -1106,8 +1124,15 @@ test("a route that keeps failing at the connection backs off to its cap while ot
       const gaps = times.slice(1).map((at, index) => at - (times[index] ?? 0));
       expect(gaps.map((gap) => Math.round(gap / 1_000))).toEqual([1, 2, 4, 8, 16, 30, 30]);
 
-      // Its own route answering - a read of the issue, after another route answered last - starts
-      // it over.
+      // A read of the issue answering, on the write's own path, starts nothing over: it is
+      // another route.
+      const capped = times.length;
+      void api.getIssue("CORE-1").catch(() => {});
+      await tick(2_200);
+      expect(times.length).toBe(capped);
+
+      // Its own route answering - another press's PATCH of the issue, after another route
+      // answered last - starts it over.
       projectsUp = false;
       void api.listProjects().catch(() => {});
       await settle();
@@ -1115,7 +1140,9 @@ test("a route that keeps failing at the connection backs off to its cap while ot
       void api.listProjects().catch(() => {});
       await settle();
       const made = times.length;
-      void api.getIssue("CORE-1").catch(() => {});
+      void api
+        .send(patch, { deadlineMs: KEYED_SEND_ATTEMPT_MS, key: "another press" })
+        .catch(() => {});
       await tick(2_200);
       expect(times.length).toBe(made + 2);
 
@@ -1132,37 +1159,33 @@ test("a route that keeps failing at the connection backs off to its cap while ot
   });
 });
 
-// W49. A write waiting its turn is kept with the request its press names (`WriteSpec.request`), so
-// a reload makes it again in its place, and keeping it runs nothing of its attempt: an attempt that
-// does something before it calls the client - a read, here recorded - does it once its turn comes,
-// never at the press. A plain write on a line that names no request is a page bug, refused at once
-// with nothing of its attempt run.
-test("planning a write that waits its turn runs nothing of its attempt", async () => {
+// W49, W54. A plain write on a line is made from the request its press names and from nothing
+// else: every attempt of it is `api.send` of that very request, which is what it is kept as while
+// it waits its turn, so the request a reload makes again and the one that goes out cannot differ,
+// and nothing of it runs before its turn. A plain write on a line that names no request, only an
+// attempt, is a page bug, refused at once with nothing of it run.
+test("a plain write on a line goes out as the very request it is kept as", async () => {
   await onFakeClock(async () => {
     const { tab, writes } = storeOf();
     const first = Promise.withResolvers<unknown>();
     void statusWrite(writes, () => first.promise, { target: "issue:CORE-1" }).catch(() => {});
-    const effects: string[] = [];
     const request: WriteRequest = { ...patch, body: { status: "backlog" } };
     const second = writes.run({
       detail: null,
       kind: plainWrite,
       label: "CORE-1 set to backlog",
       presentation: "indicator",
-      request,
+      request: sends.answer(request, async () => ({ status: "backlog" })),
       target: "issue:CORE-1",
-      write: (bounds) => {
-        effects.push("read before the write");
-        return attemptOf(request, async () => ({ status: "backlog" }))(bounds);
-      },
     });
     await settle();
     expect(row(writes, 1)).toMatchObject({ sent: false, status: "queued" });
     expect(tab.kept(row(writes, 1)?.key ?? "")).toMatchObject({
-      request: { body: { status: "backlog" }, method: "PATCH" },
+      request: { body: { status: "backlog" }, method: "PATCH", path: patch.path },
       state: { status: "queued" },
     });
-    expect(effects).toEqual([]);
+    expect(sends.calls).toHaveLength(1);
+    const effects: string[] = [];
     const unplanned = await writes
       .run({
         detail: null,
@@ -1181,21 +1204,29 @@ test("planning a write that waits its turn runs nothing of its attempt", async (
 
     first.resolve({});
     expect(await second).toEqual({ status: "backlog" });
-    expect(effects).toEqual(["read before the write"]);
+    expect(sends.calls[1]).toBe(request);
+    expect(sends.calls[1]).toEqual({
+      body: { status: "backlog" },
+      method: "PATCH",
+      path: patch.path,
+    });
+    expect(effects).toEqual([]);
 
-    // Every attempt makes the request the press named: one that makes another is a page bug,
-    // refused at once rather than kept as a request a reload would make instead.
-    const other = await writes
-      .run({
-        detail: null,
-        kind: plainWrite,
-        label: "CORE-2 set to done",
-        presentation: "indicator",
-        request: { ...patch, path: "/api/v1/issues/CORE-2" },
-        target: "issue:CORE-2",
-        write: attemptOf(patch, async () => ({})),
-      })
-      .catch((error: unknown) => error);
-    expect(other).toBeInstanceOf(OneRequestPerWriteError);
+    // A write made by an attempt of its own makes one request on every attempt: one that makes
+    // another is a page bug, refused at once rather than kept as a request a reload would make.
+    let attempts = 0;
+    const other = writes.run({
+      detail: null,
+      kind: plainWrite,
+      label: "CORE-2 set to done",
+      presentation: "indicator",
+      write: (bounds) => {
+        attempts += 1;
+        if (attempts === 1) return attemptOf(patch, () => Promise.reject(dropped()))(bounds);
+        return attemptOf({ ...patch, path: "/api/v1/issues/CORE-2" }, async () => ({}))(bounds);
+      },
+    });
+    await tick(1_500);
+    expect(await other.catch((error: unknown) => error)).toBeInstanceOf(OneRequestPerWriteError);
   });
 });

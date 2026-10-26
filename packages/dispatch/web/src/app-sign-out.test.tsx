@@ -7,7 +7,11 @@ import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
 import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import { AuthGate } from "./app";
+import type { UnsentChange } from "./features/shell/sign-in-channel";
 import { plainWrite, writesOf } from "./features/writes/write-store";
+
+/** A message the tabs of this browser post to each other, naming `login`, from whichever tab. */
+const about = (field: string, login: string) => expect.objectContaining({ [field]: login });
 
 /** The app at `/`, its whoami answered by `whoAmI` and its sign-out by `logout`, with window's
  *  confirm answered by `confirm` and every question it asked recorded. */
@@ -105,10 +109,17 @@ function keptWrites(): string[] {
   ).filter((name): name is string => name?.startsWith("dispatch.write:") === true);
 }
 
+/** Another tab of this browser on the sign-in channel, as a test drives it. */
+interface OtherTab {
+  readonly close: () => void;
+  readonly say: (message: object) => void;
+  readonly told: unknown[];
+}
+
 /** Another tab of this browser on the sign-in channel, named `id`: it says it opened, records
  *  everything it hears, and answers a sign-out's question with `unsent` - or, `silent`, not at
- *  all. `close` says it went. */
-function otherTab(id: string, unsent: readonly string[] | "silent" = []) {
+ *  all. `say` posts a message of its own, naming it; `close` says it went. */
+function otherTab(id: string, unsent: readonly UnsentChange[] | "silent" = []): OtherTab {
   const channel = new BroadcastChannel("dispatch-sign-in");
   const told: unknown[] = [];
   channel.addEventListener("message", (event: MessageEvent) => {
@@ -116,7 +127,7 @@ function otherTab(id: string, unsent: readonly string[] | "silent" = []) {
     const data: unknown = event.data;
     if (typeof data !== "object" || data === null || unsent === "silent") return;
     const ask: unknown = Reflect.get(data, "ask");
-    if (typeof ask === "string") channel.postMessage({ answer: ask, from: id, unsent });
+    if (typeof ask === "string") channel.postMessage({ answer: ask, tab: id, unsent });
   });
   channel.postMessage({ hello: true, tab: id });
   return {
@@ -124,9 +135,13 @@ function otherTab(id: string, unsent: readonly string[] | "silent" = []) {
       channel.postMessage({ gone: true, tab: id });
       channel.close();
     },
+    say: (message: object) => channel.postMessage({ ...message, tab: id }),
     told,
   };
 }
+
+/** A change a sign-out would discard, as a tab names it: by its key and label. */
+const change = (label: string, key = `key of ${label}`): UnsentChange => ({ key, label });
 
 function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -167,7 +182,7 @@ test("a sign-out discards only once Dispatch answers it, and one that fails keep
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(app.logout).toHaveBeenCalledTimes(1));
     expect(app.asked).toHaveLength(1);
-    await waitFor(() => expect(tab.told).toContainEqual({ signingOut: "alice" }));
+    await waitFor(() => expect(tab.told).toContainEqual(about("signingOut", "alice")));
     const made = attempts.length;
     await sleep(2_500);
     expect(attempts).toHaveLength(made);
@@ -184,15 +199,139 @@ test("a sign-out discards only once Dispatch answers it, and one that fails keep
         .map((row) => row.label)
     ).toEqual(["CORE-1 set to done", "CORE-2 set to done"]);
     expect(keptWrites()).toHaveLength(2);
-    await waitFor(() => expect(tab.told).toContainEqual({ stillSignedIn: "alice" }));
-    expect(tab.told).not.toContainEqual({ signedOut: "alice" });
+    await waitFor(() => expect(tab.told).toContainEqual(about("stillSignedIn", "alice")));
+    expect(tab.told).not.toContainEqual(about("signedOut", "alice"));
     await waitFor(() => expect(attempts.length).toBeGreaterThan(made));
 
     fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
     await screen.findByRole("link", { name: "Sign in with Google" });
     expect(writesOf(app.queryClient).rows()).toEqual([]);
     expect(keptWrites()).toEqual([]);
-    await waitFor(() => expect(tab.told).toContainEqual({ signedOut: "alice" }));
+    await waitFor(() => expect(tab.told).toContainEqual(about("signedOut", "alice")));
+  } finally {
+    tab.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// W50. A sign-out Dispatch answers 401 has landed: the session it would end is already gone - its
+// answer was lost and the retry found the session ended, or a sign-out in another browser revoked
+// it. The changes the person chose to discard go, here and in every other tab: the sign-in page
+// keeps none of them, and none is sent once they sign in again.
+test("a sign-out answered 401 discards what it said it would, and nothing goes out at the next sign-in", async () => {
+  let signedIn = true;
+  const app = renderApp({
+    logout: async () => {
+      signedIn = false;
+      throw new ApiError(401, { error: "unauthorized" });
+    },
+    whoAmI: async () => {
+      if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
+      return { event_head: "0", kind: "user", login: "alice" };
+    },
+  });
+  const tab = otherTab("tab-2");
+  try {
+    await screen.findByText("Signed in as alice");
+    await waitFor(() => expect(tab.told).toContainEqual(expect.objectContaining({ here: true })));
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(writesOf(app.queryClient).rows()).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(app.asked).toHaveLength(1));
+    await screen.findByRole("link", { name: "Sign in with Google" });
+    await waitFor(() => expect(tab.told).toContainEqual(about("signedOut", "alice")));
+    expect(tab.told).not.toContainEqual(about("stillSignedIn", "alice"));
+    expect(writesOf(app.queryClient).rows()).toEqual([]);
+    expect(keptWrites()).toEqual([]);
+    expect(screen.queryByRole("region", { name: "Kept changes" })).toBeNull();
+
+    signedIn = true;
+    await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+    await screen.findByText("Signed in as alice");
+    const made = attempts.length;
+    await sleep(2_500);
+    expect(attempts).toHaveLength(made);
+    expect(writesOf(app.queryClient).rows()).toEqual([]);
+  } finally {
+    tab.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// W50. A session that ends while its sign-out is still out - another browser's sign-out revoked
+// it, and this page's sign-in check says so first - has ended as the sign-out asked: it discards,
+// rather than keeping every write for a sign-in the person chose to discard them before.
+test("a session that ends under its sign-out discards, and keeps nothing for the next sign-in", async () => {
+  const held = Promise.withResolvers<{ ok: true }>();
+  let signedIn = true;
+  const app = renderApp({
+    logout: () => held.promise,
+    whoAmI: async () => {
+      if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
+      return { event_head: "0", kind: "user", login: "alice" };
+    },
+  });
+  const tab = otherTab("tab-2");
+  try {
+    await screen.findByText("Signed in as alice");
+    await waitFor(() => expect(tab.told).toContainEqual(expect.objectContaining({ here: true })));
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(writesOf(app.queryClient).rows()).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(app.logout).toHaveBeenCalledTimes(1));
+    signedIn = false;
+    await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+    await screen.findByRole("link", { name: "Sign in with Google" });
+    await waitFor(() => expect(tab.told).toContainEqual(about("signedOut", "alice")));
+    expect(tab.told).not.toContainEqual(about("stillSignedIn", "alice"));
+    expect(writesOf(app.queryClient).rows()).toEqual([]);
+    expect(keptWrites()).toEqual([]);
+    expect(screen.queryByRole("region", { name: "Kept changes" })).toBeNull();
+
+    signedIn = true;
+    await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+    await screen.findByText("Signed in as alice");
+    const made = attempts.length;
+    await sleep(2_500);
+    expect(attempts).toHaveLength(made);
+  } finally {
+    held.resolve({ ok: true });
+    tab.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// W50. The sign-out's own 401 is the verdict: it lands even while the sign-in check cannot be
+// read to say the session lapsed, rather than asking again for good with every write held.
+test("a sign-out answered 401 lands while the sign-in check cannot be read", async () => {
+  let checkable = true;
+  const app = renderApp({
+    logout: async () => {
+      checkable = false;
+      throw new ApiError(401, { error: "unauthorized" });
+    },
+    whoAmI: async () => {
+      if (!checkable) throw new NetworkError("/auth/whoami", new TypeError("Failed to fetch"));
+      return { event_head: "0", kind: "user", login: "alice" };
+    },
+  });
+  const tab = otherTab("tab-2");
+  try {
+    await screen.findByText("Signed in as alice");
+    await waitFor(() => expect(tab.told).toContainEqual(expect.objectContaining({ here: true })));
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(writesOf(app.queryClient).rows()).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(tab.told).toContainEqual(about("signedOut", "alice")));
+    expect(app.logout).toHaveBeenCalledTimes(1);
+    expect(writesOf(app.queryClient).rows()).toEqual([]);
+    expect(keptWrites()).toEqual([]);
   } finally {
     tab.close();
     app.teardown();
@@ -208,7 +347,7 @@ test("the sign-out question names every tab's unsent changes, and says when a ta
     confirm: () => answer,
     whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
   });
-  const second = otherTab("tab-2", ["CORE-4 set to backlog", "Labels of CORE-4"]);
+  const second = otherTab("tab-2", [change("CORE-4 set to backlog"), change("Labels of CORE-4")]);
   try {
     await screen.findByText("Signed in as alice");
     await waitFor(() =>
@@ -245,6 +384,93 @@ test("the sign-out question names every tab's unsent changes, and says when a ta
     expect(writesOf(app.queryClient).rows()).toHaveLength(1);
   } finally {
     second.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// W53. The sign-out question names each change once, by key: a tab duplicated from this one, or
+// from another, copied its kept writes and resumed them under the same keys, so its copies are the
+// same changes. A tab that did not answer the last question is taken for gone, so the next one
+// neither waits for it nor says the other tabs may hold more, until it speaks again.
+test("the sign-out question names a duplicated tab's copies once, and forgets a tab that missed it", async () => {
+  const app = renderApp({
+    confirm: () => false,
+    whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
+  });
+  const tabs: OtherTab[] = [];
+  try {
+    await screen.findByText("Signed in as alice");
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(writesOf(app.queryClient).rows()).toHaveLength(1));
+    const own = writesOf(app.queryClient).rows()[0]?.key ?? "";
+    const copies = [change("CORE-1 set to done", own), change("CORE-4 set to backlog", "k-4")];
+    tabs.push(otherTab("tab-2", copies), otherTab("tab-3", copies), otherTab("tab-4", "silent"));
+    for (const other of tabs) {
+      await waitFor(() =>
+        expect(other.told).toContainEqual(expect.objectContaining({ here: true }))
+      );
+    }
+    const named = "2 unsent changes";
+    const listed = "\n\n• CORE-1 set to done\n• CORE-4 set to backlog";
+    const elsewhere = ", and any unsent changes in your other Dispatch tabs";
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(app.asked).toHaveLength(1));
+    expect(app.asked[0]).toBe(`Sign out and discard ${named}${elsewhere}?${listed}`);
+
+    const started = Date.now();
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(app.asked).toHaveLength(2));
+    expect(Date.now() - started).toBeLessThan(250);
+    expect(app.asked[1]).toBe(`Sign out and discard ${named}?${listed}`);
+
+    tabs[2]?.say({ hello: true });
+    await waitFor(() =>
+      expect(tabs[2]?.told).toContainEqual(expect.objectContaining({ here: true }))
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(app.asked).toHaveLength(3));
+    expect(app.asked[2]).toBe(`Sign out and discard ${named}${elsewhere}?${listed}`);
+    expect(app.logout).not.toHaveBeenCalled();
+  } finally {
+    for (const other of tabs) other.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// W51. Another tab's sign-out holds the person's writes here as a lease, and each held write says
+// what it waits for. A signing-out tab that dies without a word - crashed, killed, frozen - stops
+// saying its sign-out is out, and within 6 s of the last time it did this tab takes it for gone
+// and its writes go on.
+test("a tab holding writes for another tab's sign-out resumes them within 6 s once that tab falls silent", async () => {
+  const app = renderApp({
+    whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
+  });
+  const signer = otherTab("tab-2");
+  try {
+    await screen.findByText("Signed in as alice");
+    await waitFor(() =>
+      expect(signer.told).toContainEqual(expect.objectContaining({ here: true }))
+    );
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(0));
+
+    signer.say({ signingOut: "alice" });
+    const said = Date.now();
+    await screen.findByText("CORE-1 set to done — Waiting for a sign-out in another tab");
+    const made = attempts.length;
+    await sleep(4_000);
+    expect(attempts).toHaveLength(made);
+
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(made), { timeout: 3_000 });
+    const resumed = Date.now() - said;
+    expect(resumed).toBeGreaterThanOrEqual(5_500);
+    expect(resumed).toBeLessThanOrEqual(6_500);
+    expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull();
+  } finally {
+    signer.close();
     app.teardown();
   }
 }, 15_000);

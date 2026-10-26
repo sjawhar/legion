@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import type { ReactNode } from "react";
 
 import { keptTab } from "../../__tests__/kept-sends-harness";
+import { answerSends } from "../../__tests__/send-answers";
 import { ApiError, api, type WriteBounds } from "../../api/client";
 import { SEND_DEADLINE_MS } from "./keyed-write";
 import { PendingWritesIndicator } from "./PendingWritesIndicator";
@@ -175,6 +176,7 @@ test("a write waiting its turn reads Waiting to send and can be discarded", asyn
   jest.useFakeTimers();
   const { client, unmount } = mountIndicator();
   const writes = writesOf(client);
+  const sends = answerSends();
   let secondSent = 0;
   try {
     const press = (label: string, answer: () => Promise<unknown>) =>
@@ -184,12 +186,8 @@ test("a write waiting its turn reads Waiting to send and can be discarded", asyn
           kind: plainWrite,
           label,
           presentation: "indicator",
-          request: patch,
+          request: sends.answer({ ...patch }, answer),
           target: "issue:CORE-1",
-          write: (bounds) => {
-            bounds.sent?.(patch);
-            return answer();
-          },
         })
         .catch(() => undefined);
     press("CORE-1 set to backlog", () => Promise.withResolvers<never>().promise);
@@ -207,6 +205,7 @@ test("a write waiting its turn reads Waiting to send and can be discarded", asyn
     expect(writes.rows().map((row) => row.label)).toEqual(["CORE-1 set to backlog"]);
     expect(secondSent).toBe(0);
   } finally {
+    sends.restore();
     unmount();
     jest.advanceTimersByTime(1);
     jest.useRealTimers();

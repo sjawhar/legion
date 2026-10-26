@@ -34,6 +34,13 @@ export function waitingToSend(row: Write): boolean {
   return row.status === "queued" && !row.sent;
 }
 
+/** Whether `row` waits for its person's sign-out in another tab of this browser: none of its
+ *  attempts starts until that tab says how it ended (`Writes.holdFor`). A refused one waits for
+ *  nothing. */
+export function heldForSignOut(row: Write): boolean {
+  return row.signingOutElsewhere && row.status !== "refused";
+}
+
 /** How much of `row`'s upload has gone up, while its body is still going up on its first try;
  *  `undefined` for any other write. Until an attempt of it has failed, it is uploading, not being
  *  tried again. */
@@ -48,9 +55,10 @@ export function uploadedPercent(row: Write): number | undefined {
  * writes): chrome, out of the page's flow in the corner the connection pill shares, and gone while
  * nothing is pending. Its status line counts the writes that went out - `Saving 2 changes…`, then,
  * once one is past its deadline and is being tried again, `Dispatch has not confirmed 2 changes —
- * still trying` - and it names each write the reader can act on or should see: one waiting its
- * turn behind another that was never sent, `Waiting to send` with Discard; an upload whose body
- * is still going up, `Uploading… N%`, which is never "still trying" until an attempt of it has
+ * still trying` - and it names each write the reader can act on or should see: one held for the
+ * person's sign-out in another tab, `Waiting for a sign-out in another tab`; one waiting its turn
+ * behind another that was never sent, `Waiting to send` with Discard; an upload whose body is
+ * still going up, `Uploading… N%`, which is never "still trying" until an attempt of it has
  * failed; a late one with Stop trying; a refused one with why, Retry and Discard. A write still
  * within its deadline is only counted, since there is nothing to do about it yet.
  */
@@ -58,12 +66,15 @@ export function PendingWritesIndicator(): ReactNode {
   const writes = useWrites();
   const rows = useWriteSelection("indicator", shown);
   if (rows.length === 0) return null;
-  const out = rows.filter((row) => row.status !== "refused" && !waitingToSend(row));
+  const out = rows.filter(
+    (row) => row.status !== "refused" && !waitingToSend(row) && !heldForSignOut(row)
+  );
   const late = out.some((row) => row.status === "late" && uploadedPercent(row) === undefined);
   const named = rows.filter(
     (row) =>
       row.status === "late" ||
       row.status === "refused" ||
+      heldForSignOut(row) ||
       waitingToSend(row) ||
       uploadedPercent(row) !== undefined
   );
@@ -111,6 +122,21 @@ export function PendingWritesIndicator(): ReactNode {
                     >
                       Discard
                     </button>
+                  </>
+                ) : heldForSignOut(row) ? (
+                  <>
+                    <span className={`min-w-0 flex-1 ${textSecondaryOnSurface}`}>
+                      {row.label} — Waiting for a sign-out in another tab
+                    </span>
+                    {waitingToSend(row) ? (
+                      <button
+                        className={secondaryButtonCompact}
+                        onClick={() => writes.discard(row.id)}
+                        type="button"
+                      >
+                        Discard
+                      </button>
+                    ) : null}
                   </>
                 ) : waitingToSend(row) ? (
                   <>

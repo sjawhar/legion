@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 
-import { api, issuePatchRequest } from "../../api/client";
+import { issuePatchRequest } from "../../api/client";
 import type {
   ArchitectureTree,
   ArchitectureTreeIssueRef,
@@ -63,8 +63,6 @@ export function useIssueComponents(
     // One write to the issue, in press order with every other (`issue:<KEY>`).
     target: () => `issue:${issue.key}`,
     request: (input: IssueComponentsInput) => issuePatchRequest(issue.key, { components: input }),
-    write: (input: IssueComponentsInput, bounds) =>
-      api.patchIssue(issue.key, { components: input }, bounds),
     onMutate: async (input): Promise<Snapshot> => {
       await Promise.all([
         queryClient.cancelQueries({ queryKey: detailKey }),

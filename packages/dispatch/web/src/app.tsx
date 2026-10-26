@@ -37,7 +37,7 @@ import { KeymapProvider } from "./features/shell/KeymapProvider";
 import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
-import { SignInChannel } from "./features/shell/sign-in-channel";
+import { SignInChannel, type UnsentChange } from "./features/shell/sign-in-channel";
 import { COMPACT_VIEWPORT_QUERY, useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { useKeyboardFit } from "./features/shell/useKeyboardFit";
@@ -514,7 +514,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   ]);
   const login = user.login;
   const signOut = useKeyedWrite({
-    // A session that lapses while the sign-out is still out has ended as it asked.
+    // A session that lapses while the sign-out is still out has ended as it asked: the sign-out
+    // lands, and its landing discards (`Writes.signedIn`).
     endsWithSession: true,
     inline: true,
     label: () => "Sign out",
@@ -532,7 +533,15 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       writesOf(queryClient).clear();
       signIns.signedOut(login);
     },
-    write: () => api.logout(),
+    // A 401 is Dispatch saying the session the sign-out would end is already gone - an earlier
+    // attempt ended it and its answer was lost, or a sign-out in another browser revoked it - so
+    // the sign-out has done what it was for, whatever the sign-in check can be read to say.
+    write: () =>
+      api
+        .logout()
+        .catch((error: unknown) =>
+          isUnauthorized(error) ? { ok: true as const } : Promise.reject(error)
+        ),
   });
   // A page that goes while its sign-out is out never hears how it ended, so every other tab lets
   // the person's writes go on: had the sign-out gone through, Dispatch refuses them (401) and
@@ -572,21 +581,26 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       onSearch={() => setPaletteMode("all")}
       onSignOut={() => {
         // Signing out discards the person's own writes in every tab of this browser, so it asks
-        // first while any is unsent, naming each - this tab's, and every other tab's, which it
-        // asks for first (`SignInChannel.unsentElsewhere`); Cancel keeps them signed in and their
-        // writes as they are. Confirmed, nothing of theirs goes out in any tab until Dispatch
-        // answers the sign-out (`Writes.holdFor`), and only its landing discards them. A session
-        // that lapses instead keeps them (`Writes.signedIn`).
+        // first while any is unsent, naming each once - this tab's, and every other tab's, which
+        // it asks for first (`SignInChannel.unsentElsewhere`), by key, since a tab duplicated
+        // from another holds the same writes; Cancel keeps them signed in and their writes as
+        // they are. Confirmed, nothing of theirs goes out in any tab until Dispatch answers the
+        // sign-out (`Writes.holdFor`), and only its landing discards them. A session that lapses
+        // instead keeps them (`Writes.signedIn`).
         if (askingTabs) return;
         setAskingTabs(true);
         void signIns.unsentElsewhere(login).then((elsewhere) => {
           setAskingTabs(false);
-          const unsent = [
+          const unsent = new Map<string, string>();
+          for (const { key, label } of [
             ...unsentChanges(writesOf(queryClient).rows(), login),
-            ...elsewhere.labels,
-          ];
-          const ask = unsent.length > 0 || elsewhere.unanswered;
-          if (ask && !window.confirm(signOutQuestion(unsent, elsewhere.unanswered))) return;
+            ...elsewhere.unsent,
+          ]) {
+            if (!unsent.has(key)) unsent.set(key, label);
+          }
+          const ask = unsent.size > 0 || elsewhere.unanswered;
+          const question = signOutQuestion([...unsent.values()], elsewhere.unanswered);
+          if (ask && !window.confirm(question)) return;
           signIns.signingOut(login);
           signOut.mutate();
         });
@@ -836,12 +850,12 @@ const signIns = new SignInChannel(
 );
 
 /** What of `login`'s a sign-out would discard here: every write of theirs they can see that
- *  Dispatch has not made - out, waiting its turn, or refused and holding their draft - by its
- *  name. A read mark is never shown, and is no change of theirs to lose. */
-export function unsentChanges(rows: readonly Write[], login: string): string[] {
+ *  Dispatch has not made - out, waiting its turn, or refused and holding their draft - by its key
+ *  and name. A read mark is never shown, and is no change of theirs to lose. */
+export function unsentChanges(rows: readonly Write[], login: string): UnsentChange[] {
   return rows
     .filter((row) => row.login === login && row.presentation !== "quiet" && row.status !== "made")
-    .map((row) => row.label);
+    .map((row) => ({ key: row.key, label: row.label }));
 }
 
 /** What signing out asks while `unsent` changes - this tab's and the other tabs' - would be

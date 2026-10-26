@@ -9,7 +9,7 @@ import {
   type IdempotencyLandedCode,
 } from "@legion/contracts";
 
-import { reachable, unreachable } from "./reachability";
+import { reachable, routeOf, unreachable } from "./reachability";
 
 import type {
   Agent,
@@ -201,12 +201,19 @@ export const WRITE_METHODS = ["DELETE", "PATCH", "POST", "PUT"] as const;
 
 export type WriteMethod = (typeof WRITE_METHODS)[number];
 
+/** What a request is answered with, for the type checker alone: no request carries it. */
+declare const answeredWith: unique symbol;
+
 /** One write as it goes to Dispatch: its method, its path and its body - JSON, a multipart form
- *  (an upload), or none. A kept write is this, made again after a reload (`send`). */
-export interface WriteRequest {
+ *  (an upload), or none - and, for the type checker, what Dispatch answers it with (`T`): a
+ *  request's builder names it (`issuePatchRequest` answers an `Issue`), so a write made from its
+ *  request alone (`WriteSpec.request`) is answered as its client method's is. A kept write is
+ *  this, made again after a reload (`send`). */
+export interface WriteRequest<T = unknown> {
   readonly method: WriteMethod;
   readonly path: string;
   readonly body?: unknown;
+  readonly [answeredWith]?: T;
 }
 
 /** One attempt of a write, as the one write path (`Writes.run`) hands it over from the press it
@@ -371,11 +378,12 @@ function pathSegment(value: string): string {
 }
 
 // The requests of the writes that wait their turn on a line (`WriteSpec.request`), each the exact
-// request its client method sends: a surface names it at the press, so a write waiting behind
-// another is kept as it for a reload, and nothing of the write's attempt runs before its turn.
+// request its client method sends, answered as that method is: a surface names it at the press,
+// and the write is made from it alone (`api.send`), so a write waiting behind another is kept as
+// the very request that goes out, and nothing of it runs before its turn.
 
 /** `PATCH /api/v1/issues/{key}`: one change of an issue's fields (`patchIssue`). */
-export function issuePatchRequest(key: string, input: UpdateIssueInput): WriteRequest {
+export function issuePatchRequest(key: string, input: UpdateIssueInput): WriteRequest<Issue> {
   return { body: input, method: "PATCH", path: `/api/v1/issues/${pathSegment(key)}` };
 }
 
@@ -384,12 +392,12 @@ export function issuePatchRequest(key: string, input: UpdateIssueInput): WriteRe
 export function agentMessageRequest(
   sessionID: string,
   input: CreateAgentMessageInput
-): WriteRequest {
+): WriteRequest<Message> {
   return { body: input, method: "POST", path: `/api/v1/agents/${pathSegment(sessionID)}/messages` };
 }
 
 /** `PUT /api/v1/me/asks/{id}/snooze` (`snoozeAsk`). */
-export function askSnoozeRequest(id: string, snoozedUntil: string): WriteRequest {
+export function askSnoozeRequest(id: string, snoozedUntil: string): WriteRequest<AskSnooze> {
   return {
     body: { snoozed_until: snoozedUntil },
     method: "PUT",
@@ -407,12 +415,18 @@ export function threadReadRequest(threadId: string, readThrough: string): WriteR
 }
 
 /** `PUT /api/v1/me/issues/{key}/state`: the person's state of an issue (`putIssueState`). */
-export function issueStateRequest(key: string, input: Partial<UserIssueState>): WriteRequest {
+export function issueStateRequest(
+  key: string,
+  input: Partial<UserIssueState>
+): WriteRequest<UserIssueState> {
   return { body: input, method: "PUT", path: `/api/v1/me/issues/${pathSegment(key)}/state` };
 }
 
 /** `PUT /api/v1/me/agents/{session}/state`: the person's state of a session (`putAgentState`). */
-export function agentStateRequest(sessionID: string, input: UserAgentStateInput): WriteRequest {
+export function agentStateRequest(
+  sessionID: string,
+  input: UserAgentStateInput
+): WriteRequest<UserAgentState> {
   return { body: input, method: "PUT", path: `/api/v1/me/agents/${pathSegment(sessionID)}/state` };
 }
 
@@ -610,7 +624,7 @@ export class DispatchApiClient {
       // what the deadline cut short is a timeout.
       if (deadline.signal.aborted && !(error instanceof ApiError) && caller?.aborted !== true) {
         // Dispatch went silent on it: its route cannot be reached, as far as the page knows.
-        unreachable(path);
+        unreachable(routeOf(init.method, path));
         throw new RequestTimeoutError(path, limit);
       }
       throw error;
@@ -620,12 +634,13 @@ export class DispatchApiClient {
   }
 
   /** Dispatch's response to one request, or its refusal as an `ApiError`; a connection that
-   *  failed is a `NetworkError`, and says Dispatch cannot be reached on its route
-   *  (`unreachable`). `arrived`, for a request held to a deadline, runs as the request's body goes
-   *  up (an upload's), as the response's headers arrive and as each piece of its body does, the
-   *  body of a refusal included; `uploaded` is told how much of an upload's body has gone up. Any
-   *  answer of Dispatch's own - one below 500, which no gateway gives for a Dispatch that is down -
-   *  says it can be reached on that route (`reachable`), which matters only once it could not be. */
+   *  failed is a `NetworkError`, and says Dispatch cannot be reached on its route - its method
+   *  and path (`unreachable`). `arrived`, for a request held to a deadline, runs as the request's
+   *  body goes up (an upload's), as the response's headers arrive and as each piece of its body
+   *  does, the body of a refusal included; `uploaded` is told how much of an upload's body has gone
+   *  up. Any answer of Dispatch's own - one below 500, which no gateway gives for a Dispatch that
+   *  is down - says it can be reached on that route (`reachable`), which matters only once it
+   *  could not be. */
   private async answered(
     path: string,
     init: RequestInit,
@@ -646,10 +661,10 @@ export class DispatchApiClient {
     } catch (error) {
       // An abort is the deadline's or the caller's (`exchange`), never the network's.
       if (init.signal?.aborted === true) throw error;
-      unreachable(path);
+      unreachable(routeOf(init.method, path));
       throw new NetworkError(path, error);
     }
-    if (answer.status < 500) reachable("answer", path);
+    if (answer.status < 500) reachable("answer", routeOf(init.method, path));
     arrived?.();
     const response = arrived === undefined ? answer : watchBody(answer, arrived);
     if (!response.ok) throw await errorFrom(response);
@@ -679,12 +694,12 @@ export class DispatchApiClient {
    * the person acts (`Writes.run`), never here; so is `bounds.login` (`Dispatch-Login`), the
    * person who pressed it. A JSON body goes as JSON and a multipart form as itself, through the
    * upload transport; `bounds.sent` is told the request as it goes out. Answers what Dispatch
-   * answered (nothing for an empty body), or rejects with its refusal; a 2xx whose body is not
-   * JSON rejects with `UnreadableAnswerError`, and a replay of an answer Dispatch did not keep
-   * with `AnswerNotKeptError`.
+   * answered (nothing for an empty body), as the request's builder names it (`WriteRequest`), or
+   * rejects with its refusal; a 2xx whose body is not JSON rejects with `UnreadableAnswerError`,
+   * and a replay of an answer Dispatch did not keep with `AnswerNotKeptError`.
    */
   send<T>(
-    request: WriteRequest,
+    request: WriteRequest<T>,
     { deadlineMs, key, login, progress, sent }: WriteBounds
   ): Promise<T> {
     const { body, method, path } = request;

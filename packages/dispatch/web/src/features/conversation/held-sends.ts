@@ -66,6 +66,9 @@ export type HeldSend = {
   /** When Send or Retry was pressed for it, which a reload keeps: a send kept for longer than
    *  `KEPT_SEND_RESUME_MS` is not made again on its own. */
   readonly pressedAt: number;
+  /** Whether the person's sign-out in another tab holds it: nothing of it goes out until that tab
+   *  says how the sign-out ended (`Write.signingOutElsewhere`). */
+  readonly signingOutElsewhere: boolean;
 } & (
   | { readonly status: "waiting" }
   | { readonly status: "sending" }
@@ -262,6 +265,7 @@ function heldSend(write: Write<ComposerSend>): HeldSend | undefined {
     mutationKey: write.detail.mutationKey,
     pressedAt: write.pressedAt,
     request: write.detail.request,
+    signingOutElsewhere: write.signingOutElsewhere,
   };
   switch (write.status) {
     case "made":

@@ -1,7 +1,7 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { agentStateRequest, api } from "../../api/client";
+import { agentStateRequest } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
 import type {
   Message,
@@ -109,9 +109,8 @@ function useSendReadMark<V>(
   const unread = useQuery(userAgentStateQuery()).data?.[sessionId]?.unread_replies ?? 0;
   useSendMarkOnce({
     mark: value === undefined ? undefined : { key: dedupeKey(value), value: input(value) },
-    onSuccess: (next: UserAgentState) => storeAgentState(queryClient, sessionId, next),
+    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
     request: (body: UserAgentStateInput) => agentStateRequest(sessionId, body),
-    send: (body: UserAgentStateInput, bounds) => api.putAgentState(sessionId, body, bounds),
     shouldSend: unread !== 0,
     target: `read:agent:${sessionId}`,
     wake: unread,

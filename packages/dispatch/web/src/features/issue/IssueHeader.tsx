@@ -197,11 +197,10 @@ export function IssueHeader({
   // being tried never lands after a newer one, whatever left the page meanwhile. A landing with no
   // answer to give is merged by reading the issue again.
   const updateIssue = useKeyedWrite({
-    write: (input: IssueUpdateInput, bounds) => api.patchIssue(issue.key, input, bounds),
     inline: (input) => !statusPickOnly(input),
     label: (input) => issueUpdateLabel(issue.key, input),
     target: () => `issue:${issue.key}`,
-    request: (input) => issuePatchRequest(issue.key, input),
+    request: (input: IssueUpdateInput) => issuePatchRequest(issue.key, input),
     onSettled: (_data, error) => {
       drafts.onIssueSettled(error);
     },
@@ -216,10 +215,9 @@ export function IssueHeader({
     },
   });
   const labelsMutation = useKeyedWrite({
-    write: (labels: string[], bounds) => api.patchIssue(issue.key, { labels }, bounds),
     label: () => `Labels of ${issue.key}`,
     target: () => `issue:${issue.key}`,
-    request: (labels) => issuePatchRequest(issue.key, { labels }),
+    request: (labels: string[]) => issuePatchRequest(issue.key, { labels }),
     onSuccess: (next) => {
       if (next !== null) mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });

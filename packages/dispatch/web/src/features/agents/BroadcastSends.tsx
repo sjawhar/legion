@@ -111,8 +111,9 @@ function agentCount(count: number): string {
 }
 
 /**
- * The page's sends, one row each, newest press first so the send just pressed is in view: queued,
- * on the wire, still being tried under its key once past its deadline (with Stop trying), sent
+ * The page's sends, one row each, newest press first so the send just pressed is in view: held
+ * while the sender's sign-out in another tab is out, saying so; queued, on the wire, still being
+ * tried under its key once past its deadline (with Stop trying), sent
  * (linking its broadcast, with the send's exclusions, and how its deliveries stand: delivering
  * while any recipient's is still on its way, from the live feed, then delivered), or refused with
  * the server's reason - or stopped - with Retry and Restore draft. One a reload interrupted too
@@ -156,7 +157,10 @@ export function BroadcastSends({
                 className={row.status === "failed" ? dangerText : textSecondaryOnSurface}
                 role="status"
               >
-                {row.status === "queued" ? (
+                {row.signingOutElsewhere &&
+                (row.status === "queued" || row.status === "sending" || row.status === "late") ? (
+                  `Waiting for a sign-out in another tab: to ${count}`
+                ) : row.status === "queued" ? (
                   `Queued: to ${count}`
                 ) : row.status === "sending" ? (
                   `Sending to ${count}…`
@@ -180,7 +184,7 @@ export function BroadcastSends({
                 markdown={row.send.input.body}
                 fullTitle
               />
-              {row.status === "late" ? (
+              {row.status === "late" && !row.signingOutElsewhere ? (
                 <StopTrying onStop={() => onStop(row)} stopping={row.stopping} />
               ) : null}
               {row.status === "queued" ? (

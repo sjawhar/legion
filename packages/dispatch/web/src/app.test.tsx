@@ -375,7 +375,9 @@ test("signing out asks first, then drops every write here and tells every other 
     expect(await out).toBeInstanceOf(SendStoppedError);
     expect(keptWrites()).toEqual([]);
     expect(asksBeforeLeaving()).toBe(false);
-    await waitFor(() => expect(told).toContainEqual({ signedOut: "alice" }));
+    await waitFor(() =>
+      expect(told).toContainEqual(expect.objectContaining({ signedOut: "alice" }))
+    );
     const made = attempts.length;
     const quiet = Promise.withResolvers<void>();
     setTimeout(quiet.resolve, 2_500);

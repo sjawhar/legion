@@ -17,11 +17,12 @@ import type { SessionSends } from "./useSessionSends";
 /**
  * One message of the viewer's to a session that Dispatch has not yet made, as its own turn: the
  * text named as theirs - `Your message: “…”`, at a glance and to a screen reader, since it is not
- * yet the session's conversation - and where it stands: waiting for the message before it, never
- * sent, with Discard; sending; still being tried past its deadline with Stop trying; or refused
- * with why, Retry and Discard. The session's live view and its Agents row both show it, and
- * either's controls act on the same write (`useSessionSends`). It leaves once Dispatch makes it,
- * and the stored message takes its place.
+ * yet the session's conversation - and where it stands: held while the viewer's sign-out in
+ * another tab is out, saying so; waiting for the message before it, never sent, with Discard;
+ * sending; still being tried past its deadline with Stop trying; or refused with why, Retry and
+ * Discard. The session's live view and its Agents row both show it, and either's controls act on
+ * the same write (`useSessionSends`). It leaves once Dispatch makes it, and the stored message
+ * takes its place.
  */
 export function PendingSendTurn({
   held,
@@ -63,6 +64,21 @@ export function PendingSendTurn({
             >
               Discard
             </RefusableButton>
+          </>
+        ) : held.signingOutElsewhere ? (
+          <>
+            <p className={`text-xs ${textMutedOnCanvas}`} role="status">
+              Waiting for a sign-out in another tab
+            </p>
+            {held.status === "waiting" ? (
+              <RefusableButton
+                look="secondary-compact"
+                onPress={() => sends.discard(held)}
+                refusal={null}
+              >
+                Discard
+              </RefusableButton>
+            ) : null}
           </>
         ) : held.status === "waiting" ? (
           <>

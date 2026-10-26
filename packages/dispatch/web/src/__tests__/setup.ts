@@ -11,6 +11,7 @@ import { blockSchemaCache } from "../features/doc/schema";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
+import { answerLineWritesByMethod } from "./line-write-methods";
 
 GlobalRegistrator.register();
 
@@ -20,6 +21,10 @@ GlobalRegistrator.register();
 // wants a different schema replaces it through its own `api.getBlockSchema` spy before the
 // first render in its file.
 void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSchema);
+
+// A plain write on a line goes out as `api.send` of its request; a test answers it, as every other
+// write, by spying on the client method that makes the same request (`line-write-methods.ts`).
+answerLineWritesByMethod();
 
 class WebSocketStub {
   binaryType = "arraybuffer";

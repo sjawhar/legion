@@ -5,7 +5,7 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
 import { keptTab, memoryFiles, UnloadTarget } from "../../__tests__/kept-sends-harness";
@@ -15,7 +15,8 @@ import type { Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import { SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
 import { Writes } from "../writes/write-store";
-import { HeldSends, heldSends, stoppable } from "./held-sends";
+import { type HeldSend, HeldSends, heldSends, stoppable } from "./held-sends";
+import { PendingSendTurn } from "./PendingSendTurn";
 import type { SentRequest } from "./send-request";
 import { useSessionSends } from "./useSessionSends";
 
@@ -354,6 +355,44 @@ test("a late send can be stopped, and its Retry goes under its key", async () =>
       jest.advanceTimersByTime(30 * 60_000);
       await settle();
       expect(createAgentMessage).toHaveBeenCalledTimes(calls);
+    } finally {
+      createAgentMessage.mockRestore();
+    }
+  });
+});
+
+// W51. A message the person's sign-out in another tab holds says so on its pending turn, and its
+// trying goes on once that tab's hold lifts.
+test("a send held for a sign-out in another tab says so, and goes on once released", async () => {
+  await onFakeClock(async () => {
+    const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+      new NetworkError("/api/v1/agents/planner-session/messages", new TypeError("Failed to fetch"))
+    );
+    const { held, writes } = heldOf();
+    const sends = { discard: () => {}, retry: () => {}, stop: () => {} };
+    try {
+      held.send(agentKey, agentSend);
+      await settle();
+      writes.holdFor("alice");
+      await settle();
+      const waiting = held.get(agentKey);
+      expect(waiting?.signingOutElsewhere).toBe(true);
+      const turn = render(createElement(PendingSendTurn, { held: waiting as HeldSend, sends }));
+      expect(turn.getByRole("status").textContent).toBe("Waiting for a sign-out in another tab");
+      turn.unmount();
+      const calls = createAgentMessage.mock.calls.length;
+      jest.advanceTimersByTime(10_000);
+      await settle();
+      expect(createAgentMessage).toHaveBeenCalledTimes(calls);
+
+      writes.release("alice");
+      await settle();
+      const going = held.get(agentKey);
+      expect(going?.signingOutElsewhere).toBe(false);
+      expect(createAgentMessage.mock.calls.length).toBeGreaterThan(calls);
+      const again = render(createElement(PendingSendTurn, { held: going as HeldSend, sends }));
+      expect(again.getByRole("status").textContent).toBe("Sending…");
+      again.unmount();
     } finally {
       createAgentMessage.mockRestore();
     }
