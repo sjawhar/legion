@@ -2276,7 +2276,11 @@ row under `--json`), and every refusal carries it, so no answer or refusal of th
 as another secrets CLI's about the same name. No line names a secret's version: a grant's release
 carries names and values alone, and a session holds no sign-in of its own to the store.
 `--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's
-body verbatim as before, and makes no settings call.
+body verbatim as before, and makes no settings call. The other secrets CLI a box may hold,
+`secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is
+archived): it reads its agent tier from local sops files and its human tier through the local
+secretsd daemon, which asks for a YubiKey touch, and it never reads this broker. One key name can
+hold different values in the two stores, which is why each CLI names the store it answered from.
 Its `secret` forms are how a person manages the agent secrets themselves, in the
 broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
