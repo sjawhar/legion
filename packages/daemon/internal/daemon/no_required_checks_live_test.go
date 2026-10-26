@@ -42,7 +42,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -104,37 +103,32 @@ func (i noRequiredChecksIssue) branch() string { return "legion/" + i.key }
 // push onto the counted head once its base requires nothing leaves the counted attempt, so the new
 // head's red, once the base requires the check again, sends the work back.
 func TestABaseThatRequiresNothingGivesNoVerdictLive(t *testing.T) {
-	natsURL := os.Getenv(liveNATSURLEnv)
-	if natsURL == "" {
-		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; scripts/e2e/no-required-checks.sh starts a nats-server and sets it", liveNATSURLEnv)
-	}
-	r := newNoRequiredChecksLive(t, natsURL)
+	r := newNoRequiredChecksLive(t)
 	r.step("nothing-required-failed-check", r.nothingRequiredFailedCheck)
 	r.step("the-same-failure-once-required-is-red", r.theSameFailureOnceRequiredIsRed)
 	r.step("a-passing-required-check-is-green", r.aPassingRequiredCheckIsGreen)
 	r.step("a-push-onto-a-base-that-requires-nothing-leaves-the-attempt", r.aPushOntoABaseThatRequiresNothingLeavesTheAttempt)
 }
 
-// newNoRequiredChecksLive boots the daemon over natsURL, with max_fix_attempts 1, and the three
-// issues already recorded: the first in testing on a base that requires nothing, its required set
-// not yet read; the second in reviewing on a base that requires ci; and the third in testing on a
-// base that requires ci, its one fix attempt counted at its head.
-func newNoRequiredChecksLive(t *testing.T, natsURL string) *noRequiredChecksLive {
+// newNoRequiredChecksLive boots the daemon over the script's broker, with max_fix_attempts 1, and
+// the three issues already recorded: the first in testing on a base that requires nothing, its
+// required set not yet read; the second in reviewing on a base that requires ci; and the third in
+// testing on a base that requires ci, its one fix attempt counted at its head.
+func newNoRequiredChecksLive(t *testing.T) *noRequiredChecksLive {
 	t.Helper()
-	cfg := workflowConfig(t, natsURL)
+	proof := newLiveProof(t, "scripts/e2e/no-required-checks.sh")
 	// One counted attempt exhausts the count, so step 4's first red is held and reported, and its
 	// last is held too unless the push onto the base that required nothing left that attempt.
-	cfg.MaxFixAttempts = 1
-	proof := newLiveProof(t, natsURL, cfg)
+	proof.cfg.MaxFixAttempts = 1
 	number, err := strconv.ParseInt(randomSuffix(t)[:6], 16, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := &noRequiredChecksLive{
 		liveProof: proof,
-		nothing:   noRequiredChecksIssue{key: cfg.Project + "-1", number: int(number) + 1, base: "base-nothing"},
-		green:     noRequiredChecksIssue{key: cfg.Project + "-2", number: int(number) + 2, base: "base-green"},
-		pushed:    noRequiredChecksIssue{key: cfg.Project + "-3", number: int(number) + 3, base: "base-pushed"},
+		nothing:   noRequiredChecksIssue{key: proof.cfg.Project + "-1", number: int(number) + 1, base: "base-nothing"},
+		green:     noRequiredChecksIssue{key: proof.cfg.Project + "-2", number: int(number) + 2, base: "base-green"},
+		pushed:    noRequiredChecksIssue{key: proof.cfg.Project + "-3", number: int(number) + 3, base: "base-pushed"},
 	}
 	r.github = newNoRequiredChecksGitHub(t)
 	r.github.pull(r.nothing, "a1")
@@ -182,15 +176,6 @@ func (r *noRequiredChecksLive) seed() {
 		{r.pushed, phase.Testing, "testing", "W", record.PullRequest{HeadSHA: "b1", Required: []string{noRequiredChecksCheck}, FixAttempts: 1, HeadCounted: "b1"}},
 	}
 	if err := r.st.Tx(ctx, func(tx pgx.Tx) error {
-		// Slot indexes are unique across the shared database, so each tree takes the next free one.
-		taken, err := r.records.Slots(ctx, tx)
-		if err != nil {
-			return err
-		}
-		index := 0
-		for _, slot := range taken {
-			index = max(index, slot.Index+1)
-		}
 		for _, seeded := range issues {
 			key := seeded.issue.key
 			if err := r.records.PutIssue(ctx, tx, record.Issue{
@@ -205,12 +190,8 @@ func (r *noRequiredChecksLive) seed() {
 			if err := r.records.PutPullRequest(ctx, tx, pr); err != nil {
 				return err
 			}
-			if err := r.records.PutSlot(ctx, tx, record.Slot{Issue: key, Index: index, AdmittedAt: time.Now()}); err != nil {
-				return err
-			}
-			index++
 		}
-		return nil
+		return r.admit(ctx, tx, r.nothing.key, r.green.key, r.pushed.key)
 	}); err != nil {
 		t.Fatalf("seed the three issues: %v", err)
 	}
@@ -267,7 +248,7 @@ func (r *noRequiredChecksLive) theSameFailureOnceRequiredIsRed() {
 		t.Fatalf("%s is in %s on the red at a1, want implementing", issue.key, got.Phase)
 	}
 	r.note("read back: checksVerdict %s, %s in %s", got.PullRequest.ChecksVerdict, issue.key, got.Phase)
-	told := r.waitNotices(issue, "checks-red", 1)
+	told := r.waitNoticesOn(fmt.Sprintf("one checks-red notice to %s's architect", issue.key), r.architectTopic(issue), "checks-red", 1)
 	r.wantRedAt(issue, told[0], "a1")
 	r.note("read back: one checks-red notice on %s's architect's topic: %s", issue.key, told[0].Payload)
 }
@@ -309,10 +290,10 @@ func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt
 	if got.Phase != phase.Testing || got.PullRequest == nil || got.PullRequest.ChecksVerdict != "red" || got.PullRequest.FixAttempts != 1 {
 		t.Fatalf("after the red at the counted head b1 %s is in %s on %+v, want testing, checksVerdict red, fixAttempts 1: the cap holds the attempt's red", issue.key, got.Phase, got.PullRequest)
 	}
-	blocked := r.waitNotices(issue, "pr-blocked", 1)
+	blocked := r.waitNoticesOn(fmt.Sprintf("one pr-blocked notice to %s's architect", issue.key), r.architectTopic(issue), "pr-blocked", 1)
 	r.note("read back: %s held in %s, checksVerdict %s, fixAttempts %d; one pr-blocked notice: %s",
 		issue.key, got.Phase, got.PullRequest.ChecksVerdict, got.PullRequest.FixAttempts, blocked[0].Payload)
-	if red := r.noticesOfKind(issue, "checks-red"); len(red) != 0 {
+	if red := r.noticesOn(r.architectTopic(issue), "checks-red"); len(red) != 0 {
 		t.Fatalf("the held red told %s's architect %d checks-red notices, want none", issue.key, len(red))
 	}
 
@@ -333,8 +314,8 @@ func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt
 	pushed := r.publishPush(issue, "b1", "b2")
 	synchronized := r.publishSynchronize(issue, "b2")
 	r.note("drove the implementer's push of b2 onto b1 (src/widget.go, pusher legion-implement[bot]) and GitHub's synchronize of #%d to b2", issue.number)
-	r.waitProcessed(pushed, pushed)
-	r.waitProcessed(synchronized, synchronized)
+	r.waitProcessed(pushed)
+	r.waitProcessed(synchronized)
 	got = r.issue(issue.key)
 	if got.PullRequest == nil || got.PullRequest.Head != "b2" || got.PullRequest.FixAttempts != 1 {
 		t.Fatalf("after the push of b2 issues[%s].pullRequest is %+v, want head b2 and fixAttempts still 1: a push onto a head with no verdict counts nothing", issue.key, got.PullRequest)
@@ -357,9 +338,9 @@ func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt
 		t.Fatalf("after the red at b2 issues[%s].pullRequest is %+v, want checksVerdict red and fixAttempts 1", issue.key, got.PullRequest)
 	}
 	r.note("read back: %s in %s, checksVerdict %s, fixAttempts %d", issue.key, got.Phase, got.PullRequest.ChecksVerdict, got.PullRequest.FixAttempts)
-	told := r.waitNotices(issue, "checks-red", 1)
+	told := r.waitNoticesOn(fmt.Sprintf("one checks-red notice to %s's architect", issue.key), r.architectTopic(issue), "checks-red", 1)
 	r.wantRedAt(issue, told[0], "b2")
-	if blocked := r.noticesOfKind(issue, "pr-blocked"); len(blocked) != 1 {
+	if blocked := r.noticesOn(r.architectTopic(issue), "pr-blocked"); len(blocked) != 1 {
 		t.Fatalf("%s's architect was told %d pr-blocked notices over the step, want the one the held red reported", issue.key, len(blocked))
 	}
 	r.note("read back: one checks-red notice on %s's architect's topic: %s; still the one pr-blocked", issue.key, told[0].Payload)
@@ -450,25 +431,11 @@ func (r *noRequiredChecksLive) holdsWithoutNotice(issue noRequiredChecksIssue, w
 		if got := r.issue(issue.key); got.Phase != want {
 			r.t.Fatalf("%s is in %s, want %s", issue.key, got.Phase, want)
 		}
-		if told := r.noticesOfKind(issue, kind); len(told) != 0 {
+		if told := r.noticesOn(r.architectTopic(issue), kind); len(told) != 0 {
 			r.t.Fatalf("%s's architect was told %d %s notices, want none: %s", issue.key, len(told), kind, told[0].Payload)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-// waitNotices polls until issue's architect has been published count notices of kind, and returns
-// them, each payload replaced by the notice's reason.
-func (r *noRequiredChecksLive) waitNotices(issue noRequiredChecksIssue, kind string, count int) []listenerPublish {
-	r.t.Helper()
-	return r.waitNoticesOn(fmt.Sprintf("%d %s notices to %s's architect", count, kind, issue.key), r.architectTopic(issue), kind, count)
-}
-
-// noticesOfKind is every notice of kind the daemon has published to the architect topic of
-// issue's tree, each payload replaced by the notice's reason.
-func (r *noRequiredChecksLive) noticesOfKind(issue noRequiredChecksIssue, kind string) []listenerPublish {
-	r.t.Helper()
-	return r.noticesOn(r.architectTopic(issue), kind)
 }
 
 // architectTopic is the role topic the architect of issue's tree is told on.

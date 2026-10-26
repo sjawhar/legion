@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -70,11 +71,19 @@ type liveProof struct {
 	project string
 }
 
-// newLiveProof readies cfg for a driver to seed and boot: Dispatch and Envoy's listener answered by
-// the run's own stand-ins, the stream the daemon's intake consumes on the script's broker at
-// natsURL, which boot refuses to run without, and the store opened and migrated.
-func newLiveProof(t *testing.T, natsURL string, cfg config.Config) liveProof {
+// newLiveProof readies workflowConfig for a driver to seed and boot: Dispatch and Envoy's listener
+// answered by the run's own stand-ins, the stream the daemon's intake consumes on the broker
+// liveNATSURLEnv names, which boot refuses to run without, and the store opened and migrated. With
+// no broker named, the test skips, naming script, the driver's own script that starts one. A
+// driver whose proof needs more of the configuration sets it on cfg before it boots: nothing here
+// reads more of it than the project and the store.
+func newLiveProof(t *testing.T, script string) liveProof {
 	t.Helper()
+	natsURL := os.Getenv(liveNATSURLEnv)
+	if natsURL == "" {
+		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; %s starts a nats-server and sets it", liveNATSURLEnv, script)
+	}
+	cfg := workflowConfig(t, natsURL)
 	p := liveProof{t: t, cfg: cfg, board: newLiveDispatch(t, cfg.Project), notices: newNoticeListener(), records: record.NewStore()}
 	dispatchServer := httptest.NewServer(p.board)
 	t.Cleanup(dispatchServer.Close)
@@ -167,12 +176,33 @@ func (p *liveProof) publish(subject, source, eventID, payload string) string {
 	return eventID
 }
 
+// admit seeds issues, in order, into the next free admission slots in tx. Slot indexes are unique
+// across the shared database, which a pod re-runs every live proof against, so each tree takes the
+// next index after the highest any earlier run left taken.
+func (p *liveProof) admit(ctx context.Context, tx pgx.Tx, issues ...string) error {
+	taken, err := p.records.Slots(ctx, tx)
+	if err != nil {
+		return err
+	}
+	index := 0
+	for _, slot := range taken {
+		index = max(index, slot.Index+1)
+	}
+	for _, issue := range issues {
+		if err := p.records.PutSlot(ctx, tx, record.Slot{Issue: issue, Index: index, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		index++
+	}
+	return nil
+}
+
 // waitProcessed waits for the daemon's processed_events row for the GitHub envelope eventID, which
 // the intake writes in the transaction that applies the event, so what a step reads next follows
-// that event; what names the envelope in the wait's failure. No route shows the row.
-func (p *liveProof) waitProcessed(what, eventID string) {
+// that event. No route shows the row.
+func (p *liveProof) waitProcessed(eventID string) {
 	p.t.Helper()
-	testwait.Eventually(p.t, "the daemon's record that it took "+what, func() bool {
+	testwait.Eventually(p.t, "the daemon's processed_events row for github event "+eventID, func() bool {
 		var taken bool
 		if err := p.st.Pool().QueryRow(context.Background(),
 			"select exists(select 1 from processed_events where source = 'github' and event_id = $1)", eventID).Scan(&taken); err != nil {

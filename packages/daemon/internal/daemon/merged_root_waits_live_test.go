@@ -38,7 +38,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -98,11 +97,7 @@ type mergedRootWaitsLive struct {
 // waiting root's branch, which must leave the merge the root waits on, and last the child's merge,
 // which closes the root on that merge.
 func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
-	natsURL := os.Getenv(liveNATSURLEnv)
-	if natsURL == "" {
-		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; scripts/e2e/merged-root-waits.sh starts a nats-server and sets it", liveNATSURLEnv)
-	}
-	r := newMergedRootWaitsLive(t, natsURL)
+	r := newMergedRootWaitsLive(t)
 	r.step("step1-the-acceptance-waits-for-the-child", r.acceptanceRefused)
 	r.step("step6-the-acceptance-lands-once-the-child-is-out", r.acceptanceAccepted)
 	r.step("step2-the-merged-root-waits-for-its-child", r.rootMergeWaits)
@@ -112,12 +107,12 @@ func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
 	r.step("step4-the-childs-merge-closes-the-root", r.childMergeClosesTheRoot)
 }
 
-// newMergedRootWaitsLive boots the daemon over natsURL with the tree already recorded: the root in
-// accepting on its reviewed, open pull request, holding its tree's admission slot, and the one
-// child beneath it implementing on an open pull request of its own.
-func newMergedRootWaitsLive(t *testing.T, natsURL string) *mergedRootWaitsLive {
+// newMergedRootWaitsLive boots the daemon over the script's broker with the tree already recorded:
+// the root in accepting on its reviewed, open pull request, holding its tree's admission slot, and
+// the one child beneath it implementing on an open pull request of its own.
+func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	t.Helper()
-	proof := newLiveProof(t, natsURL, workflowConfig(t, natsURL))
+	proof := newLiveProof(t, "scripts/e2e/merged-root-waits.sh")
 	architect, err := claim.NewToken(proof.project, proof.cfg.Project+"-1", claim.RoleArchitect)
 	if err != nil {
 		t.Fatal(err)
@@ -198,16 +193,7 @@ func (r *mergedRootWaitsLive) seedTree() {
 				return err
 			}
 		}
-		// Slot indexes are unique across the shared database, so the tree takes the next free one.
-		taken, err := r.records.Slots(ctx, tx)
-		if err != nil {
-			return err
-		}
-		index := 0
-		for _, slot := range taken {
-			index = max(index, slot.Index+1)
-		}
-		return r.records.PutSlot(ctx, tx, record.Slot{Issue: r.parent, Index: index, AdmittedAt: time.Now()})
+		return r.admit(ctx, tx, r.parent)
 	})
 	if _, err := r.st.OpenTreeLifecycle(ctx, r.project, r.parent, treelifecycle.AuthorityWorkflow); err != nil {
 		t.Fatalf("open the lifecycle of %s: %v", r.parent, err)
@@ -541,7 +527,7 @@ func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
 	eventID := r.publishOpened(r.parent, r.openedPR)
 	r.note("drove a pull request opened from %s's branch: a notifications.github.%s.pr.%d envelope, action opened, head_ref legion/%s",
 		r.parent, r.subjectRepo(), r.openedPR, r.parent)
-	r.waitProcessed("the opened", eventID)
+	r.waitProcessed(eventID)
 	r.note("read back: the daemon took the event — its processed_events row for github %s", eventID)
 	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
