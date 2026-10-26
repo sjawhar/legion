@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-497",
+  "completed": "2026-10-26T23:41:33Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
+  "critical": 0,
+  "important": 4,
+  "minor": 6,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "The interrupt latch misses an interrupt that lands while a prompt is being set up (before agent_start, e.g. during pi-envoy's own before_agent_start Dispatch read, up to 3 s) or during post-prompt recovery outside compaction and retry: the host's abort emits no aborted assistant message there (agent.ts:1554-1556 with no loop running), still sets autoResumeSuppressed (agent-session.ts:10165-10167) and folds the queued card (agent-session.ts:1383-1395, from abort's finally at 10250-10252); runSeq is unchanged, so checkFoldedCards sends the nextTurn+triggerTurn wake and #promptAgentInitiatedMessage starts the turn the person stopped. Contradicts acceptance A3 and CHANGELOG.md:49."},
+    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "In print/json mode the startup phase's wake can start a turn after initializeExtensions returns while print-mode.ts awaits MCP startup (print-mode.ts:250-254); the initial session.prompt then passes no streamingBehavior and throws AgentBusyError (agent-session.ts:7710-7717). On main the card's turn ran inside the drain and print mode prompted an idle session. The host exposes ctx.mode (extensibility/extensions/types.ts:652-653)."},
+    {"severity": "important", "file": "packages/pi-envoy/extensions/card-delivery-omp.test.ts", "description": "Order-dependent: it imports connect from \"nats\" (line 15) while envoy.test.ts:197 mock.module(\"nats\") replaces it for the whole Bun process. `bun test ./extensions/envoy.test.ts ./extensions/card-delivery-omp.test.ts` gave 893 pass 8 fail, each 'connection.request is not a function' at card-delivery-omp.test.ts:336; alone it passes 9/9 four times. The package's `bun test` (CI's step) runs both in one process."},
+    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "Cleanup: the wake subsystem (about 200 lines, seven closure variables at 1670-1711, written from deliver, message_end, auto_compaction_end, auto_retry_end, agent_start, agent_end and three cancelFoldCheck sites) belongs in its own module, as src/agent-stream.ts did, with its policy unit-tested without NATS."},
+    {"severity": "minor", "file": "packages/pi-envoy/AGENTS.md", "description": "Docs: a host without isIdle still sends a targeted Aside as an aside (envoy.ts:1262), not 'every card a steer' (AGENTS.md:28, CHANGELOG.md:46); a folded targeted Aside gets no wake outside startup (envoy.ts:1821) and a startup targeted Aside does get one, in plan mode too; neither doc says so."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "Comment at 1710 says the host timer has no cancel handle; the pinned host's setTimeout returns a Timer and has clearTimer (extensibility/extensions/types.ts:748-750)."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/card-delivery-omp.test.ts", "description": "The /plan case (660-670) publishes no card and asserts only host behaviour."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/card-delivery-omp.test.ts", "description": "isSummarization (50-54) and call() are copies of helpers in dispatch-first-omp.test.ts and legion-role-tools-omp.test.ts; export them from packages/pi-shared/test/omp-harness.ts."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "unseenStartupCards.set at 1268 runs after pi.sendMessage and leans on host ordering the comment has to defend; record before the send."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "foldedCards and seenStartupCards hold one concept with two rules; one list with a startup flag removes the split."}
+  ],
+  "ci": "At code head 2bdf4b02: lint, typecheck, pr-title success; test in_progress; the pi-envoy job queued at review time.",
+  "thermonuclear": "Both run once at 2bdf4b02: deep review CHANGES (findings 1 and 2 above, plus docs and comment Minors), code quality CHANGES (cleanup findings above). Each host claim re-read by the reviewer in the pinned source at $TMPDIR/omp-fork (tag v18.12.2-sami.20261026-135627).",
+  "risks": [
+    "One package-wide `bun run test` of three in the reviewer's pod failed 'an RPC abort_and_restore_queue during a held model request keeps the three queued cards' after 95.8 s (run took 214 s against 122-146 s for the others); the log was not kept, so the cause is unproven. The file alone passed 9/9 in four runs."
+  ]
+}
