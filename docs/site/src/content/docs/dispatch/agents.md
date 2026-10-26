@@ -157,6 +157,15 @@ at the end of the page, so you can still read what it said.
   `/` to choose from its commands. The list marks commands that only the session's terminal runs;
   their reply says they did not run. Use the arrow keys to choose, **Tab** or **Enter** to pick, and
   **Escape** to close the list. BTW offers no commands.
+- **Send** works while the agent is in the middle of a turn. The message goes at once, and the
+  session takes it as its mode says ([Send, Aside, and BTW](#send-aside-and-btw)). **Enter** sends
+  and **Shift+Enter** starts a new line. With an empty box, Send cannot be pressed, and the line
+  under the box says "Type a message first."
+- While your message is on its way, Send reads **Sending…** until Dispatch answers; you can go on
+  typing. If Dispatch refuses the message, the reason shows above the thread and your message comes
+  back into the box, ahead of anything you typed since.
+- What you type for one agent stays with that agent: moving to another agent's live view shows that
+  agent's own box, and coming back finds your text. Leaving the live view drops it.
 
 Some sessions cannot stream their conversation, such as Claude Code sessions. The live view says
 so, and still shows your messages and their replies.
