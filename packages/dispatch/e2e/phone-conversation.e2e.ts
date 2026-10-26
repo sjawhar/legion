@@ -5,6 +5,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  getComment,
   patchIssue,
   resolveComment,
 } from "./api";
@@ -570,7 +571,8 @@ test("on a phone, a thread resolved while its own reply is out stays open with t
 // server never answers must not keep the reader there: past the client's deadline they let go,
 // and Back takes the reader out. The send is not refused - the server may still take it - so the
 // thread offers no Retry, and the draft stays held. Each attempt is held to KEYED_SEND_ATTEMPT_MS
-// (15 s), so by the deadline the page has asked again, under the write's one key.
+// (15 s), so by the deadline the page has asked again, under the write's one key, and once the
+// server does answer, it has made the reply once.
 test("on a phone, a thread reply the server never answers lets Back go at the deadline", async ({
   browser,
 }) => {
@@ -608,6 +610,13 @@ test("on a phone, a thread reply the server never answers lets Back go at the de
     expect(new Set(keys).size).toBe(1);
     await back.click();
     await expect(threadView(page)).toHaveCount(0);
+
+    const landed = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 201);
+    send.release();
+    await landed;
+    await send.settled();
+    const { replies } = await getComment(earlier.id);
+    expect(replies.filter((reply) => reply.body === "Reply into the void")).toHaveLength(1);
   } finally {
     await alice.close();
   }

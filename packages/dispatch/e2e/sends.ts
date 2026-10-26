@@ -1,4 +1,4 @@
-import type { Locator, Page } from "@playwright/test";
+import type { Locator, Page, Request } from "@playwright/test";
 
 /** In-app navigation, as a link does: a reload would drop a send with the page. */
 export async function navigateInApp(page: Page, path: string): Promise<void> {
@@ -19,20 +19,46 @@ export function answeredPost(page: Page, path: string, status: number) {
 }
 
 /** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them, with
- *  the `Idempotency-Key` each carried. */
+ *  the `Idempotency-Key` each carried. `settled` resolves once every POST held so far has ended:
+ *  answered, or cut off by the page, which a held request the page gave up on never outlives -
+ *  so a row reads what Dispatch made only after every attempt that could reach it has. */
 export async function holdPosts(
   page: Page,
   pattern: string
-): Promise<{ keys: () => (string | null)[]; posts: () => number; release: () => void }> {
+): Promise<{
+  keys: () => (string | null)[];
+  posts: () => number;
+  release: () => void;
+  settled: () => Promise<void>;
+}> {
   const { promise: held, resolve: release } = Promise.withResolvers<void>();
   const keys: (string | null)[] = [];
+  const ends: Promise<void>[] = [];
   await page.route(pattern, async (route) => {
-    if (route.request().method() !== "POST") return route.fallback();
-    keys.push(await route.request().headerValue("idempotency-key"));
+    const request = route.request();
+    if (request.method() !== "POST") return route.fallback();
+    const { promise: ended, resolve: end } = Promise.withResolvers<void>();
+    const onEnd = (settled: Request) => {
+      if (settled !== request) return;
+      page.off("requestfinished", onEnd);
+      page.off("requestfailed", onEnd);
+      end();
+    };
+    page.on("requestfinished", onEnd);
+    page.on("requestfailed", onEnd);
+    ends.push(ended);
+    keys.push(await request.headerValue("idempotency-key"));
     await held;
     return route.fallback();
   });
-  return { keys: () => [...keys], posts: () => keys.length, release };
+  return {
+    keys: () => [...keys],
+    posts: () => keys.length,
+    release,
+    settled: async () => {
+      await Promise.all(ends);
+    },
+  };
 }
 
 /** What a route answers a `POST` it refuses: the status, and the code and reason the composer

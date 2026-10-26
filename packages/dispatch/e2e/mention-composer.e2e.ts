@@ -13,6 +13,7 @@ import {
   createMessage,
   createProject,
   createProjectDocument,
+  getIssueEvents,
   patchIssue,
   resolveComment,
   retryCommentDelivery,
@@ -367,6 +368,11 @@ test("a docked send the server answers at 35 s is one keyed write and shows once
     expect(keys.length).toBeGreaterThan(1);
     expect(new Set(keys).size).toBe(1);
     expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    // Every attempt that could reach Dispatch has, and Dispatch made the comment once.
+    await send.settled();
+    expect(
+      (await getIssueEvents(issue.key)).filter((event) => event.type === "comment.created")
+    ).toHaveLength(1);
   } finally {
     await alice.close();
   }
