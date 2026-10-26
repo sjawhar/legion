@@ -77,6 +77,16 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	t.Log("clone through gh auth git-credential: succeeded")
 }
 
+// This deployment's own App pair, which an unset input takes. Each value is also
+// scripts/e2e/lib/github-apps.sh's, and TestAppFallbacksMatchTheLiveProofLib reads these very
+// constants against that file, so the gated proofs here and every live proof run as one pair.
+const (
+	defaultImplementAppID      = "3202636"
+	defaultImplementAppKeyName = "LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"
+	defaultReviewAppID         = "3202653"
+	defaultReviewAppKeyName    = "GH_REVIEW_APP_PRIVATE_KEY_B64"
+)
+
 // realGitHubApps is Legion's implement and review Apps: this repository's own deployment by
 // default, another deployment's through the same four inputs the stage proofs read
 // (scripts/e2e/lib/github-apps.sh) — each App's id and the secrets-store key the devbox's
@@ -85,8 +95,10 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
 	input := func(name, fallback string, valid *regexp.Regexp) string {
-		value := os.Getenv(name)
-		if value == "" {
+		// Only an unset input takes the default: an input set to an empty value is a command that
+		// printed nothing, which the live proofs' lib refuses too.
+		value, set := os.LookupEnv(name)
+		if !set {
 			return fallback
 		}
 		if !valid.MatchString(value) {
@@ -100,15 +112,15 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 	key := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	apps, err := config.ResolveGitHubApps(config.GitHubApps{
 		Implement: config.GitHubApp{
-			AppID: input("LEGION_E2E_IMPLEMENT_APP_ID", "3202636", id),
+			AppID: input("LEGION_E2E_IMPLEMENT_APP_ID", defaultImplementAppID, id),
 			PrivateKeyCommand: privateKeyCommand(
-				input("LEGION_E2E_IMPLEMENT_APP_KEY_NAME", "LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64", key),
+				input("LEGION_E2E_IMPLEMENT_APP_KEY_NAME", defaultImplementAppKeyName, key),
 			),
 		},
 		Review: config.GitHubApp{
-			AppID: input("LEGION_E2E_REVIEW_APP_ID", "3202653", id),
+			AppID: input("LEGION_E2E_REVIEW_APP_ID", defaultReviewAppID, id),
 			PrivateKeyCommand: privateKeyCommand(
-				input("LEGION_E2E_REVIEW_APP_KEY_NAME", "GH_REVIEW_APP_PRIVATE_KEY_B64", key),
+				input("LEGION_E2E_REVIEW_APP_KEY_NAME", defaultReviewAppKeyName, key),
 			),
 		},
 	})
@@ -128,10 +140,10 @@ func TestAppFallbacksMatchTheLiveProofLib(t *testing.T) {
 		t.Fatalf("read the live proofs' App lib: %v", err)
 	}
 	for _, want := range []struct{ variable, value string }{
-		{"default_implement_app_id", "3202636"},
-		{"default_implement_app_key_name", "LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"},
-		{"default_review_app_id", "3202653"},
-		{"default_review_app_key_name", "GH_REVIEW_APP_PRIVATE_KEY_B64"},
+		{"default_implement_app_id", defaultImplementAppID},
+		{"default_implement_app_key_name", defaultImplementAppKeyName},
+		{"default_review_app_id", defaultReviewAppID},
+		{"default_review_app_key_name", defaultReviewAppKeyName},
 	} {
 		line := want.variable + "=" + want.value + "\n"
 		if !bytes.Contains(lib, []byte(line)) {

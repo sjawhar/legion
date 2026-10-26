@@ -344,8 +344,13 @@ const appInputs = {
 
 async function githubApps(inputs: Record<string, string | undefined>, then: string) {
   const work = mkdtempSync(join(dir, "apps."));
+  const ambient = { ...process.env };
+  // A devbox shell may export this deployment's own key variables; left in, `compgen -e` would
+  // strip them and hide whether the lib's own default entries do, so the child inherits none and
+  // only a case's own inputs put one back.
+  for (const name of Object.keys(ambient)) if (name.includes("PRIVATE_KEY")) delete ambient[name];
   const env: Record<string, string | undefined> = {
-    ...process.env,
+    ...ambient,
     PATH: `${fakeBin}:${process.env.PATH}`,
     LIB: join(import.meta.dir, "github-apps.sh"),
     work,

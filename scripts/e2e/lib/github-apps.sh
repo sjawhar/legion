@@ -61,7 +61,7 @@ require_app_inputs() {
     key=${!key_var-${!key_default}}
     # The bounds keep a pasted credential out of the message: a base64 key is letters and digits
     # too, so only its length tells it from a store key's name, and a refusal prints neither.
-    [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 12 ]] || fail "$id_var must be the $role App's numeric id (digits, no leading zero); its value is not printed"
+    [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 12 ]] || fail "$id_var must be the $role App's numeric id (1 to 12 digits, no leading zero); its value is not printed"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ${#key} -le 64 ]] || fail "$key_var must be a secret-store key's name (letters, digits and underscores, at most 64), not the key itself; its value is not printed"
     printf -v "${role}_app_id" %s "$id"
     printf -v "${role}_app_key_name" %s "$key"
