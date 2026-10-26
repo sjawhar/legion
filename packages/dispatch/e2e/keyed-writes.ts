@@ -1,5 +1,11 @@
 import type { Page, Request, Response, Route } from "@playwright/test";
 
+declare global {
+  interface Window {
+    __dispatchUploadAttempts?: UploadAttempt[];
+  }
+}
+
 /** One write the page made: the JSON body it sent and the `Idempotency-Key` header it sent it
  *  under, which names the person's one action, so every attempt at that action carries the same
  *  key and two actions carry two. */
@@ -139,4 +145,81 @@ export async function dropFirstAnswer(
     await route.abort("failed").catch(() => undefined);
   });
   return promise;
+}
+
+/** One attempt of an upload as the page's own `XMLHttpRequest` saw it: the key it went under and
+ *  how it ended - `load`, with Dispatch's status and error code; `error`, the connection failed;
+ *  `abort`, the page gave it up; `timeout`. `ended` is unset while it is still out. */
+export interface UploadAttempt {
+  readonly code?: string;
+  readonly ended?: "abort" | "error" | "load" | "timeout";
+  readonly key?: string;
+  readonly status?: number;
+}
+
+/** Records, from before the page loads, every `XMLHttpRequest` it sends to `path` (the transport
+ *  of its uploads, `xhrUpload`) as the request itself saw it, beside the page's own listeners:
+ *  Playwright's network events report a request the engine handed the page an answer to and one
+ *  whose connection failed in each engine's own terms, where the page reads only `load` or
+ *  `error`. Returns a reader of what was recorded, in send order. */
+export async function recordUploadAttempts(
+  page: Page,
+  path: string
+): Promise<() => Promise<UploadAttempt[]>> {
+  await page.addInitScript((watched: string) => {
+    type Recorded = {
+      code?: string;
+      ended?: "abort" | "error" | "load" | "timeout";
+      key?: string;
+      status?: number;
+    };
+    const attempts: Recorded[] = [];
+    window.__dispatchUploadAttempts = attempts;
+    const paths = new WeakMap<XMLHttpRequest, string>();
+    const keys = new WeakMap<XMLHttpRequest, string>();
+    const { open, send, setRequestHeader } = XMLHttpRequest.prototype;
+    XMLHttpRequest.prototype.open = function (
+      this: XMLHttpRequest,
+      ...args: [method: string, url: string | URL, ...rest: unknown[]]
+    ) {
+      paths.set(this, new URL(String(args[1]), window.location.href).pathname);
+      Reflect.apply(open, this, args);
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function (
+      this: XMLHttpRequest,
+      name: string,
+      value: string
+    ) {
+      if (name.toLowerCase() === "idempotency-key") keys.set(this, value);
+      return setRequestHeader.call(this, name, value);
+    };
+    XMLHttpRequest.prototype.send = function (
+      this: XMLHttpRequest,
+      body?: Document | XMLHttpRequestBodyInit | null
+    ) {
+      if (paths.get(this) === watched) {
+        const attempt: Recorded = { key: keys.get(this) };
+        attempts.push(attempt);
+        this.addEventListener("load", () => {
+          attempt.ended = "load";
+          attempt.status = this.status;
+          try {
+            const answer: unknown = JSON.parse(this.responseText);
+            if (typeof answer === "object" && answer !== null && "code" in answer) {
+              attempt.code = String(answer.code);
+            }
+          } catch {
+            // An answer that is not JSON carries no code.
+          }
+        });
+        for (const ended of ["abort", "error", "timeout"] as const) {
+          this.addEventListener(ended, () => {
+            attempt.ended = ended;
+          });
+        }
+      }
+      return send.call(this, body);
+    };
+  }, path);
+  return () => page.evaluate(() => window.__dispatchUploadAttempts ?? []);
 }

@@ -13,7 +13,14 @@ import {
   getMyState,
   slowWrites,
 } from "./api";
-import { dropFirstAnswer, keptWrites, replayed, watchAnswers, watchWrites } from "./keyed-writes";
+import {
+  dropFirstAnswer,
+  keptWrites,
+  recordUploadAttempts,
+  replayed,
+  watchAnswers,
+  watchWrites,
+} from "./keyed-writes";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -372,6 +379,175 @@ test("an upload throttled to take 30 s is one attempt and lands once", async ({
     expect(keys).toEqual([expect.any(String)]);
     expect(answers).toEqual([expect.objectContaining({ status: 201 })]);
     await expect(page.getByTestId("artifact-slow-link-bin")).toContainText("1 version");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A repeat of an upload whose first request still runs is answered `409 KEY_IN_FLIGHT`, and each
+// engine must hand the page that answer rather than a failed connection, which the page would take
+// for a transport failure and back off from (FinalReview4 L2). WebKit and Firefox send the whole of
+// an upload before they read its answer: an answer Dispatch wrote with the body still coming reached
+// them as a reset connection, so Dispatch reads and discards the rest of the body first
+// (`drainBeforeAnswer`). The slow-write hook holds the first run 25 s once its key is claimed, so
+// the page gives up on the silent attempt at 15 s and asks again under its key, with the whole
+// 20 MB body each time, while that run still holds the key. On Chromium's projects the upload is
+// throttled to take 8 s; no other engine can be throttled from Playwright. The page's own
+// `XMLHttpRequest` is the witness of how each attempt ended.
+test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once", async ({
+  browser,
+  browserName,
+}, testInfo) => {
+  test.setTimeout(150_000);
+  await createProject({ key: "KW", name: "Keyed writes" });
+  const issue = await createIssue({ project: "KW", title: "A repeated upload" });
+  const path = `/api/v1/issues/${issue.key}/artifacts`;
+  const bytes = 20 * 1024 * 1024;
+  await slowWrites("POST", path, 25_000);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const attempts = await recordUploadAttempts(page, path);
+    await page.goto(`/issues/${issue.key}`);
+    if (testInfo.project.name === "iphone") {
+      const reviewPanel = page.getByRole("button", { name: /review panel/i });
+      if ((await reviewPanel.getAttribute("aria-expanded")) === "true") await reviewPanel.click();
+    }
+    await page.getByRole("tab", { name: "Artifacts" }).click();
+    await page.getByLabel("Upload artifact").setInputFiles({
+      buffer: Buffer.alloc(bytes, 7),
+      mimeType: "application/octet-stream",
+      name: "in-flight.bin",
+    });
+    if (browserName === "chromium") {
+      const throttle = await alice.newCDPSession(page);
+      await throttle.send("Network.emulateNetworkConditions", {
+        downloadThroughput: -1,
+        latency: 0,
+        offline: false,
+        uploadThroughput: Math.floor(bytes / 8),
+      });
+    }
+    await page.getByRole("button", { exact: true, name: "Upload" }).click();
+    await expect
+      .poll(async () => (await attempts()).at(-1), { timeout: 120_000 })
+      .toMatchObject({ ended: "load", status: 201 });
+
+    const [first, ...repeats] = await attempts();
+    // The first attempt got no answer while Dispatch held its run: the page gave it up after 15 s
+    // of silence (`abort`), or the browser dropped the quiet connection first (`error`) - Firefox
+    // closes an HTTP connection that carries no traffic about 6 s after the host's network changes,
+    // which a host that adds and removes an interface while the row runs does. Either way it is a
+    // transport failure the page asks again after, under the same key.
+    expect(["abort", "error"]).toContain(first?.ended);
+    expect(first?.status).toBeUndefined();
+    // Every repeat was handed Dispatch's answer: none ended as a failed connection.
+    expect(repeats.map(({ ended }) => ended)).toEqual(repeats.map(() => "load"));
+    const waits = repeats.slice(0, -1);
+    expect(waits.length).toBeGreaterThanOrEqual(1);
+    for (const wait of waits) {
+      expect(wait).toMatchObject({ code: "KEY_IN_FLIGHT", status: 409 });
+    }
+    const key = first?.key;
+    expect(key).toEqual(expect.any(String));
+    expect(repeats.every((repeat) => repeat.key === key)).toBe(true);
+    await expect(page.getByTestId("artifact-in-flight-bin")).toContainText("1 version");
+    expect(
+      await sql(
+        `select count(*) from artifact_versions v join artifacts a on a.id = v.artifact_id where a.issue_key = '${issue.key}' and a.name = 'in-flight.bin'`
+      )
+    ).toBe("1");
+  } finally {
+    await slowWrites("POST", path, 0);
+    await alice.close();
+  }
+});
+
+// Signing out discards the person's unsent writes and starts none of them. In each of two tabs of
+// alice's, a status change is held at the network, out and never answered, and a label added
+// behind it on the same issue waits its turn. Tab 1 signs out and the person confirms the discard:
+// tab 1 drops its writes, and tab 2, told over the sign-in channel, drops alice's. Dropping the
+// held write must not start the one queued behind it (ProofRun4 D1, where the label went out at
+// the confirm and landed): neither tab makes another write after the confirm, and neither issue
+// changes. Both tabs are loaded before either write is pressed, so the sign-out comes seconds
+// after the held attempts, well inside the 15 s the page waits on a silent one before asking again.
+test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab", async ({
+  browser,
+}, testInfo) => {
+  test.setTimeout(90_000);
+  await createProject({ key: "KW", name: "Keyed writes" });
+  const issues = [
+    await createIssue({ project: "KW", title: "Tab one's change" }),
+    await createIssue({ project: "KW", title: "Tab two's change" }),
+  ];
+  const before = await Promise.all(issues.map((issue) => getIssue(issue.key)));
+  const alice = await asUser(browser, "alice");
+  try {
+    let confirmedAt: number | undefined;
+    const writes: { at: number; body: string }[] = [];
+    const tabs: Page[] = [];
+    for (const issue of issues) {
+      const page = await alice.newPage();
+      const path = `/api/v1/issues/${issue.key}`;
+      page.on("dialog", (dialog) => {
+        if (dialog.type() === "confirm") confirmedAt ??= Date.now();
+        void dialog.accept();
+      });
+      page.on("request", (request) => {
+        if (request.method() === "PATCH" && new URL(request.url()).pathname === path) {
+          writes.push({ at: Date.now(), body: request.postData() ?? "" });
+        }
+      });
+      // The status change reaches no one and is never answered; anything else goes to Dispatch.
+      await page.route(`**${path}`, (route) => {
+        const request = route.request();
+        if (request.method() === "PATCH" && request.postData()?.includes('"status"')) return;
+        return route.fallback();
+      });
+      await page.goto(`/issues/${issue.key}`);
+      await expect(page.getByRole("button", { name: "Edit labels" })).toBeVisible();
+      tabs.push(page);
+    }
+    for (const [index, page] of tabs.entries()) {
+      const label = `discarded-${index + 1}`;
+      await page.bringToFront();
+      await page.getByLabel("Status").selectOption("backlog");
+      await expect(pendingWrites(page).getByRole("status")).toHaveText("Saving 1 change…");
+      const editLabels = page.getByRole("button", { name: "Edit labels" });
+      await editLabels.click();
+      const labelSearch = page.getByRole("combobox", { name: "Search or create label" });
+      await labelSearch.fill(label);
+      await expect(page.getByRole("option", { name: `Create "${label}"` })).toBeVisible();
+      await labelSearch.press("Enter");
+      await editLabels.click();
+      await expect(pendingWrites(page)).toContainText(
+        `Labels of ${issues[index]?.key} — Waiting to send`
+      );
+    }
+    // The labels wait behind the held status changes: none has gone out.
+    expect(writes.filter(({ body }) => body.includes('"labels"'))).toEqual([]);
+
+    const [signingOut] = tabs;
+    if (signingOut === undefined) throw new Error("no tab was opened");
+    await signingOut.bringToFront();
+    if (testInfo.project.name === "iphone") {
+      await signingOut.getByRole("button", { name: "Open navigation" }).click();
+    }
+    await signingOut.getByRole("button", { name: "Sign out" }).click();
+    await expect(signingOut.getByRole("link", { name: "Sign in with Google" })).toBeVisible();
+    expect(confirmedAt).toEqual(expect.any(Number));
+    for (const page of tabs) {
+      await expect(pendingWrites(page)).toHaveCount(0);
+      await expect.poll(() => keptWrites(page)).toBe(0);
+    }
+    // A write a drop started would have gone out at once; give a straggler time to show.
+    await signingOut.waitForTimeout(3_000);
+
+    expect(writes.filter(({ at }) => at >= (confirmedAt ?? 0))).toEqual([]);
+    const after = await Promise.all(issues.map((issue) => getIssue(issue.key, agent)));
+    expect(after.map(({ labels, status }) => ({ labels, status }))).toEqual(
+      before.map(({ labels, status }) => ({ labels, status }))
+    );
   } finally {
     await alice.close();
   }
