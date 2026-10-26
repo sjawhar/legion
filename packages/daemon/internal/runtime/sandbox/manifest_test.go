@@ -122,8 +122,8 @@ func podQOS(spec corev1.PodSpec) corev1.PodQOSClass {
 // which is the kubelet's rule for the Guaranteed class — judged over every container of the pod,
 // the init containers included — and each is bounded on the node's disk, an ephemeral-storage
 // request under its limit. An issue pod's six launchers each carry their role's reservation and its
-// two init containers the launching role's; the controller's pod carries the controller's on both
-// its containers; and the image probe's one container carries the probe's own, which the daemon
+// two init containers the launching role's; the controller's pod carries the controller's on its
+// one container; and the image probe's one container carries the probe's own, which the daemon
 // hands it. A deployment with no `resources` block therefore runs only Guaranteed pods.
 func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -141,7 +141,7 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	}{
 		"root":       {podOf(t, r, rootSpec(t)), want[claim.RoleArchitect], 8},
 		"worker":     {podOf(t, r, workerSpec(t)), want[claim.RoleTester], 8},
-		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 2},
+		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 1},
 		"probe":      {probe.Spec.PodTemplate.Spec, probeReservation(), 1},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -236,14 +236,13 @@ func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 // resumeSession is a session file Oh My Pi recorded in a pod.
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
-// manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; a relaunch whose
-// workspace is recovered after its volume was lost; the root enrolled with the secrets broker; the
-// project controller's pod, launched fresh and resuming; and a worker on Claude Code, a case of its
-// own so every Oh My Pi one keeps pinning that pod unchanged by the Claude backend. The Claude
-// worker's Sandbox is the Oh My Pi worker's byte for byte: its lane is the launcher's start command
-// (launcherCommand), which TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile holds, so a pod
-// change made for Claude Code alone shows in its golden and leaves worker's. Every one owns its
-// volume.
+// manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; the root enrolled
+// with the secrets broker; the project controller's pod, launched fresh and resuming; and a worker
+// on Claude Code, a case of its own so every Oh My Pi one keeps pinning that pod unchanged by the
+// Claude backend. The Claude worker's Sandbox is the Oh My Pi worker's byte for byte: its lane is
+// the launcher's start command (launcherCommand), which
+// TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile holds, so a pod change made for Claude
+// Code alone shows in its golden and leaves worker's.
 // agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
 // (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
 // building that case's manifest, and restore nil after — every other case runs unenrolled).
@@ -253,8 +252,6 @@ func manifestCases(t *testing.T) map[string]struct {
 } {
 	resume := workerSpec(t)
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
-	recovered := workerSpec(t)
-	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
 	controllerResume := controllerSpec(t)
 	controllerResume.Generation, controllerResume.BootToken = 2, "boot-g2"
 	controllerResume.ResumeSessionFile = controllerSession
@@ -266,7 +263,6 @@ func manifestCases(t *testing.T) map[string]struct {
 		"worker":            {workerSpec(t), nil},
 		"claude-worker":     {claudeWorkerSpec(t), nil},
 		"resume":            {resume, nil},
-		"recovered":         {recovered, nil},
 		"controller":        {controllerSpec(t), nil},
 		"controller-resume": {controllerResume, nil},
 		"root-enrolled": {rootSpec(t), &AgentSecrets{
@@ -445,6 +441,25 @@ func containerNamed(t *testing.T, pod corev1.PodSpec, name string) corev1.Contai
 	}
 	t.Fatalf("the pod has no container %s", name)
 	return corev1.Container{}
+}
+
+// podDisk is the claim template of an issue pod's own disk: its issue volume is a generic
+// ephemeral volume, which Kubernetes creates with the pod and deletes with the pod, never a claim
+// that outlived an earlier pod (INFRA-80).
+func podDisk(t *testing.T, pod corev1.PodSpec) *corev1.PersistentVolumeClaimTemplate {
+	t.Helper()
+	at := slices.IndexFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == issueVolume })
+	if at < 0 {
+		t.Fatalf("the pod's volumes %+v carry no %s volume", pod.Volumes, issueVolume)
+	}
+	disk := pod.Volumes[at].VolumeSource
+	if disk.PersistentVolumeClaim != nil {
+		t.Fatalf("the pod's %s volume is the claim %s, want an ephemeral volume of its own", issueVolume, disk.PersistentVolumeClaim.ClaimName)
+	}
+	if disk.Ephemeral == nil || disk.Ephemeral.VolumeClaimTemplate == nil {
+		t.Fatalf("the pod's %s volume is %+v, want an ephemeral volume with a claim template", issueVolume, disk)
+	}
+	return disk.Ephemeral.VolumeClaimTemplate
 }
 
 // mountHolding is the deepest of c's mounts at or above path, the one path lands on, or nil when
@@ -651,7 +666,9 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 // controller's agent one by the same rule; workspace-init, which runs alone, keeps the plain
 // home-directory state home. The value is on the issue's volume, deliberately: Oh My Pi's logs,
 // Chromium's profiles and the installed plugin generation are charged to neither the pod's memory
-// nor the gigabyte of ephemeral storage the container is admitted with, and they outlive the pod.
+// nor the gigabyte of ephemeral storage the container is admitted with, and they outlive a role
+// container's restart (an issue's disk is its pod's own and goes with the pod; the controller's is
+// its Sandbox's and outlives its pod).
 // Which mount holds it is the argument above, not housekeeping: a state home reached through a
 // sub-path mount, or one overlapping the workspace or uv's directories, is a directory whose
 // contents are no longer the role's alone, and the broker-lock reasoning quietly stops holding.
@@ -711,8 +728,8 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 // directory per role is what this replaces, by the human's decision of 2026-10-20: disk is cheap,
 // an issue gets the space it needs, and the roles within a pod are not kept from sharing a cache.
 // Splitting them bought no isolation the pod has anyway — the roles of an issue share the pod,
-// the volume whole, the one checkout they all work in (workspace.Location names the repository
-// and the issue, never a role), the sessions directory and uv's Pythons and cache, and each can
+// the disk whole, the one checkout they all work in (workspace.Location names the repository
+// and the issue, never a role) and uv's Pythons and cache, and each can
 // read and write what the others write — while costing a copy of every cache per role. Bun
 // hardlinks out of its install cache into whatever it installs for (LEGION-198, where that
 // hardlinking was first met), so a file edited in place in node_modules is already in the
@@ -812,10 +829,12 @@ func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 
 // uv links a project's .venv, in an issue's workspace on the issue's volume, to an interpreter
 // under UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the volume's own
-// mount (no other mount covering them) and outside the workspace, whose tree is the project's, so a
-// later pod runs the .venv as it is and reuses what an earlier pod downloaded. The cache is at the
-// same path in every pod. The interpreter directory is the issue's: the same for two pods of one
-// issue, and another for a second issue of the tree.
+// mount (no other mount covering them) and outside the workspace, whose tree is the project's, so
+// every role container of the pod runs the .venv as it is and reuses what another role of the pod
+// downloaded. No later pod reuses any of it: the disk is the pod's own and dies with it
+// (INFRA-80), so a second pod of the issue downloads afresh. The cache is at the same path in
+// every pod, and the interpreter directory is the issue's, so two pods of one issue name the same
+// paths on disks of their own, and a second issue of the tree names another.
 func TestUvKeepsItsPythonsAndCacheOnTheIssueVolume(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -1021,7 +1040,6 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 	}{
 		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = ghrepo.Repository{} }, "no repository"},
 		"no default branch":   {func(s *runtime.SpawnSpec) { s.DefaultBranch = "" }, "no default branch for repository sjawhar/legion-smoke"},
-		"session off volume":  {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
 		"runtime-owned env":   {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
 		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "x" }, "credential-shaped"},
 		"gh token in env":     {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "Env sets GH_TOKEN"},
@@ -1071,6 +1089,11 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"an unreserved cache":       {func(o *Options) { o.RepositoryCache.Resources = corev1.ResourceRequirements{} }, "the repository cache reserves no cpu"},
 		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
 		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
+		"the file session store": {
+			func(o *Options) { o.SessionStore = ompsessions.Store{Kind: ompsessions.StoreVolume} },
+			"no session store that keeps sessions in a database",
+		},
+		"no session store": {func(o *Options) { o.SessionStore = ompsessions.Store{} }, "no session store that keeps sessions in a database"},
 		"cpu request past limit": {
 			func(o *Options) {
 				o.Resources[claim.RoleReviewer].Requests[corev1.ResourceCPU] = resource.MustParse("1500m")
@@ -1129,7 +1152,6 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
-	opts.SessionStore = ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -1259,38 +1281,6 @@ func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
 			}
 			if want := generationDir(workerSpec(t).Generation) + "/" + dispatchTokenKey; pointed && pointer != want {
 				t.Fatalf("DISPATCH_TOKEN_FILE = %q, want the generation's private %s", pointer, want)
-			}
-		})
-	}
-}
-
-// A workspace recovered after its volume was lost is workspace-init's to recreate and mark
-// (LEGION_WORKSPACE_RECOVERED_FROM, cmd/legion/workspace_init.go): the ref reaches the
-// workspace-init container alone, never the agent, and a launch recovering nothing names none.
-func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	recovered := workerSpec(t)
-	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
-	for name, tc := range map[string]struct {
-		spec runtime.SpawnSpec
-		want string
-	}{
-		"recovered": {recovered, "legion/LEGION-208"},
-		"fresh":     {workerSpec(t), ""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec)
-			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_WORKSPACE_RECOVERED_FROM"]
-			if got != tc.want || set != (tc.want != "") {
-				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
-			}
-			for _, name := range []string{fetchContainer, workerContainer} {
-				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
-					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
-				}
 			}
 		})
 	}
@@ -1562,16 +1552,19 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 // pod Legion runs, a worker's and the image probe's alike, as exactly its configured keys, read-only
 // at ProvidersDir in the agent's container alone: each provider key as a file named for the variable
 // Oh My Pi reads, which the worker's shim exports into Oh My Pi's environment (--provider-env-dir),
-// and each providers secret (the NATS nkey seed) as a file of its own name that the container's
-// `<NAME>_FILE` names, so the shim exports it to no one. The pointer is the runtime's, not the
-// spec's: a spec that carries no seed still gets it, and the claim's Secret never holds a copy. With
-// neither, no pod mounts the Secret, no shim is told a directory, and there is no pointer.
+// each providers secret (the NATS nkey seed) as a file of its own name that the container's
+// `<NAME>_FILE` names, so the shim exports it to no one, and the session database's URL key last.
+// The pointer is the runtime's, not the spec's: a spec that carries no seed still gets it, and the
+// claim's Secret never holds a copy. With neither a provider key nor a providers secret the Secret
+// is still mounted under the postgres store, holding the session database's URL alone, so no pod of
+// that store runs without the volume and no shim without the directory.
 func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 	const providersSecret = "legion-" + testProject + "-providers"
 	const seed = "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA44CNHTC4"
 	nats := []string{"NATS_NKEY_SEED"}
 	natsItem := corev1.KeyToPath{Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}
 	anthropic := corev1.KeyToPath{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}
+	sessionItem := corev1.KeyToPath{Key: testSessionDSNKey, Path: ompsessions.DSNFileName}
 	for _, tc := range []struct {
 		name      string
 		keys      map[string]string
@@ -1580,11 +1573,11 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 		items     []corev1.KeyToPath
 	}{
 		{"provider keys", map[string]string{"GEMINI_API_KEY": "gemini", "ANTHROPIC_API_KEY": "anthropic"}, nil, false,
-			[]corev1.KeyToPath{anthropic, {Key: "gemini", Path: "GEMINI_API_KEY"}}},
-		{"neither", nil, nil, false, nil},
-		{"the seed with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nats, true, []corev1.KeyToPath{anthropic, natsItem}},
-		{"the seed alone", nil, nats, true, []corev1.KeyToPath{natsItem}},
-		{"the seed, on a spec that carries none", nil, nats, false, []corev1.KeyToPath{natsItem}},
+			[]corev1.KeyToPath{anthropic, {Key: "gemini", Path: "GEMINI_API_KEY"}, sessionItem}},
+		{"the session database's URL alone", nil, nil, false, []corev1.KeyToPath{sessionItem}},
+		{"the seed with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nats, true, []corev1.KeyToPath{anthropic, natsItem, sessionItem}},
+		{"the seed alone", nil, nats, true, []corev1.KeyToPath{natsItem, sessionItem}},
+		{"the seed, on a spec that carries none", nil, nats, false, []corev1.KeyToPath{natsItem, sessionItem}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions()
@@ -1642,18 +1635,12 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
 					}
 				}
-				if tc.items == nil {
-					if len(volumes) != 0 || len(mounted(agent)) != 0 {
-						t.Errorf("%s: with neither the pod has %+v and mounts %+v", pod.container, volumes, mounted(agent))
-					}
-				} else {
-					want := &corev1.SecretVolumeSource{SecretName: providersSecret, Items: tc.items, DefaultMode: new(int32(0o440))}
-					if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
-						t.Errorf("%s's pod holds the providers Secret as %+v, want once as %+v", pod.container, volumes, *want)
-					}
-					if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
-						t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", pod.container, got, ProvidersDir)
-					}
+				want := &corev1.SecretVolumeSource{SecretName: providersSecret, Items: tc.items, DefaultMode: new(int32(0o440))}
+				if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
+					t.Errorf("%s's pod holds the providers Secret as %+v, want once as %+v", pod.container, volumes, *want)
+				}
+				if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
+					t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", pod.container, got, ProvidersDir)
 				}
 				env := envOf(agent)
 				pointer, pointed := env["NATS_NKEY_SEED_FILE"]
@@ -1672,10 +1659,7 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 			main := workerProcess
 			shim := main.Command[:slices.Index(main.Command, "--")]
 			at := slices.Index(shim, "--provider-env-dir")
-			switch {
-			case tc.items == nil && at >= 0:
-				t.Errorf("with neither the shim is told %v", shim)
-			case tc.items != nil && (at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir):
+			if at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir {
 				t.Errorf("the shim runs as %v, want --provider-env-dir %s", shim, ProvidersDir)
 			}
 		})
@@ -1706,7 +1690,6 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
-	opts.SessionStore = ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -1775,7 +1758,8 @@ func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 // keeps it off, another pod's node. Each issue pod owns a ReadWriteOnce volume of its own and
 // shares nothing with the other pods of its tree, so the scheduler places it wherever the pool has
 // room (LEGION-632). Pinned as the exact key set of the pod spec the manifest sends, so a field
-// added to the template shows here by name.
+// added to the template shows here by name; the controller's pod alone sends no initContainers,
+// since it runs none.
 func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -1791,21 +1775,67 @@ func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 			r.agentSecrets = tc.agentSecrets
 			manifest := manifestOf(t, r, tc.spec).(map[string]any)
 			pod := manifest["spec"].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
-			if got := slices.Sorted(maps.Keys(pod)); !slices.Equal(got, want) {
-				t.Errorf("the pod spec sent carries %v, want exactly %v", got, want)
+			expected := want
+			if tc.spec.Role == claim.RoleController {
+				expected = slices.DeleteFunc(slices.Clone(want), func(key string) bool { return key == "initContainers" })
+			}
+			if got := slices.Sorted(maps.Keys(pod)); !slices.Equal(got, expected) {
+				t.Errorf("the pod spec sent carries %v, want exactly %v", got, expected)
 			}
 		})
 	}
 }
 
-// The volume claim template of every Sandbox, an issue's and the controller's alike, carries no
-// tree label: an issue's claim is labelled by project and issue, the controller's by project and
-// role, while the Sandbox itself keeps the tree, which its tree's cleanup selects by. The volume is
-// the issue's, not the tree's: a child re-admitted as a root of its own keeps its Sandbox and
-// volume, and the relabel (ensureSandbox) patches the Sandbox's labels alone — the daemon's
-// restricted identity has no PVC verb — so a tree label on the claim would name the volume's first
-// tree for life (LEGION-632).
-func TestTheClaimTemplateCarriesTheIssueAndNeverTheTree(t *testing.T) {
+// An issue's Sandbox owns no volume at all: its pod's disk is a generic ephemeral volume declared
+// in the pod template, which Kubernetes creates with the pod and deletes with the pod, so an
+// issue's work never outlives the pod that did it (INFRA-80). The claim it is made from is the
+// operator's StorageClass at the operator's size, and carries no metadata: the pinned CRD declares
+// ephemeral.volumeClaimTemplate.metadata a bare object with no properties, so a label set there
+// would be pruned by the API server without a word (TestManifestMatchesTheSandboxCRD).
+func TestAnIssuePodOwnsItsDiskAndItsSandboxOwnsNoVolume(t *testing.T) {
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range manifestCases(t) {
+		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
+			l, err := r.prepare(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if l.kind == (controllerPod{}) {
+				t.Skip("the controller's Sandbox owns its volume")
+			}
+			if got := r.sandboxManifest(l).Spec.VolumeClaimTemplates; len(got) != 0 {
+				t.Errorf("the issue's Sandbox owns %+v, want no volume claim template: its pod owns its disk", got)
+			}
+			template := podDisk(t, r.podTemplate(l).Spec)
+			if !reflect.ValueOf(template.ObjectMeta).IsZero() {
+				t.Errorf("its claim template carries metadata %+v, want none: the CRD prunes every field of it", template.ObjectMeta)
+			}
+			want := corev1.PersistentVolumeClaimSpec{
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				StorageClassName: &opts.StorageClass,
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: opts.IssueVolume},
+				},
+			}
+			if !reflect.DeepEqual(template.Spec, want) {
+				t.Errorf("its claim is %+v, want %+v", template.Spec, want)
+			}
+		})
+	}
+}
+
+// The controller's Sandbox is the one this runtime still has own a volume claim template, so a
+// relaunch finds the working root its last pod left on it; its session is a row in the session
+// database, as every role's is. The template's labels are its pod's: the project and the
+// controller role, and no tree, which the controller has none of. The daemon's
+// restricted identity has no PVC verb, so the labels the claim is created with are the labels it
+// keeps for life (LEGION-632).
+func TestTheControllersClaimTemplateCarriesItsProjectAndRoleAlone(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -1817,14 +1847,15 @@ func TestTheClaimTemplateCarriesTheIssueAndNeverTheTree(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := r.sandboxManifest(l)
-			want := map[string]string{labelProject: testProject, labelIssue: labelValue(tc.spec.Issue)}
-			if l.kind == (controllerPod{}) {
-				want = map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
-			} else if s.Labels[labelTree] != labelValue(tc.spec.Tree) {
-				t.Errorf("the Sandbox carries %s=%q, want its tree %q: the tree's cleanup selects it by that label", labelTree, s.Labels[labelTree], tc.spec.Tree)
+			if l.kind != (controllerPod{}) {
+				t.Skip("an issue's Sandbox owns no claim template")
 			}
-			if got := s.Spec.VolumeClaimTemplates[0].Metadata.Labels; !maps.Equal(got, want) {
+			templates := r.sandboxManifest(l).Spec.VolumeClaimTemplates
+			if len(templates) != 1 || templates[0].Metadata.Name != issueVolume {
+				t.Fatalf("the controller's Sandbox owns %+v, want the one %s template", templates, issueVolume)
+			}
+			want := map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
+			if got := templates[0].Metadata.Labels; !maps.Equal(got, want) {
 				t.Errorf("the claim template carries %v, want exactly %v", got, want)
 			}
 		})
@@ -1982,8 +2013,7 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 // A Claude Code role's worker container is told where Claude Code keeps its state and that
 // nothing of Claude Code's own may run after a turn's last result — the harness's analogue of the
 // turn scoping `--pod-safety` writes for Oh My Pi — and an Oh My Pi role's container is told none
-// of the three. The directory is the role's own on the issue's volume, so it outlives the pod and
-// is no sibling role's.
+// of the three. The directory is the role's own under its state home, so it is no sibling role's.
 func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -2044,13 +2074,11 @@ func TestAResumingClaudePodContinuesItsTranscriptByItsID(t *testing.T) {
 	}
 }
 
-// Each harness's recorded session is held to its own rule, where the launch resolves it. A Claude
-// claim resumes a transcript of the pod's own Claude Code directory and nothing else, which
-// prepare reads through claudelaunch.ResumeSession as the tmux lane's resume does: one of another
-// role's directory, an Oh My Pi session file, or a name that is no session id is refused, and a
-// session of the other harness is refused naming the backend change that left it recorded. An Oh
-// My Pi claim's rule is validateSessionPath, the pod's sessions directory, unchanged, and a Claude
-// transcript is no session of it.
+// A Claude claim's recorded session is held to its harness's rule, where the launch resolves it: a
+// transcript of the pod's own Claude Code directory and nothing else, which prepare reads through
+// claudelaunch.ResumeSession as the tmux lane's resume does: one of another role's directory, an
+// Oh My Pi session file, or a name that is no session id is refused, and a session of the other
+// harness is refused naming the backend change that left it recorded.
 func TestARecordedSessionIsHeldToItsHarnesssRule(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -2080,53 +2108,5 @@ func TestARecordedSessionIsHeldToItsHarnesssRule(t *testing.T) {
 	if _, err := resuming(named); err == nil ||
 		!strings.Contains(err.Error(), "not named for a Claude Code session id") {
 		t.Errorf("prepare of a Claude claim resuming %s = %v, want it refused as no session id", named, err)
-	}
-	if err := validateSessionPath(resumeSession); err != nil {
-		t.Errorf("validateSessionPath(%s) = %v, want the pod's sessions directory accepted", resumeSession, err)
-	}
-	if err := validateSessionPath(transcript); err == nil ||
-		!strings.Contains(err.Error(), "cannot be resumed on this runtime") {
-		t.Errorf("validateSessionPath(%s) = %v, want it refused as no file of the pod's sessions directory", transcript, err)
-	}
-}
-
-// SessionOnVolume moves an Oh My Pi session file's recorded path onto a mounted volume and refuses
-// a Claude Code transcript, naming it, as it refuses every file a pod keeps outside its sessions
-// directory: a pod role's transcript and a pane's, under the daemon's state directory, alike. The
-// one-off copy that path is computed for (`legion sessions import`) refuses a transcript itself,
-// in its own words, before it asks (cmd/legion's importSession).
-func TestSessionOnVolumeRefusesAClaudeTranscript(t *testing.T) {
-	const root = "/mnt/tree"
-	onVolume, err := SessionOnVolume(resumeSession, root)
-	want := root + "/" + SessionsSubPath + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
-	if err != nil || onVolume != want {
-		t.Fatalf("SessionOnVolume(%s) = %q, %v; want %q", resumeSession, onVolume, err, want)
-	}
-	for _, file := range []string{
-		claudeTranscript(claim.RoleTester),
-		"/var/lib/legion/claude/legion-legion-legion-208-tester/projects/--cwd--/" + claudeTranscriptID + ".jsonl",
-	} {
-		if _, err := SessionOnVolume(file, root); err == nil ||
-			!strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "cannot be resumed on this runtime") {
-			t.Errorf("SessionOnVolume(%s) = %v, want a refusal naming it as no file of the pod's sessions directory", file, err)
-		}
-	}
-}
-
-// Whether a recorded session lives on its issue's volume is the store's and the recorded path's
-// alone: under file storage every session does, and under a session database a Claude Code
-// transcript alone — a pod role's or a pane's — since the table holds every Oh My Pi session.
-func TestSessionOnIssueVolumeFollowsTheStoreAndTheTranscript(t *testing.T) {
-	transcripts := []string{
-		claudeTranscript(claim.RoleTester),
-		"/var/lib/legion/claude/legion-legion-legion-208-tester/projects/--cwd--/" + claudeTranscriptID + ".jsonl",
-	}
-	for _, file := range append([]string{resumeSession}, transcripts...) {
-		if !SessionOnIssueVolume(false, file) {
-			t.Errorf("under file storage %s is not on the issue's volume, want it there", file)
-		}
-		if got, want := SessionOnIssueVolume(true, file), file != resumeSession; got != want {
-			t.Errorf("under a session database %s on the issue's volume: %t, want %t", file, got, want)
-		}
 	}
 }

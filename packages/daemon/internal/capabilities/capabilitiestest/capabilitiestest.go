@@ -11,7 +11,7 @@ import (
 )
 
 // binaries are the binaries the capability check's image rows look for.
-var binaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig", "chromium", "npm"}
+var binaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig", "chromium", "npm"}
 
 // BinaryScript is what a stubbed binary runs: `go version` answers a Go version, `chromium
 // --version` a Chromium one.

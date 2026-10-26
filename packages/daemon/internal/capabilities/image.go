@@ -402,12 +402,15 @@ func pluginEnabled(lock, name string) (string, bool) {
 // redis-cli, sqlite3, nc and dig are the clients a role's own work needs and an unprivileged
 // container cannot apt-install for itself: a repository's own SQLite fixture or database (and Oh
 // My Pi's own profile databases, which are SQLite where a role's session is not), a reachability
-// check, a name that does not resolve.
+// check, a name that does not resolve. gcc is on it, beside go, for cgo: Go refuses -race without
+// cgo, and cgo needs a C compiler, so a role runs the race detector as `CGO_ENABLED=1 go test -race
+// …` (the worker image keeps cgo off by default, with ENV CGO_ENABLED=0).
 // A missing tool fails the publish naming the tool; a deployment that layers its own image on the
-// published one inherits the five; a deployment still pinning an older digest keeps the old list,
+// published one inherits the five clients (psql, redis-cli, sqlite3, nc and dig) and gcc; a
+// deployment still pinning an older digest keeps the old list,
 // because the probe runs that image's own `legion`.
 func toolchain(ctx context.Context, img Image) (string, bool) {
-	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig")
+	paths, detail, ok := onPath(img, "go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig")
 	if !ok {
 		return detail, false
 	}

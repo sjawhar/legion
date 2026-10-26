@@ -9,6 +9,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
+// A pod whose init container ended non-zero is Gone for every role, and says so: no launcher could
+// have started in it. The mapping classifies it a failed init, whatever the exit code, which is
+// what keeps it out of ends() and so out of the displaced reading.
 func TestRestartingInitFailureIsGoneForEveryRole(t *testing.T) {
 	for _, waiting := range []bool{false, true} {
 		t.Run(map[bool]string{false: "terminated", true: "backoff"}[waiting], func(t *testing.T) {
@@ -16,7 +19,7 @@ func TestRestartingInitFailureIsGoneForEveryRole(t *testing.T) {
 			loc := g.spawn(workerSpec(t))
 			g.update(g.pod(loc.Sandbox.Name), func(p *corev1.Pod) {
 				p.Status.Phase = corev1.PodPending
-				failed := &corev1.ContainerStateTerminated{ExitCode: 3, Reason: "Error"}
+				failed := &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}
 				status := corev1.ContainerStatus{Name: initContainer}
 				if waiting {
 					status.State.Waiting = &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}
@@ -31,8 +34,11 @@ func TestRestartingInitFailureIsGoneForEveryRole(t *testing.T) {
 				return p != nil && p.Status.Phase == corev1.PodPending
 			})
 			observation, err := g.r.Probe(g.ctx, loc)
-			if err != nil || observation.Kind != runtime.Gone || !observation.WorkspaceLost || !strings.Contains(observation.Detail, initContainer) {
-				t.Fatalf("restarting init = %+v, %v; want Gone with workspace loss and init detail", observation, err)
+			if err != nil || observation.Kind != runtime.Gone || !strings.Contains(observation.Detail, initContainer) {
+				t.Fatalf("restarting init = %+v, %v; want Gone with the failed init and its detail", observation, err)
+			}
+			if !g.initFailed(loc) {
+				t.Fatalf("restarting init = %+v; want it classified a failed init", observation)
 			}
 		})
 	}
@@ -75,7 +81,7 @@ func TestColdInitFailureReachesSupervisionWithoutWaitingForLauncher(t *testing.T
 	g.update(g.pod(name), func(p *corev1.Pod) {
 		p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: initContainer,
 			State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
-			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3, Reason: "Error"}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
 		}}
 	})
 	launched := <-result
@@ -83,7 +89,7 @@ func TestColdInitFailureReachesSupervisionWithoutWaitingForLauncher(t *testing.T
 		t.Fatalf("init failure was hidden as a launcher timeout: %v", launched.err)
 	}
 	obs, err := g.r.Probe(g.ctx, launched.loc)
-	if err != nil || obs.Kind != runtime.Gone || !obs.WorkspaceLost {
-		t.Fatalf("supervisor cannot observe confirmed storage loss: %+v, %v", obs, err)
+	if err != nil || obs.Kind != runtime.Gone || !g.initFailed(launched.loc) {
+		t.Fatalf("supervisor cannot observe the confirmed init failure: %+v, %v", obs, err)
 	}
 }

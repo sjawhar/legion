@@ -243,23 +243,6 @@ func (s *supervisor) post(token claim.Token, ev supervise.Event) {
 	m.inbox.put(ev)
 }
 
-// volumeLost tells every other claim of c's issue that the issue's volume was lost
-// (IssueVolumeLost): each drops the session it recorded if that session lived on it
-// (supervise.Deps.SessionOnVolume). It is the machines' VolumeLost, called by c's machine under
-// its own lock, so it reads no machine — the issue of each is kept beside it — and only queues.
-func (s *supervisor) volumeLost(c supervise.Claim) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.stopped {
-		return
-	}
-	for token, m := range s.machines {
-		if token != c.Token && m.issue == c.Issue {
-			m.inbox.put(supervise.IssueVolumeLost{Claim: token})
-		}
-	}
-}
-
 // count is how many claims the daemon supervises. It waits on no lock a decision holds.
 func (s *supervisor) count() int {
 	return len(s.supervised())

@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -500,49 +499,6 @@ func TestTheSchemaRefusesAControllerClaimOnAnIssueAndAWorkflowClaimOnNone(t *tes
 		if err := s.PutClaim(context.Background(), c); err == nil {
 			t.Errorf("stored %s on role %s with issue %q and tree %q", c.Token, c.Role, c.Issue, c.Tree)
 		}
-	}
-}
-
-// IssueSessionFiles reads the issue's own claims: a session a role of the issue recorded is one,
-// retired roles included, and a session another issue of the same tree recorded is not, since it is
-// on that issue's own volume; nor is another project's claim on the same key.
-func TestIssueSessionFilesAreOnlyTheIssuesOwnClaims(t *testing.T) {
-	ctx := context.Background()
-	store := migratedStore(t)
-	child := tmuxClaim("legion-LEGION-209-implementer")
-	root := supervise.Claim{
-		Token: "legion-LEGION-208-architect", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-208",
-		Role: claim.RoleArchitect, State: supervise.StateQueued,
-	}
-	for _, c := range []supervise.Claim{child, root} {
-		if err := store.PutClaim(ctx, c); err != nil {
-			t.Fatalf("put claim %s: %v", c.Token, err)
-		}
-	}
-	files := func(project, issue string) []string {
-		t.Helper()
-		got, err := store.IssueSessionFiles(ctx, project, issue)
-		if err != nil {
-			t.Fatalf("IssueSessionFiles(%s, %s): %v", project, issue, err)
-		}
-		return got
-	}
-	if got := files("legion", child.Issue); !slices.Equal(got, []string{child.SessionFile}) {
-		t.Errorf("%s recorded session %s, yet IssueSessionFiles reads %q", child.Issue, child.SessionFile, got)
-	}
-	if got := files("legion", root.Issue); len(got) != 0 {
-		t.Errorf("%s recorded no session, yet IssueSessionFiles reads %q (its child %s recorded %s)", root.Issue, got, child.Issue, child.SessionFile)
-	}
-	if got := files("other", child.Issue); len(got) != 0 {
-		t.Errorf("another project's %s reads legion's sessions %q", child.Issue, got)
-	}
-
-	root.State, root.Session, root.SessionFile = supervise.StateRetired, "ses_architect", "/state/sessions/architect.jsonl"
-	if err := store.PutClaim(ctx, root); err != nil {
-		t.Fatalf("retire the root with its session: %v", err)
-	}
-	if got := files("legion", root.Issue); !slices.Equal(got, []string{root.SessionFile}) {
-		t.Errorf("%s's retired architect recorded session %s, yet IssueSessionFiles reads %q", root.Issue, root.SessionFile, got)
 	}
 }
 

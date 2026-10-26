@@ -12,17 +12,18 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// The pod's own paths. The issue's volume is mounted whole at TreeRoot in workspace-init and each
-// role launcher, and sessions stay on it. The pod's feed is the volume's feedSubPath directory,
+// The pod's own paths. The issue's disk is the pod's own generic ephemeral volume, created with the
+// pod and deleted with it; it is mounted whole at TreeRoot in workspace-init and each role
+// launcher, and no session is on it — every session is a row in the session database the
+// deployment names (Options.SessionStore). The pod's feed is the volume's feedSubPath directory,
 // mounted at FeedDir: read-write in workspace-fetch, which mounts nothing else of the volume, and
 // read-only over the whole volume's mount in every other container. The clone owns its object-store
-// entries, and no agent writes what the token-holding container reads. On a volume carried over from
-// an earlier release, whose agents could write the whole volume, feedSubPath may be a link to another
-// directory of it, which the kubelet mounts in its place; agents may still change what the next fetch
-// reads there, through that directory's own path or the link itself, which is no mount point in their
-// containers. There the fetch's own check of the feed (workspace.Fetch takes a feed only in the shape
-// it writes), run before any git and in an init container no agent runs beside, keeps the
-// token-holding container from running what they wrote.
+// entries, and no agent writes what the token-holding container reads. No volume is ever carried
+// over from an earlier release: an issue pod's disk is created with the pod and deleted with it
+// (INFRA-80), so every feed is one this pod's own workspace-fetch wrote, and the fetch's own check
+// of it (workspace.Fetch takes a feed only in the shape it writes), run before any git and in an
+// init container no agent runs beside, is what keeps the token-holding container from running what
+// an agent of this pod wrote.
 // Each role container has its own launcher token projection at LauncherDir, and
 // its own memory-backed LauncherPrivateDir, where its launcher writes the generation's boot token
 // and launch credentials, and StateDir. GHConfigDir is a role container's gh bundle root
@@ -42,10 +43,13 @@ import (
 // blocking its siblings'. The go command's two caches are the issue's too, one pair every role of
 // it is told, `/legion/go/build` and `/legion/go/mod` (goBuildCache, goModCache) under
 // `/legion/go`, a top-level directory of the volume beside the workspaces, the repositories,
-// SessionsSubPath, feedSubPath and uv's own (uvPythonRoot, uvCacheDir). The gigabyte of ephemeral
-// storage the container is admitted with bounds none of them.
+// feedSubPath and uv's own (uvPythonRoot, uvCacheDir). The gigabyte of ephemeral storage the
+// container is admitted with bounds none of them.
 const (
-	TreeRoot           = "/legion"
+	TreeRoot = "/legion"
+	// SessionsSubPath is the sessions directory of a legion-v10.0.0 tree volume, which no pod
+	// mounts any more: its one reader is `legion sessions import --tree-volume`, the copy of such
+	// a deployment's session files into the session table (SessionOnVolume).
 	SessionsSubPath    = "sessions"
 	FeedDir            = TreeRoot + "/" + feedSubPath
 	CacheRoot          = "/legion/cache"
@@ -59,8 +63,7 @@ const (
 )
 
 // feedSubPath is the issue volume's directory that holds the pod's feed (FeedDir). The kubelet
-// makes it on first use, so a volume provisioned before the feed moved onto it is relaunched as it
-// is: nothing of its tree moves.
+// makes it on first use.
 const feedSubPath = "feed"
 
 // AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id
@@ -152,8 +155,8 @@ func GitHubHostsKey(owner string) string { return "github-hosts-" + owner }
 func GitHubConfigKey(owner string) string { return "github-config-" + owner }
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the
-// controller copies pod labels from), the claim's Secret, and, less the tree (claimLabels), its
-// volume claim template (copied to the PVC). The informers select on the project label.
+// controller copies pod labels from), the claim's Secret, and the controller Sandbox's volume
+// claim template (copied to the PVC). The informers select on the project label.
 const (
 	labelProject = "legion.dev/project"
 	labelTree    = "legion.dev/tree"
@@ -161,9 +164,11 @@ const (
 	labelRole    = "legion.dev/role"
 )
 
-// issueVolume is every Sandbox's volume claim template, the issue's or the controller's, and the
-// pod volume its pod mounts. The controller names the claim `<template>-<sandbox>` (agent-sandbox
-// v1.0.3, sandbox_controller.go:1641), which is IssueClaimName.
+// issueVolume is the name a pod's disk is mounted under, an issue's and the controller's alike,
+// and the name of the one volume claim template the controller's Sandbox owns — an issue's owns
+// none, its disk being the pod's own ephemeral volume. The Agent Sandbox controller names the
+// claim it makes from a template `<template>-<sandbox>` (v1.0.3, sandbox_controller.go:1641),
+// which is IssueClaimName.
 const issueVolume = "issue"
 
 // A repository cache's identity and parts. labelCache marks every object of a cache — its Sandbox,
@@ -239,10 +244,10 @@ func cacheSecretName(sandbox string) string { return sandbox + "-token" }
 // Sandbox's cacheVolume template.
 func cacheClaimName(sandbox string) string { return cacheVolume + "-" + sandbox }
 
-// IssueClaimName is the volume claim of the Sandbox that t's claim runs in, the issue's or the
-// controller's, as the controller names the claim it makes from the Sandbox's `issue` template.
-// Any role claim of the issue names it: the token is cut to the Sandbox's name as SandboxName
-// cuts it.
+// IssueClaimName is the volume claim of the project controller's Sandbox, as the Agent Sandbox
+// controller names the claim it makes from that Sandbox's `issue` template. An issue's Sandbox
+// owns no template and so no claim of this name: its pod's disk is an ephemeral volume the pod
+// owns. The token is cut to the Sandbox's name as SandboxName cuts it.
 func IssueClaimName(t claim.Token) string { return issueVolume + "-" + SandboxName(t) }
 
 // secretName is the claim's Secret, which its Sandbox owns.

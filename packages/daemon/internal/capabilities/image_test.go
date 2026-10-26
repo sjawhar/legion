@@ -141,7 +141,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		Browser:    filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
 		LSP:        s.onPATH("gopls", "typescript-language-server", "pyright-langserver"),
 		CodeGraph:  filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
-		Toolchain:  s.onPATH("go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.1 linux/amd64",
+		Toolchain:  s.onPATH("go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.1 linux/amd64",
 		ClaudeCode: s.claude + " holds dist/envoy-channel.js and legion/.claude-plugin/plugin.json; " +
 			s.pin + " pins @anthropic-ai/claude-code " + capabilitiestest.ClaudeCodeVersion + " with the sha512 integrity of @anthropic-ai/claude-code-linux-x64; " +
 			s.onPATH("npm", "node"),

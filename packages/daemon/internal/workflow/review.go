@@ -105,9 +105,10 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // new head on a red verdict is (classify.AdvancePullRequestHead).
 //
 // At an exhausted fix-attempt count, a red within the attempt the count last counted - the counted
-// head, or a head pushed on top of it until a push lands on a green verdict - sends nothing back
-// before awaiting_merge (classify.FixAttemptCapHolds): the architect decides what follows. A red at
-// a head pushed onto green moves the issue as below the cap. In awaiting_merge a red always
+// head, or a head pushed on top of it until a push lands on a green verdict or on a settled head
+// whose base branch requires nothing - sends nothing back before awaiting_merge
+// (classify.FixAttemptCapHolds): the architect decides what follows. A red at a head pushed onto
+// green, or onto such a head, moves the issue as below the cap. In awaiting_merge a red always
 // withdraws the READY, whatever the count: no implementer loops there for the cap to bound, and a
 // READY must not stand on a head GitHub will not merge. The count is posted and told to the
 // architect once (classify.BlockFixAttempt), by the first red at that count that sent nothing back:

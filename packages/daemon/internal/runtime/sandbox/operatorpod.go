@@ -17,13 +17,17 @@ import (
 )
 
 // imageEnv are the variables the worker image's final stage sets (packages/daemon/docker/
-// worker.Dockerfile, ENV), which every container inherits: COREPACK_DEFAULT_TO_LATEST=0 keeps the
-// corepack shims on the pnpm and yarn their corepack ships; HOME and OMP_PROFILE place Oh My Pi's
-// profile, whose sessions directory a pod mounts from the tree volume; LEGION_OMP_PATH is the Oh
-// My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is CodeGraph's telemetry and
-// update-check opt-out; and PATH, which the runtime sets as well.
+// worker.Dockerfile, ENV), which every container inherits, and which a pod's env therefore may not
+// override: CGO_ENABLED=0 keeps cgo off by default in every process that inherits the image's
+// environment, the image's gcc on PATH notwithstanding, so a role opts in per command
+// (`CGO_ENABLED=1 go test -race …`) rather than a deployment for every build;
+// COREPACK_DEFAULT_TO_LATEST=0 keeps the corepack shims on the pnpm and yarn their corepack ships;
+// HOME and OMP_PROFILE place Oh My Pi's profile, whose models and settings the image carries and
+// whose sessions a pod never writes, every session being a row in the session database;
+// LEGION_OMP_PATH is the Oh My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is
+// CodeGraph's telemetry and update-check opt-out; and PATH, which the runtime sets as well.
 // TestImageEnvIsWhatTheWorkerImageSets holds the list to the Dockerfile.
-var imageEnv = []string{"COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
+var imageEnv = []string{"CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
 
 // setter is who sets a variable a worker's Oh My Pi starts with, and whether the operator's pod
 // env may set it too: the pod baseline yields to the operator's own value, and the operator's
@@ -175,7 +179,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		if key := providerKeys[name]; slices.Contains(providersSecrets, key) {
 			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which the pod mounts as the launch secret %s: the shim would export that secret into Oh My Pi's environment as %s", name, key, key, name)
 		}
-		if key := providerKeys[name]; sessionDSNKey != "" && key == sessionDSNKey {
+		if key := providerKeys[name]; key == sessionDSNKey {
 			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as %s", name, key, name)
 		}
 	}
@@ -188,19 +192,22 @@ func overlaps(a, b string) bool {
 	return a == b || under(a, b) || under(b, a)
 }
 
-// legionClaim reports whether claim is named as the volume claims Legion's Sandboxes make or made
-// are: an issue's or the controller's (IssueClaimName, `issue-legion-…`), a repository cache's
-// (cacheClaimName, `cache-legion-…`), or a tree's from the earlier layout legion-v10.0.0 kept
-// (`tree-legion-…`, every clone, workspace and session file of a tree). Every pod mounting such a
-// claim would read and write that workspace or that cache, so an operator volume naming one is
-// refused.
+// legionClaim reports whether claim is named as the volume claims Legion's pods and Sandboxes make
+// or made are: an issue pod's own disk, the generic ephemeral volume the kubelet names for its pod
+// and its volume (`legion-…-issue`, issuePod.disk); the controller's, which its Sandbox still owns
+// (IssueClaimName, `issue-legion-…`); a repository cache's (cacheClaimName, `cache-legion-…`); or a
+// tree's from the earlier layout legion-v10.0.0 kept (`tree-legion-…`, every clone, workspace and
+// session file of a tree). Every pod mounting such a claim would read and write that workspace or
+// that cache, so an operator volume naming one is refused. The pod's own disk is named the other
+// way round from the Sandbox-owned claims — the volume's name is the suffix, not the prefix — so it
+// needs a rule of its own rather than a fourth prefix.
 func legionClaim(claim string) bool {
 	for _, prefix := range []string{issueVolume + "-legion-", cacheVolume + "-legion-", "tree-legion-"} {
 		if strings.HasPrefix(claim, prefix) {
 			return true
 		}
 	}
-	return false
+	return strings.HasPrefix(claim, "legion-") && strings.HasSuffix(claim, "-"+issueVolume)
 }
 
 // dashboardURL is whether value is a DISPATCH_PUBLIC_URL boot lets through: a rule narrower than

@@ -211,7 +211,8 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 type sandboxBoot struct {
 	// clusterCheck is the cluster's half of boot's refusals (plan.clusterCheck), each read-only:
 	// Agent Sandbox is installed, and no Sandbox of a layout before this runtime's remains in the
-	// namespace for the project.
+	// namespace for the project. The census logs what it accepts but will not keep — an issue
+	// Sandbox whose next launch replaces its disk — to the runtime's own logger.
 	clusterCheck func(context.Context) error
 	// probe is the image probe the runtime runs (sandbox.ImageProbe), over the references of the
 	// role prompts every worker pod is handed (prompts.RoleReferences).
@@ -230,7 +231,7 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
 			return err
 		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project, reads.opts.Log)
 	}
 	return sandboxBoot{clusterCheck: clusterCheck, probe: probe}, nil
 }
@@ -380,19 +381,6 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 		return []string{natsauth.SeedVariable}
 	}
 	return nil
-}
-
-// sessionOnVolume is supervise.Deps.SessionOnVolume for cfg: under either of the Kubernetes
-// runtime's session databases (runtime.kubernetes.session_store postgres or cloudsql-iam) a
-// recorded session lived on its issue's volume only when it is a Claude Code transcript, Oh My
-// Pi's being in the table (sandbox.SessionOnIssueVolume), so a lost volume drops the transcripts
-// alone. Nil otherwise, which keeps every session on the volume: a pvc store's, and a tmux pane's,
-// whose volume is never found lost.
-func sessionOnVolume(cfg config.Config) func(file string) bool {
-	if k := cfg.Runtime.Kubernetes; k == nil || !k.SessionStore.InDatabase() {
-		return nil
-	}
-	return func(file string) bool { return sandbox.SessionOnIssueVolume(true, file) }
 }
 
 // newSecretsLogin is the daemon's agent-secrets login as the machines' Enroller: it constructs the

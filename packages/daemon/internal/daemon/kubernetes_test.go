@@ -27,7 +27,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -595,6 +594,8 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
     kubeconfig: ./kubeconfig
     context: legion-daemon
     resources:
@@ -1072,37 +1073,6 @@ func TestTheBootLogNamesTheDerivedProbeBudgetOnlyWhenItIsDerived(t *testing.T) {
 						t.Errorf("logProbeBudget wrote %q, want it to contain %q", got, want)
 					}
 				}
-			}
-		})
-	}
-}
-
-// A lost issue volume takes the sessions it kept and no other: under either session database the
-// machines are told a Claude Code transcript lived on it and an Oh My Pi session, in the table, did
-// not, so the Oh My Pi siblings of a lost Claude transcript resume theirs. Under pvc, and under
-// tmux, every session is kept on the volume (nil).
-func TestTheMachinesAreToldWhichSessionsALostVolumeTakes(t *testing.T) {
-	transcript := "/legion/scratch/state/tester/claude/projects/--legion-workspaces-sjawhar-legion-legion-1--/9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f.jsonl"
-	omp := "/home/legion/.omp/profiles/legion/agent/sessions/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-08T12-00-00-000Z_0001.jsonl"
-	if sessionOnVolume(config.Config{Runtime: config.Runtime{Name: "tmux"}}) != nil {
-		t.Error("a tmux daemon's machines are told of sessions kept off the volume, want every session on it")
-	}
-	pvc := config.Config{Runtime: config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{}}}
-	if sessionOnVolume(pvc) != nil {
-		t.Error("a session_store pvc daemon's machines are told of sessions kept off the volume, want every session on it")
-	}
-	for _, store := range []ompsessions.Store{
-		{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
-		{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
-			Instance: "acme:us-central1:legion", Name: "sessions", User: "legion",
-		}},
-	} {
-		t.Run(string(store.Kind), func(t *testing.T) {
-			cfg := config.Config{Runtime: config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{SessionStore: store}}}
-			onVolume := sessionOnVolume(cfg)
-			if onVolume == nil || !onVolume(transcript) || onVolume(omp) {
-				t.Fatalf("under session_store %s the transcript is on the volume: %t, the Oh My Pi session: %t; want true, false",
-					store.Kind, onVolume != nil && onVolume(transcript), onVolume != nil && onVolume(omp))
 			}
 		})
 	}

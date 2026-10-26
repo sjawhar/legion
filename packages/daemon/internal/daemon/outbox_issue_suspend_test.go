@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -40,20 +41,25 @@ import (
 )
 
 // issueSandboxAPI is the Kubernetes API as the daemon's issue closes see it: the project's
-// Sandboxes by name, each with the volume claim it owns, and no pod — there is no controller, so a
-// Sandbox's operatingMode is the daemon's request to the real Sandbox controller, not a claim about
-// that controller's pods. A list honours its label selector's `key=value` terms. Every Sandbox
-// delete is recorded with its options and, with foreground propagation, takes the PVC the Sandbox
-// owns as garbage collection would; a create gives the new Sandbox a uid and is recorded, and one
-// asking for a Service gets the headless Service the controller makes for it (controllerService),
-// sent to every watch of Services; a patch applies the daemon's JSON patch, refusing one whose uid
-// or resourceVersion test fails; role Secrets are accepted and forgotten; and every PVC request is
-// counted, since the restricted daemon identity has none.
+// Sandboxes by name, each with the disk of the pod it stands for, and no pod — there is no
+// controller, so a Sandbox's operatingMode is the daemon's request to the real Sandbox controller,
+// not a claim about that controller's pods. A list honours its label selector's `key=value` terms.
+// Every Sandbox delete is recorded with its options and, with foreground propagation, takes the
+// disk of the Sandbox's pod as garbage collection would, through the pod to the claim it owns; a
+// create gives the new Sandbox a uid and is recorded, and one asking for a Service gets the
+// headless Service the controller makes for it (controllerService), sent to every watch of
+// Services; a patch applies the daemon's JSON patch, refusing one whose uid or resourceVersion
+// test fails; role Secrets are accepted and forgotten; and every PVC request is counted, since the
+// restricted daemon identity has none.
 type issueSandboxAPI struct {
 	mu      sync.Mutex
 	objects map[string]map[string]any
-	// pvcs are the volume claims the Sandboxes own, by Sandbox name, while they exist.
-	pvcs        map[string]bool
+	// disks are the disks of the Sandboxes' pods, by Sandbox name, while they exist: an issue pod's
+	// disk is its own generic ephemeral volume, whose claim `<pod>-issue` the pod owns, and the
+	// fixture makes neither pod nor claim, so a Sandbox's arrival stands for its pod's disk and only
+	// the Sandbox's foreground delete, which garbage collection carries through the pod to the
+	// claim, takes it.
+	disks       map[string]bool
 	deletes     map[string]metav1.DeleteOptions
 	created     []string
 	pvcRequests int
@@ -78,21 +84,22 @@ func controllerService(name, uid string) map[string]any {
 	}
 }
 
-// issueSandbox is a Running issue Sandbox of tree and issue as the API holds it, owning its volume.
+// issueSandbox is a Running issue Sandbox of tree and issue as the API holds it, owning no volume
+// claim template: its pod's disk is the pod's own.
 func issueSandbox(name, uid, tree, issue string) map[string]any {
 	return map[string]any{
 		"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
 		"metadata": map[string]any{"name": name, "namespace": "legion", "uid": uid, "resourceVersion": "1", "generation": float64(1),
 			"labels": map[string]any{"legion.dev/project": "legion", "legion.dev/tree": tree, "legion.dev/issue": issue}},
-		"spec": map[string]any{"operatingMode": "Running", "volumeClaimTemplates": []any{map[string]any{"metadata": map[string]any{"name": "issue"}}}},
+		"spec": map[string]any{"operatingMode": "Running"},
 	}
 }
 
 func newIssueSandboxAPI(sandboxes ...map[string]any) *issueSandboxAPI {
-	a := &issueSandboxAPI{objects: map[string]map[string]any{}, pvcs: map[string]bool{}, deletes: map[string]metav1.DeleteOptions{}, services: map[string]map[string]any{}}
+	a := &issueSandboxAPI{objects: map[string]map[string]any{}, disks: map[string]bool{}, deletes: map[string]metav1.DeleteOptions{}, services: map[string]map[string]any{}}
 	for _, s := range sandboxes {
 		name := s["metadata"].(map[string]any)["name"].(string)
-		a.objects[name], a.pvcs[name] = s, true
+		a.objects[name], a.disks[name] = s, true
 	}
 	return a
 }
@@ -193,7 +200,7 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a.uids++
 		meta["uid"], meta["resourceVersion"], meta["generation"] = fmt.Sprintf("sandbox-uid-created-%d", a.uids), "1", float64(1)
-		a.objects[name], a.pvcs[name] = object, true
+		a.objects[name], a.disks[name] = object, true
 		a.created = append(a.created, name)
 		if spec, _ := object["spec"].(map[string]any); spec["service"] == true {
 			service := controllerService(name, meta["uid"].(string))
@@ -254,7 +261,7 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.deletes[name] = options
 			delete(a.objects, name)
 			if options.PropagationPolicy != nil && *options.PropagationPolicy == metav1.DeletePropagationForeground {
-				delete(a.pvcs, name)
+				delete(a.disks, name)
 			}
 			_ = json.NewEncoder(w).Encode(metav1.Status{Status: "Success"})
 		default:
@@ -315,11 +322,11 @@ func (a *issueSandboxAPI) uid(name string) string {
 	return object["metadata"].(map[string]any)["uid"].(string)
 }
 
-// pvc is whether the volume claim the Sandbox owns still exists.
-func (a *issueSandboxAPI) pvc(name string) bool {
+// disk is whether the disk of the Sandbox's pod, the claim that pod owns, still exists.
+func (a *issueSandboxAPI) disk(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.pvcs[name]
+	return a.disks[name]
 }
 
 // deleted is the options of the Sandbox's delete, and whether one was requested.
@@ -364,7 +371,12 @@ func (issueProvisionTokens) Token(context.Context, string) (string, error) {
 	return "fixture-provision-token", nil
 }
 
-func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
+// A close whose role stop is still pending acts on nothing, and the same close, resumed after the
+// daemon and its runtime restart, suspends the issue's Sandbox and deletes it: neither the runtime
+// nor the outbox keeps the pending effect in memory, and the database owns it. The stopped role's
+// session is the store's and outlives the Sandbox, which owned no part of it. The tree stays live
+// until its linger closes, and its cleanup then finds the issue's Sandbox already gone.
+func TestIssueCloseDeletesTheSandboxAfterARestart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	pool := isolatedOutboxPool(t)
@@ -395,8 +407,9 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 		rt, err := sandbox.New(runtimeCtx, &rest.Config{Host: server.URL}, sandbox.Options{
 			Namespace: "legion", Project: "legion", Store: reopened, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
 			StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
-			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
-			BootTimeout: time.Second, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
+			SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+			Tools:        sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
+			BootTimeout:  time.Second, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner), Conns: fake.NewConns(), Log: quietLogger(),
 			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})
@@ -455,8 +468,11 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := api.mode(name); got != "Suspended" {
-		t.Fatalf("Sandbox after issue close = %s, want Suspended", got)
+	if got := api.mode(name); got != "deleted" {
+		t.Fatalf("Sandbox after issue close = %s, want it suspended and then deleted", got)
+	}
+	if options, deleted := api.deleted(name); !deleted || options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
+		t.Fatalf("Sandbox delete = %+v (requested %t), want foreground propagation", options, deleted)
 	}
 	claims, err := st.Claims(ctx)
 	if err != nil || len(claims) != 1 || claims[0].Session != "saved-planner" || claims[0].SessionFile != "/legion/sessions/planner.jsonl" {
@@ -477,7 +493,10 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := api.mode(name); got != "deleted" {
-		t.Fatalf("Sandbox after linger cleanup = %s, want deleted", got)
+		t.Fatalf("Sandbox after linger cleanup = %s, want it still gone", got)
+	}
+	if live, err := st.TreeLive(ctx, "legion", issue.Tree); err != nil || live {
+		t.Fatalf("tree after its linger cleanup is live = %t, %v; want its cleanup confirmed", live, err)
 	}
 }
 
@@ -495,15 +514,15 @@ func (s issueLaunchSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.S
 	}, nil
 }
 
-// A child closed as done gives its volume back at once while its parent keeps running: the close's
-// issue_close rows retire the child's claims with their sessions dropped, and its issue_suspend row,
-// a releasing one, foreground-deletes the child's Sandbox — taking the PVC it owns with it, with no
-// PVC request from the restricted daemon — once every claim has retired; the root's Sandbox stays
-// Running on its own volume. A child parked in backlog keeps today's path: its claims suspended with
-// their sessions, its Sandbox Suspended and kept. The done child set back to todo launches fresh:
-// a new Sandbox is created, and since the issue records no session, workspace-init is not told to
-// expect a volume, so nothing reports the released volume as lost.
-func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
+// A child closed as done gives its Sandbox back at once while its parent keeps running: the
+// close's issue_close rows retire the child's claims with their sessions dropped, and its
+// issue_suspend row foreground-deletes the child's Sandbox — taking what it owns with it, with no
+// PVC request from the restricted daemon; the root's Sandbox stays Running. A child parked in
+// backlog keeps its claims suspended with their sessions, and its Sandbox goes the same way,
+// since the pod it ran in, and the disk with it, go either way. The done child set back to todo
+// launches fresh: a new Sandbox is created, and since the issue records no session, nothing is
+// expected of the disk its new pod brings.
+func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	pool := isolatedOutboxPool(t)
@@ -547,8 +566,9 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	rt, err := sandbox.New(runtimeCtx, &rest.Config{Host: server.URL}, sandbox.Options{
 		Namespace: "legion", Project: "legion", Store: st, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
 		StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
-		Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
-		BootTimeout: 300 * time.Millisecond, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
+		SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+		Tools:        sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
+		BootTimeout:  300 * time.Millisecond, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 		Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner), Conns: fake.NewConns(), Log: logger,
 		RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 	})
@@ -562,7 +582,6 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	sup := newSupervisor(runtimeCtx, st, "legion", t.TempDir(), logger)
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: issueLaunchSpecs{prompt: prompt}, Clock: stillClock{}, Log: logger,
-		VolumeLost:     sup.volumeLost,
 		Limits:         supervise.Limits{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 2},
 		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 		PluginContract: 24,
@@ -622,7 +641,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 		return left
 	}
 
-	// (a) The done child: its claims closed, its Sandbox and volume gone, its parent untouched.
+	// (a) The done child: its claims closed, its Sandbox and its pod's disk gone, its parent untouched.
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-done", intake.DispatchIssue{Key: done.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.closed", Status: "done", Title: done.Title, Parent: root.Key, Rank: "V"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
@@ -637,20 +656,17 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != "sandbox-uid-done" {
 		t.Fatalf("done child's Sandbox delete preconditions = %+v, want fenced to uid sandbox-uid-done", options.Preconditions)
 	}
-	if api.pvc(doneSandbox) {
-		t.Fatal("the done child's volume claim survived its Sandbox's foreground delete")
+	if api.disk(doneSandbox) {
+		t.Fatal("the done child's pod's disk survived its Sandbox's foreground delete")
 	}
-	if got := api.mode(rootSandbox); got != "Running" || !api.pvc(rootSandbox) || api.uid(rootSandbox) != "sandbox-uid-root" {
-		t.Fatalf("root Sandbox after the child's close = %s (pvc %t, uid %s), want the same Sandbox Running with its volume", got, api.pvc(rootSandbox), api.uid(rootSandbox))
+	if got := api.mode(rootSandbox); got != "Running" || !api.disk(rootSandbox) || api.uid(rootSandbox) != "sandbox-uid-root" {
+		t.Fatalf("root Sandbox after the child's close = %s (disk %t, uid %s), want the same Sandbox Running with its pod and that pod's disk", got, api.disk(rootSandbox), api.uid(rootSandbox))
 	}
 	if _, touched := api.deleted(rootSandbox); touched || api.pvcRequests != 0 {
 		t.Fatalf("the child's close deleted the root's Sandbox (%t) or sent %d PVC requests, want neither", touched, api.pvcRequests)
 	}
-	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "" || got.SessionFile != "" || got.WorkspaceLost || got.Locator != nil {
-		t.Fatalf("done child's planner after the close = %+v, want retired with no session, no loss and no locator", got)
-	}
-	if sessions, err := st.IssueSessionFiles(ctx, "legion", done.Key); err != nil || len(sessions) != 0 {
-		t.Fatalf("IssueSessionFiles(%s) = %q, %v after the close, want none", done.Key, sessions, err)
+	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "" || got.SessionFile != "" || got.Locator != nil {
+		t.Fatalf("done child's planner after the close = %+v, want retired with no session and no locator", got)
 	}
 	if got := storedClaim(architect.Token); got.State != supervise.StateWorking || got.Session != "saved-architect" {
 		t.Fatalf("root architect after the child's close = %+v, want it working with its session", got)
@@ -661,20 +677,21 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	if live, err := st.TreeLive(ctx, "legion", root.Key); err != nil || !live {
 		t.Fatalf("tree live after the child's close = %t, %v; want the tree still live", live, err)
 	}
-	if !strings.Contains(logs.String(), "released the closed issue's Sandbox") {
-		t.Fatal("the release logged no line naming the issue's Sandbox")
+	if !strings.Contains(logs.String(), "deleted the closed issue's Sandbox") {
+		t.Fatal("the close logged no line naming the issue's Sandbox")
 	}
 
-	// (c) The parked child: today's path, its Sandbox Suspended and kept, its sessions retained.
+	// (c) The parked child: its claims suspended with their sessions, and its Sandbox deleted as
+	// the done child's was, since its pod and the disk under it go either way.
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: parked.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: parked.Title, Parent: root.Key, Rank: "W"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
 	run("the parked child's move to backlog")
-	if got := api.mode(parkedSandbox); got != "Suspended" || !api.pvc(parkedSandbox) || api.uid(parkedSandbox) != "sandbox-uid-parked" {
-		t.Fatalf("parked child's Sandbox = %s (pvc %t, uid %s), want the same Sandbox Suspended with its volume", got, api.pvc(parkedSandbox), api.uid(parkedSandbox))
+	if got := api.mode(parkedSandbox); got != "deleted" {
+		t.Fatalf("parked child's Sandbox = %s, want it suspended and then deleted", got)
 	}
-	if _, touched := api.deleted(parkedSandbox); touched {
-		t.Fatal("the parked child's move deleted its Sandbox")
+	if options, deleted := api.deleted(parkedSandbox); !deleted || options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
+		t.Fatalf("parked child's Sandbox delete = %+v (requested %t), want foreground propagation", options, deleted)
 	}
 	if got := storedClaim(tester.Token); got.State != supervise.StateSuspended || got.Session != "saved-tester" || got.SessionFile != "/legion/sessions/tester.jsonl" {
 		t.Fatalf("parked child's tester = %+v, want it suspended with its session kept", got)
@@ -696,19 +713,13 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 		t.Fatalf("the re-entered child's start created %v, want a new Sandbox %s", api.created, doneSandbox)
 	}
 	if uid := api.uid(doneSandbox); uid == "" || uid == "sandbox-uid-done" {
-		t.Fatalf("re-entered child's Sandbox uid = %q, want a Sandbox other than the released one", uid)
+		t.Fatalf("re-entered child's Sandbox uid = %q, want one other than the Sandbox its close deleted", uid)
 	}
 	env := api.initEnv(doneSandbox)
 	if !slices.Contains(env, "PATH") {
 		t.Fatalf("the re-entered child's workspace-init environment %v names no PATH; the Running patch wrote no pod template", env)
 	}
-	if slices.Contains(env, "LEGION_EXPECT_ISSUE_VOLUME") {
-		t.Fatalf("the re-entered child's workspace-init environment %v expects a volume that was released", env)
-	}
-	if got := storedClaim(planner.Token); got.SessionFile != "" || got.WorkspaceLost {
-		t.Fatalf("re-entered child's planner = %+v, want a fresh launch with no session to resume and no loss", got)
-	}
-	if logged := logs.String(); strings.Contains(logged, "volume was lost") {
-		t.Fatalf("the re-entered child's launch reported a lost volume:\n%s", logged)
+	if got := storedClaim(planner.Token); got.SessionFile != "" {
+		t.Fatalf("re-entered child's planner = %+v, want a fresh launch with no session to resume", got)
 	}
 }

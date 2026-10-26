@@ -164,11 +164,6 @@ type countingStore struct {
 	reads *atomic.Int32
 }
 
-func (s countingStore) IssueSessionFiles(ctx context.Context, project, issue string) ([]string, error) {
-	s.reads.Add(1)
-	return s.Store.IssueSessionFiles(ctx, project, issue)
-}
-
 func (s countingStore) IssueRunsElsewhere(ctx context.Context, project, issue, tree string) (string, error) {
 	s.reads.Add(1)
 	return s.Store.IssueRunsElsewhere(ctx, project, issue, tree)

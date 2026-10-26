@@ -17,7 +17,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 var _ supervise.Specs = specs{}
@@ -165,10 +164,6 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		if value, ok := os.LookupEnv(name); ok {
 			spec.Env[name] = value
 		}
-	}
-
-	if c.WorkspaceLost {
-		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
 	}
 	return spec, nil
 }

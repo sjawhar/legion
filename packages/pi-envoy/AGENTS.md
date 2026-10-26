@@ -1,8 +1,8 @@
 # Pi Envoy Extension
 
 Tracked Oh My Pi extension package `@sjawhar/pi-envoy`: the Envoy messaging and Dispatch tools
-every session loads, in one entry, `extensions/envoy.ts`, with the four skills every session with
-Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) staged into
+every session loads, in one entry, `extensions/envoy.ts`, with the five skills every session with
+Dispatch reads (`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) staged into
 `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. The Legion entry, its
 modules, agents and skills are `@sjawhar/pi-legion` (`packages/pi-legion`, its `AGENTS.md`), which a
 Legion pane loads beside this plugin and which reaches it through the interface in
@@ -83,7 +83,9 @@ guest in a shared session) did not run it and nothing was sent, or why the host 
 prompt, skill or command that printed nothing gets no reply. On a host without `sendUserInput` a
 body that starts with `/` is not sent, since the host would hand it to the model as words, and the
 reply names the host's Oh My Pi version and says nothing was sent; any other body goes through
-`pi.sendUserMessage` as before.
+`pi.sendUserMessage` as before. The live view's model and thinking-level switch is this path too: a
+pick in its header is the person's own Send of `/model <provider/id>` or `/effort <level>`, which
+runs the host's built-in, and what the built-in prints is the reply the page shows as its answer.
 
 The stream tags the person's message with its Dispatch id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which
@@ -128,9 +130,40 @@ per ten seconds. Every built-in's name and aliases are reserved before anything 
 since the host runs a built-in by either before `prompt()`; among the rest a repeated name keeps its
 first source, which is the one the host runs. A name is listed only if a person can type it
 (`isTypableCommandName` in `@legion/contracts`, which a viewer applies too): not empty, no
-whitespace, no control character. The list keeps the host-order prefix whose frame fits the
-replay's byte budget (`historyBytes`, UTF-8 bytes of JSON) on its own, so a replay always carries
-it. A host without `sendUserInput` publishes no list, and its viewer offers no completion.
+whitespace, no control character. The list keeps the host-order prefix whose frame fits what the
+settings frame leaves of the replay's byte budget (`historyBytes`, UTF-8 bytes of JSON), so a replay
+always carries it. A host without `sendUserInput` publishes no list, and its viewer offers no
+completion.
+
+The stream also reports the model and thinking level the session runs now (`kind: "settings"`,
+INFRA-195), read from the same live `AgentSession` (`liveAgentSession`, the lookup the commands use)
+through the getters the host's `/model` and `/effort` read: `model` as `provider/id`, absent with no
+model selected; `models`, every `getAvailableModels()` entry as `provider/id` in the host's order;
+and `thinking`, with `level` the configured level `/effort` reports (`configuredThinkingLevel()`,
+`null` for the model's default) and `levels` what `/effort` offers (`getAvailableEffortSelectors()`),
+or `null` when that list is empty, which is a model with no adjustable thinking. Ids are never
+truncated and the list is never cut, since a pick sends the exact id back. A host without the
+registry export, one listing no session under this id, or a session lacking any of the four getters
+sends `reported: false`, so a session that sends no `settings` frame at all runs an older pi-envoy.
+The host fires no event when either value is set (`/model`, `/effort`, its terminal's selector), so
+the session re-reads the getters, unthrottled since they are in-memory, on every control message
+(a replay, and each watch the relay re-arms every ten seconds), on `turn_start`, on
+`retry_fallback_applied`, and in `runTypedInput` after `sendUserInput` settles and before the reply
+is posted, so the header shows a switch's result before its answer arrives. The publisher
+(`setSettings`) keeps the frame and publishes it only when it changed and a viewer is attached, and
+a control message that arms a publisher nobody was watching also sends the settings and commands
+frames as they stand (`publishState`): a page held open while the session is relaunched with
+`--resume` gets no replay from the new process, only the relay's re-arming watches. The refresh has
+its own `try`/`catch`, so a getter that throws never blocks a replay answer. A replay
+ends with the history, then `settings`, then `commands` last; the settings frame is paid for first
+and whole, the commands keep the prefix that fits in what is left, and the history takes what
+remains. A model id is a few tens of bytes, so 5,000 models fit the 512 KiB budget with room for the
+commands; a list larger than the whole budget leaves no room for anything else, and a replay over
+the NATS server's `max_payload` fails to publish, which the control pump logs. A change of session
+id (`watchAgentStream`) resets the publisher, settings included, but never its `seq` counter, which
+starts at the clock's milliseconds × 1,000: the page keeps a `settings` or `commands` frame only when
+its `seq` beats the one it applied, and a page held open while the session is relaunched with
+`--resume` holds the earlier process's numbers, so every later process must count above them.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own
@@ -422,7 +455,7 @@ state never nudges.
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
 | Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no section with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
-| Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The four skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
+| Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The five skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |

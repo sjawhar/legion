@@ -58,10 +58,6 @@ type ProvisionTokens interface {
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
 // fake.
 type Store interface {
-	// IssueSessionFiles are the session files the stored claims of issue recorded, retired ones
-	// included: those the issue's volume keeps (SessionOnIssueVolume) must still be on it, beside
-	// the issue's clone.
-	IssueSessionFiles(ctx context.Context, project, issue string) ([]string, error)
 	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
 	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
 	TreeLive(ctx context.Context, project, tree string) (bool, error)
@@ -72,8 +68,8 @@ type Store interface {
 	// IssueSandboxHome is the tree issue's Sandbox belongs to now, or "" when none: the issue's own
 	// key while a live hand-over of it is pending, else its record's tree while that tree's lifecycle
 	// is open or releasing, or, for a tree never opened, while the issue waits for admission or
-	// lingers after its own close. The tree cleanup hands a Sandbox whose home is another tree over
-	// to it (CleanupTree), and the orphan sweep keeps one whose home is its label's tree (sweep).
+	// lingers after its own close. The orphan sweep keeps a Sandbox whose home is the tree it is
+	// labelled with (sweep); the tree cleanup deletes every Sandbox of the tree it cleans.
 	IssueSandboxHome(ctx context.Context, project, issue string) (string, error)
 	// ClaimUnretired is whether the store holds token's claim in any state but retired: a claim the
 	// daemon's orphan sweep still knows, suspended and failed ones included. The sweep reads it under
@@ -149,16 +145,17 @@ type Options struct {
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
 	// SessionStore is where every role's Oh My Pi keeps its session
-	// (runtime.kubernetes.session_store), settled. Under the volume store, which the zero value is,
-	// each session is a file in the issue's volume's sessions directory. Under either database
-	// store every generation is started with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE
-	// naming a URL file (mainEnvironment), a resume is held to the session table rather than the
-	// volume (the role launcher's check, internal/launcher), and no launch expects the issue's
-	// volume to hold a session. Under postgres that file is the providers Secret key the pod and
-	// the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim, seeing the
-	// pointer, never exports; under cloudsql-iam no pod mounts a session key at all — each role
-	// container's launcher is told the instance, database and login (sessionProxyFlags), proxies a
-	// socket of its own to Cloud SQL as the pod itself, and writes the URL file in the
+	// (runtime.kubernetes.session_store), settled. It is required to keep sessions in a database
+	// (InDatabase): an issue pod's disk is the pod's own ephemeral volume and is deleted with the
+	// pod, so a session kept as a file on it would not survive to be resumed, and configure refuses
+	// any other store as it refuses an unpinned image. Every generation is started with
+	// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming a URL file (mainEnvironment), a
+	// resume is held to the session table (the role launcher's check, internal/launcher), and no
+	// launch expects any disk to hold a session. Under postgres that file is the providers Secret
+	// key the pod and the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim,
+	// seeing the pointer, never exports; under cloudsql-iam no pod mounts a session key at all —
+	// each role container's launcher is told the instance, database and login (sessionProxyFlags),
+	// proxies a socket of its own to Cloud SQL as the pod itself, and writes the URL file in the
 	// generation's private directory.
 	SessionStore ompsessions.Store
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends

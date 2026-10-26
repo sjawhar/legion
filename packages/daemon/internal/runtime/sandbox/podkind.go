@@ -14,25 +14,31 @@ import (
 )
 
 // podKind is which of the runtime's two pods a Sandbox runs: an issue pod (issuePod), which runs
-// every workflow role of one issue on the issue's own volume and provisions the issue's workspace,
-// or the project controller's pod (controllerPod, `controller: daemon`), which runs the controller
-// alone on a volume of its own and provisions nothing. prepare decides a launch's kind once, from
-// its claim, and a stored Sandbox's kind is the one its labels name (podKindOf). Building a pod
-// asks the launch's kind for every facet the two build differently; supervision — relaunch's check
-// of the running pod, the launchers, Probe, Suspend and the address records — asks a kind only its
-// roles.
+// every workflow role of one issue on a disk its own pod owns and provisions the issue's
+// workspace, or the project controller's pod (controllerPod, `controller: daemon`), which runs the
+// controller alone on the volume its Sandbox owns and provisions nothing. prepare decides a
+// launch's kind once, from its claim, and a stored Sandbox's kind is the one its labels name
+// (podKindOf). Building a pod asks the launch's kind for every facet the two build differently;
+// supervision — relaunch's check of the running pod, the launchers, Probe, Suspend and the
+// address records — asks a kind only its roles.
 type podKind interface {
 	// roles are the pod's launcher roles, one container each.
 	roles() []claim.Role
 	// claimToken is the claim of a launcher of role, one of roles, on a pod of this kind of project,
 	// issue being the issue key its Secrets carry (secretAnnotations).
 	claimToken(project, issue string, role claim.Role) (claim.Token, error)
-	// prepare resolves what the kind decides of a launch, its workspace and whether its volume
-	// must already hold what it left, refusing a spec it cannot honour.
+	// prepare resolves what the kind decides of a launch, its working directory above all,
+	// refusing a spec it cannot honour.
 	prepare(l *launch) error
 	// labels are the pod's resource labels, on its Sandbox, pod template and Secrets, which name
-	// its kind (podKindOf); its volume claim template carries them less the tree (claimLabels).
+	// its kind (podKindOf).
 	labels(project string, l launch) map[string]string
+	// disk is the pod's one disk, mounted under the fixed name issueVolume: the claim templates the
+	// kind's Sandbox owns, which outlive its pods, and the source the pod mounts the disk from.
+	// They are returned together so that a template and the claim name that refers to it are
+	// decided in one place: the controller's one `issue` template and the claim its Sandbox makes
+	// from it, or no template at all and an ephemeral volume of the pod's own for an issue.
+	disk(r *Runtime, l launch) (templates []volumeClaimTemplate, source corev1.VolumeSource)
 	// secretAnnotations are the annotations each of the pod's Secrets carries.
 	secretAnnotations(l launch) map[string]string
 	// initContainers are the pod's init containers, and initVolumes the volumes only they mount,
@@ -65,8 +71,8 @@ func podKindOf(labels map[string]string) (podKind, error) {
 }
 
 // issuePod is an issue's pod: every workflow role of the issue, one launcher each, working in the
-// issue's workspace on the issue's own volume, which its Sandbox owns. Two init containers
-// provision that workspace from the issue's repository.
+// issue's workspace on the issue's disk, the pod's own generic ephemeral volume, created with the
+// pod and deleted with it. Two init containers provision that workspace from the issue's repository.
 type issuePod struct{}
 
 func (issuePod) roles() []claim.Role { return claim.Roles }
@@ -76,11 +82,11 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 }
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
-// the workspace's place on the issue's volume. A resume of a session kept on the volume
-// (SessionOnIssueVolume) expects the volume to hold what it left; a session kept in the database
-// expects nothing of the volume, so a resume on a new one provisions its workspace from the
-// issue's pushed branch and continues. A lost volume a resume expected is workspace-init's loud
-// refusal rather than a quiet fresh agent.
+// the workspace's place on the issue's disk. It runs at every launch and expects nothing of that
+// disk, which is created with the pod and deleted with it (INFRA-80): only a new or replacement pod
+// provisions its workspace (provision, which relaunch runs only when it replaces the pod), and a
+// role launched into the live pod finds the workspace the roles before it left. docs/kubernetes.md,
+// "The disk dies with its pod", states which launch is which.
 func (issuePod) prepare(l *launch) error {
 	spec := l.spec
 	if spec.Repository.IsZero() {
@@ -91,7 +97,6 @@ func (issuePod) prepare(l *launch) error {
 		return err
 	}
 	l.workspace = working.Dir
-	l.expectVolume = l.resumeFile != "" && SessionOnIssueVolume(l.sessionsInDatabase, l.resumeFile)
 	return nil
 }
 
@@ -103,6 +108,20 @@ func (issuePod) labels(project string, l launch) map[string]string {
 		labelTree:    labelValue(l.spec.Tree),
 		labelIssue:   labelValue(l.spec.Issue),
 	}
+}
+
+// disk has no claim template: an issue's Sandbox owns no volume, so nothing of the issue's disk
+// outlives a pod (INFRA-80). The disk itself is the pod's own, a generic ephemeral volume: the
+// kubelet creates its claim when the pod starts and deletes it when the pod goes, so a suspended,
+// relaunched or swept issue leaves no volume behind and every pod starts on a workspace its init
+// containers provision afresh. Its claim template carries no metadata at all: the pinned Sandbox
+// CRD declares the template's `metadata` a bare object with no properties and no
+// preserve-unknown-fields, so a label set there is pruned by the API server without a word
+// (TestManifestMatchesTheSandboxCRD).
+func (issuePod) disk(r *Runtime, _ launch) ([]volumeClaimTemplate, corev1.VolumeSource) {
+	return nil, corev1.VolumeSource{Ephemeral: &corev1.EphemeralVolumeSource{
+		VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{Spec: r.diskSpec()},
+	}}
 }
 
 // secretAnnotations carry the exact issue key (annotationIssue), from which the launcher resolver
@@ -221,27 +240,16 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 	}
 }
 
-// provision is what a new issue pod needs before it starts: it reads whether workspace-init must
-// find the issue's volume holding retained sessions — whether any claim of the issue, whichever
-// role's launch makes the pod, recorded a session the volume keeps (SessionOnIssueVolume: every
-// session under file storage, a Claude Code transcript alone under a session database) — mints
-// the provisioning token for the repository's owner, makes sure the repository has its cache
-// (EnsureRepositoryCache: one a sweep has not made yet is made now), since a fresh feed comes from
-// that cache alone, waits until the cache's Service is its own (awaitCacheService), since the
-// fetch presents the cache's token at that Service's name, and writes the token to the pod's
-// init-only provisioning Secret with the cache's bearer token. It waits on no other pod, the
-// cache's included: the fetch waits for the cache to be ready itself, and the issue's clone lives
-// on the issue's own volume, which no other pod mounts. A cache that cannot be made, or whose
-// Service is not its own by the boot timeout, fails the launch, with nothing written: the fetch
-// could fill no fresh feed without it.
+// provision is what a new issue pod needs before it starts: it mints the provisioning token for
+// the repository's owner, makes sure the repository has its cache (EnsureRepositoryCache: one a
+// sweep has not made yet is made now), since a fresh feed comes from that cache alone, waits until
+// the cache's Service is its own (awaitCacheService), since the fetch presents the cache's token
+// at that Service's name, and writes the token to the pod's init-only provisioning Secret with the
+// cache's bearer token. It waits on no other pod, the cache's included: the fetch waits for the
+// cache to be ready itself, and the issue's clone lives on the pod's own disk, which no other pod
+// mounts. A cache that cannot be made, or whose Service is not its own by the boot timeout, fails
+// the launch, with nothing written: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" {
-		files, err := r.store.IssueSessionFiles(ctx, r.project, l.spec.Issue)
-		if err != nil {
-			return fmt.Errorf("read its issue's retained sessions: %w", err)
-		}
-		l.expectVolume = slices.ContainsFunc(files, func(file string) bool { return SessionOnIssueVolume(l.sessionsInDatabase, file) })
-	}
 	owner := l.spec.Repository.Owner()
 	minting, cancel := call(ctx)
 	token, err := r.tokens.Token(minting, owner)
@@ -271,10 +279,12 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 }
 
 // controllerPod is the project controller's pod (`controller: daemon`): the controller's launcher
-// alone, working in the root of a volume of its own, which its Sandbox owns, so a relaunch resumes
-// its session. It belongs to no tree and holds the review App's GitHub credential like any
-// verdict-only role (appauth.AppRoleFor), but provisions no workspace: its one init container
-// makes its sessions directory and holds a resume to its session.
+// alone, working in the root of a volume of its own, which its Sandbox owns, so the working root a
+// pod leaves is the one its successor finds. It belongs to no tree and holds the review App's
+// GitHub credential like any verdict-only role (appauth.AppRoleFor). Its pod runs no init
+// container: it provisions no workspace, and the sessions directory that was the last thing such a
+// container made on its volume is gone, its sessions now rows in the session database
+// (initContainers).
 type controllerPod struct{}
 
 func (controllerPod) roles() []claim.Role { return []claim.Role{claim.RoleController} }
@@ -295,33 +305,33 @@ func (controllerPod) labels(project string, _ launch) map[string]string {
 	return map[string]string{labelProject: project, labelRole: string(claim.RoleController)}
 }
 
-// secretAnnotations are none: the controller's claim is the project's (claimToken).
-func (controllerPod) secretAnnotations(launch) map[string]string { return nil }
-
-// initContainers are one workspace-init, which mounts the controller's volume alone: `workspace-init
-// controller` provisions nothing and waits on no lock. It is told the image's PATH and, when the
-// pod is created to resume a controller whose session is a file on the volume, the session it must
-// find, as the volume holds it, so a lost volume brings up a fresh controller before any launcher
-// starts; a session kept in the database is the launcher's to find (internal/launcher). It takes
-// the controller's resources.
-func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
-	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
-	if l.resumeFile != "" && !l.sessionsInDatabase {
-		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: sessionOnVolume(l.resumeFile, TreeRoot)})
-	}
-	return []corev1.Container{{
-		Name:            initContainer,
-		Image:           r.image,
-		Command:         []string{r.tools.Legion, "workspace-init", "controller", "--root", TreeRoot},
-		Env:             env,
-		WorkingDir:      TreeRoot,
-		VolumeMounts:    []corev1.VolumeMount{{Name: issueVolume, MountPath: TreeRoot}},
-		Resources:       r.resources[l.spec.Role],
-		SecurityContext: restrictedContainer(),
+// disk is the one `issue` volume the controller's Sandbox owns, so the working root the controller
+// runs in (TreeRoot, prepare) outlives its pods. Its template's labels are the pod's own (labels),
+// which carry the project and the controller role and no tree: the controller belongs to none, and
+// the daemon's restricted identity has no PVC verb, so a label put on the claim at creation is the
+// label it keeps for life. The pod mounts the claim of its own Sandbox (IssueClaimName), the name
+// the Agent Sandbox controller gives the claim it makes from that template.
+func (controllerPod) disk(r *Runtime, l launch) ([]volumeClaimTemplate, corev1.VolumeSource) {
+	templates := []volumeClaimTemplate{{
+		Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.labels(l)},
+		Spec:     r.diskSpec(),
+	}}
+	return templates, corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+		ClaimName: IssueClaimName(l.spec.Claim),
 	}}
 }
 
-// initVolumes are none: its init container mounts only its volume.
+// secretAnnotations are none: the controller's claim is the project's (claimToken).
+func (controllerPod) secretAnnotations(launch) map[string]string { return nil }
+
+// initContainers are none: the controller's volume needs no preparing before its launcher starts.
+// The launcher works in the volume's root, which the mount itself makes, owned by the pod's group
+// (fsGroup, podTemplate); the scratch directories its agent is told are made by the shim
+// (podsafety.EnsureScratch); and its session is a row in the session database, which the role
+// launcher looks up before it starts the child (internal/launcher), not a file on the volume.
+func (controllerPod) initContainers(*Runtime, launch) []corev1.Container { return nil }
+
+// initVolumes are none: the controller's pod runs no init container.
 func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
 
 // agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, where its gh reads its

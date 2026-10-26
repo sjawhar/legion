@@ -4,7 +4,11 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { architectureSourcesQuery } from "../../api/queries";
-import type { ArchitectureTree, ArchitectureTreeComponent } from "../../api/types";
+import type {
+  ArchitectureTree,
+  ArchitectureTreeComponent,
+  ArchitectureTreeSource,
+} from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { QueryError } from "../../components/QueryError";
 import { TruncatedText } from "../../components/TruncatedText";
@@ -41,8 +45,8 @@ import {
   childComponents,
   componentPath,
   componentTone,
+  distrustedSources,
   indexComponents,
-  modelDistrusted,
   sourceState,
 } from "./architecture-model";
 import { ComponentDetails } from "./ComponentDetails";
@@ -112,12 +116,13 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
   });
   // A rejected model comes back 200 with the reason in last_error; either way the tree's
   // source line settles from the refetch. A failure of the request itself (transport, 5xx) has
-  // nowhere to land on the source row, so it renders beside the button until the next attempt.
+  // nowhere to land on the source row, so it renders beside that source's button until the
+  // next attempt.
   const refresh = useMutation({
-    mutationFn: () => api.syncArchitectureSource(project),
+    mutationFn: (repo: string) => api.syncArchitectureSource(project, repo),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["architecture", project] });
-      void queryClient.invalidateQueries({ queryKey: ["architecture-source", project] });
+      // Its key prefixes the project's own list, so both refresh.
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey });
     },
   });
@@ -137,10 +142,17 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
   }
   return (
     <ArchitectureTreeView
-      onRefresh={() => refresh.mutate()}
+      onRefresh={(repo) => refresh.mutate(repo)}
       project={project}
-      refreshError={refresh.error === null ? null : refresh.error.message}
-      refreshing={refresh.isPending}
+      refresh={
+        refresh.isIdle
+          ? null
+          : {
+              error: refresh.error === null ? null : refresh.error.message,
+              pending: refresh.isPending,
+              repo: refresh.variables,
+            }
+      }
       selectedId={selectedId}
       tree={tree.data}
       update={update}
@@ -149,20 +161,26 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
   );
 }
 
+/** The latest Refresh: which source it asked for, whether it is still out, and the error of the
+ *  request itself if it failed. */
+interface RefreshState {
+  readonly error: string | null;
+  readonly pending: boolean;
+  readonly repo: string;
+}
+
 function ArchitectureTreeView({
   onRefresh,
   project,
-  refreshError,
-  refreshing,
+  refresh,
   selectedId,
   tree,
   update,
   view,
 }: {
-  onRefresh: () => void;
+  onRefresh: (repo: string) => void;
   project: string;
-  refreshError: string | null;
-  refreshing: boolean;
+  refresh: RefreshState | null;
   selectedId: string | null;
   tree: ArchitectureTree;
   update: UpdatePaneState;
@@ -189,8 +207,10 @@ function ArchitectureTreeView({
       ? tree.components.filter((component) => !component.external && component.total === 0)
       : childComponents(tree.components, levelId);
   const now = Date.now();
-  const distrusted = modelDistrusted(tree.source, now);
-  const state = sourceState(tree.source, now);
+  const distrusted = distrustedSources(tree.sources, now);
+  // The empty state belongs to a project none of whose sources has imported a model yet.
+  const neverImported =
+    tree.components.length === 0 && tree.sources.every((source) => source.last_commit === null);
 
   // Focus follows a keyboard level change once the new rows have rendered: the effect runs
   // after every render and acts only when a level change armed it.
@@ -315,45 +335,15 @@ function ArchitectureTreeView({
   return (
     <div className="space-y-4" data-testid="architecture-pane">
       <header className={`space-y-1 text-sm ${textSecondaryOnCanvas}`}>
-        <p
-          className="flex flex-wrap items-center gap-x-2 gap-y-1"
-          data-testid="architecture-source"
-        >
-          <span className={`font-medium ${textSecondaryOnCanvas}`}>
-            {tree.source.repo}/{tree.source.branch}
-          </span>
-          {tree.source.last_commit === null ? null : (
-            <>
-              <span aria-hidden="true">·</span>
-              <span>
-                at <code className="text-xs">{tree.source.last_commit.slice(0, 8)}</code>
-              </span>
-            </>
-          )}
-          <span aria-hidden="true">·</span>
-          {state === "never-synced" || tree.source.last_sync_at === null ? (
-            <span>never synced</span>
-          ) : (
-            <span className={state === "stale" ? inlineWarningText : undefined}>
-              checked <Timestamp at={tree.source.last_sync_at} />
-              {state === "stale" ? " (stale)" : null}
-            </span>
-          )}
-          <span aria-hidden="true">·</span>
-          <button
-            className={`min-h-11 font-medium disabled:cursor-not-allowed disabled:opacity-50 md:min-h-0 ${linkText} ${linkHoverText}`}
-            disabled={refreshing}
-            onClick={onRefresh}
-            type="button"
-          >
-            {refreshing ? "Refreshing…" : "Refresh"}
-          </button>
-          {refreshError === null ? null : (
-            <span className={`text-xs ${dangerText}`} role="alert">
-              {refreshError}
-            </span>
-          )}
-        </p>
+        {tree.sources.map((source) => (
+          <SourceLine
+            key={source.repo}
+            now={now}
+            onRefresh={() => onRefresh(source.repo)}
+            refresh={refresh}
+            source={source}
+          />
+        ))}
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="architecture-scope">
           <span>
             {tree.totals.issues_done}/{tree.totals.issues_total} issues done
@@ -400,18 +390,6 @@ function ArchitectureTreeView({
           )}
         </p>
       </header>
-
-      {tree.source.last_error === null ? null : (
-        <div
-          className={`rounded-lg border p-3 text-sm ${calloutDangerBorder} ${calloutDangerBg} ${dangerText}`}
-          role="alert"
-        >
-          Last import failed: {tree.source.last_error}
-          {tree.source.last_commit === null
-            ? null
-            : ` · showing the model from ${tree.source.last_commit.slice(0, 8)}`}
-        </div>
-      )}
 
       <nav
         aria-label="Component level"
@@ -465,10 +443,10 @@ function ArchitectureTreeView({
         </p>
       ) : null}
 
-      {tree.components.length === 0 ? (
+      {neverImported ? (
         <p className={textMutedOnCanvas} data-testid="architecture-empty">
-          No model imported yet — Refresh reads .dispatch/architecture from {tree.source.repo}/
-          {tree.source.branch}.
+          No model imported yet — Refresh reads .dispatch/architecture from{" "}
+          {tree.sources.map((source) => `${source.repo}/${source.branch}`).join(", ")}.
         </p>
       ) : rows.length === 0 ? (
         <p className={textMutedOnCanvas}>
@@ -480,7 +458,7 @@ function ArchitectureTreeView({
             <ComponentRow
               component={component}
               components={tree.components}
-              distrusted={distrusted}
+              distrusted={distrusted.has(component.source)}
               hasChildren={hasChildren(component.id)}
               index={index}
               key={component.id}
@@ -503,6 +481,77 @@ function ArchitectureTreeView({
           tree={tree}
         />
       ) : null}
+    </div>
+  );
+}
+
+/** One source's header line: `repo/branch · at <sha8> · checked <time>` (or `never synced`) with
+ *  its own Refresh, which imports that source alone; under it, when the source's last import
+ *  failed, the error and the commit its components still come from. */
+function SourceLine({
+  now,
+  onRefresh,
+  refresh,
+  source,
+}: {
+  now: number;
+  onRefresh: () => void;
+  refresh: RefreshState | null;
+  source: ArchitectureTreeSource;
+}): ReactNode {
+  const state = sourceState(source, now);
+  const mine = refresh !== null && refresh.repo === source.repo;
+  const refreshing = mine && refresh.pending;
+  return (
+    <div data-testid="architecture-source">
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className={`font-medium ${textSecondaryOnCanvas}`}>
+          {source.repo}/{source.branch}
+        </span>
+        {source.last_commit === null ? null : (
+          <>
+            <span aria-hidden="true">·</span>
+            <span>
+              at <code className="text-xs">{source.last_commit.slice(0, 8)}</code>
+            </span>
+          </>
+        )}
+        <span aria-hidden="true">·</span>
+        {state === "never-synced" || source.last_sync_at === null ? (
+          <span>never synced</span>
+        ) : (
+          <span className={state === "stale" ? inlineWarningText : undefined}>
+            checked <Timestamp at={source.last_sync_at} />
+            {state === "stale" ? " (stale)" : null}
+          </span>
+        )}
+        <span aria-hidden="true">·</span>
+        <button
+          aria-label={refreshing ? `Refreshing ${source.repo}…` : `Refresh ${source.repo}`}
+          className={`min-h-11 font-medium disabled:cursor-not-allowed disabled:opacity-50 md:min-h-0 ${linkText} ${linkHoverText}`}
+          disabled={refresh?.pending === true}
+          onClick={onRefresh}
+          type="button"
+        >
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
+        {mine && refresh.error !== null ? (
+          <span className={`text-xs ${dangerText}`} role="alert">
+            {refresh.error}
+          </span>
+        ) : null}
+      </p>
+      {source.last_error === null ? null : (
+        <div
+          className={`mt-1 rounded-lg border p-3 text-sm ${calloutDangerBorder} ${calloutDangerBg} ${dangerText}`}
+          role="alert"
+        >
+          Last import failed: {source.last_error}
+          {source.last_commit === null
+            ? null
+            : ` · showing the model from ${source.last_commit.slice(0, 8)}`}
+        </div>
+      )}
     </div>
   );
 }

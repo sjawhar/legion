@@ -166,8 +166,8 @@ stamps.
 - **The daemon-launched controller keeps failing.** `legion claims list` shows its claim,
   `legion-<project>-controller`, and the daemon logs why each launch failed and when it retries a
   failed one. `kubectl -n <namespace> describe pod legion-<project>-controller` and its logs show the
-  pod's own side; a `workspace-init` exit 3 means its volume lost the session, and the daemon starts
-  a fresh controller.
+  pod's own side. The controller's session is a row in the session database like every other, so a
+  launch that cannot find it fails naming it rather than starting a fresh controller quietly.
 - **The daemon refuses to boot: `stop legion-<project>-controller, the controller an earlier boot
   under controller: daemon launched, since this daemon leaves the controller to its operator
   (controller: operator): …`.** `legion.yaml` was switched back to `controller: operator`, and the
@@ -422,32 +422,35 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   the next pod unscheduled until the daemon reads it dead past `worker_boot_timeout_seconds` and,
   once its launch failures run out, fails the claim. `kubectl -n legion describe pod <pod>` names the
   reason. Keep `admission_cap`, and the children a tree runs at once, within what the pool's limits
-  can place ([The cluster](/legion/legion/running-legion/#the-cluster)). A pod relaunched onto
-  another node first waits for its volume to detach from the old one (`FailedAttachVolume` or
-  `Multi-Attach` events, transient). The image probe pod, `legion-probe-<project>-<digest prefix>`,
+  can place ([The cluster](/legion/legion/running-legion/#the-cluster)). A pod replaced on another
+  node waits for no volume to detach: an issue's disk is its own pod's, created with it and
+  deleted with it, so a replacement brings a disk of its own. The image probe pod,
+  `legion-probe-<project>-<digest prefix>`,
   Pending Unschedulable at boot is the one pod the daemon waits on instead: it logs `boot probe is
   waiting on capacity; running it again` with the scheduler's reason and creates the pod again every
   5 minutes, serving nothing until one is placed and passes, and then reports the `pool-capacity`
   capability open with the count and the reason. Make room in the pool, or raise its limits; the
   probe pod itself needs only 250m and 1Gi.
-- **The `workspace-init` container fails.** It provisions the issue's workspace on the issue's own
-  volume, and its refusals name what to do, sometimes a `jj` command to run against the issue's
+- **The `workspace-init` container fails.** It provisions the issue's workspace on the pod's own
+  disk, and its refusals name what to do, sometimes a `jj` command to run against the issue's
   clone (a local bookmark deleted and never pushed, or a conflicted one). Read it with
 
   ```sh
   kubectl -n legion logs <pod> -c workspace-init
   ```
 
-  Nothing is registered before a refusal, so every later attempt refuses the same way until the
-  repository is fixed. Run the commands it names from a shell in the issue's running pod
-  (`kubectl -n legion exec -it <pod> -c architect -- sh`), or, when none runs, in a pod of your own
-  that mounts the issue's volume (`docs/kubernetes.md` in the repository, "A shell on an issue's
-  volume").
-- **The issue's volume was lost.** The daemon logs
-  `supervise: the issue's volume was lost with the session; relaunching a fresh session`. The loss
-  is one issue's: its other roles drop the sessions they kept on that volume, and no other issue of
-  the tree is touched. The agent comes back as a new session in a new workspace, which holds
-  `.legion/<issue>/workspace-recovered.json` naming the issue's branch to reconcile from.
+  Nothing is registered before a refusal, so every later attempt in that pod refuses the same way
+  until the repository is fixed. Run the commands it names from a shell in the issue's running pod
+  (`kubectl -n legion exec -it <pod> -c architect -- sh`). When no pod of the issue runs there is
+  nothing to reach — the disk went with the pod — and the issue's next launch provisions a fresh
+  clone and workspace from its pushed branch on a disk of its own (`docs/kubernetes.md` in the
+  repository, "A shell on an issue's disk").
+- **An issue's work is gone after its pod was replaced.** That is the shape of the runtime, not a
+  failure: an issue's disk is its pod's own and is deleted with the pod, so a stop, a close, a
+  node loss or a launch that replaces the pod takes the workspace with it. What survives is what
+  was pushed to `legion/<issue>` and each role's conversation, which lives in the session
+  database; the next pod provisions the workspace from that branch, and the agent is told its
+  workspace is newer than its conversation before its next turn.
 - **`worker-stream: rejected hello (stale worker generation)`** in the daemon's log is the fence
   working: a pod from an older generation of a claim tried to connect after a newer one replaced it.
   Nothing to do.
@@ -510,10 +513,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   decision that needs your authority.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
-  counted head and every head pushed on top of it until a push lands on a head CI judged green) no
-  longer sends the work back by itself, so the issue waits in testing, review, acceptance, retro or merging for
-  the architect, or for a worker's own decision such as a reviewer's request for changes. A `READY`
-  is still withdrawn on red CI.
+  counted head and every head pushed on top of it until a push lands on a head CI judged green, or
+  on a settled head whose base branch requires no check and no workflow; such a push raises no
+  count) no longer sends the work back by itself, so the issue waits in testing, review, acceptance,
+  retro or merging for the architect, or for a worker's own decision such as a reviewer's request
+  for changes. A `READY` is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
@@ -581,14 +585,17 @@ workflows the base branch requires:
 legion state --config legion.yaml --json | jq '.issues["<KEY>"].pullRequest'
 ```
 
-No `checksVerdict` on a pull request whose checks have settled means the daemon has not read the
-base branch's required checks yet, or a required workflow's run on the head is still going, has
-not happened, or has not been read since the head settled. A head with no verdict holds nothing
-back - `READY` reads no check of it, and GitHub decides the merge under the base branch's own
-rules - it is only that Legion sends the work nowhere on it. Its log names each read GitHub
-refused,
-with the repository, the pull request and the HTTP status (`read the checks a pull request's base
-branch requires`); the daemon reads again every two minutes.
+No `checksVerdict` on a pull request whose checks have settled has one of these causes: the base
+branch requires no check and no workflow, so the daemon judges nothing there and a failed check
+sends nothing back; the daemon has not read the base branch's required checks yet; a required check
+was cancelled, or the head's checks settled without it; or a required workflow's run on the head is
+still going, has not happened, or has not been read since the head settled. The absent value alone
+does not tell these apart: read on GitHub what the base branch requires and the head's checks. A
+head with no verdict holds nothing back - `READY` reads no check of it, and GitHub decides the merge
+under the base branch's own rules - it is only that Legion sends the work nowhere on it. The
+daemon's log names each read GitHub refused, with the repository, the pull request and the HTTP
+status (`read the checks a pull request's base branch requires`); the daemon reads again every two
+minutes.
 
 ## A repository change was not applied
 
