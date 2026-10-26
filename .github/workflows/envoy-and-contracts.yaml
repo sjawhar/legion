@@ -1252,10 +1252,10 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache-dependency-path: packages/envoy/go.sum
       # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
-      # never reaches: an unknown option, --help, and a NATS already holding the port, where the
-      # driver must refuse rather than run the acceptance against a server it did not start. It
-      # needs the bun and go this job already has, and it runs first because it is seconds
-      # (INFRA-250).
+      # never reaches: an unknown option, --help, and an E2E_NATS_PORT, E2E_PORT or E2E_SESSION_PORT
+      # another process already holds, which the driver uses as given and fails on rather than
+      # replacing it or running against a server it did not start. It needs the bun and go this job
+      # already has, and it runs first because it is seconds (INFRA-250).
       - name: Refusal test for e2e-local.sh
         run: bash scripts/e2e-local.test.sh
         working-directory: packages/envoy

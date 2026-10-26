@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # listener-deploy-probe.test.sh — Proves listener-deploy-probe.sh's per-tick lines, summary and exit
-# code over two fake listener tasks: Python http.servers bound to 127.0.0.1 and 127.0.0.2 on one
-# port, and a fake getent on PATH that resolves probe.test to both, three ticks a run. The name
-# itself resolves nowhere for curl, so every run also lists probe.test as unreached, which names it
-# without failing the run.
+# code over two fake listener tasks: one Python process per case that serves 127.0.0.1 and
+# 127.0.0.2 on one port the kernel chose, and a fake getent on PATH that resolves probe.test to
+# both, three ticks a run. The name itself resolves nowhere for curl, so every run also lists
+# probe.test as unreached, which names it without failing the run.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -47,26 +47,64 @@ printf '%s\n' '127.0.0.1       STREAM probe.test' '127.0.0.1       DGRAM' '127.0
 EOF
 chmod +x "${fake_bin_dir}/getent"
 
-# The fake task answers /healthz and GET /v1/sessions as its mode says: ok (both 200), starting
-# (main's shape while the durable is held: /healthz 200 "starting", /v1 503 "service starting" at
-# every tick), flap (/v1 200, then 503 at its second request, then 200), unauthorized (/v1 401),
-# exiting (/v1 200 twice, then the task stops right after it answers the next /healthz, so that
-# tick's /v1 finds nothing listening), unhealthy (/healthz 503 and /v1 503 at every tick). empty,
-# reset and slow fail /v1 at its first two requests and answer 200 at the third: empty closes the
-# connection without an answer and reset resets it, as Go's net/http does after a handler panics,
-# and slow answers after 4 s, past the probe's 3 s. Any /v1 request without the probe's bearer is
-# 401 too, so a pass also proves the bearer was sent.
+# The fake tasks answer /healthz and GET /v1/sessions as each address's mode says: ok (both 200),
+# starting (main's shape while the durable is held: /healthz 200 "starting", /v1 503 "service
+# starting" at every tick), flap (/v1 200, then 503 at its second request, then 200), unauthorized
+# (/v1 401), exiting (/v1 200 twice, then the task stops right after it answers the next /healthz,
+# so that tick's /v1 finds nothing listening), unhealthy (/healthz 503 and /v1 503 at every tick).
+# empty, reset and slow fail /v1 at its first two requests and answer 200 at the third: empty
+# closes the connection without an answer and reset resets it, as Go's net/http does after a
+# handler panics, and slow answers after 4 s, past the probe's 3 s. none binds the address without
+# listening, so it refuses every connection while no other process can take the port. Any /v1
+# request without the probe's bearer is 401 too, so a pass also proves the bearer was sent. Each
+# address keeps its own mode and request count and serves in its own thread, so a task that exits
+# closes only its own socket.
 cat >"$server" <<'EOF'
+import errno
 import http.server
 import json
 import os
 import socket
 import struct
 import sys
+import threading
 import time
 
-address, port, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-v1_requests = 0
+port_file, modes = sys.argv[1], {"127.0.0.1": sys.argv[2], "127.0.0.2": sys.argv[3]}
+
+
+def bind_pair():
+    # The kernel chooses the port on 127.0.0.1, and 127.0.0.2 takes the same one. Another socket
+    # may already hold that port on 127.0.0.2, so a refused second bind closes both and starts over.
+    for _ in range(20):
+        first = socket.socket()
+        first.bind(("127.0.0.1", 0))
+        port = first.getsockname()[1]
+        second = socket.socket()
+        try:
+            second.bind(("127.0.0.2", port))
+        except OSError as error:
+            first.close()
+            second.close()
+            if error.errno != errno.EADDRINUSE:
+                raise
+            continue
+        return port, {"127.0.0.1": first, "127.0.0.2": second}
+    sys.exit("no port was free on both 127.0.0.1 and 127.0.0.2 in 20 attempts")
+
+
+class Task(http.server.ThreadingHTTPServer):
+    def __init__(self, listening, mode):
+        super().__init__(listening.getsockname(), Handler, bind_and_activate=False)
+        self.socket.close()
+        self.socket = listening
+        self.mode = mode
+        self.v1_requests = 0
+        self.lock = threading.Lock()
+
+    def stop(self):
+        self.shutdown()
+        self.server_close()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -82,22 +120,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        global v1_requests
+        task = self.server
         if self.path == "/healthz":
-            if mode == "unhealthy":
+            if task.mode == "unhealthy":
                 return self.answer(503, {"status": "unhealthy"})
-            stopping = mode == "exiting" and v1_requests == 2
+            with task.lock:
+                stopping = task.mode == "exiting" and task.v1_requests == 2
             if stopping:
                 # The task stops as Go's server.Shutdown does: it stops listening first, then
-                # finishes the request in flight, and exits.
-                self.server.socket.shutdown(socket.SHUT_RDWR)
-            self.answer(200, {"status": "starting" if mode == "starting" else "healthy"})
+                # finishes the request in flight. Only this address's socket closes.
+                task.socket.shutdown(socket.SHUT_RDWR)
+            self.answer(200, {"status": "starting" if task.mode == "starting" else "healthy"})
             if stopping:
                 self.connection.shutdown(socket.SHUT_WR)
-                os._exit(0)
+                threading.Thread(target=task.stop).start()
             return None
         if self.path == "/v1/sessions":
-            v1_requests += 1
+            with task.lock:
+                task.v1_requests += 1
+                v1_requests = task.v1_requests
+            mode = task.mode
             if mode == "unauthorized" or self.headers.get("Authorization") != "Bearer probe-token":
                 return self.answer(401, {"error": "unauthorized"})
             failing = v1_requests <= 2
@@ -122,26 +164,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.answer(404, {"error": "not found"})
 
 
-http.server.ThreadingHTTPServer((address, port), Handler).serve_forever()
+port, sockets = bind_pair()
+for address, bound in sockets.items():
+    if modes[address] != "none":
+        bound.listen()
+        threading.Thread(target=Task(bound, modes[address]).serve_forever, daemon=True).start()
+# Both sockets are in their modes: a listening socket queues connections before its thread serves.
+with open(port_file + ".tmp", "w") as out:
+    out.write("%d\n" % port)
+os.rename(port_file + ".tmp", port_file)
+# The process holds both sockets, a none address's included, until the test kills it.
+threading.Event().wait()
 EOF
 
-port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-readonly port
-
-# start_server ADDRESS MODE starts a fake task on ADDRESS:$port and waits until it answers; the mode
-# none starts nothing, so the address refuses every connection.
-start_server() {
-  local address="$1" mode="$2" attempt
-  [[ "$mode" != none ]] || return 0
-  python3 "$server" "$address" "$port" "$mode" &
-  server_pids+=("$!")
-  for attempt in $(seq 50); do
-    curl -s -o /dev/null "http://${address}:${port}/healthz" && return 0
-    [[ "$attempt" -lt 50 ]] || break
+# wait_port_file FILE PID WHAT waits until the fake process PID, named WHAT, has written FILE: the
+# port it serves, written once its sockets are ready.
+wait_port_file() {
+  local file="$1" pid="$2" what="$3"
+  for _ in $(seq 50); do
+    [[ ! -s "$file" ]] || return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+      printf 'FAIL: %s exited before it wrote its port\n' "$what" >&2
+      exit 1
+    fi
     sleep 0.1
   done
-  printf 'FAIL: the fake task on %s:%s never answered\n' "$address" "$port" >&2
+  printf 'FAIL: %s never wrote its port\n' "$what" >&2
   exit 1
+}
+
+port=""
+starts=0
+# start_tasks FIRST_MODE SECOND_MODE starts one fake process serving 127.0.0.1 and 127.0.0.2 in
+# those modes on one port the kernel chose, and sets $port from the fresh port file it writes.
+start_tasks() {
+  local port_file
+  starts=$((starts + 1))
+  port_file="${temporary_dir}/listener-port.${starts}"
+  python3 "$server" "$port_file" "$1" "$2" &
+  server_pids+=("$!")
+  wait_port_file "$port_file" "$!" "the fake tasks"
+  read -r port <"$port_file"
 }
 
 status=0
@@ -152,8 +215,7 @@ run_case() {
   local first="$1" second="$2"
   shift 2
   stop_servers
-  start_server 127.0.0.1 "$first"
-  start_server 127.0.0.2 "$second"
+  start_tasks "$first" "$second"
   status=0
   env -u ENVOY_TOKEN_FILE PATH="${fake_bin_dir}:${PATH}" ENVOY_TOKEN=probe-token \
     bash "$driver" --url "http://probe.test:${port}" --interval 1 --duration 3 "$@" >"$output_file" 2>&1 || status=$?
@@ -246,9 +308,10 @@ printf 'PASS: a task whose /v1 never answers 200 while /healthz answers fails th
 cat >"$dispatch_server" <<'EOF'
 import http.server
 import json
+import os
 import sys
 
-port, mode = int(sys.argv[1]), sys.argv[2]
+port_file, mode = sys.argv[1], sys.argv[2]
 posts = 0
 
 
@@ -288,9 +351,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                  "deliveries": [delivery], "advice": {"status": "in_progress"}})
 
 
-http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file + ".tmp", "w") as out:
+    out.write("%d\n" % server.server_address[1])
+os.rename(port_file + ".tmp", port_file)
+server.serve_forever()
 EOF
-dispatch_port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
 printf 'dispatch-token\n' >"${temporary_dir}/dispatch-token"
 printf 'wrong-token\n' >"${temporary_dir}/wrong-dispatch-token"
 
@@ -302,16 +368,16 @@ stop_dispatch() {
 }
 
 # run_dispatch_case MODE TOKEN_FILE runs case (h)'s probe, a Dispatch message at ticks 1 and 3,
-# against a fake Dispatch in MODE, with the Dispatch bearer in TOKEN_FILE.
+# against a fake Dispatch in MODE, with the Dispatch bearer in TOKEN_FILE. Each start of the fake
+# binds a port the kernel chose and writes it to a fresh port file.
 run_dispatch_case() {
-  local mode="$1" token_file="$2" attempt
-  python3 "$dispatch_server" "$dispatch_port" "$mode" &
+  local mode="$1" token_file="$2" port_file dispatch_port
+  starts=$((starts + 1))
+  port_file="${temporary_dir}/dispatch-port.${starts}"
+  python3 "$dispatch_server" "$port_file" "$mode" &
   dispatch_pid="$!"
-  for attempt in $(seq 50); do
-    curl -s -o /dev/null "http://127.0.0.1:${dispatch_port}/" && break
-    [[ "$attempt" -lt 50 ]] || fail "the fake Dispatch never answered"
-    sleep 0.1
-  done
+  wait_port_file "$port_file" "$dispatch_pid" "the fake Dispatch"
+  read -r dispatch_port <"$port_file"
   run_case ok ok --dispatch-url "http://127.0.0.1:${dispatch_port}" --dispatch-token-file "$token_file" \
     --dispatch-issue LEGION-1 --dispatch-session ses_probe --dispatch-every 2
   stop_dispatch
@@ -376,7 +442,7 @@ printf 'PASS: a run without --url is a usage error (exit 2)\n'
 mkdir -p "${temporary_dir}/no-curl"
 ln -s "$(command -v sed)" "${temporary_dir}/no-curl/sed"
 status=0
-PATH="${temporary_dir}/no-curl" "$BASH" "$driver" --url "http://probe.test:${port}" --targets 127.0.0.1 >"$output_file" 2>&1 || status=$?
+PATH="${temporary_dir}/no-curl" "$BASH" "$driver" --url "http://probe.test:1" --targets 127.0.0.1 >"$output_file" 2>&1 || status=$?
 expect_status 4 "no curl"
 expect_text 'ERR: missing required command: curl' "no curl"
 printf 'PASS: a host without curl is a missing tool (exit 4)\n'

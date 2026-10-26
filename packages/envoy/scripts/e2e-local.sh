@@ -8,7 +8,10 @@
 # delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
 # bounded acceptance run responsive while retaining the production settle logic.
 #
-# Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
+# Ports: the OS chooses each one, and each URL is built from the port its own process reports
+# (natsd's "Listening for client connections on" line, the listener's "envoy-listener listening"
+# addr, the fake session's "ready <port>"). E2E_NATS_PORT, E2E_PORT and E2E_SESSION_PORT set a port
+# explicitly; it is used as given, and one already in use fails with "address already in use".
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -49,14 +52,6 @@ readonly fixture_dir
 out_dir="${envoy_dir}/out/e2e"
 readonly out_dir
 
-nats_port="${E2E_NATS_PORT:-14222}"
-listener_port="${E2E_PORT:-19020}"
-session_port="${E2E_SESSION_PORT:-19021}"
-readonly nats_port listener_port session_port
-listener_url="http://127.0.0.1:${listener_port}"
-readonly listener_url
-nats_url="nats://127.0.0.1:${nats_port}"
-readonly nats_url
 webhook_secret="e2e-local"
 readonly webhook_secret
 session_id="ses_e2e_local"
@@ -120,8 +115,7 @@ done
 # The lock is held by this shell, and the servers it starts, for as long as they live, and needs no
 # cleanup of its own; a directory left by a run that is gone holds no lock and is cleaned as usual.
 # After a SIGKILL of this script, which runs no cleanup, the natsd and listener it started inherit
-# the lock's descriptor and outlive it, so a later run is refused until they are gone, as it would
-# be anyway: they still hold the NATS port.
+# the lock's descriptor and outlive it, so a later run is refused until they are gone.
 mkdir -p "$out_dir"
 exec {lock_fd}>"$lock_file"
 flock -n "$lock_fd" || {
@@ -149,18 +143,19 @@ printf 'building listener and NATS server\n'
   go build -o "$nats_binary" ./internal/testnats/cmd/natsd
 )
 
-printf 'starting NATS: 127.0.0.1:%s\n' "$nats_port"
-"$nats_binary" -p "$nats_port" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
+printf 'starting NATS\n'
+"$nats_binary" -p "${E2E_NATS_PORT:--1}" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
 nats_pid=$!
 
-# wait_for_nats returns once the server this script started is answering, and fails otherwise. It
-# must never pass on another server: something already holding the port — a run left behind, or a
-# second run of this script — greets a connection exactly as ours would, while ours exits with
-# "address already in use". So the greeting is read only after our own server's log says it is
-# ready, and the wait ends the moment our own process is gone.
+# wait_for_nats returns once the server this script started is answering, and sets nats_port to the
+# port that server reports; it fails otherwise. It must never pass on another server: something
+# already holding an E2E_NATS_PORT — a run left behind, or another program — greets a connection
+# exactly as ours would, while ours exits with "address already in use". So the port is read from
+# our own server's log once it says it is ready, and the wait ends the moment our own process is
+# gone.
 wait_for_nats() {
   local deadline=$((SECONDS + 30))
-  local banner
+  local banner port
   while ((SECONDS < deadline)); do
     if ! kill -0 "$nats_pid" 2>/dev/null; then
       printf 'ERR: the NATS server this script started ended before it was ready.\n' >&2
@@ -168,26 +163,37 @@ wait_for_nats() {
       return 1
     fi
     if grep -q 'Server is ready' "$nats_log_file"; then
+      port="$(sed -n 's/.*Listening for client connections on 127\.0\.0\.1:\([0-9][0-9]*\)$/\1/p' "$nats_log_file")"
+      if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        printf 'ERR: the NATS server this script started is ready but named no client port.\n' >&2
+        cat "$nats_log_file" >&2
+        return 1
+      fi
       # A NATS server greets every connection it accepts with its INFO line; curl's telnet
       # scheme reads that greeting, then waits out its own --max-time, so only the text proves
       # the port answers.
-      banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${nats_port}" </dev/null 2>/dev/null || true)"
+      banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${port}" </dev/null 2>/dev/null || true)"
       if [[ "$banner" == 'INFO '* ]]; then
+        nats_port="$port"
         return 0
       fi
     fi
     sleep 0.25
   done
-  printf 'ERR: NATS did not accept connections on 127.0.0.1:%s within 30 seconds.\n' "$nats_port" >&2
+  printf 'ERR: the NATS server this script started did not accept connections within 30 seconds.\n' >&2
   cat "$nats_log_file" >&2
   return 1
 }
 
 printf 'waiting for NATS\n'
 wait_for_nats
+readonly nats_port
+nats_url="nats://127.0.0.1:${nats_port}"
+readonly nats_url
+printf 'NATS: %s\n' "$nats_url"
 
-printf 'starting listener: %s\n' "$listener_url"
-PORT="$listener_port" \
+printf 'starting listener\n'
+PORT="${E2E_PORT:-0}" \
   ENVOY_MACHINE_ID=e2e-local \
   NATS_URLS="$nats_url" \
   ENVOY_WEBHOOKS=github \
@@ -197,6 +203,35 @@ PORT="$listener_port" \
   ENVOY_CI_DEBOUNCE=250ms \
   "$listener_binary" >"$listener_log_file" 2>&1 &
 listener_pid=$!
+
+# wait_for_listener returns once the listener this script started logs the address it is bound to,
+# and sets listener_url from it; it fails the moment that process is gone, as it is when E2E_PORT
+# is already in use.
+wait_for_listener() {
+  local deadline=$((SECONDS + 30))
+  local addr
+  while ((SECONDS < deadline)); do
+    addr="$(jq -Rnr '[inputs | fromjson? | select(.msg == "envoy-listener listening") | .addr][0] // empty' "$listener_log_file")"
+    if [[ -n "$addr" ]]; then
+      listener_url="http://${addr}"
+      return 0
+    fi
+    if ! kill -0 "$listener_pid" 2>/dev/null; then
+      printf 'ERR: the listener this script started ended before it was listening.\n' >&2
+      cat "$listener_log_file" >&2
+      return 1
+    fi
+    sleep 0.25
+  done
+  printf 'ERR: the listener did not report its address within 30 seconds.\n' >&2
+  cat "$listener_log_file" >&2
+  return 1
+}
+
+printf 'waiting for the listener address\n'
+wait_for_listener
+readonly listener_url
+printf 'listener: %s\n' "$listener_url"
 
 wait_for_health() {
   local deadline=$((SECONDS + 30))
@@ -215,36 +250,46 @@ wait_for_health() {
 printf 'waiting for listener health\n'
 wait_for_health
 
-E2E_SESSION_PROMPTS_FILE="$session_prompts_file" E2E_SESSION_PORT="$session_port" \
+E2E_SESSION_PROMPTS_FILE="$session_prompts_file" E2E_SESSION_PORT="${E2E_SESSION_PORT:-0}" \
   bun -e '
     import { appendFileSync } from "node:fs";
 
     const output = process.env.E2E_SESSION_PROMPTS_FILE;
     const port = Number(process.env.E2E_SESSION_PORT);
-    if (output === undefined || !Number.isInteger(port) || port <= 0) {
+    if (output === undefined || !Number.isInteger(port) || port < 0) {
       throw new Error("fake-session configuration is invalid");
     }
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port,
-      async fetch(request) {
-        const url = new URL(request.url);
-        if (request.method !== "POST" || !url.pathname.endsWith("/prompt_async")) {
-          return new Response("not found", { status: 404 });
-        }
-        appendFileSync(output, `${await request.text()}\n`);
-        return new Response(null, { status: 204 });
-      },
-    });
+    let server;
+    try {
+      server = Bun.serve({
+        hostname: "127.0.0.1",
+        port,
+        async fetch(request) {
+          const url = new URL(request.url);
+          if (request.method !== "POST" || !url.pathname.endsWith("/prompt_async")) {
+            return new Response("not found", { status: 404 });
+          }
+          appendFileSync(output, `${await request.text()}\n`);
+          return new Response(null, { status: 204 });
+        },
+      });
+    } catch (error) {
+      // Bun says "Is port N in use?"; this names the failure as the other servers here do.
+      if (error?.code !== "EADDRINUSE") throw error;
+      process.stderr.write(`fake session: listen 127.0.0.1:${port}: address already in use\n`);
+      process.exit(1);
+    }
     process.stdout.write(`ready ${server.port}\n`);
   ' >"$session_ready_fifo" 2>"$session_log_file" &
 session_pid=$!
 
-if ! IFS= read -r -t 5 session_ready <"$session_ready_fifo" || [[ "$session_ready" != "ready ${session_port}" ]]; then
-  printf 'ERR: fake session did not bind to port %s.\n' "$session_port" >&2
+if ! IFS= read -r -t 5 session_ready <"$session_ready_fifo" || [[ ! "$session_ready" =~ ^ready\ ([0-9]+)$ ]]; then
+  printf 'ERR: the fake session did not report its port.\n' >&2
   cat "$session_log_file" >&2
   exit 3
 fi
+session_port="${BASH_REMATCH[1]}"
+readonly session_port
 
 (
   cd "$repo_root"
