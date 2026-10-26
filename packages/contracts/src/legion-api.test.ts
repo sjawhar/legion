@@ -514,7 +514,7 @@ test("the state golden carries the deployment's capability report", () => {
     name: "resource-limits",
     status: "open",
     detail:
-      "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
+      "no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod",
     configLine: 'capabilities.decided.resource-limits: "<reason>"',
     source: "configuration",
   });

@@ -156,6 +156,12 @@
 
 ### Changed
 
+- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
+  `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
+  fields, in place of one entry per role, and the `resource-limits` capability row's detail names
+  pods (`no CPU and memory requests and limits under runtime.kubernetes.resources for the issue
+  pod`) rather than roles. `LegionStateResponse` reads `settings` loosely, so its schema is
+  unchanged.
 - **Breaking:** a project's architecture model comes from any number of sources, one per
   repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order
   the project added them, replaces `source`; `ArchitectureTreeComponent.source` names the

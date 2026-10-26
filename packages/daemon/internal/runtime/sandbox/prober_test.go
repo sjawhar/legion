@@ -9,10 +9,9 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-
-	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // proberOptions are testOptions without anything only supervision reads: no provisioning token
@@ -46,7 +45,7 @@ func TestAProberNeedsNoSupervision(t *testing.T) {
 }
 
 // Every refusal of what the probe itself reads stands for the prober: the namespace, the
-// digest-pinned image, the pool the runtime places every pod on, and every role's reservation.
+// digest-pinned image, the pool the runtime places every pod on, and each pod's reservation.
 func TestAProberRefusesWhatTheFullRuntimeRefusesOfTheProbe(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -56,7 +55,7 @@ func TestAProberRefusesWhatTheFullRuntimeRefusesOfTheProbe(t *testing.T) {
 		{"no namespace", func(o *Options) { o.Namespace = "" }, "no namespace"},
 		{"an image by tag", func(o *Options) { o.Image = "ghcr.io/example/legion-worker:latest" }, "is not pinned by digest"},
 		{"the pool selector", func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "other"} }, "is the runtime's"},
-		{"a missing reservation", func(o *Options) { delete(o.Resources, claim.RoleImplementer) }, "no reservation for role implementer"},
+		{"a missing reservation", func(o *Options) { o.Resources.Issue = corev1.ResourceRequirements{} }, "the issue pod reserves no cpu"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := proberOptions()

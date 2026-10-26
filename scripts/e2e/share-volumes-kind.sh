@@ -35,6 +35,8 @@ mkdir -p "$evidence"
 transcript_to "$evidence/transcript.log"
 # shellcheck source-path=SCRIPTDIR source=lib/kind-sandbox.sh
 . "$root/scripts/e2e/lib/kind-sandbox.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
+. "$root/scripts/e2e/lib/role-namespaces.sh"
 
 # The NFS server: NFS-Ganesha as the Kubernetes SIG Storage's nfs-provisioner image ships it, run
 # with a configuration of the proof's own (two exports, NFSv4.0, no grace period).
@@ -224,28 +226,39 @@ done
 pass
 
 begin pod-shares
-container=architect
+# An issue pod has one container, `roles`, which mounts every pod-block volume at the block's path
+# (a path outside the image's home); every role's namespaces must see it there. The reads and writes
+# below run as the launched architect's agent sees the pod (role_enter_sh): inside its role-init's
+# namespaces, as its shim's user. The launch driver's worker stream is gone once it exits, and the
+# shim redials it without end, so the role's namespaces stay up for the checks.
+container=roles
+role=architect
+role_exec() { kind_k -n legion exec "$pod" -c "$container" -- sh -c "$role_enter_sh" role-enter "$role" "$@"; }
 for _ in $(seq 1 90); do
-  kind_k -n legion exec "$pod" -c "$container" -- true >/dev/null 2>&1 && break
+  role_exec true >/dev/null 2>&1 && break
   sleep 2
 done
+# shellcheck disable=SC2016 # expanded by the role's shell
+entered=$(role_exec sh -c 'echo "uid $(id -u), pid 1 $(tr "\0" " " </proc/1/cmdline | cut -c1-80)"' 2>&1) ||
+  fail "cannot enter the $role role's namespaces in pod $pod: $entered"
+note "role $role: $entered"
 kind_k -n legion get pod "$pod" -o yaml >"$evidence/shares-pod.yaml"
 note "pod $pod: runtimeClassName $(kind_k -n legion get pod "$pod" -o jsonpath='{.spec.runtimeClassName}'), volumes $(kind_k -n legion get pod "$pod" -o jsonpath='{range .spec.volumes[?(@.name=="team")]}team→claim {.persistentVolumeClaim.claimName}{end}{range .spec.volumes[?(@.name=="scratch")]}, scratch→nfs {.nfs.server}:{.nfs.path}{end}')"
 kernel=$(kind_k -n legion exec "$pod" -c "$container" -- sh -c 'dmesg 2>/dev/null | head -1')
 [[ $kernel == *gVisor* ]] || fail "container $container's kernel is not gVisor's: $kernel"
 note "container $container: $kernel"
-note "mounts: $(kind_k -n legion exec "$pod" -c "$container" -- sh -c 'grep -E " /mnt/(team|scratch) " /proc/mounts' | tr '\n' ';')"
-read_back=$(kind_k -n legion exec "$pod" -c "$container" -- cat /mnt/team/seed.txt) || fail "container $container cannot read /mnt/team/seed.txt"
-[ "$read_back" = "$seed" ] || fail "container $container read $read_back from /mnt/team/seed.txt, not the seed"
+note "role $role mounts: $(role_exec sh -c 'grep -E " /mnt/(team|scratch) " /proc/mounts' | tr '\n' ';')"
+read_back=$(role_exec cat /mnt/team/seed.txt) || fail "role $role cannot read /mnt/team/seed.txt"
+[ "$read_back" = "$seed" ] || fail "role $role read $read_back from /mnt/team/seed.txt, not the seed"
 note "cat /mnt/team/seed.txt → $read_back"
-if refused=$(kind_k -n legion exec "$pod" -c "$container" -- sh -c 'echo no >/mnt/team/written-by-pod' 2>&1); then
-  fail "container $container wrote to /mnt/team, which the pod block mounts read-only"
+if refused=$(role_exec sh -c 'echo no >/mnt/team/written-by-pod' 2>&1); then
+  fail "role $role wrote to /mnt/team, which the pod block mounts read-only"
 fi
 [[ $refused == *"Read-only file system"* ]] || fail "the write to /mnt/team failed for another reason: $refused"
 note "echo no >/mnt/team/written-by-pod → refused: $(tr '\n' ' ' <<<"$refused")"
 token="written by $pod at $(date -u +%FT%TZ)"
-kind_k -n legion exec "$pod" -c "$container" -- sh -c "printf '%s\n' '$token' >/mnt/scratch/from-issue-pod && ls -ln /mnt/scratch/from-issue-pod" >"$work/written" ||
-  fail "container $container cannot write /mnt/scratch/from-issue-pod: $(cat "$work/written")"
+role_exec sh -c "printf '%s\n' '$token' >/mnt/scratch/from-issue-pod && ls -ln /mnt/scratch/from-issue-pod" >"$work/written" 2>&1 ||
+  fail "role $role cannot write /mnt/scratch/from-issue-pod: $(cat "$work/written")"
 note "printf … >/mnt/scratch/from-issue-pod → $(cat "$work/written")"
 held=$(kind_k -n nfs exec ganesha -- cat /export/scratch/from-issue-pod)
 [ "$held" = "$token" ] || fail "the NFS server holds $held in /export/scratch/from-issue-pod, not what the pod wrote"
