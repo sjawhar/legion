@@ -512,7 +512,8 @@ func TestARewatchOntoARecreatedBucketKeepsTheCopyUntilTheReadCompletes(t *testin
 	into := newSeen()
 	now := newClock()
 	logger, records := jsonLogger(t)
-	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now), kvwatch.WithLogger(logger))
+	// No periodic probe: the test drives the read of the recreated bucket itself.
+	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now), kvwatch.WithLogger(logger), kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
@@ -574,7 +575,8 @@ func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
 	}
 	into := newSeen()
 	now := newClock()
-	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now))
+	// No periodic probe, which would find the recreate before Check does.
+	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now), kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
@@ -716,7 +718,8 @@ func TestAHeldReadReleasedTooLateNeitherCompletesNorRestoresServing(t *testing.T
 			}
 			into := newSeen()
 			now := newClock()
-			w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now))
+			// No periodic probe, which would read a recreated bucket before Check finds it.
+			w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now), kvwatch.WithStreamProbeInterval(0))
 			t.Cleanup(w.Stop)
 			w.Start()
 			eventually(t, "the first read's completion", w.Following)
@@ -764,7 +767,7 @@ func TestAStaleEpisodeOutlastsFailedReadsUntilOneCompletes(t *testing.T) {
 	into := newSeen()
 	now := newClock()
 	arm := &armed{}
-	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc(arm.afterFunc()))
+	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
@@ -851,7 +854,7 @@ func TestATimedOutReadIsReadAgainByTheWatcher(t *testing.T) {
 		into.hold("gone-from-the-bucket")
 		arm := &armed{}
 		handle := scripted(kv.KeyValue, append([]watchStep{timesOut(1)}, steps...)...)
-		w := kvwatch.New("test cache", handle.handle(), into, kvwatch.WithAfterFunc(arm.afterFunc()))
+		w := kvwatch.New("test cache", handle.handle(), into, kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 		t.Cleanup(w.Stop)
 		w.Start()
 		eventually(t, "the re-read to be armed", func() bool { return arm.waits() == 1 })
@@ -958,7 +961,8 @@ func TestABucketRecreatedWithAShorterTTLShortensTheStaleBound(t *testing.T) {
 	conn, kv := bucket(t, uri)
 	into := newSeen()
 	now := newClock()
-	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now))
+	// No periodic probe: the test drives the read of the recreated bucket itself.
+	w := kvwatch.New("test cache", kv, into, kvwatch.WithNow(now.Now), kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)
@@ -1205,7 +1209,8 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(slow.release) }) }
 	t.Cleanup(release)
 	into := newSeen()
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: slow}, into)
+	// No periodic probe: the test's two Rewatches are the only reads of the recreated bucket.
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: slow}, into, kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the first read's completion", w.Following)

@@ -15,7 +15,9 @@ import (
 // to wait for a repair, and every callback, in the order the watcher armed them, which the test
 // fires itself. The production wait is a minute, so a test that slept for it could not run at
 // all. Each callback is kept, not just the last, because a real one can still run after a later
-// stop has armed its own: time.Timer.Stop does not wait for a callback already started.
+// stop has armed its own: time.Timer.Stop does not wait for a callback already started. A test
+// that counts or fires its waits turns the stream probe off (kvwatch.WithStreamProbeInterval(0)),
+// whose waits it would otherwise record among them.
 type armed struct {
 	mu    sync.Mutex
 	delay time.Duration
@@ -148,7 +150,7 @@ func TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn(t *testing.T) {
 	arm := &armed{}
 	logger, records := jsonLogger(t)
 	w := kvwatch.New("test cache", kv, into,
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -179,7 +181,7 @@ func TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair(t *testing.T) {
 	arm := &armed{}
 	logger, records := jsonLogger(t)
 	w := kvwatch.New("test cache", kv, newSeen(),
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -214,7 +216,7 @@ func TestAWatcherNothingRepairsLogsWhenItsMinutePasses(t *testing.T) {
 	arm := &armed{}
 	logger, records := jsonLogger(t)
 	w := kvwatch.New("test cache", kv, newSeen(),
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -250,7 +252,7 @@ func TestAWaitARepairClearedReportsNotTheNextStop(t *testing.T) {
 	arm := &armed{}
 	logger, records := jsonLogger(t)
 	w := kvwatch.New("test cache", kv, newSeen(),
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
@@ -294,7 +296,7 @@ func TestAWatcherStoppedOnPurposeLogsNeither(t *testing.T) {
 	arm := &armed{}
 	logger, records := jsonLogger(t)
 	w := kvwatch.New("test cache", kv, newSeen(),
-		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+		kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 

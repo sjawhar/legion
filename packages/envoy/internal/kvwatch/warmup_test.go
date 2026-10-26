@@ -147,7 +147,7 @@ func TestATimedOutWarmUpSaysSoAndIsReadAgainByTheWatcher(t *testing.T) {
 	into := newSeen()
 	arm := &armed{}
 	handle := scripted(kv.KeyValue, timesOut(1))
-	w := kvwatch.New("interest registry", handle.handle(), into, kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()))
+	w := kvwatch.New("interest registry", handle.handle(), into, kvwatch.WithLogger(logger), kvwatch.WithAfterFunc(arm.afterFunc()), kvwatch.WithStreamProbeInterval(0))
 	t.Cleanup(w.Stop)
 	w.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -15,6 +15,16 @@
 // watcher itself. The watcher records whether its copy can be served (Servable): never before its
 // first complete read, and not once the copy has stopped following the bucket for longer than a
 // bound (the stale episode).
+//
+// The watcher also finds by itself a bucket deleted, or deleted and created again, under it.
+// nats.go's ordered consumer does not end on a recreate: once its idle heartbeats stop it moves
+// onto the new stream at the old stream's last sequence + 1, says nothing, and so skips the new
+// bucket's first records, every one of them when the old stream was the longer. So the watcher reads
+// its bucket's stream every few seconds (probe), again before a read completes, and again before it
+// applies a record while following when its last confirmation is older than nats.go could have moved
+// the consumer (streamConfirmMaxAge). A different stream stops the copy following at once and the
+// watcher reads the new bucket whole; a missing one stops it following until the bucket is back.
+// Check, the stores' health probe, stays the fallback for a recreate these reads missed.
 package kvwatch
 
 import (
@@ -74,8 +84,39 @@ var ErrRefilling = errors.New("kvwatch: the cache has no complete read of its bu
 const defaultStaleBound = 2 * time.Minute
 
 // rereadDelay is how long a watcher waits before it reads its bucket again after the current
-// read's scan timed out.
+// read's scan timed out, or a re-read failed to start.
 const rereadDelay = 5 * time.Second
+
+// streamProbeInterval is how often a watcher reads its bucket's stream to find the bucket deleted,
+// or deleted and created again, under it (probe). One STREAM.INFO per watcher every 2 s keeps the
+// latest confirmation of a healthy bucket's stream younger than streamConfirmMaxAge, so the gate on
+// delivered records rarely waits for a read of its own.
+const streamProbeInterval = 2 * time.Second
+
+// streamConfirmMaxAge is the oldest confirmation of the bucket's stream under which a record
+// delivered while the copy follows its bucket is applied without reading the stream first
+// (unconfirmed). It holds by nats.go's own constants (v1.50.0 js.go), not by timer luck. Deleting
+// the stream ends the old ordered consumer's records and idle heartbeats, and nats.go moves the
+// consumer onto a stream created again only from activityCheck, which runs every hbcThresh (2) ×
+// the 5 s idle heartbeat (orderedHeartbeatsInterval) and resets the consumer only when nothing - no
+// record, no heartbeat - arrived since the check before it, 10 s earlier. While the stream exists
+// the server sends one or the other at least every 5 s, so the earliest reset comes 10 s after the
+// last arrival before the delete: at least 5 s after the delete itself. A confirmation is the time
+// its STREAM.INFO request was sent, and an answer naming the watched stream means the delete came
+// after that send. So a record in hand at most 4 s after a confirmation's send arrived before any
+// reset could have happened, at the earliest 5 s after that send, and is the watched stream's; a
+// record past that waits for one synchronous read of the stream, which stops the copy following
+// before the record is applied when the stream is no longer the watched one. 4 s leaves a second of
+// margin under the 5 s.
+const streamConfirmMaxAge = 4 * time.Second
+
+// The causes a re-read names in the line it logs when it fails to start (reread). A timed-out
+// scan's wording is the refill rig's key (internal/testnats/cmd/refillrig).
+const (
+	timedOutCause    = "a timed-out scan"
+	recreatedCause   = "a recreated bucket"
+	unconfirmedCause = "a read whose stream could not be confirmed"
+)
 
 // Watcher is one cache's KV watcher, from New.
 type Watcher struct {
@@ -83,11 +124,15 @@ type Watcher struct {
 	bucket string
 	cache  Cache
 	log    *slog.Logger
-	// now is the clock the stale episode is measured on, time.Now unless WithNow replaced it.
+	// now is the clock the stale episode and the age of a stream confirmation are measured on,
+	// time.Now unless WithNow replaced it.
 	now func() time.Time
 	// staleBound is the longest stale episode served (defaultStaleBound unless WithStaleBound
 	// replaced it); a stream's MaxAge can shorten it (boundFor).
 	staleBound time.Duration
+	// probeInterval is how often the watcher reads its bucket's stream (probe): streamProbeInterval
+	// unless WithStreamProbeInterval replaced it, 0 for no periodic probe.
+	probeInterval time.Duration
 
 	ready     chan struct{}
 	readyOnce sync.Once
@@ -100,8 +145,8 @@ type Watcher struct {
 	first bus.KeyValue
 
 	// after arms the wait between a stop nobody asked for and the ERROR that says no repair came,
-	// and the wait before a timed-out read is read again: time.AfterFunc unless WithAfterFunc
-	// replaced it, so a test fires those waits itself.
+	// the wait before a read is read again, and the wait before the next stream probe:
+	// time.AfterFunc unless WithAfterFunc replaced it, so a test fires those waits itself.
 	after AfterFunc
 
 	mu sync.RWMutex
@@ -120,14 +165,24 @@ type Watcher struct {
 	// generation it was armed for, so one still running after a repair cleared it reports nothing
 	// (reportUnrepaired).
 	repairTimer Timer
-	// rereadTimer is the armed wait before the current generation's timed-out read is read again
-	// (reread), and the marker that such a read is due. The two places the generation moves (watch,
-	// Stop) clear it, and its callback carries the generation it was armed for, so one still running
-	// after that reads nothing.
+	// rereadTimer is the armed wait before the current generation's bucket is read again (reread):
+	// after its scan timed out, after a read of its stream found the bucket recreated, or after such a
+	// re-read failed to start. It is the marker that such a read is due, so a probe that finds the
+	// same recreate again starts no second one. The two places the generation moves (watch, Stop)
+	// clear it, and its callback carries the generation it was armed for, so one still running after
+	// that reads nothing.
 	rereadTimer Timer
+	// probeTimer is the armed wait before the current generation's next stream probe (probe). Each
+	// watch that installs arms it for its own generation and Stop clears it; its callback carries
+	// that generation, so one still running after either reads nothing.
+	probeTimer Timer
 	// stream is when the bucket's stream the current watcher reads was created. A different time
-	// on the next watch means the bucket was deleted and created again.
+	// on a later read of the stream means the bucket was deleted and created again.
 	stream time.Time
+	// confirmedAt is when the latest read that found the bucket's stream to be stream was sent (the
+	// installing watch's own, and confirmStream's), on now: the gate on records delivered while
+	// following measures streamConfirmMaxAge from it (unconfirmed).
+	confirmedAt time.Time
 	// epoch is the current read's Read.Epoch, and bound its stale bound (boundFor).
 	epoch uint64
 	bound time.Duration
@@ -168,10 +223,10 @@ type Watcher struct {
 type Option func(*Watcher)
 
 // WithLogger sets the logger the watcher writes its lines through: each read's warm-up, a first
-// start that failed, a recreated bucket, a re-read that failed and its own end. The listener passes
-// its own, so they are JSON records with machine_id, as internal/store's are (store.WithLogger says
-// why the listener never sets the default instead). Without it the watcher logs where
-// slog.Default() points.
+// start that failed, a recreated or deleted bucket, a re-read that failed and its own end. The
+// listener passes its own, so they are JSON records with machine_id, as internal/store's are
+// (store.WithLogger says why the listener never sets the default instead). Without it the watcher
+// logs where slog.Default() points.
 func WithLogger(log *slog.Logger) Option {
 	return func(w *Watcher) { w.log = log }
 }
@@ -193,18 +248,28 @@ const unrepairedDelay = time.Minute
 const repairFailedReason = "repair failed"
 
 // WithAfterFunc sets how the watcher arms its waits, time.AfterFunc by default: the unrepairedDelay
-// wait for a repair, and the rereadDelay wait before a timed-out read is read again. The
-// production waits are a minute and seconds, so a test hands in its own, keeps each callback and
-// fires it itself rather than sleeping for it.
+// wait for a repair, the wait before a bucket is read again (rereadDelay after a timed-out scan or
+// a re-read that failed to start, none after a recreate a stream read found), and the wait before
+// the next stream probe. The production waits are a minute and seconds, so a test hands in its
+// own, keeps each callback and fires it itself rather than sleeping for it.
 func WithAfterFunc(after AfterFunc) Option {
 	return func(w *Watcher) { w.after = after }
 }
 
-// WithNow sets the clock the stale episode is measured on (Servable), time.Now by default, so a
-// test moves past the stale bound without waiting it out. Elapsed time is never read from record
-// timestamps.
+// WithNow sets the clock the stale episode (Servable) and the age of the latest stream confirmation
+// (streamConfirmMaxAge) are measured on, time.Now by default, so a test moves past the stale bound
+// without waiting it out. Elapsed time is never read from record timestamps.
 func WithNow(now func() time.Time) Option {
 	return func(w *Watcher) { w.now = now }
+}
+
+// WithStreamProbeInterval sets how often the watcher reads its bucket's stream to find a recreate
+// (probe), in place of the 2-second default. 0 arms no periodic probe, for a test that counts or
+// fires the watcher's other waits (WithAfterFunc), or recreates the bucket and drives the reads
+// itself. The stream is still read before a read completes and before a record is applied on an
+// old confirmation, so a copy still never follows a stream other than the one it read.
+func WithStreamProbeInterval(interval time.Duration) Option {
+	return func(w *Watcher) { w.probeInterval = interval }
 }
 
 // WithStaleBound sets the longest stale episode served, in place of the 2-minute default, for
@@ -221,15 +286,16 @@ func WithStaleBound(bound time.Duration) Option {
 // so every handle the store reads and writes through checks its keys.
 func New(name string, kv bus.KeyValue, cache Cache, options ...Option) *Watcher {
 	w := &Watcher{
-		name:       name,
-		bucket:     kv.Bucket(),
-		cache:      cache,
-		now:        time.Now,
-		staleBound: defaultStaleBound,
-		ready:      make(chan struct{}),
-		first:      kv,
-		kv:         kv,
-		after:      func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
+		name:          name,
+		bucket:        kv.Bucket(),
+		cache:         cache,
+		now:           time.Now,
+		staleBound:    defaultStaleBound,
+		probeInterval: streamProbeInterval,
+		ready:         make(chan struct{}),
+		first:         kv,
+		kv:            kv,
+		after:         func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
 	}
 	for _, option := range options {
 		option(w)
@@ -347,8 +413,8 @@ func (w *Watcher) Servable() error {
 }
 
 // Following reports whether the copy follows its bucket: a read has completed since the copy last
-// stopped following (a watch installing a new read, the current watcher's own end, a recreated
-// bucket Check found, or a disconnect).
+// stopped following (a watch installing a new read, the current watcher's own end, a deleted or
+// recreated bucket a read of its stream found, a recreate Check found, or a disconnect).
 func (w *Watcher) Following() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -372,10 +438,11 @@ func (w *Watcher) Disconnected() {
 }
 
 // NeedsRead reports whether the copy does not follow its bucket and no read is under way to make
-// it: the current generation's scan has ended or never began, and no re-read of a timed-out scan
-// is armed. Such a copy is repaired by nothing but a Rewatch, for instance when the reconnect
-// hook's Rewatch failed while the old watcher survived, so the listener's self-health check reads
-// it as a watcher to rebuild. A stopped watcher needs nothing.
+// it: the current generation's scan has ended or never began, and no re-read (of a timed-out scan,
+// or of a recreated bucket a read of its stream found) is armed. Such a copy is repaired by nothing
+// but a Rewatch, for instance when the reconnect hook's Rewatch failed while the old watcher
+// survived, so the listener's self-health check reads it as a watcher to rebuild. A stopped watcher
+// needs nothing.
 func (w *Watcher) NeedsRead() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -407,14 +474,19 @@ func (w *Watcher) markStale() {
 // stops following then, and the read under way, if any, completes nothing. The recorded error
 // makes the listener's self-health rebuild the watcher, and that Rewatch reads the new bucket.
 //
+// The watcher normally finds a recreate first, within its probe interval, and reads the new bucket
+// itself (confirmStream), so Check then finds the stream it reads unchanged. Check is the fallback
+// for a recreate those reads of the stream missed: a probe that kept failing, or none armed.
+//
 // The stream is known by its creation time, and one path moves that time with no recreate.
 // nats-server before v2.14.6 re-stamps a recovered stream's creation time in its file store, and
 // an in-place config update persists the re-stamped time (nats-io/nats-server#8471, fixed in
 // v2.14.6 and v2.15.0). So a stream config update after a server restart, followed by another
-// restart, reads as a recreate. The reconnect hook's Rewatch after that restart usually meets it
-// first: it reads the same bucket again as a new epoch and adopts the new time, with no 503. When
-// Check meets it first, /healthz answers 503 until the next self-health rebuild does the same.
-// Either way the cost is one read, and Check is quiet from then on.
+// restart, reads as a recreate. The reconnect hook's Rewatch after that restart, or the watcher's
+// own probe, usually meets it first: either reads the same bucket again as a new epoch and adopts
+// the new time, with no 503. When Check meets it first, /healthz answers 503 until the next
+// self-health rebuild does the same. Either way the cost is one read, and Check is quiet from then
+// on.
 func (w *Watcher) Check() error {
 	stream, err := bus.ReadStreamState(w.KV())
 	if err != nil {
@@ -473,6 +545,7 @@ func (w *Watcher) Stop() {
 	w.watcher = nil
 	w.clearRepairArm()
 	w.clearRereadArm()
+	w.clearProbeArm()
 	w.generation++
 	w.mu.Unlock()
 }
@@ -614,10 +687,12 @@ func (w *Watcher) watchDone() {
 // hook and the listener's self-health rebuild. A watch reads its stream before it arms its watcher
 // and takes the locks, so it can arrive after a newer watch has switched to a recreated bucket: a
 // watch whose stream is older than a running, healthy watcher's is discarded, and that watcher
-// stays. A watch with a nonzero expect, the re-read of a timed-out read (reread), installs only
-// while generation expect is still current, and is discarded the same way otherwise: whatever
-// moved the generation began a read of its own. After Stop it arms nothing and only moves the
-// handle; a watcher it armed while Stop ran is kept for End.
+// stays. A watch with a nonzero expect, a re-read of generation expect (reread), installs only
+// while that generation is still current, and is discarded the same way otherwise: whatever moved
+// the generation began a read of its own. A watch that installs arms its generation's stream probe
+// and counts the read of the stream it made as the latest confirmation of it (confirmedAt). After
+// Stop it arms nothing and only moves the handle; a watcher it armed while Stop ran is kept for
+// End.
 func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 	w.mu.Lock()
 	stopped := w.stopped
@@ -635,6 +710,7 @@ func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 	// The warm-up's cost as the caller waiting on readiness sees it: the stream read and the
 	// watcher's create request are part of it, not just the entries that follow.
 	started := time.Now()
+	sent := w.now()
 	state, err := bus.ReadStreamState(kv)
 	if err != nil {
 		return err
@@ -671,8 +747,10 @@ func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 	// installed stream with no recorded error has one running): creation times do not always grow
 	// (a JetStream restore keeps the snapshot's, and a recreate can follow a clock step back), so
 	// when the current watcher has ended or Check has flagged its bucket, the watch installs as
-	// usual, and if it did read the old stream the next Check flags that too.
-	older := w.err == nil && stream.Before(w.stream)
+	// usual, and if it did read the old stream the next Check flags that too. A re-read needs no
+	// such rule: its generation is still current, so no watch switched since, and the stream it
+	// read is the bucket's, however old its creation time (a probe that found a restored bucket).
+	older := expect == 0 && w.err == nil && stream.Before(w.stream)
 	if older || (expect != 0 && w.generation != expect) {
 		w.mu.Unlock()
 		w.applyMu.Unlock()
@@ -690,6 +768,7 @@ func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 	w.watcher = watcher
 	w.kv = kv
 	w.stream = stream
+	w.confirmedAt = sent
 	w.err = nil
 	w.bound = w.boundFor(state.MaxAge)
 	// A new read begins: the copy stops following until it completes.
@@ -697,9 +776,10 @@ func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 	w.reading = true
 	w.readDisconnects = disconnects
 	// The replacement runs, so the stop it repaired needs no ERROR, and the read a timed-out scan
-	// was waiting to begin is this one.
+	// or a recreate was waiting to begin is this one. The stream probe follows the new generation.
 	w.clearRepairArm()
 	w.clearRereadArm()
+	w.armProbe(generation)
 	read := Read{Epoch: w.epoch, Recreated: recreated, MaxAge: state.MaxAge}
 	w.mu.Unlock()
 	w.cache.BeginRead(read)
@@ -718,8 +798,10 @@ func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 
 // consume feeds the cache what the watcher of generation delivers, as the read read. The first nil
 // ends the read's scan: a complete scan completes the read (completeRead), and one nats.go's idle
-// timer gave up on arms a re-read (scanTimedOut). A watcher that ends before its scan's nil
-// completes nothing either: the cache removes nothing for a read it cannot vouch for.
+// timer gave up on arms a re-read (readAgainLater). A watcher that ends before its scan's nil
+// completes nothing either: the cache removes nothing for a read it cannot vouch for. A record
+// delivered after the read completed waits for a read of the bucket's stream when the latest
+// confirmation of it is too old to vouch for the record (applyCurrent).
 func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, read Read, started time.Time) {
 	var scan KeyScan
 	scanning := true
@@ -742,7 +824,7 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, read Read,
 					w.logWarmUp(scan, time.Since(started), timedOut)
 				}
 				if timedOut {
-					w.scanTimedOut(generation)
+					w.readAgainLater(generation, timedOutCause)
 				} else {
 					w.completeRead(generation, read)
 				}
@@ -782,21 +864,38 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, read Read,
 	w.signalReady()
 }
 
-// completeRead completes generation's read, whose scan delivered every record: under applyMu, so
-// no other hook runs between the check and the state write, it checks the read may still complete
-// (completes), has the cache sweep what the read did not find (CompleteRead), and only then
-// records that the copy follows its bucket, so expiry that waits on following resumes only after
-// the sweep. A recreated bucket Check found, or a disconnect, between the sweep and the state write
-// skips the write: the read did deliver every record of the stream it read, so its sweep stands,
-// and the copy stays not following until the next read.
+// completeRead completes generation's read, whose scan delivered every record. While the read may
+// complete, it first reads the bucket's stream, outside the locks (confirmStream): nats.go's ordered
+// consumer can move onto a bucket recreated during the scan and end the scan with records of two
+// streams, so a read is complete only of the stream it was installed on. Another stream, or none,
+// stops the copy following and completes nothing, and the new bucket is read again; a stream read
+// that fails completes nothing and is read again after rereadDelay, as a timed-out scan is. Then,
+// under applyMu, so no other hook runs between the check and the state write, it checks the read
+// may still complete (completes), has the cache sweep what the read did not find (CompleteRead),
+// and only then records that the copy follows its bucket, so expiry that waits on following
+// resumes only after the sweep. A recreate found, or a disconnect, between the sweep and the state
+// write skips the write: the read did deliver every record of the stream it read, so its sweep
+// stands, and the copy stays not following until the next read.
 func (w *Watcher) completeRead(generation uint64, read Read) {
+	w.mu.RLock()
+	completes := w.completes(generation)
+	w.mu.RUnlock()
+	if completes {
+		switch w.confirmStream(generation) {
+		case streamReplaced:
+			return
+		case streamUnread:
+			w.readAgainLater(generation, unconfirmedCause)
+			return
+		}
+	}
 	w.applyMu.Lock()
 	defer w.applyMu.Unlock()
 	w.mu.Lock()
 	if generation == w.generation {
 		w.reading = false
 	}
-	completes := w.completes(generation)
+	completes = w.completes(generation)
 	w.mu.Unlock()
 	if !completes {
 		return
@@ -812,38 +911,41 @@ func (w *Watcher) completeRead(generation uint64, read Read) {
 }
 
 // completes reports, under mu, whether generation's read may complete: it is still the current
-// one, the watcher is not stopped, Check has recorded no recreated bucket, and no disconnect came
-// since its watch began.
+// one, the watcher is not stopped, no terminal error is recorded (its own end, or a recreate Check
+// found), and no disconnect came since its watch began.
 func (w *Watcher) completes(generation uint64) bool {
 	return generation == w.generation && !w.stopped && w.err == nil && w.disconnects == w.readDisconnects
 }
 
-// scanTimedOut handles the timed-out scan of generation's read: the read completes nothing, so the
-// cache removes nothing, and the watcher reads the bucket again after rereadDelay (reread) rather
-// than wait for a Rewatch that nothing would start: the watcher still runs, so Err stays nil and
-// the listener's self-health rebuild has nothing to rebuild.
-func (w *Watcher) scanTimedOut(generation uint64) {
+// readAgainLater ends generation's read without completing it -- its scan timed out, or the stream
+// it read could not be confirmed (completeRead) -- so the cache removes nothing, and the watcher
+// reads the bucket again after rereadDelay (reread) rather than wait for a Rewatch that nothing
+// would start: the watcher still runs, so Err stays nil and the listener's self-health rebuild has
+// nothing to rebuild. cause names the re-read in the line a failed one logs.
+func (w *Watcher) readAgainLater(generation uint64, cause string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if generation != w.generation || w.stopped {
 		return
 	}
 	w.reading = false
-	w.armReread(generation)
+	w.armReread(generation, rereadDelay, cause)
 }
 
-// armReread arms the re-read of generation's read (reread), under mu, in place of any armed
-// before.
-func (w *Watcher) armReread(generation uint64) {
+// armReread arms the re-read of generation's bucket (reread) after delay, under mu, in place of
+// any armed before. cause names it in the line a failed re-read logs.
+func (w *Watcher) armReread(generation uint64, delay time.Duration, cause string) {
 	w.clearRereadArm()
-	w.rereadTimer = w.after(rereadDelay, func() { w.reread(generation) })
+	w.rereadTimer = w.after(delay, func() { w.reread(generation, cause) })
 }
 
-// reread reads the bucket again for generation, whose read timed out: only while generation is
-// still current and the watcher not stopped, since whatever moved the generation began a read of
-// its own, and through watch's expect, so a Rewatch that installs first wins. A re-read whose setup
-// fails (the stream read or WatchAll) is armed again for the same generation.
-func (w *Watcher) reread(generation uint64) {
+// reread reads the bucket again for generation, whose read timed out, could not be confirmed, or
+// was found to be of a bucket since recreated: only while generation is still current and the
+// watcher not stopped, since whatever moved the generation began a read of its own, and through
+// watch's expect, so a Rewatch that installs first wins. A re-read whose setup fails (the stream
+// read or WatchAll; a recreated bucket deleted again, say) logs a WARN naming cause and is armed
+// again for the same generation after rereadDelay.
+func (w *Watcher) reread(generation uint64, cause string) {
 	w.mu.RLock()
 	due := generation == w.generation && !w.stopped
 	kv := w.kv
@@ -855,13 +957,135 @@ func (w *Watcher) reread(generation uint64) {
 	if err == nil {
 		return
 	}
-	w.logger().Warn(w.name+" re-read of a timed-out scan failed; it is tried again",
+	w.logger().Warn(w.name+" re-read of "+cause+" failed; it is tried again",
 		slog.String("bucket", w.bucket), slog.String("error", err.Error()))
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if generation == w.generation && !w.stopped {
-		w.armReread(generation)
+		w.armReread(generation, rereadDelay, cause)
 	}
+}
+
+// streamCheck is what one read of the bucket's stream found for a generation (confirmStream).
+type streamCheck int
+
+const (
+	// streamSame: the bucket's stream is the one the generation reads.
+	streamSame streamCheck = iota
+	// streamReplaced: the bucket was deleted, or deleted and created again; the copy stopped
+	// following.
+	streamReplaced
+	// streamUnread: the read failed for another reason, which changes nothing.
+	streamUnread
+	// streamMoot: the generation is no longer current, or the watcher stopped.
+	streamMoot
+)
+
+// confirmStream reads the bucket's stream for generation and acts on what it finds: the stream
+// probe's read (probe), the gate's before a record is applied (applyCurrent), and the check before
+// a read completes (completeRead). The request is sent outside the locks, and its answer compared
+// under mu with the stream generation's watch installed, so an answer for a generation since
+// replaced or stopped changes nothing.
+//
+// The same stream records when the request was sent as the latest confirmation (confirmedAt).
+// Another creation time means the bucket was deleted and created again under the watcher, which
+// nats.go's ordered consumer may follow without ending: the copy stops following at once, which
+// starts its stale episode and takes from a read under way the right to complete, and unless a
+// re-read is already due the watcher reads the new bucket itself as a re-read of generation
+// (reread), whose install begins a new epoch (Read.Recreated). No stream at all means the bucket
+// was deleted: the copy stops following, since it cannot follow a missing bucket, and the probe
+// goes on, so the read that finds the bucket created again starts the re-read. Any other error
+// changes nothing: a transport failure is Check's, Ping's and the self-health monitor's to report.
+// A finding that starts a re-read logs one INFO line, as does one that stops a copy following a
+// deleted bucket, so a probe that finds the same thing again logs nothing.
+func (w *Watcher) confirmStream(generation uint64) streamCheck {
+	w.mu.RLock()
+	due := generation == w.generation && !w.stopped
+	kv := w.kv
+	w.mu.RUnlock()
+	if !due {
+		return streamMoot
+	}
+	sent := w.now()
+	state, err := bus.ReadStreamState(kv)
+	gone := errors.Is(err, nats.ErrStreamNotFound)
+	if err != nil && !gone {
+		return streamUnread
+	}
+	w.mu.Lock()
+	if generation != w.generation || w.stopped {
+		w.mu.Unlock()
+		return streamMoot
+	}
+	if !gone && state.Created.Equal(w.stream) {
+		if sent.After(w.confirmedAt) {
+			w.confirmedAt = sent
+		}
+		w.mu.Unlock()
+		return streamSame
+	}
+	stopped := w.following || w.reading
+	w.stopFollowing()
+	rereads := !gone && w.rereadTimer == nil
+	if rereads {
+		w.armReread(generation, 0, recreatedCause)
+	}
+	w.mu.Unlock()
+	switch {
+	case rereads:
+		w.logger().Info(w.name+" bucket was recreated under its watcher; its cache stops following and is re-read from the new bucket, kept until the read completes",
+			slog.String("bucket", w.bucket))
+	case gone && stopped:
+		w.logger().Info(w.name+" bucket was deleted under its watcher; its cache stops following and is kept until the bucket is created again and read",
+			slog.String("bucket", w.bucket))
+	}
+	return streamReplaced
+}
+
+// armProbe arms generation's next stream probe (probe) after the probe interval, under mu, in place
+// of any armed before. With no probe interval (WithStreamProbeInterval) it arms nothing.
+func (w *Watcher) armProbe(generation uint64) {
+	w.clearProbeArm()
+	if w.probeInterval <= 0 {
+		return
+	}
+	w.probeTimer = w.after(w.probeInterval, func() { w.probe(generation) })
+}
+
+// probe is one stream probe of generation: it reads the bucket's stream (confirmStream), which keeps
+// the confirmation the gate on delivered records measures fresh and finds a bucket deleted, or
+// deleted and created again, under a watcher that goes on running, and then arms the next probe
+// while generation is still current. A probe of a generation since replaced or stopped reads
+// nothing and arms nothing: the watch that replaced it armed its own.
+func (w *Watcher) probe(generation uint64) {
+	if w.confirmStream(generation) == streamMoot {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if generation == w.generation && !w.stopped {
+		w.armProbe(generation)
+	}
+}
+
+// clearProbeArm drops the armed stream probe, under mu: the caller moves the generation under the
+// same lock, so a callback of the wait already running reads nothing either (probe).
+func (w *Watcher) clearProbeArm() {
+	if w.probeTimer == nil {
+		return
+	}
+	w.probeTimer.Stop()
+	w.probeTimer = nil
+}
+
+// unconfirmed reports whether a record generation's watcher delivered must wait for a read of the
+// bucket's stream before it is applied: the copy follows its bucket, and the latest confirmation of
+// its stream was sent longer than streamConfirmMaxAge ago, so the record may come from an ordered
+// consumer nats.go moved onto a recreated bucket (streamConfirmMaxAge says why the bound is safe).
+func (w *Watcher) unconfirmed(generation uint64) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return generation == w.generation && w.following && w.now().Sub(w.confirmedAt) > streamConfirmMaxAge
 }
 
 // clearRereadArm drops the armed re-read, under mu: the caller moves the generation under the same
@@ -951,8 +1175,15 @@ func (w *Watcher) logWarmUp(scan KeyScan, elapsed time.Duration, timedOut bool) 
 }
 
 // applyCurrent applies entry, a record of read, only while generation is still the current
-// watcher's.
+// watcher's. A record delivered while the copy follows its bucket on a stream confirmation older
+// than streamConfirmMaxAge (unconfirmed) waits for a read of the stream first (confirmStream), so
+// a record from a consumer nats.go moved onto a recreated bucket is applied only once the copy has
+// stopped following. The probe keeps the confirmation of a healthy bucket fresh, so that read is
+// rare; one that fails changes nothing, and the record is applied.
 func (w *Watcher) applyCurrent(entry nats.KeyValueEntry, generation uint64, read Read) {
+	if w.unconfirmed(generation) {
+		w.confirmStream(generation)
+	}
 	w.applyMu.Lock()
 	defer w.applyMu.Unlock()
 	if w.current(generation) {
