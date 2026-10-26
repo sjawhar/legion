@@ -37,7 +37,7 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 // Credential is the harness's GitHubCredential: every role's gh bundle renders the implement App's
 // tokens, the one App the harness holds — its full lease for owner (the run's repository's owner
 // when owner is empty, the controller's launch), and its read-only lease for every other owner of
-// the run's repositories. Stage 4a proves the files reach each role's container, follow the lease
+// the run's repositories. Stage 4a proves the files reach each role, follow the lease
 // and pick the owner a command names, not which App a role writes as; Stage 4b's daemon hands each
 // role its own.
 func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner string) (ghconfig.Bundle, error) {
