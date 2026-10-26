@@ -230,13 +230,14 @@ const busUnansweredPrefix = "envoy: the message bus did not answer"
 // subject.
 const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
 
-// writeBusUnavailable answers a send, a publish or a role lookup the bus did not serve, in the one
-// place that writes that 503, so the body's prefix and the hint never drift apart. Retry-After is
-// set only where retrying can help: bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy
-// errors.Is(err, bus.ErrRefused) - a refusal NATS repeats however often the same bytes are sent -
-// and writeNATSError answers those as the 413 and the 400 they are, so this one guard keeps the
-// header off exactly those two and off nothing else. The status writeNATSError settled on is
-// passed back for the record's sake, as that function's own comment explains.
+// writeBusUnavailable answers a send, a publish, a role lookup or a session or interest read the
+// bus did not serve, in the one place that writes that 503, so the body's prefix and the hint never
+// drift apart. Retry-After is set only where retrying can help: bus.ErrTooLarge and
+// bus.ErrInvalidSubject both satisfy errors.Is(err, bus.ErrRefused) - a refusal NATS repeats
+// however often the same bytes are sent - and writeNATSError answers those as the 413 and the 400
+// they are, so this one guard keeps the header off exactly those two and off nothing else. The
+// status writeNATSError settled on is passed back for the record's sake, as that function's own
+// comment explains.
 //
 // A publish the server denied (bus.ErrPublishDenied) is answered ahead of both, because it is
 // neither. bus.ErrRefused has exactly three members (internal/bus/nats.go): bus.ErrTooLarge,
@@ -366,11 +367,12 @@ func senderStamp(ctx context.Context, registry *store.Registry, sessions *sessio
 // context: the send route's read of the target session, the publish route's resolution of a role
 // lane's holder (resolveLiveRoleHolder, every attempt of it), both routes' read of the sender's
 // interest record (senderStamp) and both routes' publish share it, and GET /v1/roles/<role>
-// resolves its holder within it too. The HTTP client gives each attempt 5 s
-// (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is 10 s
-// (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a sender
-// whose bus cannot be reached reads the 503 that names the reason, in time to act on it, instead
-// of the timeout it would otherwise retry blind.
+// resolves its holder within it too. GET /v1/sessions, GET /v1/registry/<session_id> and GET
+// /v1/interests/<session_id> read interest records within it as well. The HTTP client gives each
+// attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is
+// 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a
+// sender whose bus cannot be reached reads the 503 that names the reason, in time to act on it,
+// instead of the timeout it would otherwise retry blind.
 const sendRequestBudget = 3500 * time.Millisecond
 
 // sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a
@@ -641,11 +643,20 @@ type sessionInfo struct {
 	LastSeen       int64    `json:"last_seen"`
 }
 
+// sessionInterestReadTimeout bounds sessionInfoFor's read of one session's interest record from
+// the bucket, which a cache miss makes (store.Registry.Get bounds that read alone): a bucket that
+// does not answer is reported a second in, rather than when the route's sendRequestBudget ends,
+// and GET /v1/registry/<session_id>, whose session read may already have spent
+// roleHolderReadTimeout (2 s), still answers inside that budget.
+const sessionInterestReadTimeout = 1 * time.Second
+
 // sessionInfoFor joins one session entry with its interests (its topics, and the roles those topics
 // name), so a row of GET /v1/sessions and the single answer of GET /v1/registry/<session_id> are
-// one shape built one way. A session the interest registry holds nothing for keeps its empty topics
-// and roles: a session that registered and subscribed to nothing is not an error here.
-func sessionInfoFor(registry *store.Registry, sessionID string, entry session.SessionEntry) sessionInfo {
+// one shape built one way. A session the interest registry holds no key for keeps its empty topics
+// and roles: a session that registered and subscribed to nothing is not an error here. Any other
+// error is a read that did not answer within sessionInterestReadTimeout of ctx, and is returned:
+// a caller answers it as the bus-unavailable 503, never as a session with no topics.
+func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID string, entry session.SessionEntry) (sessionInfo, error) {
 	info := sessionInfo{
 		SessionID:      sessionID,
 		MachineID:      entry.MachineID,
@@ -658,22 +669,34 @@ func sessionInfoFor(registry *store.Registry, sessionID string, entry session.Se
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
 	}
-	if interest, err := registry.Get(context.Background(), sessionID); err == nil {
-		info.Topics = interest.Topics
-		info.Roles = roleNames(interest.Topics)
+	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
+	defer cancel()
+	interest, err := registry.Get(readCtx, sessionID)
+	switch {
+	case errors.Is(err, nats.ErrKeyNotFound):
+		return info, nil
+	case err != nil:
+		return sessionInfo{}, err
 	}
-	return info
+	info.Topics = interest.Topics
+	info.Roles = roleNames(interest.Topics)
+	return info, nil
 }
 
 // sessionsHandler returns all live sessions by iterating the session registry
 // (envoy_sessions, 5-min TTL — only live sessions) and enriching each with
-// topic data from the interests registry (envoy_interests).
+// topic data from the interests registry (envoy_interests). Every interest read shares one
+// sendRequestBudget deadline, so however many rows miss the interest cache the list answers
+// inside it, and the first read that does not answer ends the request with the bus-unavailable
+// 503.
 func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
 		entries, err := sessions.List()
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -686,7 +709,12 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			if !strings.Contains(entry.Dir, dirFilter) || !strings.Contains(entry.Title, titleFilter) {
 				continue
 			}
-			result = append(result, sessionInfoFor(registry, entry.SessionID, entry.SessionEntry))
+			info, err := sessionInfoFor(ctx, registry, entry.SessionID, entry.SessionEntry)
+			if err != nil {
+				writeBusUnavailable(w, err)
+				return
+			}
+			result = append(result, info)
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
@@ -700,7 +728,8 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 // gone. Only the bucket's word that the key is absent is a 404, and its wording is load-bearing:
 // Dispatch classifies a delivery failure on the "no live session " prefix, as the send route's own
 // 404 writes it. An id NATS refuses as a key is the caller's to fix, and a read that did not answer
-// is a 503 to retry — never a session a caller may take for ended.
+// — the session's, or its interest record's within sendRequestBudget (sessionInfoFor) — is a 503 to
+// retry: never a session a caller may take for ended, nor one with no topics.
 func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -712,6 +741,8 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
 		entry, err := roleHolderSession(d.sessions, sessionID, registered)
 		switch {
 		case errors.Is(err, bus.ErrRefused):
@@ -730,11 +761,21 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			// literal was that copy's twin until the two changes met here.
 			writeBusUnavailable(w, err)
 		default:
-			writeJSON(w, http.StatusOK, sessionInfoFor(d.registry, sessionID, entry))
+			info, err := sessionInfoFor(ctx, d.registry, sessionID, entry)
+			if err != nil {
+				writeBusUnavailable(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, info)
 		}
 	}
 }
 
+// adminInterestsHandler lists, reads and removes persisted interests. GET /v1/interests/<session_id>
+// reads within sendRequestBudget of the request's own context: a cache miss is read through to the
+// bucket, the bucket's word that the key is absent is a 404, and a read that did not answer is the
+// bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
+// writeBusUnavailable gives it).
 func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
@@ -750,7 +791,9 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 
 		switch r.Method {
 		case http.MethodGet:
-			item, err := registry.Get(context.Background(), sessionID)
+			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+			defer cancel()
+			item, err := registry.Get(ctx, sessionID)
 			// Only a session the registry holds no key for is unknown; a read NATS did not
 			// serve is the listener's failure, which a caller must not take for "no topics".
 			if errors.Is(err, nats.ErrKeyNotFound) {
@@ -758,7 +801,7 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 				return
 			}
 			if err != nil {
-				writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
+				writeBusUnavailable(w, err)
 				return
 			}
 			writeJSON(w, http.StatusOK, item)

@@ -648,8 +648,14 @@
   sender's interest record for the envelope's `sender` within a second of that budget
   (`senderStampReadTimeout`): a read that does not answer stamps the session id and the title this
   listener's cache holds, and the publish goes on to meet the silent bus itself and answer the
-  503 inside the attempt. The 413 for a message NATS cannot take whole and the 400 for a subject
-  or key it refuses are unchanged. A publish on either route whose request context has already
+  503 inside the attempt. `GET /v1/sessions`, `GET /v1/registry/<session_id>` and `GET
+  /v1/interests/<session_id>` read an interest record their cache misses from the bucket within
+  the same 3.5 s budget (a session row's read capped at a second, and a list's reads sharing one
+  budget), where a silent bus held them for the 10 s JetStream wait: a read that does not answer
+  is that 503 with `Retry-After: 1`, where the first two answered a row with no topics and the
+  third a 503 with neither the named body nor `Retry-After`. The 413 for a message NATS cannot
+  take whole and the 400 for a subject or key it refuses are unchanged. A publish on either route
+  whose request context has already
   ended — its budget spent, which a role-holder resolution that answers just as the budget ends
   can leave it, or the request cancelled — puts nothing on the wire and is answered that 503: a
   core subject has no duplicate window and the client retries every 5xx, so a message emitted
