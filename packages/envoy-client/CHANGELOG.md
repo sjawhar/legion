@@ -53,7 +53,9 @@
   (`DispatchWriteRetry.silenceMs`) is cut off and asked again the same way, so a write Dispatch is
   slow to finish gets `409 KEY_IN_FLIGHT` and then its replay; a body of a megabyte or more goes
   out as a stream with its `Content-Length`, the connection taking each 64 KiB of it counting as
-  progress, so an upload still going out is never cut off. A `GET`, `PUT` or `DELETE` carries no
+  progress, so an upload still going out is never cut off. An answer with no body (a 101, 204,
+  205 or 304) is handed on as it came, as the page does, never rebuilt around a body it does not
+  have. A `GET`, `PUT` or `DELETE` carries no
   key and is sent once, and the call's deadline or its cancellation is never retried. A write
   whose attempts run out throws the last attempt's own error, except where that answer alone would
   say the write never took effect while an earlier attempt may have reached Dispatch (a gateway's

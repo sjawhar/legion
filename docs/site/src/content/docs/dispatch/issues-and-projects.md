@@ -197,8 +197,10 @@ with **Discard**, and its sign-in link leaves the page without asking. Signing o
 listing each change it would discard, in this tab and in your other Dispatch tabs (when a tab does
 not answer at once, it says it would also discard **any unsent changes in your other Dispatch
 tabs**), and discards nothing until Dispatch has signed you out: meanwhile none of your changes
-goes out in any tab, and if the sign-out fails you stay signed in with every change, told **The
-sign-out did not go through.** One interrupted more
+goes out in any tab (another tab's read **Waiting for a sign-out in another tab**), and if the
+sign-out fails you stay signed in with every change, told **The sign-out did not go through.**
+If that tab closes before Dispatch answers, the others send your changes again within seconds.
+One interrupted more
 than five minutes ago is not sent on its own: the corner lists it as **Not saved: …** with
 **Retry** and **Discard**. A Retry of a stopped or interrupted change asks again under its first
 name, so it is saved at most once if you retry within 24 hours of the first try; after that
