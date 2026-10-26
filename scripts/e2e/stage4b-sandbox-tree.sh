@@ -1877,9 +1877,12 @@ shape_problems() {
         or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != [$audience])
         then "the projected token source of the operator pod is not the one token for LEGION_E2E_MODEL_GATEWAY_AUDIENCE" else empty end),
       (if ($s.containers | map(.name)) != ["roles"] then "pod containers \($s.containers | map(.name)), want only [\"roles\"]" else empty end),
+      # The operator mounts models.yml at the image home; the roles container holds every mount
+      # under the home at the same path under the home mounts directory instead (container_home_path),
+      # and the namespaces of each role bind it back.
       ([$s.volumes[] | select(.configMap.name == $route) | .name] as $route_volumes
         | if ($route_volumes | length) != 1 then "no one volume of the route ConfigMap \($route)"
-          elif ([$c.volumeMounts[]? | select(.name == $route_volumes[0] and .mountPath == "/home/legion/.omp/profiles/legion/agent/models.yml")] | length) != 1
+          elif ([$c.volumeMounts[]? | select(.name == $route_volumes[0] and .mountPath == "/var/run/legion/home/.omp/profiles/legion/agent/models.yml")] | length) != 1
           then "the roles container does not mount models.yml of \($route) where every role profile reads it" else empty end),
       (if $s.nodeSelector["legion.dev/pool"] != "legion" then "nodeSelector \($s.nodeSelector)" else empty end),
       (if ([$s.tolerations[]? | select(.key == "legion.dev/pool")] | length) == 0 then "no legion.dev/pool toleration" else empty end),

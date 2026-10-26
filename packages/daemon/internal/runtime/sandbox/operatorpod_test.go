@@ -17,6 +17,26 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
+// operatorRouteFixture is the Go live harnesses' operator pod (deploy/kubernetes/operator-route/
+// pod.yml) with its token audience filled in, as an operator and each live harness run fill in
+// their gateway's: config.ReadPodFile refuses the placeholder itself.
+func operatorRouteFixture(t *testing.T) Pod {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := filepath.Join(t.TempDir(), "pod.yml")
+	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := config.ReadPodFile(filled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Pod(fixture)
+}
+
 // CheckPod refuses, naming both, an operator variable the runtime, the worker image, or every
 // launch sets, or one that places Oh My Pi's sessions; a volume Legion names; a mount at, under, or
 // above a path Legion mounts, the image owns, a tool runs from, or the state home Legion reserves
@@ -63,20 +83,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byOperator   = "runtime.kubernetes.pod.env sets"
 		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
 	)
-	// The operator route with its token audience filled in, as an operator and each live harness run
-	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	filled := filepath.Join(t.TempDir(), "pod.yml")
-	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fixture, err := config.ReadPodFile(filled)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := operatorRouteFixture(t)
 	for _, tc := range []struct {
 		name string
 		pod  Pod
@@ -167,7 +174,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 		{name: "a provider key reading the session database's URL", keys: map[string]string{"DATABASE_URL": "SESSION_DSN"},
 			want: "provider_keys names DATABASE_URL from the providers Secret's key SESSION_DSN, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as DATABASE_URL"},
-		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
+		{name: "the live harnesses' operator pod", pod: fixture, keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
 		{name: "an operator's own overlays, which the baseline composes with",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
 		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the

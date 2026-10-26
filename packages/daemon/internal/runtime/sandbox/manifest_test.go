@@ -270,32 +270,53 @@ func TestManifestGoldens(t *testing.T) {
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
 			r.agentSecrets = tc.agentSecrets
-			var buffer bytes.Buffer
-			encoder := json.NewEncoder(&buffer)
-			encoder.SetEscapeHTML(false)
-			encoder.SetIndent("", "  ")
-			if err := encoder.Encode(manifestOf(t, r, tc.spec)); err != nil {
-				t.Fatal(err)
-			}
-			encoded := buffer.Bytes()
-			path := filepath.Join("testdata", "golden", name+".json")
-			if *updateGolden {
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, encoded, 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("read golden (run `go test ./internal/runtime/sandbox/ -update`): %v", err)
-			}
-			if !bytes.Equal(encoded, want) {
-				t.Fatalf("%s is stale\n got: %s\nwant: %s", path, encoded, want)
-			}
+			checkGolden(t, name, manifestOf(t, r, tc.spec))
 		})
+	}
+}
+
+// The root issue pod under the Go live harnesses' operator pod (deploy/kubernetes/operator-route/
+// pod.yml), which Stage 4b's pod shape (shape_problems in scripts/e2e/stage4b-sandbox-tree.sh)
+// judges: the golden is the pod a live run's daemon builds from that fixture, so the shape's rules
+// are run against what the renderer puts where (scripts/e2e/lib/stage4b-pods.test.ts).
+func TestOperatorRouteGolden(t *testing.T) {
+	opts := goldenOptions()
+	opts.Pod = operatorRouteFixture(t)
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGolden(t, "root-operator-route", manifestOf(t, r, rootSpec(t)))
+}
+
+// checkGolden compares manifest, encoded as the goldens are, with testdata/golden/<name>.json, or
+// writes it there under -update.
+func checkGolden(t *testing.T, name string, manifest any) {
+	t.Helper()
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(manifest); err != nil {
+		t.Fatal(err)
+	}
+	encoded := buffer.Bytes()
+	path := filepath.Join("testdata", "golden", name+".json")
+	if *updateGolden {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden (run `go test ./internal/runtime/sandbox/ -update`): %v", err)
+	}
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("%s is stale\n got: %s\nwant: %s", path, encoded, want)
 	}
 }
 

@@ -117,6 +117,10 @@ interface Run {
   streams?: Stream[];
   // resources is run_resources, each pod's expected reservation; the defaults by default.
   resources?: Record<string, Reservation>;
+  // route and audience are the run's route ConfigMap and gateway audience. The defaults are names
+  // the plain goldens carry no route or audience of, so each rule's tests keep only their own lines.
+  route?: string;
+  audience?: string;
 }
 // shapeProblemLines runs shape_problems on the pod under RUN's worker streams and returns every
 // line it prints. The golden pod departs from the run's route and audience rules (its route
@@ -138,7 +142,7 @@ function shapeProblemLines(object: object, run: Run = {}): string[] {
       "bash",
       "-c",
       `set -Eeuo pipefail
-root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} route_configmap=route gateway_audience=audience host=${host} port_worker_stream=${port}
+root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} route_configmap=${run.route ?? "route"} gateway_audience=${run.audience ?? "audience"} host=${host} port_worker_stream=${port}
 run_resources=${JSON.stringify(JSON.stringify(run.resources ?? defaults))}
 ${shapeProblems}
 shape_problems`,
@@ -166,6 +170,53 @@ function reservationProblems(object: object, run: Run = {}): string[] {
       line.includes("affinity")
   );
 }
+
+// The root issue pod the runtime builds under the operator route a live run carries
+// (deploy/kubernetes/operator-route/pod.yml, its token audience filled in with operator-audience,
+// TestOperatorRouteGolden), with the ConfigMap the fixture names: the pod a Stage 4b run's daemon
+// builds. Its whole verdict is pinned, so a mount the renderer moves fails here.
+const operatorRoute = JSON.parse(
+  readFileSync(
+    join(
+      root,
+      "packages",
+      "daemon",
+      "internal",
+      "runtime",
+      "sandbox",
+      "testdata",
+      "golden",
+      "root-operator-route.json"
+    ),
+    "utf8"
+  )
+);
+const operatorRun: Run = { route: "legion-operator-route", audience: "operator-audience" };
+function operatorPod() {
+  return {
+    metadata: { name: "pod", uid: "uid", creationTimestamp: created },
+    spec: structuredClone(operatorRoute.spec.podTemplate.spec),
+    status: { qosClass: "Guaranteed" },
+  };
+}
+
+describe("the pod shape, whole, on the pod the runtime builds under the operator route", () => {
+  test("departs from no rule", () => {
+    expect(shapeProblemLines(operatorPod(), operatorRun).filter((line) => line !== "")).toEqual([]);
+  });
+
+  test("a models.yml at the image home in the roles container, as before the move, departs", () => {
+    const object = operatorPod();
+    for (const mount of object.spec.containers[0].volumeMounts) {
+      if (mount.mountPath === "/var/run/legion/home/.omp/profiles/legion/agent/models.yml") {
+        mount.mountPath = "/home/legion/.omp/profiles/legion/agent/models.yml";
+      }
+    }
+    expect(shapeProblemLines(object, operatorRun).filter((line) => line !== "")).toEqual([
+      "the roles container does not mount models.yml of legion-operator-route where every role profile reads it",
+    ]);
+  });
+});
 
 describe("the pod shape's --connect rule", () => {
   test("a pod whose launcher dials advertise_host at the worker stream port passes it", () => {
