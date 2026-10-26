@@ -152,10 +152,10 @@ type recorder struct {
 	decisions []Decision
 }
 
-func (r *recorder) PassOn(_ context.Context, q store.AnswerQuestion, reason Reason, asker, ref string) error {
+func (r *recorder) PassOn(_ context.Context, q store.AnswerQuestion, reason Reason, origin Origin) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.passed = append(r.passed, passed{q.ID, string(reason), asker, ref})
+	r.passed = append(r.passed, passed{q.ID, string(reason), origin.Asker, origin.Ref})
 	return nil
 }
 

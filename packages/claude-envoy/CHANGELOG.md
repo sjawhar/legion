@@ -13,6 +13,11 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-204): `GET /legion/v1/state` carries `questionsForController`, the questions to stopped
+  agents the daemon's answer loop passed to the controller in the last seven days, always emitted,
+  so the MCP server's strict state reader admits the field and nothing this plugin reads or writes
+  moved; a session of it registers with a daemon at 37.
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field

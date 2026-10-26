@@ -129,3 +129,32 @@ func TestAQuestionsIdentityIsItsMessageOrDedupeKey(t *testing.T) {
 		t.Fatalf("Envoy origin = %+v", envoy)
 	}
 }
+
+// Who asked is named for the model and for the controller a question is passed to: a person by
+// their Dispatch login, an agent by its session, with the session's title when the listener
+// stamped one on the envelope; where is the dispatch:// reference or the Envoy event.
+func TestAQuestionsAskerIsTheLoginOrTheSessionWithItsTitle(t *testing.T) {
+	person, err := ReadOrigin(messageHandoff("ses_tester", "m-1", 1, "Why?"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if person.Asker != "user:person@example.com" || person.Ref != "dispatch://LEGION-9/message/m-1" {
+		t.Fatalf("Dispatch origin asker %q, ref %q; want the login and the message's reference", person.Asker, person.Ref)
+	}
+	untitled := envoyHandoff("notifications.agent.ses_tester", "ses_tester", "evt-1", "agent.ses_tester.k1", "Which?")
+	agent, err := ReadOrigin(untitled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.Asker != "session:ses_asker" || agent.Ref != "envoy:evt-1" {
+		t.Fatalf("Envoy origin asker %q, ref %q; want the session and the event", agent.Asker, agent.Ref)
+	}
+	titled := untitled
+	titled.Envelope.Sender = &intake.HandoffSender{SessionID: "ses_asker", Title: "LEGION-9 implementer"}
+	if agent, err = ReadOrigin(titled); err != nil {
+		t.Fatal(err)
+	}
+	if agent.Asker != "session:ses_asker (LEGION-9 implementer)" {
+		t.Fatalf("Envoy origin with a stamped sender asker %q; want the session and its title", agent.Asker)
+	}
+}

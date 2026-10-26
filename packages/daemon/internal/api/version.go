@@ -304,4 +304,11 @@ package api
 // tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
 // request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
 // request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 36
+//
+// 37: INFRA-204 (sjawhar/legion) -- api.State gains `questionsForController`, every question to a
+// stopped agent that the daemon's answer loop passed to the controller in the last seven days
+// (id, issue, role, session, asker, ref, reason, passedAt), newest first and at most 100: the
+// controller's `agent-question` notice is a live wake only, so a controller that starts later
+// reads what it missed here. Never null, so a 36 plugin's strict reader refuses the state, and the
+// boot gate and `legion probe-image` refuse the mixed pair.
+const DaemonAPIVersion = 37

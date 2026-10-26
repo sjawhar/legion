@@ -63,9 +63,10 @@ const startedAt = new Date().toISOString();
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
  * (`workflow.RoleFor`, through daemon-pane.go), on the rig's one repository. `capabilities` is the
  * deployment's capability report, `strandedClaims` the claims nothing will wake, `heldOutboxRows`
- * the lifecycle rows held behind their issues' running ones and `repositories` the project's
- * mapping, each of which the strict reader requires; the rig has no deployment to report on, its
- * one claim runs and it has no outbox, so the first three are the empty lists the daemon's
+ * the lifecycle rows held behind their issues' running ones, `questionsForController` the questions
+ * the answer loop passed to the controller and `repositories` the project's mapping, each of which
+ * the strict reader requires; the rig has no deployment to report on, its one claim runs, it has no
+ * outbox and no question was passed on, so the first four are the empty lists the daemon's
  * MarshalJSON emits when there is none. `settings` is the daemon's resolved legion.yaml with no
  * credential in it, also required; the rig has no file, so it carries the two keys the reader
  * types at the daemon's defaults. */
@@ -94,6 +95,7 @@ const STATE = LegionStateResponse.parse({
     caches: [],
   },
   settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+  questionsForController: [],
 });
 
 interface LogLine {

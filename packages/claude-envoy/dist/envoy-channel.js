@@ -37194,6 +37194,14 @@ function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
 
+// ../contracts/src/legion-handoff.ts
+var LegionAgentHandoffSchema = exports_external.object({
+  original_topic: exports_external.string().min(1),
+  target_session: exports_external.string().min(1),
+  role_token: exports_external.string().min(1),
+  project: exports_external.string().min(1),
+  envelope: EnvelopeSchema
+}).strict();
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
   "architect",
@@ -44264,6 +44272,16 @@ var legionHeldOutboxRow = exports_external.strictObject({
   waitedSeconds: exports_external.number().int().nonnegative(),
   waitsOn: exports_external.number().int().positive()
 });
+var legionQuestionForController = exports_external.strictObject({
+  id: nonEmptyString,
+  issue: issueKey,
+  role: exports_external.enum(LEGION_ROLES),
+  session: nonEmptyString,
+  asker: exports_external.string(),
+  ref: exports_external.string(),
+  reason: nonEmptyString,
+  passedAt: timestamp
+});
 var legionIssue = exports_external.strictObject({
   key: nonEmptyString,
   generation: exports_external.number().int().nonnegative(),
@@ -44348,7 +44366,8 @@ var LegionStateResponse = exports_external.strictObject({
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: exports_external.array(legionCapabilityState),
   repositories: legionRepositories,
-  settings: legionSettings
+  settings: legionSettings,
+  questionsForController: exports_external.array(legionQuestionForController).max(100)
 });
 var LegionRegisterResponse = exports_external.strictObject({
   claimToken: nonEmptyString,
@@ -47110,7 +47129,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 36
+  daemonApiVersion: 37
 };
 
 // src/channel-forwarder.ts

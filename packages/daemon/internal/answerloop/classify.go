@@ -186,7 +186,9 @@ func classifyDispatch(ctx context.Context, h intake.Handoff, conv store.AgentCon
 
 // ReadOrigin reads what a question's hand-off says about it, without reading anything else: its
 // kind, identity, text, asker and where to post its answer. It is how the loop reads a recorded
-// question's hand-off again.
+// question's hand-off again. A Dispatch asker is `<kind>:<id>` (`user:<login>`, or
+// `session:<id>`); an Envoy asker is `session:<id>`, followed by the session's title in brackets
+// when the listener stamped one on the envelope.
 func ReadOrigin(h intake.Handoff) (Origin, error) {
 	env := h.Envelope
 	if env.Source != "dispatch" {
@@ -194,8 +196,12 @@ func ReadOrigin(h intake.Handoff) (Origin, error) {
 		if text == "" {
 			text = env.PayloadSummary
 		}
+		asker := "session:" + env.SourceSession
+		if env.Sender != nil && env.Sender.SessionID == env.SourceSession && env.Sender.Title != "" {
+			asker += " (" + env.Sender.Title + ")"
+		}
 		return Origin{
-			Kind: KindEnvoy, Identity: env.DedupeKey, Text: text, Asker: "session:" + env.SourceSession,
+			Kind: KindEnvoy, Identity: env.DedupeKey, Text: text, Asker: asker,
 			Where: "an Envoy message from session " + env.SourceSession, Ref: "envoy:" + env.EventID, MayAskNothing: true,
 			Sender: env.SourceSession, EventID: env.EventID,
 		}, nil

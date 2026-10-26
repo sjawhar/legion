@@ -66,6 +66,35 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
+	// QuestionsForController is every question to a stopped agent that the daemon's answer loop
+	// passed to the controller in the last QuestionsForControllerWindow, newest first and at most
+	// QuestionsForControllerLimit of them: the agent-question notice is a live wake only, so a
+	// controller that starts later reads here what it missed. Never null (contract 37).
+	QuestionsForController []QuestionForController `json:"questionsForController"`
+}
+
+// QuestionsForControllerWindow is how far back the state lists the questions passed to the
+// controller, and QuestionsForControllerLimit the most it lists.
+const (
+	QuestionsForControllerWindow = 7 * 24 * time.Hour
+	QuestionsForControllerLimit  = 100
+)
+
+// QuestionForController is one question the answer loop passed to the controller, as its
+// agent-question notice named it: the question's id, the agent's issue, role and session, who asked
+// (`user:<login>`, or `session:<id>` with the asking session's title when known), where (a
+// dispatch:// reference, or `envoy:<event id>`), why it was passed on (`not_answered`,
+// `needs_work`, a bound or fault the answer met, `over_limit`, `unknown_format`, `no_provider`,
+// `no_price`, `no_conversation`, `post_refused`), and when.
+type QuestionForController struct {
+	ID       string     `json:"id"`
+	Issue    string     `json:"issue"`
+	Role     claim.Role `json:"role"`
+	Session  string     `json:"session"`
+	Asker    string     `json:"asker"`
+	Ref      string     `json:"ref"`
+	Reason   string     `json:"reason"`
+	PassedAt time.Time  `json:"passedAt"`
 }
 
 // RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
@@ -192,8 +221,8 @@ type AgentSecretsLoginView struct {
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims` and `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the
-// plugin's strict reader refuses.
+// `strandedClaims`, `capabilities` and `questionsForController` arrays on the wire: a nil Go map or
+// slice is `null`, which the plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -211,6 +240,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
+	}
+	if out.QuestionsForController == nil {
+		out.QuestionsForController = []QuestionForController{}
 	}
 	return json.Marshal(out)
 }

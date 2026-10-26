@@ -206,26 +206,75 @@ func utcDay(at time.Time) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
+// QuestionPassedSource is the processed_events source the daemon marks a question passed to the
+// controller under, by the question's id, in the transaction that queues its agent-question notice:
+// the mark is what passes a question once, and when.
+const QuestionPassedSource = "agent-question"
+
+// PassedQuestion is a question the daemon passed to the controller, and when it did.
+type PassedQuestion struct {
+	AnswerQuestion
+	PassedAt time.Time
+}
+
+// PassedQuestionsTx is the project's questions passed to the controller at since or later, newest
+// first and at most limit of them, read through tx: each question with a QuestionPassedSource mark,
+// at the mark's time.
+func (s *Store) PassedQuestionsTx(ctx context.Context, tx pgx.Tx, project string, since time.Time, limit int) ([]PassedQuestion, error) {
+	// No column of processed_events shares a name with one of answer_questions.
+	rows, err := tx.Query(ctx, `select `+questionColumns+`, processed_at
+		from answer_questions join processed_events on source = $1 and event_id = id
+		where project = $2 and processed_at >= $3
+		order by processed_at desc, id desc limit $4`, QuestionPassedSource, project, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read the questions %s passed to the controller: %w", project, err)
+	}
+	defer rows.Close()
+	var passed []PassedQuestion
+	for rows.Next() {
+		var p PassedQuestion
+		if p.AnswerQuestion, err = scanQuestion(rows, &p.PassedAt); err != nil {
+			return nil, fmt.Errorf("read the questions %s passed to the controller: %w", project, err)
+		}
+		passed = append(passed, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the questions %s passed to the controller: %w", project, err)
+	}
+	return passed, nil
+}
+
 func scanQuestions(rows pgx.Rows, inserted *bool) ([]AnswerQuestion, error) {
 	defer rows.Close()
+	var extra []any
+	if inserted != nil {
+		extra = append(extra, inserted)
+	}
 	var found []AnswerQuestion
 	for rows.Next() {
-		var q AnswerQuestion
-		var token, role, state string
-		var handoff []byte
-		dest := []any{&q.ID, &q.Project, &q.Identity, &q.Session, &token, &q.Issue, &role, &q.Kind, &q.MayAskNothing, &handoff,
-			&state, &q.ReplyKind, &q.ReplyText, &q.PassReason, &q.ForwardDelivered, &q.Deliveries, &q.ReceivedAt, &q.LastSeenAt, &q.UpdatedAt}
-		if inserted != nil {
-			dest = append(dest, inserted)
-		}
-		if err := rows.Scan(dest...); err != nil {
+		q, err := scanQuestion(rows, extra...)
+		if err != nil {
 			return nil, err
 		}
-		q.Token, q.Role, q.State, q.Handoff = claim.Token(token), claim.Role(role), QuestionState(state), handoff
 		found = append(found, q)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return found, nil
+}
+
+// scanQuestion is the current row's questionColumns, with each column after them scanned into
+// extra.
+func scanQuestion(rows pgx.Rows, extra ...any) (AnswerQuestion, error) {
+	var q AnswerQuestion
+	var token, role, state string
+	var handoff []byte
+	dest := []any{&q.ID, &q.Project, &q.Identity, &q.Session, &token, &q.Issue, &role, &q.Kind, &q.MayAskNothing, &handoff,
+		&state, &q.ReplyKind, &q.ReplyText, &q.PassReason, &q.ForwardDelivered, &q.Deliveries, &q.ReceivedAt, &q.LastSeenAt, &q.UpdatedAt}
+	if err := rows.Scan(append(dest, extra...)...); err != nil {
+		return AnswerQuestion{}, err
+	}
+	q.Token, q.Role, q.State, q.Handoff = claim.Token(token), claim.Role(role), QuestionState(state), handoff
+	return q, nil
 }

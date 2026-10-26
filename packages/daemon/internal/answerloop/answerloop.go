@@ -117,11 +117,12 @@ type Tools interface {
 
 // PassOn tells the controller of a question the agent's reply does not settle: one not answered, a
 // request for work, one past a bound or a fault, or over the daily limit. reason is the Reason,
-// asker who asked, ref where (a dispatch:// reference, or the Envoy envelope). It is called once
-// the reply is posted, and again only when a restart finds the question not yet marked passed on,
-// so an implementation passes a question once by its id.
+// origin the question as its hand-off carries it: its text, who asked (Asker) and where (Ref, a
+// dispatch:// reference or the Envoy envelope). It is called once the reply is posted, and again
+// only when a restart finds the question not yet marked passed on, so an implementation passes a
+// question once by its id.
 type PassOn interface {
-	PassOn(ctx context.Context, question store.AnswerQuestion, reason Reason, asker, ref string) error
+	PassOn(ctx context.Context, question store.AnswerQuestion, reason Reason, origin Origin) error
 }
 
 // Decision is a person's decision on an ask the stopped agent opened: the ask's answer, or a

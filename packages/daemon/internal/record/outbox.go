@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -197,6 +198,43 @@ type Notice struct {
 	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
 	// live row's the session's environment to fix, and neither is the controller's.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
+	// Question is an agent-question notice's account of the question the answer loop passed on,
+	// and absent from every other kind; the notice's Role is the agent's and its Reason why the
+	// question was passed on.
+	Question *AgentQuestion `json:"question,omitempty"`
+}
+
+// AgentQuestion is a question to a stopped agent that the daemon's answer loop passed to the
+// controller (an agent-question notice): the question's id (answer_questions), the agent's issue
+// and session, who asked (`user:<login>`, or `session:<id>` with the asking session's title when
+// the listener stamped one), where it was asked (a dispatch:// reference, or `envoy:<event id>`),
+// and its text, cut at AgentQuestionTextLimit characters with a note saying so.
+type AgentQuestion struct {
+	ID      string `json:"id"`
+	Issue   string `json:"issue"`
+	Session string `json:"session"`
+	Asker   string `json:"asker"`
+	Ref     string `json:"ref"`
+	Text    string `json:"text"`
+}
+
+// AgentQuestionTextLimit is the most characters of a question's text an agent-question notice
+// carries; the rest is left out, and a note says how long the question was and where to read it.
+const AgentQuestionTextLimit = 2000
+
+// AgentQuestionText is text as an agent-question notice carries it: whole when it is at most
+// AgentQuestionTextLimit characters, otherwise its first AgentQuestionTextLimit characters and a
+// note naming its length and ref, where the whole question is.
+func AgentQuestionText(text, ref string) string {
+	runes := 0
+	for i := range text {
+		if runes == AgentQuestionTextLimit {
+			return text[:i] + fmt.Sprintf("\n\n[cut: the question is %d characters; the first %d are shown, the whole question is at %s]",
+				utf8.RuneCountInString(text), AgentQuestionTextLimit, ref)
+		}
+		runes++
+	}
+	return text
 }
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
@@ -262,14 +300,17 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // "Free slots"). A tick is the daemon's periodic wake, whose issue is the project key. An
 // unslotted notice names a root admission found in the workflow with neither a slot nor a place in
 // the waiting line, which it took out of the workflow; its reason names the status the root stood
-// at. When admission sends each is its rule (admit.Admission.wakeController and its callers,
-// admit's releaseUnslotted).
+// at. An agent-question notice names a question to a stopped agent that the daemon's answer loop
+// passed on, with its account (Notice.Question), the agent's role and why (Reason), once per
+// question (the daemon's PassOn). When admission sends each of the others is its rule
+// (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
 const (
-	TriageNotice    NoticeKind = "triage"
-	SlotFreeNotice  NoticeKind = "slot-free"
-	TodoNotice      NoticeKind = "todo"
-	TickNotice      NoticeKind = "tick"
-	UnslottedNotice NoticeKind = "unslotted"
+	TriageNotice        NoticeKind = "triage"
+	SlotFreeNotice      NoticeKind = "slot-free"
+	TodoNotice          NoticeKind = "todo"
+	TickNotice          NoticeKind = "tick"
+	UnslottedNotice     NoticeKind = "unslotted"
+	AgentQuestionNotice NoticeKind = "agent-question"
 )
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
@@ -644,9 +685,18 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if (value.Kind == "catch-up") != (value.CatchUp != nil) {
 			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
 		}
+		if value.Question != nil {
+			return fmt.Errorf("a %s notice carries a question; only a controller's agent-question notice does", value.Kind)
+		}
 	case ControllerNotice:
 		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
+		}
+		if (value.Kind == AgentQuestionNotice) != (value.Question != nil) {
+			return fmt.Errorf("a %s controller notice carries a question only when it is an agent-question notice", value.Kind)
+		}
+		if value.Question != nil && value.Question.ID == "" {
+			return fmt.Errorf("an agent-question notice names its question's id")
 		}
 	case SuperviseRequest:
 		if !validSuperviseOp(value.Op) {
@@ -715,7 +765,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AgentQuestionNotice:
 		return true
 	default:
 		return false

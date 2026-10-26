@@ -1673,6 +1673,10 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		}
 		state.Repositories = s.repositories.view(caches)
 	}
+	state.QuestionsForController, err = questionsForController(ctx, tx, s.store, s.projectToken, time.Now())
+	if err != nil {
+		return api.State{}, err
+	}
 	return state, nil
 }
 

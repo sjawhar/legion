@@ -9,12 +9,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/answer"
 	"github.com/sjawhar/legion/daemon/internal/answerloop"
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/conversation"
@@ -22,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghtool"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -100,7 +105,8 @@ func TestAClaimStartedDuringAnAnswerGetsTheQuestionAndItsConversationNothing(t *
 		Answers: config.Answers{Bounds: config.AnswerBounds{Answer: time.Minute, ModelCalls: 1, OutputTokens: 100, Concurrent: 1, DailyUSD: 50}},
 		Store:   st, Dispatch: dispatch.New(dispatchServer.URL, "t"), Envoy: notify.New(listener.URL, "t"), Gate: gate,
 		Issues: noFacts{}, Tools: noTool{}, Conversations: answerloop.Harnesses{},
-		PassOn: loggedPassOn{slog.New(slog.NewTextHandler(io.Discard, nil))}, Decisions: loggedDecisions{slog.New(slog.NewTextHandler(io.Discard, nil))},
+		PassOn:    controllerPassOn{pool: st.Pool(), records: record.NewStore(), now: func() time.Time { return now }, log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Decisions: loggedDecisions{slog.New(slog.NewTextHandler(io.Discard, nil))},
 		Answer: func(ctx context.Context, req answer.Request) (answer.Reply, error) {
 			// The operator resumes the tester while its answer is generated.
 			if err := gate.CheckLaunch(ctx, views.view.Claim); err != nil {
@@ -139,5 +145,142 @@ func TestAClaimStartedDuringAnAnswerGetsTheQuestionAndItsConversationNothing(t *
 	}
 	if published[0]["topic"] != "notifications.role."+string(gateToken) || published[0]["handoff"] != false || posted {
 		t.Fatalf("listener got %v, Dispatch posted %t; want the question on the tester's role topic alone", published, posted)
+	}
+}
+
+// A question passed to the controller is one agent-question notice, however often PassOn is
+// called for it (a restart that finds it not yet marked passed on calls it again, also after the
+// notice went): one controller notice row, published once to the controller topic, whose body
+// names the question's id, issue, role, session, asker, ref, text and reason.
+func TestOutboxAgentQuestionIsQueuedAndDeliveredOncePerQuestion(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	passOn := controllerPassOn{pool: pool, records: records, now: func() time.Time { return now }, log: quietLogger()}
+	q := store.AnswerQuestion{ID: "5f0c2a9e7b14d3866a1e0c4b9d2f7a35", Issue: "LEGION-9", Role: claim.RoleTester, Session: "ses_tester"}
+	origin := answerloop.Origin{Text: "Is PR 7 green?", Asker: "user:person@example.com", Ref: "dispatch://LEGION-9/message/m-1"}
+
+	for range 2 {
+		if err := passOn.PassOn(ctx, q, answerloop.ReasonNotAnswered, origin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows := outboxRows(t, pool); rows != 1 {
+		t.Fatalf("outbox rows after passing the question twice = %d, want one", rows)
+	}
+	publisher := &outboxPublisher{}
+	runner := &outbox{pool: pool, project: "legion", dispatchProject: "LEGION", records: records, notices: publisher, now: func() time.Time { return now }, log: quietLogger()}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := passOn.PassOn(ctx, q, answerloop.ReasonNotAnswered, origin); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	published := publisher.publishes()
+	if len(published) != 1 || outboxRows(t, pool) != 0 {
+		t.Fatalf("publishes = %+v with %d rows left; want one and none", published, outboxRows(t, pool))
+	}
+	if published[0].topic != "notifications.legion.legion.controller" || published[0].message != "agent-question on LEGION-9" {
+		t.Fatalf("published to %q as %q; want the controller topic, as an agent-question on the agent's issue", published[0].topic, published[0].message)
+	}
+	body, err := json.Marshal(published[0].payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"kind":"agent-question","role":"tester","reason":"not_answered","question":{"id":"5f0c2a9e7b14d3866a1e0c4b9d2f7a35",` +
+		`"issue":"LEGION-9","session":"ses_tester","asker":"user:person@example.com","ref":"dispatch://LEGION-9/message/m-1","text":"Is PR 7 green?"}}`
+	if string(body) != want {
+		t.Fatalf("notice body = %s, want %s", body, want)
+	}
+}
+
+// `legion state` lists a question passed to the controller for seven days after it was passed,
+// and not after, newest first, with who asked and where as its hand-off says; a question never
+// passed on is not listed.
+func TestQuestionsForControllerListsAPassedQuestionForSevenDays(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, testpg.Database(t, "legion_daemon_passed_questions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	passOn := controllerPassOn{pool: st.Pool(), records: record.NewStore(), now: func() time.Time { return now }, log: quietLogger()}
+	question := func(id, event string) store.AnswerQuestion {
+		t.Helper()
+		handoff := intake.Handoff{
+			OriginalTopic: "notifications.agent.ses_tester", TargetSession: "ses_tester", RoleToken: string(gateToken), Project: "legion",
+			Envelope: intake.HandoffEnvelope{EventID: event, Source: "agent", SourceEventID: "s", SourceSession: "ses_asker",
+				Topic: "notifications.agent.ses_tester", DedupeKey: "agent.ses_tester." + id, PayloadSummary: "Did it pass?", TraceID: "t",
+				Sender: &intake.HandoffSender{SessionID: "ses_asker", Title: "LEGION-9 implementer"}},
+		}
+		raw, err := json.Marshal(handoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q, _, err := st.ReceiveQuestion(ctx, store.AnswerQuestion{
+			ID: id, Project: "legion", Identity: handoff.Envelope.DedupeKey, Session: "ses_tester", Token: gateToken, Issue: "LEGION-9",
+			Role: claim.RoleTester, Kind: "envoy", MayAskNothing: true, Handoff: raw, ReceivedAt: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return q
+	}
+	pass := func(q store.AnswerQuestion, reason answerloop.Reason, at time.Time) {
+		t.Helper()
+		q.PassReason = string(reason)
+		q.State, q.UpdatedAt = store.QuestionAppended, at
+		if err := st.UpdateQuestion(ctx, q, store.QuestionReceived); err != nil {
+			t.Fatal(err)
+		}
+		if err := passOn.PassOn(ctx, q, reason, answerloop.Origin{Asker: "session:ses_asker (LEGION-9 implementer)", Ref: "envoy:evt"}); err != nil {
+			t.Fatal(err)
+		}
+		q.State = store.QuestionPassedOn
+		if err := st.UpdateQuestion(ctx, q, store.QuestionAppended); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool().Exec(ctx, "update processed_events set processed_at = $3 where source = $1 and event_id = $2",
+			store.QuestionPassedSource, q.ID, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	older, newer := now.Add(-7*24*time.Hour+time.Minute), now.Add(-time.Hour)
+	pass(question("q-older", "evt-older"), answerloop.ReasonNeedsWork, older)
+	pass(question("q-newer", "evt-newer"), answerloop.Reason("answer_seconds"), newer)
+	question("q-answered", "evt-answered")
+
+	listed := func(at time.Time) []api.QuestionForController {
+		t.Helper()
+		var questions []api.QuestionForController
+		if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
+			var err error
+			questions, err = questionsForController(ctx, tx, st, "legion", at)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return questions
+	}
+	entry := func(id, event, reason string, at time.Time) api.QuestionForController {
+		return api.QuestionForController{ID: id, Issue: "LEGION-9", Role: claim.RoleTester, Session: "ses_tester",
+			Asker: "session:ses_asker (LEGION-9 implementer)", Ref: "envoy:" + event, Reason: reason, PassedAt: at}
+	}
+	newerEntry, olderEntry := entry("q-newer", "evt-newer", "answer_seconds", newer), entry("q-older", "evt-older", "needs_work", older)
+	if got := listed(now); !reflect.DeepEqual(got, []api.QuestionForController{newerEntry, olderEntry}) {
+		t.Fatalf("questions for the controller = %+v, want the newer and then the older", got)
+	}
+	// Seven days and a second after the older was passed it is no longer listed.
+	later := older.Add(api.QuestionsForControllerWindow + time.Second)
+	if got := listed(later); !reflect.DeepEqual(got, []api.QuestionForController{newerEntry}) {
+		t.Fatalf("questions for the controller seven days after the older was passed = %+v, want the newer alone", got)
 	}
 }

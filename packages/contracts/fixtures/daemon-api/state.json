@@ -557,5 +557,17 @@
     "worker_backends": {
       "tester": "omp"
     }
-  }
+  },
+  "questionsForController": [
+    {
+      "id": "5f0c2a9e7b14d3866a1e0c4b9d2f7a35",
+      "issue": "LEGION-207",
+      "role": "tester",
+      "session": "ses_tester_207",
+      "asker": "user:octocat",
+      "ref": "dispatch://LEGION-207/message/m-4411",
+      "reason": "not_answered",
+      "passedAt": "2026-09-22T09:14:03Z"
+    }
+  ]
 }

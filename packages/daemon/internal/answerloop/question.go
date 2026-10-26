@@ -246,7 +246,7 @@ func (l *Loop) post(ctx context.Context, q store.AnswerQuestion, origin Origin) 
 	if refusedForGood(err) {
 		l.cfg.Log.Error("answers: the reply was refused; the question is passed on", "question", q.ID, "session", q.Session, "error", err)
 		q.PassReason = string(ReasonPostRefused)
-		if err := l.cfg.PassOn.PassOn(ctx, q, ReasonPostRefused, origin.Asker, origin.Ref); err != nil {
+		if err := l.cfg.PassOn.PassOn(ctx, q, ReasonPostRefused, origin); err != nil {
 			return err
 		}
 		return l.move(ctx, &q, store.QuestionDropped, store.QuestionAppended)
@@ -257,7 +257,7 @@ func (l *Loop) post(ctx context.Context, q store.AnswerQuestion, origin Origin) 
 	if q.PassReason == "" {
 		return l.move(ctx, &q, store.QuestionPosted, store.QuestionAppended)
 	}
-	if err := l.cfg.PassOn.PassOn(ctx, q, Reason(q.PassReason), origin.Asker, origin.Ref); err != nil {
+	if err := l.cfg.PassOn.PassOn(ctx, q, Reason(q.PassReason), origin); err != nil {
 		return fmt.Errorf("pass the question on: %w", err)
 	}
 	return l.move(ctx, &q, store.QuestionPassedOn, store.QuestionAppended)

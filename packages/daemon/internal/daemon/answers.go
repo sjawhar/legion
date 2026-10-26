@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/answer"
 	"github.com/sjawhar/legion/daemon/internal/answerloop"
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -54,7 +56,7 @@ func (w *workflowRuntime) attachAnswers(cfg config.Config, p plan, s *supervisio
 		Envoy: notify.New(cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"]), Gate: s.answerGate,
 		Issues: recordFacts{w}, Tools: ghTools{host: host, bounds: cfg.Answers.Bounds},
 		Conversations: answerloop.Harnesses{OpenSQL: conversationStore(*cfg.Answers, p.answers)},
-		PassOn:        loggedPassOn{w.log}, Decisions: loggedDecisions{w.log},
+		PassOn:        controllerPassOn{pool: w.pool, records: w.records, now: time.Now, log: w.log}, Decisions: loggedDecisions{w.log},
 		AppID: func(role claim.Role) string {
 			if appauth.AppRoleFor(role) == appauth.Implement {
 				return cfg.GitHubApps.Implement.AppID
@@ -128,14 +130,73 @@ func (t ghTool) Lookup(ctx context.Context, seq int) (ghtool.Found, error) {
 
 func (t ghTool) Close() error { return t.answer.Close() }
 
-// loggedPassOn logs a question passed on. The controller's agent-question notice and `legion
-// state`'s listing are the next change's (plan 2.8, "Passing on"), which replaces this.
-type loggedPassOn struct{ log *slog.Logger }
+// controllerPassOn passes a question to the controller: in one transaction it marks the question
+// passed by its id (processed_events, store.QuestionPassedSource) and queues its agent-question
+// notice, a controller notice row the outbox publishes to the controller topic as it does every
+// controller notice, so the notice survives a restart, and a restart that finds the question not
+// yet marked passed on and calls this again queues nothing more. records wakes the outbox once the
+// transaction commits (projectRecords). `legion state` lists the question from the mark
+// (questionsForController).
+type controllerPassOn struct {
+	pool    *pgxpool.Pool
+	records record.Store
+	now     func() time.Time
+	log     *slog.Logger
+}
 
-func (p loggedPassOn) PassOn(_ context.Context, q store.AnswerQuestion, reason answerloop.Reason, asker, ref string) error {
-	p.log.Warn("answers: question passed on", "question", q.ID, "issue", q.Issue, "role", q.Role, "session", q.Session,
-		"reason", reason, "asker", asker, "ref", ref)
+func (p controllerPassOn) PassOn(ctx context.Context, q store.AnswerQuestion, reason answerloop.Reason, origin answerloop.Origin) error {
+	row, err := record.NewOutboxRow(q.Issue, record.ControllerNotice{
+		Kind: record.AgentQuestionNotice, Role: q.Role, Reason: string(reason),
+		Question: &record.AgentQuestion{
+			ID: q.ID, Issue: q.Issue, Session: q.Session, Asker: origin.Asker, Ref: origin.Ref,
+			Text: record.AgentQuestionText(origin.Text, origin.Ref),
+		},
+	}, p.now())
+	if err != nil {
+		return fmt.Errorf("the agent-question notice of %s: %w", q.ID, err)
+	}
+	queued := false
+	// The pass is its own transaction, so it owns the commit hook the row's write registers.
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, p.pool, func(tx pgx.Tx) error {
+		fresh, err := p.records.MarkProcessed(scoped, tx, store.QuestionPassedSource, q.ID)
+		if err != nil || !fresh {
+			return err
+		}
+		queued = true
+		return p.records.Enqueue(scoped, tx, row)
+	}); err != nil {
+		return fmt.Errorf("pass the question %s to the controller: %w", q.ID, err)
+	}
+	committed()
+	if queued {
+		p.log.Info("answers: question passed to the controller", "question", q.ID, "issue", q.Issue, "role", q.Role, "session", q.Session,
+			"reason", reason, "asker", origin.Asker, "ref", origin.Ref)
+	}
 	return nil
+}
+
+// questionsForController is the project's questions passed to the controller in the
+// api.QuestionsForControllerWindow before now, newest first, at most api.QuestionsForControllerLimit,
+// read through tx, each with who asked and where as its recorded hand-off says. A hand-off that no
+// longer reads names no asker and no ref; the question is listed all the same.
+func questionsForController(ctx context.Context, tx pgx.Tx, st *store.Store, project string, now time.Time) ([]api.QuestionForController, error) {
+	passed, err := st.PassedQuestionsTx(ctx, tx, project, now.Add(-api.QuestionsForControllerWindow), api.QuestionsForControllerLimit)
+	if err != nil {
+		return nil, err
+	}
+	questions := make([]api.QuestionForController, len(passed))
+	for i, p := range passed {
+		questions[i] = api.QuestionForController{
+			ID: p.ID, Issue: p.Issue, Role: p.Role, Session: p.Session, Reason: p.PassReason, PassedAt: p.PassedAt.UTC(),
+		}
+		if h, err := intake.DecodeHandoff(p.Handoff); err == nil {
+			if origin, err := answerloop.ReadOrigin(h); err == nil {
+				questions[i].Asker, questions[i].Ref = origin.Asker, origin.Ref
+			}
+		}
+	}
+	return questions, nil
 }
 
 // loggedDecisions records a decision in the log. Routing it to the architect or the controller is

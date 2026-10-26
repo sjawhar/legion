@@ -27,6 +27,9 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Verdict: "pass", Version: 4, Reason: ""},
 		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
 		ControllerNotice{Kind: TickNotice, OpenCapabilities: []string{"secrets", "resource-limits"}},
+		ControllerNotice{Kind: AgentQuestionNotice, Role: claim.RoleTester, Reason: "not_answered", Question: &AgentQuestion{
+			ID: "q-1", Issue: "LEGION-208", Session: "ses_tester", Asker: "user:person", Ref: "dispatch://LEGION-208/message/m-1", Text: "Is PR 7 green?",
+		}},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
@@ -125,6 +128,11 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "a slot-free notice for an architect", payload: Notice{Kind: SlotFreeNotice}, reason: "unknown notice kind"},
 		{name: "a todo notice for an architect", payload: Notice{Kind: TodoNotice}, reason: "unknown notice kind"},
 		{name: "a tick notice for an architect", payload: Notice{Kind: TickNotice}, reason: "unknown notice kind"},
+		{name: "an agent-question notice for an architect", payload: Notice{Kind: AgentQuestionNotice, Question: &AgentQuestion{ID: "q-1"}}, reason: "unknown notice kind"},
+		{name: "an architect's notice carrying a question", payload: Notice{Kind: "held", Question: &AgentQuestion{ID: "q-1"}}, reason: "only a controller's agent-question notice does"},
+		{name: "an agent-question notice without its question", payload: ControllerNotice{Kind: AgentQuestionNotice, Reason: "not_answered"}, reason: "carries a question only when"},
+		{name: "another controller notice carrying a question", payload: ControllerNotice{Kind: TickNotice, Question: &AgentQuestion{ID: "q-1"}}, reason: "carries a question only when"},
+		{name: "an agent-question notice naming no question", payload: ControllerNotice{Kind: AgentQuestionNotice, Question: &AgentQuestion{Issue: "LEGION-208"}}, reason: "names its question's id"},
 		{name: "unknown supervise operation", payload: SuperviseRequest{Op: "unknown"}, reason: "unknown supervise operation"},
 		{name: "a stop that is not a tree close", payload: SuperviseRequest{Op: "stop", Tree: "LEGION-208", Role: claim.RoleArchitect}, reason: "unknown supervise operation"},
 		{name: "an issue close naming a linger", payload: SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Linger: 7}, reason: "only a tree close"},
@@ -231,5 +239,22 @@ func TestATickNoticeCarriesItsOpenCapabilitiesThroughTheRow(t *testing.T) {
 				t.Fatalf("payload = %#v, want %#v", got, tc.payload)
 			}
 		})
+	}
+}
+
+// An agent-question notice carries a question of up to AgentQuestionTextLimit characters whole,
+// and a longer one cut at that many characters, counted as characters rather than bytes, with a
+// note naming its length and where the whole question is.
+func TestAnAgentQuestionsTextIsCutAtItsLimitWithANote(t *testing.T) {
+	const ref = "dispatch://LEGION-208/message/m-1"
+	whole := strings.Repeat("é", AgentQuestionTextLimit)
+	if got := AgentQuestionText(whole, ref); got != whole {
+		t.Fatalf("a question of exactly the limit = %d characters, want it whole", len([]rune(got)))
+	}
+	long := whole + "?!"
+	got := AgentQuestionText(long, ref)
+	want := whole + "\n\n[cut: the question is 2002 characters; the first 2000 are shown, the whole question is at " + ref + "]"
+	if got != want {
+		t.Fatalf("a question over the limit = %q, want its first %d characters and the note", got[len(whole):], AgentQuestionTextLimit)
 	}
 }
