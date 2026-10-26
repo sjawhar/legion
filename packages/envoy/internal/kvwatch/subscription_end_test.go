@@ -46,9 +46,16 @@ func TestASubscriptionEndingMidScanNeverPanics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("jetstream: %v", err)
 		}
-		handle, err := bus.OpenKeyValue(conn, js, testBucketName)
-		if err != nil {
-			t.Fatalf("bucket: %v", err)
+		// The bucket lookup is setup, not what the round tests, and the 20 ms wait the round needs
+		// bounds the legacy STREAM.INFO it makes too, which a loaded machine can miss: try again.
+		var handle bus.KeyValue
+		for attempt := 0; ; attempt++ {
+			if handle, err = bus.OpenKeyValue(conn, js, testBucketName); err == nil {
+				break
+			}
+			if attempt == 50 {
+				t.Fatalf("round %d: bucket: %v", round, err)
+			}
 		}
 		release := make(chan struct{})
 		first := make(chan time.Time, 1)
