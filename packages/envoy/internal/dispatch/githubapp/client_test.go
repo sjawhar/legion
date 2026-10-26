@@ -47,8 +47,19 @@ type fakeGitHub struct {
 	tokenExpiresAt time.Time
 	publicKey      *rsa.PublicKey
 	clientID       string
-	// commits maps a branch name to its commit sha; a missing branch answers 404.
+	// commits maps a branch name to its commit sha; a missing branch answers missingBranchStatus.
+	// The commits route answers as GitHub does: the bare sha for Accept:
+	// application/vnd.github.sha, the commit's JSON otherwise.
 	commits map[string]string
+	// missingBranchStatus is the status a branch absent from commits answers: 422 is GitHub's
+	// answer for a branch that does not exist, with GitHub's body; anything else (0 included) is
+	// 404 with no body.
+	missingBranchStatus int
+	// largeCommits names the branches whose JSON answer carries a file list that pushes it past
+	// 1 MiB, as a large commit's does on GitHub.
+	largeCommits map[string]bool
+	// ignoresSHAMediaType answers the commits route's JSON whatever Accept asks for.
+	ignoresSHAMediaType bool
 	// files maps a repository path to its content; a subtree read lists the
 	// paths directly inside the requested directory and each blob is served
 	// under sha "blob-<path>".
@@ -168,12 +179,37 @@ func (f *fakeGitHub) handler() http.Handler {
 	}
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		requireInstallationToken(r)
-		sha, ok := f.commits[r.PathValue("branch")]
+		branch := r.PathValue("branch")
+		sha, ok := f.commits[branch]
 		if !ok {
+			if f.missingBranchStatus == http.StatusUnprocessableEntity {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprintf(w, `{"message":"No commit found for SHA: %s","documentation_url":"https://docs.github.com/rest/commits/commits#get-a-commit","status":"422"}`, branch)
+				return
+			}
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		fmt.Fprintf(w, `{"sha":%q}`, sha)
+		if r.Header.Get("Accept") == "application/vnd.github.sha" && !f.ignoresSHAMediaType {
+			w.Header().Set("Content-Type", "application/vnd.github.sha")
+			fmt.Fprint(w, sha)
+			return
+		}
+		commit := map[string]any{"sha": sha}
+		if f.largeCommits[branch] {
+			// 300 files of ~4 KiB patch each: about 1.2 MiB of JSON.
+			patch := strings.Repeat("+a line this commit adds to the file, as its diff shows it\n", 70)
+			files := make([]map[string]any, 300)
+			for i := range files {
+				files[i] = map[string]any{"filename": fmt.Sprintf("file-%03d.txt", i), "status": "added", "patch": patch}
+			}
+			commit["files"] = files
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(commit); err != nil {
+			f.t.Errorf("encode commit: %v", err)
+		}
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		requireInstallationToken(r)
@@ -605,13 +641,16 @@ func TestNewRejectsMalformedKey(t *testing.T) {
 	}
 }
 
+// mainCommit is the head of the fixture repository's main branch.
+const mainCommit = "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff"
+
 func newReaderFixture(t *testing.T, fake *fakeGitHub) (*Client, string) {
 	t.Helper()
 	fake.installations = map[string]string{"legion/arch": "read"}
 	fake.installationID = 7
 	fake.tokenExpiresAt = time.Now().Add(time.Hour)
 	if fake.commits == nil {
-		fake.commits = map[string]string{"main": "c0ffee"}
+		fake.commits = map[string]string{"main": mainCommit}
 	}
 	client := newTestClient(t, fake)
 	token, err := client.Token(context.Background(), 7)
@@ -626,12 +665,108 @@ func TestRefResolvesTheBranchCommit(t *testing.T) {
 	client, token := newReaderFixture(t, fake)
 
 	sha, err := client.Ref(context.Background(), token, "legion", "arch", "main")
-	if err != nil || sha != "c0ffee" {
+	if err != nil || sha != mainCommit {
 		t.Fatalf("ref: sha=%q err=%v", sha, err)
 	}
 
 	if _, err := client.Ref(context.Background(), token, "legion", "arch", "gone"); !errors.Is(err, ErrNoBranch) {
 		t.Fatalf("missing branch: err=%v, want ErrNoBranch", err)
+	}
+}
+
+// GitHub answers a branch that does not exist with 422 and a repository the installation cannot
+// see with 404; Ref answers ErrNoBranch and no SHA for both.
+func TestRefMissingBranchIsErrNoBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{name: "404 not found", status: http.StatusNotFound},
+		{name: "422 no commit found", status: http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeGitHub{t: t, missingBranchStatus: tc.status}
+			client, token := newReaderFixture(t, fake)
+			sha, err := client.Ref(context.Background(), token, "legion", "arch", "gone")
+			if !errors.Is(err, ErrNoBranch) {
+				t.Fatalf("missing branch answered %d: err=%v, want ErrNoBranch", tc.status, err)
+			}
+			if sha != "" {
+				t.Fatalf("missing branch answered %d: sha=%q, want none", tc.status, sha)
+			}
+		})
+	}
+}
+
+// A commit whose JSON answer lists enough changed files to pass the 1 MiB response cap still
+// resolves: Ref never reads that answer.
+func TestRefReadsTheHeadOfALargeCommit(t *testing.T) {
+	const large = "dddddddddddddddddddddddddddddddddddddddd"
+	fake := &fakeGitHub{
+		t:            t,
+		commits:      map[string]string{"main": mainCommit, "big/change": large},
+		largeCommits: map[string]bool{"big/change": true},
+	}
+	client, token := newReaderFixture(t, fake)
+
+	// The commit's JSON answer, which this fake serves as GitHub does, does not fit the cap.
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/repos/legion/arch/commits/big%2Fchange", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	fake.handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.Len() <= responseLimit {
+		t.Fatalf("large commit's JSON answer is %d bytes (status %d), want more than the %d cap", recorder.Body.Len(), recorder.Code, responseLimit)
+	}
+
+	sha, err := client.Ref(context.Background(), token, "legion", "arch", "big/change")
+	if err != nil {
+		t.Fatalf("Ref: %v", err)
+	}
+	if sha != large {
+		t.Fatalf("Ref = %q, want %q", sha, large)
+	}
+}
+
+// An answer that is not one commit SHA -- GitHub (or a proxy) ignoring the media type and
+// answering the commit's JSON, or any other body -- is an error that quotes nothing of the body
+// and is not ErrNoBranch, so the import keeps the model it has.
+func TestRefRefusesAnAnswerThatIsNotACommitSHA(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fake *fakeGitHub
+		body []string
+	}{
+		{
+			name: "the commit's JSON",
+			fake: &fakeGitHub{ignoresSHAMediaType: true},
+			body: []string{mainCommit, `"sha"`, "{"},
+		},
+		{
+			name: "a body that is no SHA",
+			fake: &fakeGitHub{commits: map[string]string{"main": "not-a-sha"}},
+			body: []string{"not-a-sha"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.fake.t = t
+			client, token := newReaderFixture(t, tc.fake)
+			sha, err := client.Ref(context.Background(), token, "legion", "arch", "main")
+			if err == nil {
+				t.Fatalf("Ref = %q, want an error", sha)
+			}
+			if errors.Is(err, ErrNoBranch) {
+				t.Fatalf("Ref error %q is ErrNoBranch, want a failed read", err)
+			}
+			for _, text := range tc.body {
+				if strings.Contains(err.Error(), text) {
+					t.Fatalf("Ref error %q quotes the body's %q", err, text)
+				}
+			}
+			if !strings.Contains(err.Error(), "legion/arch@main") {
+				t.Fatalf("Ref error %q names no branch", err)
+			}
+		})
 	}
 }
 

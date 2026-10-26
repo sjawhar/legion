@@ -414,9 +414,7 @@ func resolveAnswers(file fileConfig, configDir string, cfg *Config) error {
 // runtime keeps them: a postgres:// URL's file under session_store postgres, the file the panes
 // read under runtime tmux's (runtime.tmux.session_dsn_file); its own IAM login on
 // session_database's instance under cloudsql-iam; none under runtime tmux's files store, whose
-// conversations are files on the daemon's own host. A conversation on an issue's volume
-// (session_store pvc) is out of the daemon's reach, so `answers` is refused there whole. Each store
-// refuses the key it does not use, as runtime.kubernetes' session keys do; under runtime tmux the
+// conversations are files on the daemon's own host. Each store refuses the key it does not use, as runtime.kubernetes' session keys do; under runtime tmux the
 // block names nothing, since the daemon reads the conversations where its panes keep them.
 func conversationStoreOf(read *answersFile, configDir string, rt Runtime) (ConversationStore, error) {
 	k := rt.Kubernetes
@@ -449,6 +447,6 @@ func conversationStoreOf(read *answersFile, configDir string, rt Runtime) (Conve
 		database.User = read.user
 		return ConversationStore{Database: database}, nil
 	default:
-		return ConversationStore{}, fmt.Errorf("%s is not used when %s is %s: each conversation is a file on its issue's volume, which the daemon does not mount and the tree's close deletes, so there is none to answer from; remove %s, or keep conversations in a database (session_store postgres or cloudsql-iam)", answersKey, sessionStoreKey, kind, answersKey)
+		return ConversationStore{}, fmt.Errorf("%s cannot read conversations under %s %q", answersKey, sessionStoreKey, kind)
 	}
 }

@@ -51,9 +51,10 @@ var createTables = []string{
 // undefinedTable is Postgres's SQLSTATE for a relation that does not exist.
 const undefinedTable = "42P01"
 
-// ReadDSN is the connection URL a DSN file holds, trimmed as Oh My Pi trims it: the session
-// database's, or the daemon's own for `legion sessions mark-lost`, whose callers say which. Its
-// refusals name the file, never what it holds.
+// ReadDSN is the connection URL a DSN file holds, trimmed as Oh My Pi trims it. Every caller reads
+// the session database's: Connect, which opens it, and the launcher's own resume lookup
+// (launcher.sessionWritten), which reads the file afresh before each attempt so a URL rewritten
+// under it is picked up. Its refusals name the file, never what it holds.
 func ReadDSN(file string) (string, error) {
 	body, err := os.ReadFile(file)
 	if err != nil {

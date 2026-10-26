@@ -9,6 +9,21 @@
   `{original_topic, target_session, role_token, project, envelope}` with the envelope as it would
   have been delivered, on `notifications.legion.<project>.agents.<session>`. The Go daemon decodes
   it as `intake.Handoff` (INFRA-204).
+- `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
+  one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
+  parameters whose absence makes the server answer every match
+  (`api/issue_page.go`'s `parseIssuePage`). It is for a caller that must not miss or repeat a row
+  while other writers change the list, and above all for one whose own writes move issues out of
+  what it filtered on: offset paging shifts such a row across a page boundary, so it comes back
+  twice or never. `--all` beside `--limit` or `--offset` is refused with a usage error naming
+  both ways. The default call is unchanged, still a page of `DEFAULT_ISSUE_PAGE_LIMIT` rows at
+  offset 0.
+- `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
+  (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
+  read lists the last 10 without either.
+- `DEFAULT_ISSUE_READ_EVENTS` (10), how many of an issue's newest events `dispatch_read` lists
+  without `events` or `all_events`: the number its description names and `DispatchClient.read`'s
+  default.
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared
@@ -126,6 +141,19 @@
 
 ### Changed
 
+- **Breaking:** a project's architecture model comes from any number of sources, one per
+  repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order
+  the project added them, replaces `source`; `ArchitectureTreeComponent.source` names the
+  repository whose files define the component; `ArchitectureSource.components` counts the
+  components that source projects now; and `ArchitectureSyncedEventPayload` and
+  `ArchitectureSyncFailedEventPayload` gain optional `repo` and `branch`, optional because events
+  retained from before projects had several sources lack them. `dispatch_architecture_sync` takes
+  an optional `repo` (`owner/name`; any other shape, a name of `.` or `..` included, is refused
+  before a request) to sync that one source, and without it syncs every source; its description
+  says a project may have several sources, that one source's failure leaves every other source
+  untouched, and that sources are saved in Settings or with
+  `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}`. Its `example` is now
+  `{ project: "CORE", repo: "acme/infra" }`.
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the
   already-merged sentence, for a pull request a person merged before READY, and the by-hand

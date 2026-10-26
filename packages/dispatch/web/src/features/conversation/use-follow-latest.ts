@@ -7,12 +7,21 @@ const NEWEST_TURN_SELECTOR = "[data-turn]";
 export function useFollowLatest({
   enabled,
   latestItemSeq,
+  onFirstPlacement,
   ownSendCount,
 }: {
   enabled: boolean;
-  /** A number that rises with the newest card's recency, or `undefined` while the list is
-   *  empty: the hook follows that card and needs nothing else about the list. */
+  /** A number that rises with the newest card's recency, or `undefined` until that card is on
+   *  the page (while the caller's list is loading, failed or empty): the hook follows that card
+   *  and needs nothing else about the list. It spends its one first placement on the first
+   *  defined value, so a caller must not pass one before the card renders. */
   latestItemSeq: number | undefined;
+  /** Called once, in the layout effect that spends the first placement, right after the reader
+   *  is placed at the newest card - so before any parent layout effect of that commit. It tells
+   *  the caller the reader has just been placed for the first time: a scroll position recorded
+   *  before the list was ever on the page (a tab switch's, say) is stale and must not be
+   *  applied over this placement. A later arrival, own send or re-enable never calls it. */
+  onFirstPlacement?: () => void;
   ownSendCount: number;
 }): {
   atTop: boolean;
@@ -24,6 +33,12 @@ export function useFollowLatest({
   const previousItemSeq = useRef<number | undefined>(undefined);
   const previousSends = useRef(ownSendCount);
   const followScrollY = useRef<number | undefined>(undefined);
+  // The latest callback, read when the placement happens, so a new identity never re-runs the
+  // placement effect. Declared before it, so it is current in the same commit.
+  const onFirstPlacementRef = useRef(onFirstPlacement);
+  useLayoutEffect(() => {
+    onFirstPlacementRef.current = onFirstPlacement;
+  });
   const followsLatest = useCallback(
     () =>
       window.scrollY <= 0 ||
@@ -92,6 +107,9 @@ export function useFollowLatest({
     setAtTop(followsLatestNow);
     if (followsLatestNow) {
       jumpToLatest();
+    }
+    if (first) {
+      onFirstPlacementRef.current?.();
     }
   }, [enabled, followsLatest, jumpToLatest, latestItemSeq, ownSendCount]);
 

@@ -649,7 +649,7 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
-// The questions passed to the controller (contract 37): the golden carries the question LEGION-207's
+// The questions passed to the controller (contract 38): the golden carries the question LEGION-207's
 // stopped tester could not answer, a state with none carries an empty list rather than none, a
 // question names its role and when it was passed, and the list cannot be dropped: a plugin from
 // before the field refuses the state, which is what the bump is for.

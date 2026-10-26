@@ -59,8 +59,7 @@ var runtimeOwned = map[string]bool{
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
 // disk or tmux: the shared refusal (runtime.ValidateSpawnSpec) — nothing may reach a pane as a -e
 // value that is a secret, or that overrides a variable the runtime sets — then tmux's own. A claim
-// token names the pane's secret files, so it is one file name. A pane's workspace is a directory
-// on the daemon's own disk, which is never lost and recovered, so a spec recovering one is refused.
+// token names the pane's secret files, so it is one file name.
 //
 // providerKeys are the names the shim will export into OMP's environment from the provider-env
 // directory. The shim skips a NAME whose NAME_FILE pointer the pane carries and refuses to start
@@ -75,10 +74,6 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 	token := string(spec.Claim)
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("spawn %s: "+format, append([]any{token}, args...)...)
-	}
-	if spec.WorkspaceRecoveredFrom != "" {
-		return refuse("the spec recovers a lost workspace from %s, and a tmux pane's workspace is on the daemon's own disk, never lost",
-			spec.WorkspaceRecoveredFrom)
 	}
 	for _, key := range providerKeys {
 		_, inEnv := spec.Env[key]

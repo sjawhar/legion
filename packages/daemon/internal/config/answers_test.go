@@ -19,7 +19,6 @@ const (
 	openaiByCommand    = "    openai: {base_url: https://gateway.internal.example/openai, api_key_command: printf openai-key}\n"
 	opusPrice          = "    anthropic/claude-opus-5-5: {input: 5, output: 25, cache_write: 6.25, cache_read: 0.5}\n"
 	gptPrice           = "    openai/gpt-6.1: {input: 1.25, output: 10, cache_write: 0, cache_read: 0.125}\n"
-	postgresStore      = "    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n"
 	cloudSQLStore      = "    session_store: cloudsql-iam\n    session_database: {instance: example-project:us-central1:example-instance, name: legion_sessions, user: legion-sessions@example-project.iam}\n"
 	daemonDSNFile      = "  conversation_store: {dsn_file: conversations-dsn}\n"
 	daemonIAMLogin     = "  conversation_store: {user: legion-daemon@example-project.iam}\n"
@@ -32,15 +31,14 @@ func answersBlock(providers, prices, rest string) string {
 	return "answers:\n  providers:\n" + providers + "  prices:\n" + prices + rest
 }
 
-// No `answers`, or `answers: null`, leaves the loop off under either runtime, the default pvc
-// store included: the daemon runs as it did before the block existed.
+// No `answers`, or `answers: null`, leaves the loop off under either runtime: the daemon runs as
+// it did before the block existed.
 func TestNoAnswersBlockLeavesTheLoopOff(t *testing.T) {
 	for name, body := range map[string]string{
 		"tmux, absent":         minimalFile,
 		"tmux, null":           minimalFile + "answers: null\n",
-		"kubernetes, pvc":      kubernetesFile,
 		"kubernetes, null":     "answers:\n" + kubernetesFile,
-		"kubernetes, postgres": kubernetesFile + postgresStore,
+		"kubernetes, postgres": kubernetesFile,
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := LoadForValidation(writeConfigFile(t, body), noEnv)
@@ -126,7 +124,7 @@ func TestAnswersBoundsTheFileSetsOverrideTheDefaults(t *testing.T) {
 // conversation_store is the key the runtime's own store needs, and only that one: dsn_file under
 // session_store postgres, user under cloudsql-iam (with session_database's instance and database),
 // neither under tmux, whose postgres store's runtime.tmux.session_dsn_file is the conversation
-// store's; and under pvc, the default, `answers` is refused whole.
+// store's.
 func TestAnswersConversationStoreFollowsTheRuntimesStore(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -135,45 +133,35 @@ func TestAnswersConversationStoreFollowsTheRuntimesStore(t *testing.T) {
 	}{
 		{
 			name: "postgres, dsn_file",
-			body: kubernetesFile + postgresStore + answersBlock(anthropicByFile, opusPrice, daemonDSNFile),
+			body: kubernetesFile + answersBlock(anthropicByFile, opusPrice, daemonDSNFile),
 			want: ConversationStore{DSNFile: "conversations-dsn"},
 		},
 		{
 			name:    "postgres, no conversation_store",
-			body:    kubernetesFile + postgresStore + answersBlock(anthropicByFile, opusPrice, ""),
+			body:    kubernetesFile + answersBlock(anthropicByFile, opusPrice, ""),
 			refusal: answersRequiredDSN,
 		},
 		{
 			name:    "postgres, user alone",
-			body:    kubernetesFile + postgresStore + answersBlock(anthropicByFile, opusPrice, daemonIAMLogin),
+			body:    kubernetesFile + answersBlock(anthropicByFile, opusPrice, daemonIAMLogin),
 			refusal: "answers.conversation_store.user is not used when runtime.kubernetes.session_store is postgres; remove it",
 		},
 		{
 			name: "cloudsql-iam, user",
-			body: kubernetesFile + cloudSQLStore + answersBlock(anthropicByFile, opusPrice, daemonIAMLogin),
+			body: withSessionStore(cloudSQLStore) + answersBlock(anthropicByFile, opusPrice, daemonIAMLogin),
 			want: ConversationStore{Database: ompsessions.Database{
 				Instance: "example-project:us-central1:example-instance", Name: "legion_sessions", User: "legion-daemon@example-project.iam",
 			}},
 		},
 		{
 			name:    "cloudsql-iam, no conversation_store",
-			body:    kubernetesFile + cloudSQLStore + answersBlock(anthropicByFile, opusPrice, ""),
+			body:    withSessionStore(cloudSQLStore) + answersBlock(anthropicByFile, opusPrice, ""),
 			refusal: "answers.conversation_store.user is required with runtime.kubernetes.session_store cloudsql-iam: the IAM login the daemon signs in to runtime.kubernetes.session_database's instance as",
 		},
 		{
 			name:    "cloudsql-iam, dsn_file",
-			body:    kubernetesFile + cloudSQLStore + answersBlock(anthropicByFile, opusPrice, "  conversation_store: {dsn_file: conversations-dsn, user: legion-daemon@example-project.iam}\n"),
+			body:    withSessionStore(cloudSQLStore) + answersBlock(anthropicByFile, opusPrice, "  conversation_store: {dsn_file: conversations-dsn, user: legion-daemon@example-project.iam}\n"),
 			refusal: "answers.conversation_store.dsn_file is not used when runtime.kubernetes.session_store is cloudsql-iam; remove it",
-		},
-		{
-			name:    "pvc by default",
-			body:    kubernetesFile + answersBlock(anthropicByFile, opusPrice, ""),
-			refusal: "answers is not used when runtime.kubernetes.session_store is pvc: each conversation is a file on its issue's volume, which the daemon does not mount and the tree's close deletes, so there is none to answer from; remove answers, or keep conversations in a database (session_store postgres or cloudsql-iam)",
-		},
-		{
-			name:    "pvc named, with a conversation_store",
-			body:    kubernetesFile + "    session_store: pvc\n" + answersBlock(anthropicByFile, opusPrice, daemonDSNFile),
-			refusal: "answers is not used when runtime.kubernetes.session_store is pvc: each conversation is a file on its issue's volume, which the daemon does not mount and the tree's close deletes, so there is none to answer from; remove answers, or keep conversations in a database (session_store postgres or cloudsql-iam)",
 		},
 		{
 			name: "tmux, no conversation_store",

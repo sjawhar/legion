@@ -177,8 +177,9 @@ const legionSlotView = z.strictObject({
 });
 
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
- * (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
- * `detail` the cause's own detail (the run and its completion, or the build's commit), `at` when. */
+ * (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or
+ * `bound`), `detail` the cause's own detail (the run and its completion, the deploy workflow's run,
+ * attempt, job and step success, or the build's commit), `at` when. */
 const legionCheckWakeView = z.strictObject({
   kind: nonEmptyString,
   detail: z.string(),
@@ -245,7 +246,7 @@ const legionHeldOutboxRow = z.strictObject({
 });
 
 /** `api.QuestionForController` — one question to a stopped agent that the daemon's answer loop
- * passed to the controller (its `agent-question` notice, contract 37): the question's id, the
+ * passed to the controller (its `agent-question` notice, contract 38): the question's id, the
  * agent's issue, role and session, who asked (`user:<login>`, or `session:<id>` with the asking
  * session's title when known), where (a `dispatch://` reference, or `envoy:<event id>`), why it was
  * passed on (`not_answered`, `needs_work`, a bound or fault, `over_limit`, `unknown_format`,
@@ -406,7 +407,7 @@ const legionRepositories = z.strictObject({
  * legion.yaml key added later changes no strictly parsed shape (contract 35);
  * `questionsForController` is every question the answer loop passed to the controller in the last
  * seven days, newest first, at most 100, never null: the `agent-question` notice is a live wake
- * only, so a controller that starts later reads here what it missed (contract 37). */
+ * only, so a controller that starts later reads here what it missed (contract 38). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,

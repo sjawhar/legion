@@ -281,7 +281,7 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	}
 }
 
-// --- Integration Tests (testcontainers NATS) ---
+// --- Integration Tests (a real NATS server) ---
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account
 // testnats.URL hands t, where no earlier test made an interest or role bucket.
@@ -447,8 +447,7 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 }
 
 func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
-	ctx := context.Background()
-	ctr, uri := testnats.Start(t)
+	srv, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	// Safety net: a double close is a no-op.
 	t.Cleanup(conn.Close)
@@ -474,9 +473,7 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 
 	// Kill NATS — KV is now unreachable
 	conn.Close()
-	if err := ctr.Terminate(ctx); err != nil {
-		t.Fatalf("failed to terminate NATS: %v", err)
-	}
+	srv.Terminate(t)
 
 	// Match should still return correct results from cache
 	got := reg.Match("m1", "notifications.test")
@@ -2006,10 +2003,12 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
 		t.Fatalf("delete the interest bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
-	if err != nil {
-		t.Fatalf("recreate the interest bucket: %v", err)
-	}
+	// Through the rig's retry, as every other delete-then-create of one name in this module is:
+	// nats-server answers a delete before it has removed the account's streams directory, and a
+	// create inside that window is refused. The role bucket Open made is still in this account, so
+	// the directory is not being removed here — but that is a fact about this test's neighbours,
+	// not about the call, and the retry does not depend on it.
+	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	putInterest(t, recreated, Interest{SessionID: "ses_a", MachineID: "m1", Topics: []string{"notifications.new"}})
 	putInterest(t, recreated, Interest{SessionID: "ses_b", MachineID: "m1", Topics: []string{"notifications.b"}})
 	if err := reg.Rewatch(conn); err != nil {

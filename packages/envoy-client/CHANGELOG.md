@@ -4,13 +4,52 @@
 
 ### Changed
 
+- **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
+  one per repository, and prints each source's answer in turn: `Synced P architecture from
+  repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
+  previous model of repo stays up (commit C).`, `The previous model of repo stays up (N
+  components).` (a source re-saved on another branch, whose earlier components stay until an
+  import replaces them) or `No model has ever imported from repo.`; its
+  `details` are `{project, sources: [{repo, branch, commit, error}]}`. `--repo <owner/name>`
+  imports that one source alone, and a credential or branch problem there is still an error exit
+  (`409 SOURCE_ACCESS`); without it, every source is attempted and such a problem is that
+  source's failed line. `DispatchClient` gains `listArchitectureSources(project)`,
+  `syncArchitectureSources(project)` and `syncArchitectureSource(project, repo)`, on the routes
+  under `/api/v1/projects/{key}/architecture-sources`, and loses `getArchitectureSource`; the
+  issue create's architecture guidance reads the list and takes `[]` as no model. A Dispatch older
+  than this release has no route for the list, so the client then reads that server's
+  `GET /api/v1/projects/{key}/architecture-source` (`null`, or a pre-#1522 `404
+  SOURCE_NOT_FOUND`, is no model; a row is one source) and the guidance stays right while the
+  plugin and the server roll out separately; a project the server does not know is still reported
+  as "Could not check whether project … has an architecture model". Against a Dispatch older than
+  this release, `dispatch architecture-sync --project <KEY>` falls back to that server's
+  single-source sync (`POST /api/v1/projects/{key}/architecture-source/sync`) and prints its one
+  line, and `--repo` needs a Dispatch of this release; the other way round, an older plugin's
+  `architecture-sync` keeps working against this release's Dispatch, which keeps the singular sync
+  route for it (INFRA-391).
 - A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
   expires a session record 300 s after its last write, and three refresh attempts plus one whole
   listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between
   them) fit inside that lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may
   fail and the third still completes before a live session's record is dropped.
+- The `envoy_publish` description says who receives a team topic (any `notifications.` topic the
+  stream does not store): every session subscribed to it when it is published, and it is not
+  retained. A session holding its own NATS connection receives it directly, the publisher's own
+  included; a session on a serve port, such as an OpenCode agent, receives it through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where the description said such a session received nothing
+  (INFRA-122).
 
 ### Added
+
+- `dispatch issues --all` reads the whole filtered listing in one request. The client gains
+  `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
+  answers for that request, refusing any other shape by name: a page back from a request carrying
+  no paging is a Dispatch that still pages one. `dispatch_issues` routes `--all` there and leaves
+  every other call on `listIssuePage` with the same default page, and `--all` beside `--limit` or
+  `--offset` is refused before any request goes out. The command is for a caller that must not
+  miss or repeat a row: a row whose status changes between two offset reads comes back twice or
+  never, which bites hardest when the caller's own writes are what move it.
 
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
@@ -38,6 +77,14 @@
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
 
 ### Fixed
+
+- The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
+  flag or command, a missing or unknown host, a session it cannot name a directory for, a file
+  that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader
+  of the ledger now sees a call whose output a pipe, `$(…)` or another program swallowed. A call
+  with no session id logs nothing, as before. A `--help` that prints help and a `--dry-run` that
+  passes its checks log nothing; a `--help` of an unknown command and a `--dry-run` with a bad
+  argument are refused, and logged like any other refusal.
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
   aborts the lookup and returns the origin without `tmux` and `pane`. An aborted `defaultExec` call
@@ -232,6 +279,20 @@
 
 ### Added
 
+- `dispatch-cli` exports `cliRefusals(text)`, which lists each refusal line the `dispatch` CLI
+  printed in `text`, with the command a `was not called` line names (null for a usage refusal).
+  It reads the CLI's output as a transcript holds it, so a refusal counts when a pipe hid the
+  CLI's exit. A warning, the note that the session's state was not written, and the notice of a
+  file that is not read are not refusals. pi-legion's skill-scenario scorer reads refusals with it.
+- `dispatch read --events N` lists an issue's last N events and `--all-events` every one, on an
+  issue read and on its `dispatch://KEY/log`; without either the read lists the last 10, as before.
+  `DispatchClient.read` takes `{ events: N | "all" }` (`IssueReadOptions`; `DEFAULT_ISSUE_READ_EVENTS`
+  when absent) and reads the newest N with `GET /api/v1/issues/{key}/events`, 200 to a request,
+  the most one request may ask for. Both flags together, or either beside a read that lists no
+  events (a document summary, an ask, a comment, a message's conversation, the issue's children),
+  are refused before any request, naming what the read prints instead. An agent that audits who
+  asked what and which ask was answered reads it with the command, not the events API by hand. A
+  `dispatch://KEY/children` read reads only the issue, no longer its last 10 events.
 - `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
   repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
   `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the

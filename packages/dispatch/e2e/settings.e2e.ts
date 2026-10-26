@@ -230,7 +230,7 @@ test("an architecture source saves after the GitHub App access check, fails inli
     const sourceSaved = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/Legion/Arch") &&
         response.ok()
     );
     await page.getByRole("button", { name: "Add source" }).click();
@@ -238,6 +238,21 @@ test("an architecture source saves after the GitHub App access check, fails inli
     await expect(page.getByRole("cell", { exact: true, name: "legion/arch" })).toBeVisible();
     await expect(page.getByRole("cell", { exact: true, name: "main" })).toBeVisible();
     await expect(page.getByRole("cell", { exact: true, name: "Access verified" })).toBeVisible();
+
+    // A branch the repository does not have is refused inline with the server's 409, and the
+    // stored source keeps its branch.
+    await page.getByLabel("Source project").selectOption("CORE");
+    await page.getByLabel("Source repository").fill("legion/arch");
+    await page.getByLabel("Branch", { exact: true }).fill("no-such-branch");
+    await page.getByRole("button", { name: "Add source" }).click();
+    await expect(
+      page
+        .getByRole("alert")
+        .filter({ hasText: "the branch does not exist: no-such-branch on legion/arch" })
+    ).toBeVisible();
+    await expect(page.getByRole("cell", { exact: true, name: "main" })).toBeVisible();
+    await expect(page.getByRole("cell", { exact: true, name: "no-such-branch" })).toHaveCount(0);
+    await page.getByLabel("Branch", { exact: true }).fill("main");
 
     // The App gets uninstalled; re-saving fails its access check inline and the
     // stored source survives.
@@ -254,7 +269,9 @@ test("an architecture source saves after the GitHub App access check, fails inli
       fullPage: true,
     });
 
-    await page.getByRole("button", { name: "Delete architecture source for CORE" }).click();
+    await page
+      .getByRole("button", { name: "Delete architecture source legion/arch for CORE" })
+      .click();
     await expect(page.getByText("No architecture sources yet.")).toBeVisible();
     await expect(page.getByRole("cell", { exact: true, name: "legion/arch" })).not.toBeVisible();
   } finally {
@@ -284,7 +301,7 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
     const sourceSaved = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/legion/arch") &&
         response.ok()
     );
     await page.getByRole("button", { name: "Add source" }).click();
@@ -293,12 +310,14 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
     const synced = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source/sync") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/legion/arch/sync") &&
         response.ok()
     );
-    await page.getByRole("button", { name: "Refresh architecture source for CORE" }).click();
+    await page
+      .getByRole("button", { name: "Refresh architecture source legion/arch for CORE" })
+      .click();
     await synced;
-    await expect(page.getByText(`Synced ${commit.slice(0, 12)}`)).toBeVisible();
+    await expect(page.getByText(`Synced ${commit.slice(0, 12)} · 2 components`)).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("architecture-source-synced.png"),
       fullPage: true,
@@ -317,13 +336,17 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
     const rejected = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source/sync") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/legion/arch/sync") &&
         response.ok()
     );
-    await page.getByRole("button", { name: "Refresh architecture source for CORE" }).click();
+    await page
+      .getByRole("button", { name: "Refresh architecture source legion/arch for CORE" })
+      .click();
     await rejected;
     await expect(page.getByText(/duplicate component id/)).toBeVisible();
-    await expect(page.getByText(`Previous model stays up at ${commit.slice(0, 12)}`)).toBeVisible();
+    await expect(
+      page.getByText(`Previous model stays up at ${commit.slice(0, 12)} · 2 components`)
+    ).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("architecture-source-sync-rejected.png"),
       fullPage: true,

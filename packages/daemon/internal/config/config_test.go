@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // The smallest file that loads: the three Stage 1 keys and the Stage 3 workflow keys with no
@@ -391,6 +392,127 @@ func TestLoadRefusesProjectSlackChannels(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", tc.projects, 1)
+			if body == minimalFile {
+				t.Fatal("the fixture's projects block was not replaced")
+			}
+			_, err := Load(writeConfigFile(t, body), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A project's deploys are the workflows whose runs wake its production checks, each a parsed
+// repository, its workflow's path and the step whose success is a deploy, kept in the file's order.
+// A project that names none, or names an empty list, has none.
+func TestLoadReadsProjectDeploys(t *testing.T) {
+	body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n"+
+		"  DEMO:\n    deploys:\n"+
+		"      - {repo: acme/infra, workflow: .github/workflows/envoy.yaml, step: Apply}\n"+
+		"      - {repo: sjawhar/legion, workflow: .github/workflows/release.yml, step: Publish image}\n"+
+		"  OTHER: {}\n"+
+		"  EMPTY: { deploys: [] }\n", 1)
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load project deploys: %v", err)
+	}
+	want := []Deploy{
+		{Repo: ghrepo.MustParse("acme/infra"), Workflow: ".github/workflows/envoy.yaml", Step: "Apply"},
+		{Repo: ghrepo.MustParse("sjawhar/legion"), Workflow: ".github/workflows/release.yml", Step: "Publish image"},
+	}
+	if got := cfg.Projects["DEMO"].Deploys; !reflect.DeepEqual(got, want) {
+		t.Errorf("DEMO deploys = %#v, want %#v", got, want)
+	}
+	for _, key := range []string{"OTHER", "EMPTY"} {
+		if got := cfg.Projects[key].Deploys; got != nil {
+			t.Errorf("%s deploys = %#v, want nil", key, got)
+		}
+	}
+}
+
+// The loader refuses a deploy it could match no run against, or would match one run against
+// twice: a list that is no list of mappings, a key besides repo, workflow and step, a repository
+// ghrepo refuses, a workflow that is not a file directly under .github/workflows/ ending .yml or
+// .yaml, a missing or empty step, and one repository's workflow named twice, whatever the case of
+// the repository's name.
+func TestLoadRefusesProjectDeploys(t *testing.T) {
+	const workflowRule = "must be a file directly under .github/workflows/ ending .yml or .yaml, as a workflow run's path names it"
+	for _, tc := range []struct{ name, deploys, want string }{
+		{
+			name:    "not a list",
+			deploys: "{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply}",
+			want:    "projects.DEMO.deploys must be an array",
+		},
+		{
+			name:    "an entry that is no mapping",
+			deploys: "[sjawhar/legion]",
+			want:    "projects.DEMO.deploys[0] must be a mapping",
+		},
+		{
+			name:    "an unknown key",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply, branch: main}]",
+			want:    "unknown key projects.DEMO.deploys[0].branch",
+		},
+		{
+			name:    "no repo",
+			deploys: "[{workflow: .github/workflows/envoy.yaml, step: Apply}]",
+			want:    "projects.DEMO.deploys[0].repo is required",
+		},
+		{
+			name:    "a repo that is no owner and name",
+			deploys: "[{repo: legion, workflow: .github/workflows/envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].repo must be "owner/name" (got "legion")`,
+		},
+		{
+			name:    "a repo GitHub strips .git from",
+			deploys: "[{repo: sjawhar/legion.git, workflow: .github/workflows/envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].repo "sjawhar/legion.git" ends in ".git", which GitHub strips from a repository's name: name it "sjawhar/legion"`,
+		},
+		{
+			name:    "no workflow",
+			deploys: "[{repo: sjawhar/legion, step: Apply}]",
+			want:    "projects.DEMO.deploys[0].workflow is required",
+		},
+		{
+			name:    "a workflow outside .github/workflows",
+			deploys: "[{repo: sjawhar/legion, workflow: envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow "envoy.yaml" ` + workflowRule,
+		},
+		{
+			name:    "a workflow in a nested directory",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/deploy/envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/deploy/envoy.yaml" ` + workflowRule,
+		},
+		{
+			name:    "a workflow that is no YAML file",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.json, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/envoy.json" ` + workflowRule,
+		},
+		{
+			name:    "a workflow with no file name",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/.yaml" ` + workflowRule,
+		},
+		{
+			name:    "no step",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml}]",
+			want:    "projects.DEMO.deploys[0].step is required",
+		},
+		{
+			name:    "an empty step",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: ' '}]",
+			want:    "projects.DEMO.deploys[0].step must not be empty",
+		},
+		{
+			name: "one workflow twice",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply}, " +
+				"{repo: Sjawhar/Legion, workflow: .github/workflows/envoy.yaml, step: Deploy}]",
+			want: "projects.DEMO.deploys names Sjawhar/Legion .github/workflows/envoy.yaml twice",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n  DEMO:\n    deploys: "+tc.deploys+"\n", 1)
 			if body == minimalFile {
 				t.Fatal("the fixture's projects block was not replaced")
 			}

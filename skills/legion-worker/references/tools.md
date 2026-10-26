@@ -86,11 +86,11 @@ for it*.
 
 An install of your own — an interpreter, a browser, a second toolchain, an extraction prefix — is
 on the sanctioned side when both of these hold: what it writes lands on the issue's own volume,
-under `/legion`, which outlives the pod and is shared by the issue's roles — whether through a
-variable the runtime sets for you there or under a path on that volume your harness names
-itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under `/legion/workspaces`) and
-the runtime's own directories (`/legion/repos`, `/legion/feed`, `/legion/sessions`); and after
-the command exits nothing else resolves differently. The workspace is excluded because its jj
+under `/legion`, which outlives a role's relaunch in its pod and is shared by the issue's roles —
+whether through a variable the runtime sets for you there or under a path on that volume your
+harness names itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under
+`/legion/workspaces`) and the runtime's own directories (`/legion/repos`, `/legion/feed`); and
+after the command exits nothing else resolves differently. The workspace is excluded because its jj
 working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB in a role
 container), so a root written there is added to the change every role shares, and a larger new
 file is left untracked, every jj command in the workspace then warning `Refused to snapshot some
@@ -122,7 +122,7 @@ What each shape leaves resolving:
   all. `uv sync` or `bun install` in your workspace materialises what that project already
   declares, into that project's own directory, which a process reaches by asking for that project
   and no other way — and the runtime puts `UV_PYTHON_INSTALL_DIR` and the workspace itself on the
-  issue's volume exactly so a later pod reuses it.
+  issue's volume exactly so every role of the issue's pod reuses it.
 - An extraction prefix: whatever you leave resolving through it, which is yours to decide. Unpack
   Debian packages under `$HOME`, export `LD_LIBRARY_PATH` in the shell you go on working in, and
   you change what every later command in that shell — and every subagent that inherits the
@@ -147,8 +147,8 @@ toolchain — is where the first condition does the work. `uv run --with pyyaml=
 passes both: the wheel lands in `UV_CACHE_DIR`, under `wheels-v6/pypi/pyyaml/6.0.2-…`, and
 `UV_PYTHON_INSTALL_DIR` is never created, because the image's own `python3` served the run. The
 interpreter is the other run: a project whose `.python-version` names an interpreter uv must fetch
-puts about 70 MB under `UV_PYTHON_INSTALL_DIR`, where the issue's next pod finds it, while the
-cache holds no wheel. A browser download passes too, and for Playwright — the browser driver this
+puts about 70 MB under `UV_PYTHON_INSTALL_DIR`, where every role of the issue's pod finds it, while
+the cache holds no wheel. A browser download passes too, and for Playwright — the browser driver this
 repository's own Dispatch suite installs (`playwright install`, `packages/dispatch`'s
 `e2e:install`) — it passes as it stands, with nothing pointed anywhere: playwright-core resolves
 its browser registry under `XDG_CACHE_HOME`, which the runtime has already put on the issue's
@@ -164,11 +164,13 @@ here) at a directory under one of the paths above yourself, since an unset one l
 wherever the tool defaults, which is nowhere this runtime chose.
 
 Where it lands is what you pay. Under one of those variables it is on the issue's volume: it
-outlives the pod, and every role of the issue shares it — under every one of those variables but
-`XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, "the one directory of the issue's
-scratch that is the role's own rather than the issue's" (`roleEnvironment`), because Oh My Pi
-names its browser broker's lock from the state root and an abstract socket name is one name across
-every container of the pod — and a later pod of the issue reuses it. Under `$HOME` —
+outlives a role's relaunch in its pod, and every role of the issue shares it — under every one of
+those variables but `XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, "the one directory
+of the issue's scratch that is the role's own rather than the issue's" (`roleEnvironment`),
+because Oh My Pi names its browser broker's lock from the state root and an abstract socket name
+is one name across every container of the pod — though not the pod itself: the issue's disk is
+the pod's own and is deleted with it, so a later pod of the issue starts without it. Under
+`$HOME` —
 `/home/legion`, which no volume is mounted on — it is the container's own filesystem: one copy per
 role, per pod, gone when the role relaunches, and charged to the container's ephemeral-storage
 limit, which is per role and smaller than the volume. Moving exactly these writes off that
@@ -178,7 +180,7 @@ under `$HOME` fails the first condition and is outside the sanctioned form, howe
 changes. The three artefacts above are the whole of that line's ground. Disk is not: every cache is
 already relocated onto the issue's volume, which has the room for them (`docs/kubernetes.md`, "The
 tools a role's own work needs", carries the figure), and a sanctioned install is paid once per
-issue, on the issue's own disk, by the issue's roles together.
+issue pod, on the issue's own disk, by the issue's roles together.
 
 **The worked case, and the one a role actually meets: the Dispatch e2e stack.** A change to
 `packages/dispatch` is proved by driving its browser suite, which needs a Postgres with pgvector;
@@ -376,11 +378,11 @@ $ grep -rn redis-cli
 $ grep -rn redis-tools
 ```
 
-Two kinds of hit want more than a substitution. The toolchain smoke step in
+One kind of hit wants more than a substitution: the toolchain smoke step in
 `packages/daemon/docker/worker.Dockerfile` runs each tool once, so a new one needs its own
-invocation there (`nc` and `dig` take no `--version`); and the `THIRD_PARTY_NOTICES` intro string
-in the same file is a licence file that hand-lists the Debian packages the image installs,
-assembled into the image at `/usr/share/doc/legion/THIRD_PARTY_NOTICES`.
+invocation there (`nc` and `dig` take no `--version`). The licence file the image carries at
+`/usr/share/doc/legion/THIRD_PARTY_NOTICES` needs no edit: its list of Debian packages is written at
+build time from the image's own dpkg database.
 
 Four of the files the grep finds are in Go, and those four are the gated ones: the `toolchain`
 name list in `packages/daemon/internal/capabilities/image.go` makes the probe require it; that
@@ -391,13 +393,9 @@ the capability and `probe-image` tests fail on an image that does not carry it; 
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
 
 Miss one of those four and the suite is red, which is what makes them easy to find. Nothing holds
-a Dockerfile comment, the notices string or the smoke step to anything today, so a change that
-stops at the gated sites opens green and ships a licence file that does not name the package it
-installs. That is a fact about this build rather than a property: dispatch://INFRA-255 generates
-the package list from `dpkg-query` at build time and drops the hand-kept string, and once it lands
-the notices half of this warning goes with it while the smoke step and the comments stay yours to
-carry. It reaches a role only once a deployment pins the new image digest, as every Legion change
-does — never within your own phase.
+a Dockerfile comment or the smoke step to anything, so a change that stops at the gated sites opens
+green with comments that no longer describe the image and a smoke step that never runs the new
+tool.
 
 So when your work needs such a tool, say so to the architect that owns your issue (`envoy_publish`
 to its role topic), with the tool, what your phase needs it for, and the runner forms you already

@@ -107,10 +107,6 @@ type Claim struct {
 	// Every relaunch resumes that recorded session and refuses another one.
 	Session     string
 	SessionFile string
-	// WorkspaceLost is a claim whose session was lost with the issue's volume it lived on — the one
-	// exception to resuming the agent a claim recorded. It records no session, and every launch
-	// recreates its workspace, fresh, until a new agent registers.
-	WorkspaceLost bool
 	// ServingGeneration is the issue generation of the last confirmed delivery this claim retired:
 	// the run it goes on working until another delivery of a run replaces it. It is the second of
 	// the three sources a completion is attributed from (api/handoff.go): the pending delivery
@@ -197,7 +193,7 @@ func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, IssueVolumeLost, and the nine requests. The transition table has a row or a
+// PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has a row or a
 // named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
@@ -289,10 +285,6 @@ type Deps struct {
 	// owner of the repository the issue works. Every delivery hands it to the agent's working copy
 	// before the task. nil, for a daemon with no workflow or no GitHub Apps, adopts nothing.
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
-	// VolumeLost is told of a claim whose issue's volume was found lost as it relaunches that claim
-	// fresh, so the daemon can tell the issue's other claims (IssueVolumeLost): their sessions were
-	// on the same volume. nil tells no one.
-	VolumeLost func(c Claim)
 	// Registered is told of every registration the claim persisted, a first one (register) and the
 	// recorded session registering again (reregister), with the claim as written: the daemon's record
 	// of the conversations its agents have had (agent_conversations), which no close, suspension or
@@ -1001,11 +993,11 @@ func (m *Machine) stopPrevious(ctx context.Context) error {
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
-// is spent. A resume that found the issue's volume lost is the exception (relaunchFresh). A task whose
-// turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
-// and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
-// A process that dies while a suspension is held leaves the claim suspended instead (endHeld). A
-// process that ended with a pod the daemon itself replaced is not a death at all (displaced).
+// is spent. A task whose turn the process was running goes back to waiting first (interrupted),
+// for the relaunch to send, and a death with work outstanding is counted as one (chargeDeath),
+// failing the claim at the limit. A process that dies while a suspension is held leaves the claim
+// suspended instead (endHeld). A process that ended with a pod the daemon itself replaced is not
+// a death at all (displaced).
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
@@ -1018,41 +1010,13 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 	if m.chargeDeath() {
 		return m.fail(ctx, "deaths with work outstanding ran out")
 	}
-	if observation.Kind == runtime.Gone && observation.WorkspaceLost {
-		return m.relaunchFresh(ctx)
-	}
 	return m.relaunchAfterFailure(ctx)
 }
 
-// relaunchFresh is a resume whose workspace-init found the issue's volume lost, the session file
-// with it: resuming again would fail the same way on every attempt until the budget ran out. It is
-// the one exception to the same-agent rule. The claim drops the session it recorded and relaunches
-// as a fresh session that recreates its workspace from the issue's branch, and the agent that
-// registers next is the session it resumes from then on. The volume ended the process, not the
-// launch, so no launch failure is charged; the fresh launch has no session to find missing, so it
-// cannot end this way again. The daemon is told first: the issue's other claims kept their sessions
-// on that volume.
-func (m *Machine) relaunchFresh(ctx context.Context) error {
-	m.log.Warn("supervise: the issue's volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
-	m.loseSession()
-	if m.deps.VolumeLost != nil {
-		m.deps.VolumeLost(copyClaim(m.claim))
-	}
-	return m.launch(ctx)
-}
-
-// loseSession drops the session the claim recorded, which lived on an issue's volume since lost:
-// the claim expects no session until a new agent registers, and its launches recreate the workspace.
-func (m *Machine) loseSession() {
-	m.forgetSession()
-	m.claim.WorkspaceLost = true
-}
-
-// forgetSession drops the session the claim recorded and any loss recorded with it, leaving the
-// claim as one no agent has registered for: the next launch is a fresh spawn that provisions its
-// workspace anew. The issue's close releases the volume the session lived on (table's issueClose).
+// forgetSession drops the session the claim recorded, leaving the claim as one no agent has
+// registered for: the next launch is a fresh spawn that provisions its workspace anew.
 func (m *Machine) forgetSession() {
-	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", false
+	m.claim.Session, m.claim.SessionFile = "", ""
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -1329,8 +1293,6 @@ func claimOf(ev Event) claim.Token {
 	case PromptRefused:
 		return ev.Claim
 	case Timer:
-		return ev.Claim
-	case IssueVolumeLost:
 		return ev.Claim
 	case StalePlugin:
 		return ev.Claim

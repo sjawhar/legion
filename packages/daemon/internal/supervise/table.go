@@ -107,11 +107,6 @@ type Timer struct {
 	DeliveryID string
 }
 
-// IssueVolumeLost is another claim of the claim's issue finding the issue's volume lost (its
-// workspace-init found neither the clone nor its session): whatever session this claim recorded
-// was on that volume, and is gone with it. The daemon sends it to the issue's other claims.
-type IssueVolumeLost struct{ Claim claim.Token }
-
 // StalePlugin is a re-adopted claim found still speaking a plugin contract this daemon does not,
 // posted once at boot for every restored claim in that state (refreshStalePlugins in
 // internal/daemon), before any of them is relaunched, and again at every orphan sweep for a claim
@@ -199,11 +194,11 @@ type RequestStop struct{ Claim claim.Token }
 type RequestTreeClose struct{ Claim claim.Token }
 
 // RequestIssueClose is the workflow closing a child issue as done (workflow's leave): the claim
-// ends as a tree close ends it, and drops the session it recorded, since the issue's volume that
-// session lived on is released with the close (record.IssueSuspend's Release). It is not a lost
+// ends as a tree close ends it, and drops the session it recorded, since the issue is finished
+// and the pod that session lived on goes with the close (record.IssueSuspend). It is not a lost
 // workspace: nothing is recovered, and the issue's next run, should a person set it todo again,
-// starts fresh on a volume of its own. Like the tree's close it is the workflow's own decision and
-// is not put to TreeClosable.
+// starts fresh on a pod and a disk of its own. Like the tree's close it is the workflow's own
+// decision and is not put to TreeClosable.
 type RequestIssueClose struct{ Claim claim.Token }
 
 // RequestOperatorClose is the operator closing a tree through the API, through its root claim; the
@@ -259,7 +254,6 @@ func (StreamLateRefusal) isEvent()    {}
 func (PromptAcked) isEvent()          {}
 func (PromptRefused) isEvent()        {}
 func (Timer) isEvent()                {}
-func (IssueVolumeLost) isEvent()      {}
 func (StalePlugin) isEvent()          {}
 func (RequestSpawn) isEvent()         {}
 func (RequestRegister) isEvent()      {}
@@ -310,7 +304,6 @@ const (
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
 
-	onVolumeLost  eventKind = "issue_volume_lost"
 	onStalePlugin eventKind = "stale_plugin"
 
 	timerPrefix eventKind = "timer:"
@@ -336,8 +329,6 @@ func kindOf(ev Event) eventKind {
 		return onRefused
 	case Timer:
 		return timerPrefix + eventKind(ev.Kind)
-	case IssueVolumeLost:
-		return onVolumeLost
 	case StalePlugin:
 		return onStalePlugin
 	case RequestSpawn:
@@ -533,12 +524,6 @@ func fillTable(t *builder) {
 	t.ignore(onRelaunchTimer, "no relaunch is waiting", StateQueued, StateLaunchUncertain, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
 
-	// The issue's volume, found lost by another claim of the issue.
-	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held", sessionLost, nil,
-		slices.Concat(processless, booting)...)
-	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
-		StateRegistered, StateReady, StateWorking, StateIdle)
-
 	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
 	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,
 		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
@@ -608,7 +593,7 @@ func fillTable(t *builder) {
 
 	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, drop its session and retire it", issueClose,
 		[]ClaimState{StateRetired}, stoppable...)
-	t.row(onIssueClose, "already retired: the session it kept goes with the issue's volume", issueCloseRetired, nil, StateRetired)
+	t.row(onIssueClose, "already retired: the session it kept goes with the issue", issueCloseRetired, nil, StateRetired)
 
 	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
 	// A close of a tree already retired is the outcome the operator asked for, so it answers as
@@ -983,22 +968,7 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 
 func spawn(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
 
-// sessionLost is another claim of the issue finding the issue's volume lost: the session this claim
-// recorded was on it, so the claim drops it and its next launch is a fresh session that recreates
-// its workspace — never a resume that finds the session missing (beside a clone another claim may
-// already have recreated) and fails until its budget runs out. A claim with no session has nothing
-// to drop.
-func sessionLost(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.Session == "" && m.claim.SessionFile == "" {
-		return nil
-	}
-	m.log.Warn("supervise: the issue's volume the session lived on was lost; the next launch is a fresh session", "session", m.claim.Session)
-	m.loseSession()
-	return m.persist(ctx)
-}
-
-// register records the session the agent became; a claim whose workspace was lost has its fresh
-// agent now, whose session is on the recreated volume, so the loss is over. The boot intervals end
+// register records the session the agent became. The boot intervals end
 // with the registration, but not the deadline: it is armed again at its base bound, and only the
 // agent's ready ends it. A registration whose answer never reached its agent leaves a claim no
 // ready will ever come for, and from here that looks exactly like an agent slow to boot. A
@@ -1006,7 +976,7 @@ func sessionLost(m *Machine, ctx context.Context, _ Event) error {
 // (staleRegistration): the agent that just registered is not the one that relaunch starts.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
-	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
+	m.claim.Session, m.claim.SessionFile = r.Session, r.SessionFile
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.PluginContract = r.PluginContract
 	if r.PluginContract == m.deps.PluginContract {
@@ -1124,7 +1094,8 @@ func operatorRetry(m *Machine, ctx context.Context, ev Event) error {
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes
 // nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
 // retired root would leave the orphan sweep's known set, which would then take whatever the
-// runtime holds for the root issue — under a sandbox, its Sandbox and the volume it owns. Any other
+// runtime holds for the root issue — under a sandbox, its Sandbox, and with it the pod and the
+// disk that pod owns. Any other
 // stop of it is refused, naming the operator's close when it is that close which ends the tree.
 func stop(m *Machine, ctx context.Context, _ Event) error {
 	if !m.claim.treeRoot() {
@@ -1142,13 +1113,18 @@ func stop(m *Machine, ctx context.Context, _ Event) error {
 // record it still holds for that tree is exactly what TreeClosable refuses on, so it is not asked.
 func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ctx) }
 
-// issueClose is the workflow's close of a child issue as done, which releases the issue's Sandbox
-// and the volume it owns once every claim of the issue has retired (store.IssueSuspension's
-// release): the claim ends as a tree close ends it, and the session it recorded goes first, since it
-// lived on that volume. The claim's workspace is not lost — nothing is recovered, and a later start
-// of the issue, re-entered by a person's todo, is a fresh spawn on a volume of its own — so no
-// recorded loss outlives the close either. A release that fails changes nothing, so the close can
-// be asked again.
+// issueClose is the workflow's close of a child issue as done: it releases the claim through the
+// runtime, which ends at most this role's process and forgets the claim. It deletes no issue
+// Sandbox — under Agent Sandbox a release deletes only the controller's, whose Sandbox is that
+// claim's and nothing else (Runtime.Release, releaseControllerSandbox) — so an issue's pod and the
+// disk it owns go with the separately fenced IssueSuspend, or with the tree cleanup once every
+// claim of the tree has retired. That is why a merged close leaves the implementer's pod standing:
+// its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). The claim
+// ends as a tree close ends it, and the session it recorded goes first — the session is a row in
+// the session database rather than a file on any disk, so what is dropped is the record of which
+// session this claim held. Nothing of the workspace is recovered, and a later start of the issue,
+// re-entered by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that
+// fails changes nothing, so the close can be asked again.
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err
@@ -1158,10 +1134,11 @@ func issueClose(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // issueCloseRetired is the issue's close reaching a claim already retired (a tree's close retired it
-// with its session kept): the session is on the volume the close releases, so it goes, and a claim
-// recording none is left as it is.
+// with its session kept): the issue is finished, so the session goes with it — a later start of the
+// issue, re-entered by a person's todo, is a fresh one — and a claim recording none is left as it
+// is.
 func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.Session == "" && m.claim.SessionFile == "" && !m.claim.WorkspaceLost {
+	if m.claim.Session == "" && m.claim.SessionFile == "" {
 		return nil
 	}
 	m.forgetSession()
