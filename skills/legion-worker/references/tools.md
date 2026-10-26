@@ -165,11 +165,13 @@ here) at a directory under one of the paths above yourself, since an unset one l
 wherever the tool defaults, which is nowhere this runtime chose.
 
 Where it lands is what you pay. Under one of those variables it is on the issue's volume: it
-outlives the pod, and every role of the issue shares it — under every one of those variables but
-`XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, "the one directory of the issue's
-scratch that is the role's own rather than the issue's" (`roleEnvironment`), because Oh My Pi
-names its browser broker's lock from the state root and an abstract socket name is one name across
-every role of the pod, which share its network — and a later pod of the issue reuses it. Under
+outlives the pod, and every role of the issue is told the same path — under every one of those
+variables but
+`XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, a directory named for your role
+(`roleEnvironment`) because Oh My Pi names its browser broker's lock from the state root and an
+abstract socket name is one name across every role of the pod, which share its network. It is not
+private: every role of the issue can write it, as it can every path above — and a later pod of the
+issue reuses it. Under
 `$HOME` — `/home/legion`, which no volume is mounted on — it is your role's own home, an overlay
 over the image's whose writes land on the pod's disk (an `emptyDir` every role's home and `/tmp`
 share): one copy per role, per pod, kept across the role's relaunches in that pod and gone when

@@ -602,7 +602,8 @@ on local disk (`~/.omp/profiles/legion/agent/…`), and `.legion/` handoffs live
 pod that dies loses those local files as it does today — the conversation it does not. OMP's logs
 are under the role's state home (`/legion/scratch/state/<role>/omp/profiles/legion/logs`, [Anatomy
 of a Sandbox pod](#anatomy-of-a-sandbox-pod)), which is on the issue's volume, the one directory
-of the issue's scratch that is the role's own: those logs, Chromium's `browser-profiles` and the
+of the issue's scratch named for the role (every role of the issue can still write it): those
+logs, Chromium's `browser-profiles` and the
 plugin generation a stale-plugin
 relaunch installs outlive the pod and are there for the pod that replaces it, as the workspace's
 CodeGraph index is — `.codegraph/` in the workspace on the same volume (185 MB for this
@@ -1286,16 +1287,17 @@ runs the earlier release:
    back](#rolling-back-the-upgrade)). The two `-T` options leave out Oh My Pi's session tables:
    where they share the daemon's database under a login of their own, the daemon's login cannot
    read them and a `pg_dump` that names them exits 1 with `permission denied for table
-   omp_session_files`, and a restore of a dump without them leaves every session as it stands.
+   omp_session_files`. A rollback restores the dump into a new database, so the session tables in
+   this one are left as they stand.
 6. **Roll this release out in one step:**
    - the daemon at this release, with its `legion.yaml` at this release's shape:
      `runtime.kubernetes.issue_volume` where the file set `tree_volume`, one `resources.issue`
      entry where it set a `resources.<role>` entry per workflow role, and `resources.controller`
      as `{cpu, memory}` (with `cpu_request` and `memory_request` below them where the requests
      were lower) where it set that entry's `requests` and `limits` ([Configuration](#configuration)
-     names each refusal); keep a copy of the file's whole `runtime.kubernetes` block as it was,
-     since a rollback puts `tree_volume` and the `resources` block back, the earlier release
-     refusing `issue_volume` and the `issue` entry ([Rolling back](#rolling-back-the-upgrade));
+     names each refusal); keep a copy of the whole file as it was, since the earlier release
+     refuses this release's shape key by key and a rollback puts that copy back ([Rolling
+     back](#rolling-back-the-upgrade) names every refused key);
    - `runtime.kubernetes.image` pinned to a worker image built from it, since the image probe
      refuses a worker image whose `pi-legion` declares another daemon API contract (`ProbeImage` in
      `internal/runtime/sandbox/probe.go`); and
@@ -1328,10 +1330,10 @@ per-claim or tree-volume Sandbox all the same.
 
 #### Rolling back the upgrade
 
-Restore the dump from step 5 and re-pin the earlier release; work done under this release since the
-upgrade is not in the dump. Re-pinning without the restore does not work. Once this release has
-booted it has applied migrations 0033 to 0051 (`internal/store/migrations`), and the earlier
-release cannot read what they and this release write:
+Roll back by restoring the dump from step 5 and re-pinning the earlier release; work done under
+this release since the upgrade is not in the dump. Re-pinning without the restore does not work.
+Once this release has booted it has applied migrations 0033 to 0051 (`internal/store/migrations`),
+and the earlier release cannot read what they and this release write:
 
 - it refuses an `issue_suspend` outbox row as an unknown kind (`decodeOutboxJSON` in
   `internal/record/outbox.go` at `legion-v10.0.0`);
@@ -1351,61 +1353,106 @@ claim it has not retired (`ReconcileOrphans` in `internal/runtime/sandbox/sandbo
 `legion-<project>-<issue key lowercased>`, the controller's and each repository cache's. An issue's
 volume is owned by its Sandbox ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so it goes
 with it: every change not pushed from the issue's workspace and, under `session_store: pvc`, every
-session on it. So before re-pinning, with this release's daemon stopped (scale its Deployment to
-zero, or `legion stop`), take each issue's Sandbox away and keep its volume. With `<namespace>` and
-`<project>` as in step 4, each Sandbox is set `Suspended`, which ends its pod, and is then deleted
-with `--cascade=orphan`, which leaves everything it owns in place with that ownership removed: its
-volume claim, its Secrets and its Service. The loop then deletes the Secrets (the role launcher
-tokens and gh files, and the provisioning token) and the Service, and keeps the volume claim:
+session on it. This release does the same if it boots once on the restored database, which holds
+no issue record and only retired claims: its boot sweep deletes every issue Sandbox with a grace
+of 0 too. Do these steps in this order:
 
-```sh
-kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
-while read -r name; do
-  kubectl -n <namespace> patch sandbox "$name" --type merge -p '{"spec":{"operatingMode":"Suspended"}}'
-  kubectl -n <namespace> wait --for=delete "pod/$name" --timeout=5m
-  kubectl -n <namespace> delete sandbox "$name" --cascade=orphan
-  kubectl -n <namespace> delete secret "$name-boot" --ignore-not-found
-  for role in architect planner implementer tester reviewer merger; do
-    kubectl -n <namespace> delete secret "$name-$role-boot" --ignore-not-found
-  done
-  kubectl -n <namespace> delete service "$name" --ignore-not-found
-done
-kubectl -n <namespace> get pvc -l 'legion.dev/project=<project>,legion.dev/issue' \
-  -o custom-columns=NAME:.metadata.name,ISSUE:.metadata.labels.legion\\.dev/issue,OWNERS:.metadata.ownerReferences
-```
+1. **Stop this release's daemon and keep it stopped**, before anything else:
 
-The wait comes before the delete because an orphaned pod would keep running with nothing to stop
-it. The same `get sandboxes` query then prints nothing, and the last command lists one claim,
-`issue-legion-<project>-<issue key lowercased>`, per issue, each with `<none>` owners. The earlier
-release never mounts one of them: it names its claims `tree-legion-<project>-<root
-issue>-architect` (`TreeClaimName` in `names.go` at `legion-v10.0.0`), and its sweep lists
-Sandboxes alone. The controller's Sandbox and the repository caches' are left to the earlier
-release's sweep, which deletes them with their volumes: the controller's session and the caches'
-clones, which hold no issue's work.
+   ```sh
+   kubectl -n <daemon namespace> scale deployment <daemon Deployment> --replicas=0
+   kubectl -n <daemon namespace> wait --for=delete pod -l <daemon pod labels> --timeout=5m
+   ```
 
-**Put `legion.yaml` back before the re-pin**, the copy step 6 said to keep. The earlier release
-reads the file before it opens the database or the cluster, and refuses this release's shape key by
-key, so a daemon re-pinned on the file as this release left it never starts: `tree_volume` where
-this release's file sets `issue_volume` (`unknown key runtime.kubernetes.issue_volume`, `members`
-in `internal/config/config.go` at `legion-v10.0.0`), one `resources.<role>` entry per workflow role
-where it sets `resources.issue` (`runtime.kubernetes.resources key "issue" must be a role
-(architect, planner, implementer, tester, reviewer, merger, controller)`, `readResources` in
-`internal/config/kubernetes.go` at that tag), and `resources.controller` as that entry's `requests`
-and `limits` where it sets `cpu`, `memory`, `cpu_request` and `memory_request` (`unknown key
-runtime.kubernetes.resources.controller.cpu`, the same `members`). Every other key of the block
-this release added goes with them, each refused by name the same way: `session_database`,
-`plugins`, `repository_cache` and `setup`. A deployment that turned a database store on puts
-`session_store` back to `pvc`, or leaves it unset, and removes `session_dsn_secret` with it: the
-earlier release refuses `postgres` (`runtime.kubernetes.session_store postgres is not supported
-until Stage 6: a pod's session lives on the tree volume (pvc)`), refuses `cloudsql-iam` as
-`runtime.kubernetes.session_store must be 'pvc' or 'postgres'`, and refuses the secret beside
-`pvc` (`runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is
-pvc; remove it`), all three in `checkSessionStore` of the same file; it reads no session of that
-table in any case, since the claims the dump restores are the drained ones (below). No data is lost
-to any of these refusals — each comes before the daemon's first write and names its key — but the
-daemon stays down until the file is back, so run the earlier release's `legion start
---check-config` on it before re-pinning.
+   (`legion stop` for a daemon outside a Deployment). It stays at zero replicas until step 5
+   re-pins it: a crash restart, or a replica left running, after the restore boots this release on
+   the restored database, and that one boot sweeps every issue Sandbox, and its volume, with a
+   grace of 0.
+2. **Take each issue's Sandbox away and keep its volume.** With `<namespace>` and `<project>` as in
+   step 4 of the upgrade, each Sandbox is set `Suspended`, which ends its pod, and is then deleted
+   with `--cascade=orphan`, which leaves everything it owns in place with that ownership removed:
+   its volume claim, its Secrets and its Service. The loop then deletes the Secrets (the role
+   launcher tokens and gh files, and the provisioning token) and the Service, and keeps the volume
+   claim:
+
+   ```sh
+   kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
+     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+   while read -r name; do
+     kubectl -n <namespace> patch sandbox "$name" --type merge -p '{"spec":{"operatingMode":"Suspended"}}'
+     kubectl -n <namespace> wait --for=delete "pod/$name" --timeout=5m
+     kubectl -n <namespace> delete sandbox "$name" --cascade=orphan
+     kubectl -n <namespace> delete secret "$name-boot" --ignore-not-found
+     for role in architect planner implementer tester reviewer merger; do
+       kubectl -n <namespace> delete secret "$name-$role-boot" --ignore-not-found
+     done
+     kubectl -n <namespace> delete service "$name" --ignore-not-found
+   done
+   kubectl -n <namespace> get pvc -l 'legion.dev/project=<project>,legion.dev/issue' \
+     -o custom-columns=NAME:.metadata.name,ISSUE:.metadata.labels.legion\\.dev/issue,OWNERS:.metadata.ownerReferences
+   ```
+
+   The wait comes before the delete because an orphaned pod would keep running with nothing to
+   stop it. The same `get sandboxes` query then prints nothing, and the last command lists one
+   claim, `issue-legion-<project>-<issue key lowercased>`, per issue, each with `<none>` owners. The
+   earlier release never mounts one of them: it names its claims `tree-legion-<project>-<root
+   issue>-architect` (`TreeClaimName` in `names.go` at `legion-v10.0.0`), and its sweep lists
+   Sandboxes alone. The controller's Sandbox and the repository caches' are left to the earlier
+   release's sweep, which deletes them with their volumes: the controller's session and the caches'
+   clones, which hold no issue's work.
+3. **Restore the dump into a new database**, and point the earlier release's `postgres_dsn` at it:
+
+   ```sh
+   createdb <connection options> <new database>
+   pg_restore --exit-on-error --no-owner -d <new database> <dump file>
+   ```
+
+   The database this release ran on is left untouched, and with it the shared session tables
+   under a login of their own. Restoring into that database does not work:
+   `pg_restore --clean --if-exists` exits 1 there, since this release's foreign keys onto `claims`
+   and `issues` keep it from dropping either table (`cannot drop table public.claims because other
+   objects depend on it`) and the restore then meets the tables still there (`relation "claims"
+   already exists`), leaving `schema_version` at 32 with this release's tables and claims in place.
+   Run 2026-10-26 07:31Z on postgres:16.15 (Docker), at head `5511b8ad7`: a database at
+   `legion-v10.0.0`'s migrations 0001 to 0032 with claims, dumped as step 5 says, then taken to
+   0051 by this head's migrations; `pg_restore --clean --if-exists` into it exited 1 as quoted, and
+   the command above into a new database exited 0 with `schema_version` at 32, both claims, and no
+   session table, while the old database's session row stayed.
+4. **Put `legion.yaml` back**, the copy of the whole file step 6 said to keep, and run the earlier
+   release's `legion start --check-config` on it. The earlier release reads the file before it
+   opens the database or the cluster, and refuses this release's shape key by key, so a daemon
+   re-pinned on the file as this release left it never starts:
+   - the top-level keys this release added, each `unknown key <key>` (`classify` in
+     `internal/config/config.go` at `legion-v10.0.0`): `capabilities`, `production_check_hours`
+     and `worker_backends`;
+   - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
+     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag)
+     and every key this release added there, `deploys`, `merge` and `slack_channels`, each
+     `Unknown key "projects.<KEY>.<key>"`;
+   - `tree_volume` where this release's file sets `issue_volume` (`unknown key
+     runtime.kubernetes.issue_volume`, `members` in `internal/config/config.go` at that tag), one
+     `resources.<role>` entry per workflow role where it sets `resources.issue`
+     (`runtime.kubernetes.resources key "issue" must be a role (architect, planner, implementer,
+     tester, reviewer, merger, controller)`, `readResources` in `internal/config/kubernetes.go` at
+     that tag), and `resources.controller` as that entry's `requests` and `limits` where it sets
+     `cpu`, `memory`, `cpu_request` and `memory_request` (`unknown key
+     runtime.kubernetes.resources.controller.cpu`, the same `members`);
+   - every other key of the `runtime.kubernetes` block this release added, each refused by name
+     the same way: `session_database`, `plugins`, `repository_cache`, `setup`,
+     `agent_secrets.token_file`, and a pod volume of kind `persistent_volume_claim` or `nfs`;
+   - a database session store: the file puts `session_store` back to `pvc`, or leaves it unset,
+     and removes `session_dsn_secret` with it. The earlier release refuses `postgres`
+     (`runtime.kubernetes.session_store postgres is not supported until Stage 6: a pod's session
+     lives on the tree volume (pvc)`), refuses `cloudsql-iam` as `runtime.kubernetes.session_store
+     must be 'pvc' or 'postgres'`, and refuses the secret beside `pvc`
+     (`runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is
+     pvc; remove it`), all three in `checkSessionStore` of `internal/config/kubernetes.go`; it
+     reads no session of that table in any case, since the claims the dump restores are the
+     drained ones (below).
+
+   No data is lost to any of these refusals — each comes before the daemon's first write and
+   names its key — but the daemon stays down until the file is back.
+5. **Re-pin the earlier release** and scale its Deployment back to one replica.
 
 What the rollback loses, then: the record of every tree this release ran (the restored claims are
 the drained ones, so the earlier release resumes no role and knows no issue of those trees), every
@@ -1492,8 +1539,9 @@ moved address's relaunch does.
 `runtime.kubernetes.pod` loses names it could use before, each refused at load
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)): the volume names `role-homes` and
 `role-probe`; a mount at, under or above `/var/run/legion/roles`, `/var/run/legion/home`,
-`/var/run/legion/role-probe`, `/dev/pts` or `/dev/mqueue`; and a mount at or above `/tmp`,
-`/var/tmp`, `/run/lock`, `/var/lock` or `/dev/shm`, or the image's other spellings of them. Run
+`/var/run/legion/role-probe`, `/dev/mqueue`, `/dev/ptmx`, `/dev/pts` or `/proc`; and a mount at
+or above `/tmp`, `/var/tmp`, `/run/lock`, `/var/lock` or `/dev/shm`, or the image's other
+spellings of them. Run
 this release's `legion start --check-config` on the file before the rollout.
 
 To roll this release back, every stored locator and every issue Sandbox both go back to what the
@@ -1803,9 +1851,10 @@ registry, a Chromium about 400 MB, and the bun install cache's cold fill for thi
 because roles run tests — where a cold `go build ./...` of that same module with nothing tested
 leaves 751 MiB and 375 MiB, the reproducible cold-build measurement that
 [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) records below beside it. One directory is
-the role's own, its state home at `/legion/scratch/state/<role>`, holding Oh My Pi's logs,
-Chromium's `browser-profiles` and the plugin generation an installing launch puts there; it is the
-role's for a mechanism, not caution: Oh My Pi names its browser broker's lock from the state
+per role, its state home at `/legion/scratch/state/<role>`, holding Oh My Pi's logs,
+Chromium's `browser-profiles` and the plugin generation an installing launch puts there; it is
+per role for a mechanism, not isolation, since every role of the issue can write it: Oh My Pi
+names its browser broker's lock from the state
 root, the name is an abstract unix socket, an abstract socket name is one name across a network
 namespace, and every role of a pod shares the pod's, so one state home would block every role's
 broker but the first. An
@@ -2504,7 +2553,7 @@ every other owner's is the same App's narrowed to reading contents, pull request
 
 The `roles` container mounts each role `<r>`'s own volumes under its directory of
 `/var/run/legion/roles`: `/var/run/legion/roles/<r>/launcher` (volume `launcher-<r>`, read-only:
-the launcher token), `/var/run/legion/roles/<r>/gh` (`gh-<r>`, read-only: the role's gh bundle,
+the launcher token, as `LAUNCHER_TOKEN`), `/var/run/legion/roles/<r>/gh` (`gh-<r>`, read-only: the role's gh bundle,
 each owner's two keys as `<owner>/hosts.yml` and `<owner>/config.yml`),
 `/var/run/legion/roles/<r>/private` (`private-<r>`, memory), `/var/run/legion/roles/<r>/state`
 (`state-<r>`, memory) and, only when the pod enrolls with the secrets broker,
@@ -2565,8 +2614,11 @@ or `/dev/shm`, or at or above the image's other spellings of them (`/var/run/loc
 `/var/run/shm`), is refused: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above
 <dir>, which every role's namespace in an issue pod covers with its own: mount under it instead`.
 A mount under `/tmp` and the like is allowed, and role-init carries it back. A mount at, under or
-above `/dev/pts` or `/dev/mqueue` is refused, since role-init mounts a filesystem of the role's own
-there and carries nothing back onto it: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p>
+above `/dev/mqueue`, `/dev/ptmx`, `/dev/pts` or `/proc` is refused (`roleReplacedPaths` in
+`internal/runtime/sandbox/manifest.go`), since role-init mounts a filesystem of the role's own
+there (a new devpts instance at `/dev/pts`, its `ptmx` bound over `/dev/ptmx`, the role's own IPC
+namespace's mqueue at `/dev/mqueue`, the role's own `/proc`) and carries nothing back onto it:
+`runtime.kubernetes.pod.volume_mounts[i].mount_path <p>
 overlaps /dev/pts, which every role's namespace in an issue pod replaces with a filesystem of its
 own and carries no mount back onto: a mount may be neither at, under, nor above /dev/pts`. A mount
 at, under or
@@ -2586,8 +2638,9 @@ reaches the role at its own path.
 What a role writes without being told where is not on the node's disk: the issue's temporary
 directory, its cache and data homes and bun's install cache are one set on the issue's volume,
 every role of the pod told the same four, and the two Go caches are one pair on that volume shared
-by the issue's roles (below). The one directory of that scratch a role has to itself is its state
-home, `XDG_STATE_HOME=/legion/scratch/state/<role>` (`roleStateHome`, `manifest.go`), and its shim
+by the issue's roles (below). The one directory of that scratch named for a role is its state
+home, `XDG_STATE_HOME=/legion/scratch/state/<role>` (`roleStateHome`, `manifest.go`), which every
+role of the issue can still write (below), and its shim
 makes Oh My Pi's profile directory under it, `omp/profiles/legion`, before Oh My Pi starts
 (`podsafety.EnsureStateHome`; Oh My Pi reads the variable only where that directory already exists,
 falling back to the profile's config root otherwise). The roles share the pod's network namespace,
@@ -2707,8 +2760,10 @@ through any of these:
   which every role can write: the transcript a sibling's Oh My Pi reads back when its session
   resumes. Under `postgres` the transcripts are rows instead, and the database's URL is in the
   providers mount the container holds for the pod rather than for a role, so every role of the
-  issue reaches them there; under `cloudsql-iam` each generation's connection is its own role's,
-  in that role's private directory, and no sibling reaches it ([Session store](#session-store)).
+  issue reaches them there. Under `cloudsql-iam` each generation's connection is private to its
+  role (the socket is in that role's private directory), but every role signs in as the pod's one
+  IAM login, whose rights reach every session row, so any role that opens a connection of its
+  own reads and writes a sibling's transcript as well ([Session store](#session-store)).
 
 The issue's roles trust one another's writes to the volume as they did when each ran in a container
 of its own. The namespaces keep a role's tokens and private files out of a sibling's own reads, and
@@ -2746,7 +2801,8 @@ version 20): the issue's roles already share the pod, the issue's volume whole, 
 they all work in, the sessions directory, uv's Pythons and cache and the two Go caches, and each
 can read and write what the others write, so a cache per role bought an isolation the pod does not
 have and cost a copy of every cache per role. `XDG_STATE_HOME=/legion/scratch/state/<role>` is the
-one directory of the scratch that stays the role's own (the state home above). The two Go caches
+one directory of the scratch named for a role (the state home above), and a sibling can write it
+too. The two Go caches
 are the issue's as they already were, one pair every role of the issue is told:
 `GOCACHE=/legion/go/build` and `GOMODCACHE=/legion/go/mod` (`goBuildCache` and `goModCache`,
 `manifest.go`), beside the workspaces rather than under the scratch, on the same volume beside
