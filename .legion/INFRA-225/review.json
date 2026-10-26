@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-225",
+  "completed": "2026-10-26T11:01:35Z",
+  "round": 8,
+  "decision": "approved",
+  "reviewedCodeHead": "680616ac6d20df498e9238192134d29a6f1eef85",
+  "scope": "The architect's scope: the conflict merge 680616ac of main@origin 7f6ef46f (#2173, INFRA-80) into the head approved in round 7 plus retro's commits (ee6a5f92 docs/solutions, d5530b01 removal of .legion/INFRA-225/). Checked: the fingerprint, the version and fixture regeneration, both changelogs' entries kept, required checks and mergeability at the merged code head.",
+  "fingerprint": "77accc3f (round 7 approval): f5600f4176c5089b; 07b5af86: b6c5a5b094a76971. Changed only by renumbering forced by main taking contract 37 and migration 0051: DaemonAPIVersion 37 -> 38 with its ledger entry renumbered and its collision note rewritten (main's 36 INFRA-229 and 37 INFRA-80 entries kept); daemonApiVersion 38 in pi-legion and claude-envoy package.json, contracts fixtures/daemon-api/version.json and claude-envoy dist/envoy-channel.js; legion-api.test.ts comments; the branch's migrations 0051_dispatch_issues -> 0052 and 0052_issue_taken_back -> 0053 with their SQL unchanged and their tests renamed (migrateThrough 51 and 52); pi-legion AGENTS.md's contract sentence; both CHANGELOG entries renumbered.",
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title; branch protection none. CI head 680616ac (newest pull_request run; compare 680616ac...07b5af86 is .legion/ only). The first attempt of every run at 680616ac was cancelled at 10:20Z with no head change; the reviewer re-ran Tests 40301868693 and PR Title 40302040194 once. Attempt 2: Tests success (lint, typecheck, test success) at 10:59Z; PR Title success. gh pr view: MERGEABLE (mergeStateStatus BLOCKED, awaiting this review).",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "verifiedThisRound": [
+    "main@origin's migrations end at 0051_issue_suspend_release; the head has 0050, 0051 (main's), 0052_dispatch_issues, 0053_issue_taken_back with no gap or duplicate; the renamed migration SQL is byte-identical to the round 7 files under the old numbers (per-file diff of the normalized diffs).",
+    "version.go carries main's 35, 36 and 37 ledger entries unchanged and the branch's entry as 38; DaemonAPIVersion = 38; every pin (two manifests, version.json, the dist bundle) reads 38.",
+    "Both CHANGELOGs' [Unreleased] sections hold every line main has plus the branch's INFRA-225 entries (diff against main@origin adds lines only, apart from claude-envoy's #2032 entry whose 'daemon API contract N' tracks the current pin, as it did at 37).",
+    "No stale reference to the old numbers outside .legion/ and history: grep for 0051_dispatch, 0052_issue_taken, 'contract 37' finds only main's INFRA-80 entries and outbox_test.go's main-owned 0051 references; the retro's docs/solutions note already says migration 0053.",
+    "Retro's two commits change only docs/solutions/ and remove .legion/INFRA-225/; the implement and test handoffs were written again after the merge.",
+    "Tester round 11 at 680616ac: full driven battery on a database migrated through the renumbered migrations, implementerProof verified, failures empty; both E2E lines name 680616ac. All nine review threads resolved; none opened since round 6."
+  ],
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality once at 680616ac, scoped to the merge: both APPROVE, no findings. 0051_issue_suspend_release only rewrites outbox payloads, so 0053's backfill reads the same rows after it; go vet ./... and go vet -tags e2e ./... in packages/daemon pass; main's version.go lines 1-330 are byte-identical in the merged file. Provider not verified: the subagent transcripts render without provider or model, and the sql session store is not readable from this pod (no psql).",
+  "acceptedRisks": "The two event-lag windows and the whole-mirror read stay on the PR's Not proven / risk line, as the architect ruled."
+}
