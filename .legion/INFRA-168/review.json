@@ -2,43 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T09:53:00Z",
+  "completed": "2026-10-26T10:59:00Z",
   "decision": "changes_requested",
-  "round": "generation 3, the full round at code head a3fc16aad2523c535e232f23e097f30333677007 (handoff 4fb131c03020c59877d87a060d6593c011ba31c6); the fingerprint changed since the approval of 57db85e5, so not a confirmation",
+  "round": "The narrowed round after review_round_cap=3 (the architect's Narrow decision, dispatch://INFRA-168/comment/169d9f23), at code head 403f240f20d5 (handoff 717bd4eb). Scope: the five findings of the review at 83ff55cf, whether each fix holds, and whether the fixes add a new way an ask reaches the person unjudged or a record is lost.",
   "critical": 0,
-  "important": 5,
+  "important": 2,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:3317-3324",
-      "description": "The breaker passes an upload whose new ask was never refused. When the rules check's judged list (an upload leaves out the asks the stored document holds) is shorter than the scan, every scanned ask counts as refused, the held ones included; two refused uploads that each add a different new ask beside a held #window block trip #window, and a third upload adding a never-judged ask is sent unreviewed by the breaker. Reproduced by the quality review (entries verdict/match, verdict/match, breaker). Present since the approved head; fix: count only the asks the rules check judged (parse once, have runRulesCheck return the judged asks)."
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:3480-3485",
+      "description": "Finding 1 holds for a rules refusal only. A block-mode charter revise still counts `breakerThings(callAsks())`, the upload's full scan with the blocks its stored version holds, so two charter refusals of uploads that each add a different new ask beside a stored #window trip #window, and a third upload's new ask goes out with outcome breaker, judged by neither check. Both thermonuclear reviews reproduced it with the PR's three-upload test under bySystem(REVISE, RULES_NONE): entries verdict/revise/none, verdict/revise/none, breaker/allow."
     },
     {
       "severity": "important",
-      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:2622-2628",
-      "description": "The rebuttal's trailing shell comment makes Envoy's run-end check count a rebutted dispatch write as work: pi-shared dispatchCommandHead refuses an unquoted '#', so envoy.ts:3110-3125 sets check_due for a rebutted `dispatch comment`, re-arming the ask nudge's stop-time self-check and its reminder. Regression from round 6; reproduced by the deep review (dispatchCommandHead returns undefined on the rewritten command)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:3776-3795",
-      "description": "AskGate refuses, in block mode, the command it handed back: scopedCommand returns undefined for a head line ending in ` # --advisor-rebuttal '…'`, so resending the recorded call (after a Dispatch-side failure, or copying that form) gets the unreadable refusal, whose text never names the comment. Reproduced by the deep review."
-    },
-    {
-      "severity": "important",
-      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:2582, rules-check.ts:216, askgate-core.ts:994-996",
-      "description": "The refusal texts and the Rebuttal doc still say the flag is removed before sending and that the call the agent reads back lacks it, contradicting the new acknowledgement and the command the agent reads back, the exact contradiction rounds 6-8 removed from the acknowledgement."
-    },
-    {
-      "severity": "important",
-      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:3942-3961",
-      "description": "At session shutdown the Dispatch record (up to RECORD_TIMEOUT_MS, 5 s) runs before appendEntry, while session_shutdown waits SHUTDOWN_WAIT_MS 1.5 s before the host seals the session; a record slower than about 0.5 s loses the advisor-gate entry. Reproduced by the deep review (shutdown returned after 1501 ms with 0 entries; the entry arrived after). Present since the approved head; fix: when closing, append the entry first or bound the record by what remains of the shutdown wait."
+      "file": "packages/pi-envoy/extensions/askgate/askgate.test.ts:5415",
+      "description": "Finding 5's fix holds, but half of it has no test: with the in-flight cut (`for (const stop of recordStops) stop.abort(RECORD_SHUT_DOWN)`) made a no-op, the PR's shutdown test still passes, because its record starts after shutdown; a record already in flight when shutdown begins then keeps its 5 s stop and its entry is lost (both reviews' probe: returnedAt 1500, entries []; at head returnedAt 1250 with the entry)."
     }
   ],
-  "invariants": "Plan rev 10's ten invariants each hold at a3fc16aa (read by both thermonuclear reviews and by the reviewer), except invariant 5 at shutdown (finding 5) and invariant 4 on uploads whose judged list differs from the scan (finding 1). G3 holds: askIdentity and breakerKey are JSON arrays with the tag mapping, and askgate-report refuses --sessions '' and any flag given twice by name.",
-  "a4Ruling": "Charter judgment working as designed, not a defect of code this change depends on: A4 binds this change's rules check, which answered none for the tried ask in every round and mode; the round-8 block refusal came from #2159's charter (Access 7, ask a peer who may hold the access), which the spec keeps beside the check, varies with the ask's wording (rounds 6 and 7 opened it in block), and is overridden by --advisor-rebuttal, as the spec says.",
-  "thermonuclear": "At 4fb131c0 (code head a3fc16aa): deep review APPROVE with three Minor-labelled findings (2, 3 and 5 above; the reviewer judges each Important under the no-deferral rule since each changes behaviour or loses a record); quality review CHANGES (finding 1 above, plus structure and test-quality items batched into the Fast-follow).",
-  "ci": "Read at 09:51Z: main's rulesets require lint, typecheck, test and pr-title, branch protection none; the newest pull_request runs are at a3fc16aa with lint, typecheck, test queued and pr-title queued (one cancelled), so nothing is green yet; a request for changes does not wait on it.",
-  "provider": "Not applicable to this round's own reading; the tester's round 8 names anthropic/claude-opus-5-5 for all 102 assistant turns and 12 rules calls, read from each session's turns.",
-  "fastFollow": "AskGate core structure: one charter-outcome mapping in decide (3331-3390), Breaker and its key helpers in their own module and the rules-check unit tests in rules-check.test.ts, DECISION_DOCUMENT_PREFIX, the rules failure outcomes and the shared types exported once, the record's timeout owned by decision-record.ts, the unreachable dry-run timeout branch removed, the read-back tests asserting result.input.command without the `?? command` fallback, and askgate-report.ts on node:util parseArgs."
+  "fixesHold": {
+    "1_breaker_upload": "Holds on the rules path: the count is matches over ruled.judged; the PR's three-upload test fails with the old scan-index logic restored (deep review mutation). Does not hold on the charter path (finding above).",
+    "2_envoy_nudge": "Holds: pi-shared withoutComment drops a trailing comment where bash ends the line; envoy.test.ts's rebutted-command case passes and fails with withoutComment a no-op; pi-shared's bash differential test passes with bash present.",
+    "3_resend_unreadable": "Holds: overrideComment reads a trailing comment of override flags alone as the rebuttal, every other comment stays unreadable; the deep review's differential fuzz of 5,547 commands against real bash 5.2 found 0 mismatches for AskGate's 352 scoped and the shared scan's 2,048 accepted commands.",
+    "4_refusal_texts": "Holds: both renderers use the per-surface `fate`; the test fails with the old texts restored.",
+    "5_shutdown_entry": "Holds at head (entry written by 1,250 ms); its in-flight half is untested (finding above)."
+  },
+  "newPaths": "No new way an ask reaches the person unjudged: an accepted comment is override flags alone, so it is the rebuttal the flag already gave, recorded as one; comment text is cut before here-document detection; tripped and revised use the same identities (judged is a filter of the same scan, and a retype's identity ignores the opening readAsks rewrites). One narrower record loss, judged not a defect: a Dispatch record that answers 250-500 ms after a call given up at the end of the shutdown grace is now cut where it used to land; the entry still lands and names the cut in recordError, and the README says when the stop comes. Recorded in Not proven / risk.",
+  "ci": "Read at 10:58Z at 403f240f20d5 (only .legion/ above it): lint, typecheck and test in_progress, pr-title queued; Docs success. Not green; a request for changes does not wait on it.",
+  "verification": "The reviewer ran at 717bd4eb: pi-shared `bun test src/shell-command.test.ts` 6 pass; pi-envoy askgate.test.ts's five new tests 5 pass; envoy.test.ts's rebutted-command test 1 pass. The thermonuclear pair ran once at this head, narrowed to this scope, both CHANGES on the two findings above."
 }
