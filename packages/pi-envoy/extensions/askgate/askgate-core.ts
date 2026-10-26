@@ -162,14 +162,17 @@
 //   - breaker: two refusals of one thing on one target (the device plus its issue/ask/artifact/
 //     project values) send the third attempt at it unasked, and say so; the second refusal
 //     already warns that it will. A thing is each new ask a call opens, or the call as a whole
-//     when it opens none: a charter refusal counts on each thing of the call, a rules refusal on
-//     the asks it refused, and neither on an ask block an upload's stored version already holds
-//     (`refusalThings`). A call trips when one of its own things has been refused twice, so the
-//     pass goes to the thing that was refused and nothing else: an ask refused once, or never, on
-//     a target whose other ask was refused twice is reviewed as usual. Only a refusal counts: a
-//     warn-mode charter revise sends the call, so it never advances the breaker, while a rules
-//     match refuses in either mode and always does. An allow, a rebuttal or a trip resets the
-//     target, every thing on it.
+//     when it opens none; an upload is each ask block of its document and the upload itself (its
+//     name and text), never the call as a whole (`callKeys`). A refusal counts only things of the
+//     call it refused (`refusalThings`): a rules refusal the asks it refused, a charter refusal
+//     each thing of any other call, and of an upload the asks the rules check judged, or the
+//     upload itself where it judged none; none counts an ask block an upload's stored version
+//     already holds. A call trips when one of its own things has been refused twice, so the pass
+//     goes to the thing that was refused and nothing else, and the call a warning names, sent
+//     again, trips: an ask refused once, or never, on a target whose other ask was refused twice
+//     is reviewed as usual. Only a refusal counts: a warn-mode charter revise sends the call, so
+//     it never advances the breaker, while a rules match refuses in either mode and always does.
+//     An allow, a rebuttal or a trip resets the target, every thing on it.
 //   - no-model-role / skipped: neither `@askgate` (modelRoles.askgate) nor `@default` resolves, or
 //     the session's primary model is on another provider than the gate's. Nothing is rendered or
 //     sent. With no model role the call is refused in both modes, naming the roles to set; it never
@@ -2509,47 +2512,68 @@ const askIdentity = (ask: NewAsk): string =>
 const WHOLE_CALL = "";
 
 /**
- * What a call is to the breaker on its target: each new ask it opens, or the call as a whole when
- * it opens none. A refusal counts on these things and a later call trips on them, so a pass only
- * ever goes to a thing that was refused: a call whose asks were refused too few times on that
- * target, or never, is reviewed, and a call opening no ask counts its own refusals, whatever asks
- * were refused there before it.
+ * What a call is to the breaker on its target, read from the call's own arguments before any
+ * check runs: the one key set both what a resend trips on (`Breaker.tripped`) and what a refusal
+ * counts (`refusalThings`) are taken from. A call that is not an upload is each new ask it opens,
+ * or the call as a whole when it opens none, so a call opening no ask counts its own refusals,
+ * whatever asks were refused there before it.
+ *
+ * An upload is each ask block its document holds, the ones its stored version already holds
+ * included, since no check has run to tell them apart, and last its upload key: the document's
+ * name as Dispatch stores it (trimmed) and a digest of the text its scan reads, the snapshot's
+ * bytes for a `--path` upload. Only the same upload sent again yields that key, never another
+ * document on the same issue (the breaker's target names no document) and never a call that is
+ * not an upload. An upload is never the call as a whole, which every other upload on the issue
+ * opening no ask would share.
  */
-const breakerThings = (asks: readonly NewAsk[]): string[] =>
-  asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);
+const callKeys = (toolName: string, input: Input): string[] => {
+  const asks = newAsks(toolName, input);
+  if (toolName !== "dispatch_artifact")
+    return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);
+  const content =
+    typeof input.content === "string"
+      ? createHash("sha256").update(input.content).digest("hex")
+      : null;
+  const name = typeof input.name === "string" ? input.name.trim() : null;
+  return [...asks.map(askIdentity), JSON.stringify(["upload", name, content])];
+};
 
 /**
- * The things one refusal counts on its target, the same for a rules refusal and a charter one: a
- * refusal never counts an ask block the stored version of an upload already holds. An upload's scan
- * (`breakerThings`) carries every block of its document, the stored ones included, so counting them
- * would make every later upload of that document trip on a block no check read, and send its own new
- * asks out unreviewed.
+ * The things one refusal counts on its target: always some of the refused call's own keys
+ * (`callKeys`), so the warning a refusal gives is true by construction. A refusal warns that the
+ * same call sent again goes out unreviewed only when a thing it counted reaches the breaker's
+ * count, and that resend's keys hold every such thing, so it trips. Nothing is counted that the
+ * call's keys lack.
  *
  * A rules refusal counts the asks it matched, each numbered on the list the check judged, which for
- * an upload already leaves the stored blocks out. A charter refusal of any other call counts its
- * things, its scan holding only asks it opens. A charter refusal of an upload counts the asks the
- * rules check judged, the ones its read found new; where nothing tells them apart from the stored
- * blocks (the check judged none, its read failed and it judged only part of them, or it did not
- * run), it counts the call as a whole, which an upload opening an ask never trips on, so that
- * upload is reviewed again rather than passed. Each thing counted is one the same call's scan
- * holds, so an upload sent again unchanged trips on its judged asks.
+ * an upload already leaves out the blocks its stored version holds. A charter refusal of any other
+ * call counts every key of it, its scan holding only asks it opens. A charter refusal of an upload
+ * never counts a block its stored version holds, since its keys carry every block of the document
+ * and counting the stored ones would make every later upload of that document trip on a block no
+ * check read, sending its own new asks out unreviewed. It counts the asks the rules check judged,
+ * the ones its read found new or, its read failed, the openers with no id; where the check judged
+ * none (it did not run, its stored version holding every opener, or it judged nothing), it counts
+ * the upload key alone, so only that upload sent again unchanged ever trips on it.
  */
 const refusalThings = (
   toolName: string,
-  callAsks: () => readonly NewAsk[],
+  keys: readonly string[],
   ruled: RulesCheck | undefined
 ): string[] => {
-  if (ruled !== undefined && ruled.matches.length > 0)
-    return ruled.matches.map((match) => askIdentity(ruled.judged[match.ask - 1]));
-  if (toolName !== "dispatch_artifact") return breakerThings(callAsks());
-  return ruled === undefined || ruled.asksPartial || ruled.judged.length === 0
-    ? [WHOLE_CALL]
-    : ruled.judged.map(askIdentity);
+  const counted =
+    ruled !== undefined && ruled.matches.length > 0
+      ? ruled.matches.map((match) => askIdentity(ruled.judged[match.ask - 1]))
+      : toolName !== "dispatch_artifact"
+        ? keys
+        : ruled !== undefined && ruled.judged.length > 0
+          ? ruled.judged.map(askIdentity)
+          : keys.slice(-1);
+  return counted.filter((thing) => keys.includes(thing));
 };
 
 /**
  * What the gate has said on one target since the breaker last reset it. `refusals` counts, per
- * thing (`breakerThings`), the calls the gate did not send; `revises` counts every revise,
+ * thing (`callKeys`), the calls the gate did not send; `revises` counts every revise,
  * the warn-mode charter ones that sent the call included; `charter` keeps the charter's reasons.
  */
 type Held = { refusals: Map<string, number>; revises: number; charter: string[] };
@@ -2558,10 +2582,12 @@ type Held = { refusals: Map<string, number>; revises: number; charter: string[] 
  * The breaker: a loop of refusals of one thing on one target ends on the third attempt, which goes
  * out unreviewed. It counts refusals, since a warn-mode revise sends the call and leaves no loop.
  *
- * A call trips when one of its own things has been refused GATE_BREAKER_REVISES times, and the
- * refusal that brings a thing to that count warns of it, so the warning and the pass are about the
- * same thing. A call opening several asks trips on any one of them: a pass that needed every ask
- * refused would never end a loop on one ask of several that the rules check keeps refusing.
+ * A call trips when one of its own keys (`callKeys`) has been refused GATE_BREAKER_REVISES times,
+ * and the refusal that brings a thing to that count warns of it. A refusal counts only keys of the
+ * call it refused (`refusalThings`), so the warning and the pass are about the same thing, and the
+ * call that warning names, sent again, trips. A call with several keys trips on any one of them: a
+ * pass that needed every ask refused would never end a loop on one ask of several that the rules
+ * check keeps refusing.
  *
  * The reset stays per target while the count is per thing: an allow, a rebuttal or a trip sends a
  * call on the target, which ends every loop there, so each thing on it starts again from zero.
@@ -3314,16 +3340,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         };
       }
       if (halted) return pass("halted");
-      // The new asks this call opens, read from its own arguments as the rules check reads them:
+      // The call's breaker keys, read from its own arguments as the rules check reads its asks:
       // a parse of the arguments, which costs no model call and no Dispatch read. Only the
       // breaker needs them, so they are read where it asks, and never for a target it holds
-      // nothing on.
-      let opened: NewAsk[] | undefined;
-      const callAsks = () => (opened ??= newAsks(event.toolName, event.input));
-      // A tripped breaker sends the call unasked only where one of its own things was refused
+      // nothing on. A refusal counts some of these same keys, so a call it warns of trips here.
+      let keys: string[] | undefined;
+      const thisCallKeys = () => (keys ??= callKeys(event.toolName, event.input));
+      // A tripped breaker sends the call unasked only where one of its own keys was refused
       // enough times here. Any other call on the same target is something the gate has refused
       // too few times or never, so the review runs and every count stays where it is.
-      if (breaker.tripped(key, () => breakerThings(callAsks()))) {
+      if (breaker.tripped(key, thisCallKeys)) {
         breaker.reset(key);
         return {
           fields: { decision: "allow", outcome: "breaker" },
@@ -3434,7 +3460,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // same in warn and block mode.
         const tripsNext = breaker.revised(
           key,
-          refusalThings(event.toolName, callAsks, ruled),
+          refusalThings(event.toolName, thisCallKeys(), ruled),
           charterReason
         );
         const delivered = [
@@ -3509,7 +3535,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const refused = base.verdictMode === "block";
       const tripsNext = breaker.revised(
         key,
-        refused ? refusalThings(event.toolName, callAsks, ruled) : [],
+        refused ? refusalThings(event.toolName, thisCallKeys(), ruled) : [],
         verdict.reason
       );
       return {

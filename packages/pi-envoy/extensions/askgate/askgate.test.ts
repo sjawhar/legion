@@ -6258,6 +6258,106 @@ describe("rules check", () => {
       ["breaker", "allow"],
     ]);
   });
+  /**
+   * A block-mode gate whose charter revises and whose rules check matches nothing, uploading
+   * documents of any name on X-1, where Dispatch holds `brief.md` with `#window`; `served` false
+   * leaves the session without a Dispatch, so the read of the stored version fails.
+   */
+  const charterRefusingDocuments = (served = true) => {
+    let sent = { name: "", content: "" };
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      complete: bySystem(REVISE, RULES_NONE),
+      ...(served
+        ? {
+            dispatch: dispatchServing([
+              { id: "doc-brief", name: "brief.md", slug: "brief", markdown: BRIEF },
+            ]).session,
+            // A directory that exists: the gate reads the stored version through its Dispatch.
+            cwd: SUITE_TMP,
+          }
+        : {}),
+      dryRun: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ issue: "X-1", ...sent }),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    const upload = (callId: string, name: string, content: string) => {
+      sent = { name, content };
+      return g.bash(
+        callId,
+        `dispatch artifact --issue X-1 --name ${name} --content-file - <<'EOF'\n${content}EOF`
+      );
+    };
+    return { g, upload };
+  };
+  test("an unchanged re-upload whose stored version holds every ask is refused twice, warned on the second, and goes out on the breaker the third time", async () => {
+    // No rules check runs (every opener is stored), so each charter refusal counts the upload itself.
+    const { g, upload } = charterRefusingDocuments();
+    const first = await upload("a", "brief.md", BRIEF);
+    expect(first?.block).toBe(true);
+    expect(first?.reason).not.toContain(SECOND);
+    const second = await upload("b", "brief.md", BRIEF);
+    expect(second?.block).toBe(true);
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const asked = g.calls.length;
+    const third = await upload("c", "brief.md", BRIEF);
+    expect(third?.block).toBeUndefined();
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked);
+    // The trip reset the target: the fourth send is reviewed afresh, its refusal the first again.
+    const fourth = await upload("d", "brief.md", BRIEF);
+    expect(fourth?.block).toBe(true);
+    expect(fourth?.reason).not.toContain(SECOND);
+    expect(g.calls.filter(isRules)).toHaveLength(0);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual([
+      ["verdict", "revise"],
+      ["verdict", "revise"],
+      ["breaker", "allow"],
+      ["verdict", "revise"],
+    ]);
+  });
+  test("after two charter refusals of one upload on an issue, a different upload there with no ask block is reviewed", async () => {
+    // The breaker's target names the issue, not the document: the refusals of `brief.md` count on
+    // that upload alone, never on the call as a whole that another document opening no ask is.
+    const { g, upload } = charterRefusingDocuments();
+    await upload("a", "brief.md", BRIEF);
+    expect((await upload("b", "brief.md", BRIEF))?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const charters = g.calls.filter(isCharter).length;
+    const other = await upload("c", "notes.md", "# Notes\n\nThe person said: ship it on Friday.\n");
+    expect(other?.additionalContext ?? "").not.toContain('outcome="breaker"');
+    expect(other?.block).toBe(true);
+    expect(other?.reason).not.toContain(SECOND);
+    expect(g.calls.filter(isCharter)).toHaveLength(charters + 1);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual(
+      Array(3).fill(["verdict", "revise"])
+    );
+  });
+  test("an upload whose rules check judged only part of its asks counts its charter refusals on the judged ask, so sent unchanged a third time it goes out on the breaker as warned", async () => {
+    // The read of the stored version fails: `#window` may be stored, so only the opener with no id
+    // is judged, and the charter's refusals count on it.
+    const { g, upload } = charterRefusingDocuments(false);
+    const content = `${BRIEF}\n:::ask{}\nWhich region?\n:::\n`;
+    const first = await upload("a", "brief.md", content);
+    expect(first?.block).toBe(true);
+    expect(first?.reason).not.toContain(SECOND);
+    const second = await upload("b", "brief.md", content);
+    expect(second?.block).toBe(true);
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const asked = g.calls.length;
+    const third = await upload("c", "brief.md", content);
+    expect(third?.block).toBeUndefined();
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked);
+    expect(g.calls.filter(isRules)).toHaveLength(2);
+    expect(g.entries.map((e) => [e.outcome, e.decision, e.ruleAsksPartial])).toEqual([
+      ["verdict", "revise", true],
+      ["verdict", "revise", true],
+      ["breaker", "allow", undefined],
+    ]);
+  });
   test("a doc-edit whose document read fails still judges every ask it inserts", async () => {
     const check = await checkRules(
       {
