@@ -149,7 +149,7 @@ func (l *launcherSigner) Sign(method, url string) (string, error) {
 func machineContext() (base string, signer *launcherSigner, err error) {
 	base = strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
 	if base == "" {
-		return "", nil, errors.New("AGENT_SECRETS_URL is required")
+		return "", nil, errors.New("AGENT_SECRETS_URL is required: it names the secrets broker this machine's login, and the grants it lists or ends, are at")
 	}
 	sock, named := helperSocket()
 	if !exists(sock) {

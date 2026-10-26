@@ -4,6 +4,23 @@
 
 ### Added
 
+- `agent-secrets` names the store it answered from, so no answer of its own is read as another
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
+  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
+  settings cannot be read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
+  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
+  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
+  on standard error naming the store the table is from; `machine list` and `grant list` name
+  their broker the same way; and every refusal names where this CLI looked, from a denied request
+  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
+  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
+  broker's own body verbatim and make no settings call; `secret list --json` and
+  `secret show --json` gain a `store` field. No line names a secret's version: the broker
+  releases a grant's values as names and values alone, and a session holds no sign-in of its own
+  to the store to read one with (`agent-secrets secret show`, which reads the store directly
+  under the person's own sign-in, lists each version as before).
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

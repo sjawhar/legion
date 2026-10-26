@@ -201,7 +201,7 @@ func cmdMachineList(args []string, stdout, stderr io.Writer) int {
 	}
 	machines, raw, err := newClient(base).OperatorMachines(context.Background(), signer)
 	if err != nil {
-		return operatorFail(stderr, form, err)
+		return operatorFail(stderr, form, brokerSource(base), err)
 	}
 	if *asJSON {
 		writeVerbatim(stdout, raw)
@@ -221,7 +221,9 @@ func cmdMachineList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		return 1
 	}
-	// The legend goes to stderr, so the table on stdout stays one row per login for a script.
+	// The source line and the legend go to stderr, so the table on stdout stays one row per
+	// login for a script.
+	fmt.Fprintf(stderr, "Every row is a login to %s.\n", brokerSource(base))
 	if slices.ContainsFunc(machines.Credentials, func(m OperatorMachine) bool { return m.Expired }) {
 		fmt.Fprintln(stderr, "STATE expired: the login enrolls no more sessions, but sessions it enrolled still run until they end; revoking it ends them.")
 	}
@@ -249,12 +251,12 @@ func cmdMachineRevoke(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if err := newClient(base).RevokeOperatorMachine(context.Background(), signer, id); err != nil {
-		return operatorFail(stderr, form, err)
+		return operatorFail(stderr, form, brokerSource(base), err)
 	}
 	if sameID(id, signer.credentialID) {
 		fmt.Fprintf(stderr, "agent-secrets %s: revoking this machine's own login ends every session it enrolled, this one's broker access included\n", form)
 	}
-	fmt.Fprintf(stdout, "revoked %s\n", id)
+	fmt.Fprintf(stdout, "revoked %s at %s\n", id, brokerSource(base))
 	return 0
 }
 
@@ -266,19 +268,20 @@ func sameID(a, b string) bool {
 	return errA == nil && errB == nil && x == y
 }
 
-// operatorFail prints a machine or grant command's failure and answers 1. The helper's refusal to
-// sign (launcherRefusal) prints as it stands, and the broker refusing the machine's login says to
-// log it in again.
-func operatorFail(stderr io.Writer, form string, err error) int {
+// operatorFail prints a machine or grant command's failure and answers 1, naming the broker it
+// asked (src), so a refusal is never read as another secrets CLI's answer. The helper's refusal
+// to sign (launcherRefusal) prints as it stands: it is this machine's own helper refusing, with
+// no broker asked anything. The broker refusing the machine's login says to log it in again.
+func operatorFail(stderr io.Writer, form string, src source, err error) int {
 	var broker *apiError
 	var refused *launcherRefusal
 	switch {
 	case errors.As(err, &refused):
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, refused)
 	case errors.As(err, &broker) && broker.Status == http.StatusUnauthorized && broker.Code == "LAUNCHER_INVALID":
-		fmt.Fprintf(stderr, "agent-secrets %s: %v; this machine's login is expired or revoked (run: agent-secrets machine login)\n", form, broker)
+		fmt.Fprintf(stderr, "agent-secrets %s: %v; this machine's login to %s is expired or revoked (run: agent-secrets machine login)\n", form, broker, src)
 	default:
-		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
+		fmt.Fprintf(stderr, "agent-secrets %s: %v%s\n", form, err, src.asked())
 	}
 	return 1
 }
