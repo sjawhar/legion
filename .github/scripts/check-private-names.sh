@@ -55,8 +55,12 @@ set -euo pipefail
 # directory's path from the repository root (or its absolute path, outside the repository) before
 # the cd below. The path is never rewritten: the kernel follows its symlinks and `..` parts as the
 # caller's shell would, and a name starting with "-" gets a "./" so find does not read an option.
-repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
-caller=$(pwd -P)
+# Each directory is read with an "x" after pwd's newline, since a command substitution drops every
+# trailing newline, a directory name's own included.
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P && printf x)
+repo_root=${repo_root%$'\n'x}
+caller=$(pwd -P && printf x)
+caller=${caller%$'\n'x}
 case $caller in
   "$repo_root") prefix= ;;
   "$repo_root"/*) prefix=${caller#"$repo_root"/}/ ;;

@@ -64,8 +64,8 @@ var (
 
 // testOptions are the options every test starts from: production's shape — a store that keeps
 // sessions in a database included, which configure requires, here the postgres one with its URL key
-// — every role's reservation at the daemon's defaults (reservations), with budgets short enough
-// that a wait the test expects to end never slows the suite.
+// — both pods' reservations at the daemon's defaults (reservations), with budgets short enough that
+// a wait the test expects to end never slows the suite.
 func testOptions() Options {
 	return Options{
 		Namespace:    testNamespace,
@@ -95,7 +95,7 @@ func testOptions() Options {
 		Conns:                 fake.NewConns(),
 		RepositoryCache: RepositoryCache{
 			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
-			Resources: reservations()[claim.RoleController],
+			Resources: reservations().Controller,
 		},
 		Mapped: func() []ghrepo.Repository { return nil },
 		Log:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -678,14 +678,9 @@ func (g *rig) createPod(s *sandbox) {
 	}
 }
 
-// runningStatus is a Running issue pod's status: workspace-init done and every role launcher
-// running.
+// runningStatus is a Running issue pod's status: workspace-init done and its one container running.
 func runningStatus() corev1.PodStatus {
-	containers := make([]corev1.Container, 0, len(claim.Roles))
-	for _, role := range claim.Roles {
-		containers = append(containers, corev1.Container{Name: string(role)})
-	}
-	return runningStatusOf(corev1.PodSpec{Containers: containers})
+	return runningStatusOf(corev1.PodSpec{Containers: []corev1.Container{{Name: runtime.IssuePodContainer}}})
 }
 
 // runningStatusOf is the status of a pod of spec once Running: workspace-init done and each of its
@@ -979,18 +974,17 @@ func claimLabels(_ claim.Role) map[string]string {
 	return map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree}
 }
 
-// sandboxLocator is a recorded role process locator in its claim's pod.
+// sandboxLocator is a recorded role process locator in its claim's pod's one container.
 func sandboxLocator(token claim.Token, uid string) runtime.Locator {
 	role, ok := token.Role()
 	if !ok {
 		panic("test token has no role")
 	}
-	container := string(role)
 	return runtime.Locator{
 		Runtime:     runtime.RuntimeSandbox,
 		Claim:       token,
 		Incarnation: runtime.SandboxIncarnation(uid, 1),
-		Sandbox:     &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token), PodUID: uid, Container: container, Generation: 1},
+		Sandbox:     &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token), PodUID: uid, Container: podContainer(role), Generation: 1},
 	}
 }
 

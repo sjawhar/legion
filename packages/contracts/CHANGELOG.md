@@ -4,6 +4,8 @@
 
 ### Added
 
+- `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
+
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
   session a personal token attributed to a human, ` (as <namespace>/<name>)` for one a service
   token authenticated, else `""` (always for a user or system). `actorLabel` is now `actorName`
@@ -155,6 +157,24 @@
 
 ### Changed
 
+- `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
+  place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
+  dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
+  (which kind to use, and that resolving records no decision), `dispatch_comment` (a reply under an
+  open ask asks for clarification), `dispatch_doc_edit` (one replace per paragraph, then one
+  insert, then a read back), `dispatch_artifact` (never upload a document's own name to change
+  it) and `dispatch_architecture_sync` (what a failed source's line still shows, and that a
+  credential or branch problem with `repo` is `409 SOURCE_ACCESS`).
+- `dispatch ask --help` says never to create an issue to park a question, and `dispatch issue
+  --help` says to create a project only when a person asks for one, and that work across projects
+  goes in the project that owns most of it.
+
+- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
+  `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
+  fields, in place of one entry per role, and the `resource-limits` capability row's detail names
+  pods (`no CPU and memory requests and limits under runtime.kubernetes.resources for the issue
+  pod`) rather than roles. `LegionStateResponse` reads `settings` loosely, so its schema is
+  unchanged.
 - **Breaking:** a project's architecture model comes from any number of sources, one per
   repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order
   the project added them, replaces `source`; `ArchitectureTreeComponent.source` names the

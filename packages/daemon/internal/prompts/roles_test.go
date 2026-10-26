@@ -130,6 +130,18 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 }
 
+func TestPlannerKeepsFindingsAndHumanToDoAsksOutsideDesignQuestions(t *testing.T) {
+	planner := rolePart(t, "core/planner.md")
+	for _, rule := range []string{
+		"Read the repository's `STRATEGY.md` when it has one",
+		"A finding outside the tree, and a to-do only a person can do, is always an ask.",
+	} {
+		if !strings.Contains(planner, rule) {
+			t.Errorf("core/planner.md does not contain %q", rule)
+		}
+	}
+}
+
 func TestTheHeadlessFragmentHoldsTheWorkersSharedRules(t *testing.T) {
 	headless := rolePart(t, "mechanics/headless.md")
 	interactive := rolePart(t, "mechanics/interactive.md")
