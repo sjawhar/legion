@@ -109,6 +109,16 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.dispatchArtifact(ctx, tx, fact)
 	case intake.GateAboveDispatch:
 		return e.gateAboveDispatch(ctx, tx, fact)
+	case intake.DispatchAskOpened:
+		return e.dispatchAskOpened(ctx, tx, fact)
+	case intake.DispatchAskClosed:
+		return e.dispatchAskClosed(ctx, tx, fact)
+	case intake.DispatchAskReply:
+		return e.dispatchAskReply(ctx, tx, fact)
+	case intake.DispatchApprovalMoved:
+		return e.dispatchApprovalMoved(ctx, tx, fact)
+	case intake.DispatchAskRestored:
+		return e.dispatchAskRestored(ctx, tx, fact)
 	case intake.HandoffComplete:
 		return e.handoff(ctx, tx, fact)
 	case intake.PullRequestOpened:

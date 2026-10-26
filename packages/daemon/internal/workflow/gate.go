@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -22,9 +23,18 @@ import (
 // gate already records that same review as told. The architect is told the version the gate opened
 // at, which an approval carried to a later version makes the later one, and is not told it again
 // when the gate of that document was already open at that version.
+//
+// The approval request the registration's read found open is mirrored as the read found it
+// (mirrorRegisteredRequest), before anything decides whether the registration changes the gate:
+// the row is the request's, not the gate's, and its write is fenced by the sequence the read began
+// at, so a registration that changes no gate still records what its read saw, and an older one
+// rolls nothing back.
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	if err := e.mirrorRegisteredRequest(ctx, tx, *issue, fact); err != nil {
 		return intake.Result{}, err
 	}
 	stored, err := e.store.Gate(ctx, tx, fact.Issue)
@@ -152,6 +162,28 @@ func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact strin
 		return err
 	}
 	return e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: version, Reason: reason})
+}
+
+// mirrorRegisteredRequest writes the mirror row of the approval request a registration read open
+// on the registered document, as the read found it: an approval request of that document, open, on
+// the turn RequestWaitsOnAgent names. The read's state is written at the issue's sequence the read
+// began at (fact.Since), because Dispatch's approval read gives no sequence of its own. Every event
+// at or below Since is one the read reflects, so it never overwrites the read; every turn or state
+// the request took between Since and the read is an event of the request itself (an opening, a
+// reply, a hand-back, the ask.edited of a version that moved it, its close), which overwrites the
+// read whenever it arrives, and the newest of them is the state the read showed. So once they have
+// all arrived the row is the read's or newer. A fence placed above Since could instead refuse, for
+// good, an event newer than the read. Only a root's asks are mirrored.
+func (e *Engine) mirrorRegisteredRequest(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.GateRegistered) error {
+	if fact.RequestAsk == "" || !claim.IsTreeRoot(root.Key, root.Tree) {
+		return nil
+	}
+	turn := "human"
+	if fact.RequestWaitsOnAgent {
+		turn = "agent"
+	}
+	return e.mirrorAsk(ctx, tx, root, fact.RequestAsk, askChange{seq: fact.Since.Seq, kind: record.AskApproval, artifact: fact.ArtifactID,
+		state: askOpen, turn: turn})
 }
 
 // gateAboveDispatch resets a gate recorded above the version Dispatch holds for its document to

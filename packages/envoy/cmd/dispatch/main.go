@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -100,6 +101,9 @@ type bootConfig struct {
 	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
 	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
 	ListenAddr string
+	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
+	// (pprofAddress); empty, nothing listens.
+	PprofAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process.
 	DevSignIn bool
@@ -168,6 +172,12 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	// The profiler binds first, before NATS, migrations and the rest of boot, so a slow or hung
+	// boot can be profiled and a port clash refuses the boot before anything connects.
+	if _, err := startPprof(ctx, boot.PprofAddr); err != nil {
+		slog.Error("dispatch: pprof", "error", err)
+		os.Exit(1)
+	}
 
 	var natsClient *bus.Client
 	if boot.NATSDisabled {
@@ -600,6 +610,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
+	pprofAddr, err := pprofAddress(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.PprofAddr = pprofAddr
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
@@ -920,18 +935,14 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 	return nil
 }
 
-func parsePositiveInt(raw string) (int, error) {
-	n := 0
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("not a positive integer: %q", raw)
-		}
-		n = n*10 + int(r-'0')
+// parsePort reads the port a setting names: decimal digits alone, 1-65535. The error names the
+// setting, so a refusal says which variable to fix.
+func parsePort(name, raw string) (int, error) {
+	port, err := strconv.Atoi(raw)
+	if err != nil || strings.TrimLeft(raw, "0123456789") != "" || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid %s %q: want a port number 1-65535", name, raw)
 	}
-	if n == 0 {
-		return 0, fmt.Errorf("not a positive integer: %q", raw)
-	}
-	return n, nil
+	return port, nil
 }
 
 // openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
@@ -1049,14 +1060,8 @@ func listenAddress(env settingValues) (string, error) {
 	port := strings.TrimSpace(env.get("DISPATCH_PORT"))
 	if port == "" {
 		port = defaultListenPort
-	} else {
-		parsed, err := parsePositiveInt(port)
-		if err != nil {
-			return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
-		}
-		if parsed > 65535 {
-			return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
-		}
+	} else if _, err := parsePort("DISPATCH_PORT", port); err != nil {
+		return "", err
 	}
 	return net.JoinHostPort(host, port), nil
 }
