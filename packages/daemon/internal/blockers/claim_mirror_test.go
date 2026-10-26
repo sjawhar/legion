@@ -2,6 +2,9 @@ package blockers
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -127,5 +130,41 @@ func TestTheBootListingAndTheTickReReadWriteTheClaim(t *testing.T) {
 	}
 	if holder, seq := claimOf(t, rows, "LEGION-901"); holder != "session:other" || seq != 9 {
 		t.Fatalf("claim after an older re-read = %q at %d, want session:other at 9 kept", holder, seq)
+	}
+}
+
+// A claim that names no actor is unknown wherever the daemon reads it: Dispatch's listing showing
+// one leaves the stored claim, as an issue event carrying the same claim does (intake's
+// issueEventClaim), rather than writing it as nobody.
+func TestAClaimNamingNoActorIsUnknownOnAReadAsOnAnEvent(t *testing.T) {
+	actorless := map[string]any{"actor": map[string]any{"kind": "user"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]map[string]any{{"key": "LEGION-901", "status": "todo", "rank": "a", "last_seq": 12, "claim": actorless}}); err != nil {
+			t.Errorf("write the listing: %v", err)
+		}
+	}))
+	defer server.Close()
+	listed, err := dispatch.New(server.URL, "token").ListIssues(context.Background(), testProject, nil)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	pool := migratedPool(t)
+	records := record.NewStore()
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := records.PutDispatchIssue(context.Background(), tx, record.DispatchIssueRow{Key: "LEGION-901", Project: testProject, Status: "todo",
+			Seq: 9, ClaimedBy: "session:other", ClaimSeq: 9}); err != nil {
+			t.Fatal(err)
+		}
+		if err := Reconcile(context.Background(), tx, records, testProject, listed); err != nil {
+			t.Fatalf("reconcile the listing: %v", err)
+		}
+	})
+	if holder, seq := claimOf(t, mirrored(t, pool, records), "LEGION-901"); holder != "session:other" || seq != 9 {
+		t.Fatalf("claim after a listing showing a claim naming no actor = %q at %d, want session:other at 9 kept", holder, seq)
+	}
+	event := intake.ListedIssue(listed[0])
+	if event.ClaimKnown {
+		t.Fatalf("the listing's fact = %#v, want its claim unknown", event)
 	}
 }

@@ -124,7 +124,7 @@ func (w *workflowRuntime) readObserved(ctx context.Context, keys []string) []int
 			continue
 		}
 		observed = append(observed, intake.IssueStatus{
-			Key: key, Status: issue.Status, Blockers: issue.BlockedBy, Seq: issue.LastSeq, ClaimedBy: issue.Claim.Holder(), ClaimKnown: true})
+			Key: key, Status: issue.Status, Blockers: issue.BlockedBy, Seq: issue.LastSeq, ClaimedBy: issue.Claim.Holder(), ClaimKnown: !issue.ClaimUnread})
 	}
 	return observed
 }

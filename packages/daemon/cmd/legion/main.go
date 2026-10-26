@@ -84,7 +84,7 @@ var commands = map[string]commandEntry{
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
 	"claude-bridge":  {runClaudeBridge, "run Claude Code in Oh My Pi's place under worker-shim, for a role worker_backends puts on claude"},
 	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
-	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
+	"launcher":       {runLauncher, "PID 1 of an issue pod's roles container or the controller's pod: starts and stops each role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
@@ -235,8 +235,8 @@ func pluginsSourceWords(source string) string {
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
-// Under kubernetes, when a role requests less cpu or memory than its limit, one plain `resources:`
-// line names those roles and the pods they make Burstable (capabilities.Deployment.BurstableLine);
+// Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
+// `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
 // probe's attempt budget is derived above slow_command_timeout_seconds (daemon.ProbeBudget), one
 // plain line names the derived bound and why; then one names the repository cache every mapped

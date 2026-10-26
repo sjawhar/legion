@@ -89,8 +89,10 @@ type IssueSummary struct {
 	// in the order Dispatch lists them; none when it waits on nothing.
 	BlockedBy []string
 	// ClaimedBy is who Dispatch shows holding the issue's claim, as Claim.Holder writes it, or
-	// empty for nobody.
-	ClaimedBy string
+	// empty for nobody. ClaimUnread says Dispatch showed a claim naming no actor: neither nobody
+	// nor anyone the daemon can name, so the read says nothing of the claim.
+	ClaimedBy   string
+	ClaimUnread bool
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
@@ -111,8 +113,9 @@ type Issue struct {
 	ResolvedRepo string
 	// BlockedBy is IssueSummary.BlockedBy.
 	BlockedBy []string
-	// Claim is the issue's claim Dispatch shows, nil for none.
-	Claim *Claim
+	// Claim is the issue's claim Dispatch shows, nil for none; ClaimUnread is IssueSummary's.
+	Claim       *Claim
+	ClaimUnread bool
 }
 
 // Claim is the actor Dispatch records as an issue's holder: a session or a person.

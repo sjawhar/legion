@@ -87,7 +87,7 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
  * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
- * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * pod: the Sandbox's name, the pod's uid, the container (`roles` for an issue pod) and the process generation; the
  * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [

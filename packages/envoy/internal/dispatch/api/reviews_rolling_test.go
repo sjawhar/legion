@@ -15,7 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// previousReleaseReview writes a review in tx exactly as the release before migration 0118 does
+// previousReleaseReview writes a review in tx exactly as the release before migration 0120 does
 // (docs.WriteReview before it kept the sequence): the review row, naming no event_seq, then its
 // artifact.* event appended through the real broker. It returns the row's id and the event.
 func previousReleaseReview(t *testing.T, ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, reason *string) (string, model.Event) {
@@ -67,72 +67,89 @@ func reviewEventSeq(t *testing.T, database *store.Store, reviewID string) int64 
 	return seq
 }
 
-// A review the release before migration 0118 writes while a rollout (or a rollback) runs both
+// A review the release before migration 0120 writes while a rollout (or a rollback) runs both
 // releases names no event_seq. It is newer than the review this release wrote before it, and the
 // approval read must say so: the migration's trigger gives it its event's sequence at its commit.
 // Without the trigger it would rank below the sequenced review (`event_seq desc nulls last`), so a
 // person's changes request written by an old pod would be overridden by the approval before it, and
 // a person's approval written by an old pod would read back as the changes requested before it.
+// The trigger reads an issue document's events on its issue and a project document's on the
+// document itself, so both owners are covered.
 func TestAReviewThePreviousReleaseWritesDuringARolloutReadsAsTheNewest(t *testing.T) {
-	for _, order := range []struct {
-		name          string
-		first, second string
-	}{
-		{name: "changes requested by an old pod after an approval", first: "approved", second: "changes_requested"},
-		{name: "approval by an old pod after a changes request", first: "changes_requested", second: "approved"},
-	} {
-		t.Run(order.name, func(t *testing.T) {
-			handler, database, deps := newTestServer(t, testServerOptions{})
-			issue := createInteractionIssue(t, handler, "TEST", "Rolling review", "A spec")
-			artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
-			ctx := context.Background()
-
-			body := map[string]any{"state": order.first}
-			if order.first == "changes_requested" {
-				body["reason"] = "Name the rollback path."
-			}
-			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", body, "alice")
-			if response.Code != http.StatusCreated {
-				t.Fatalf("review as this release: status=%d body=%s", response.Code, response.Body.String())
-			}
-			first := decodeBody[model.ArtifactReview](t, response)
-			if reviewEventSeq(t, database, first.ID) == 0 {
-				t.Fatalf("this release's review carries no sequence")
-			}
-
-			var reason *string
-			if order.second == "changes_requested" {
-				reason = new("And name who runs the restore.")
-			}
-			tx, err := database.Pool.Begin(ctx)
-			if err != nil {
-				t.Fatalf("begin the previous release's review: %v", err)
-			}
-			defer func() { _ = tx.Rollback(ctx) }()
-			reviewID, event := previousReleaseReview(t, ctx, tx, deps.Events, artifact, first.Version, order.second, reason)
-			if err := tx.Commit(ctx); err != nil {
-				t.Fatalf("commit the previous release's review: %v", err)
-			}
-
-			type sequencedRead struct {
-				Approval struct {
-					State string `json:"state"`
-					Seq   *int64 `json:"seq"`
-				} `json:"approval"`
-			}
-			got := decodeBody[sequencedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
-			if got.Approval.State != order.second || got.Approval.Seq == nil || *got.Approval.Seq != int64(event.Seq) {
-				readSeq := "none"
-				if got.Approval.Seq != nil {
-					readSeq = strconv.FormatInt(*got.Approval.Seq, 10)
+	for _, owner := range []string{"issue document", "project document"} {
+		for _, order := range []struct {
+			name          string
+			first, second string
+		}{
+			{name: "changes requested by an old pod after an approval", first: "approved", second: "changes_requested"},
+			{name: "approval by an old pod after a changes request", first: "changes_requested", second: "approved"},
+		} {
+			t.Run(owner+"/"+order.name, func(t *testing.T) {
+				handler, database, deps := newTestServer(t, testServerOptions{})
+				var artifact model.Artifact
+				if owner == "issue document" {
+					issue := createInteractionIssue(t, handler, "TEST", "Rolling review", "A spec")
+					artifact = decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+				} else {
+					if created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+						"key": "PLAN", "name": "Plans",
+					}, "alice"); created.Code != http.StatusCreated {
+						t.Fatalf("create project: status=%d body=%s", created.Code, created.Body.String())
+					}
+					artifact = createProjectDocument(t, handler, "PLAN", "Rolling plan", "A plan")
+					if artifact.IssueKey != nil {
+						t.Fatalf("project document belongs to issue %s", *artifact.IssueKey)
+					}
 				}
-				t.Errorf("approval reads %s at sequence %s, want %s, the old pod's newer review (sequence %d)",
-					got.Approval.State, readSeq, order.second, event.Seq)
-			}
-			if seq := reviewEventSeq(t, database, reviewID); seq != int64(event.Seq) {
-				t.Errorf("the previous release's review sequence = %d (0 is none), want its event's %d", seq, event.Seq)
-			}
-		})
+				ctx := context.Background()
+
+				body := map[string]any{"state": order.first}
+				if order.first == "changes_requested" {
+					body["reason"] = "Name the rollback path."
+				}
+				response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/reviews", body, "alice")
+				if response.Code != http.StatusCreated {
+					t.Fatalf("review as this release: status=%d body=%s", response.Code, response.Body.String())
+				}
+				first := decodeBody[model.ArtifactReview](t, response)
+				if reviewEventSeq(t, database, first.ID) == 0 {
+					t.Fatalf("this release's review carries no sequence")
+				}
+
+				var reason *string
+				if order.second == "changes_requested" {
+					reason = new("And name who runs the restore.")
+				}
+				tx, err := database.Pool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("begin the previous release's review: %v", err)
+				}
+				defer func() { _ = tx.Rollback(ctx) }()
+				reviewID, event := previousReleaseReview(t, ctx, tx, deps.Events, artifact, first.Version, order.second, reason)
+				if err := tx.Commit(ctx); err != nil {
+					t.Fatalf("commit the previous release's review: %v", err)
+				}
+
+				type sequencedRead struct {
+					Approval struct {
+						State string `json:"state"`
+						Seq   *int64 `json:"seq"`
+					} `json:"approval"`
+				}
+				got := decodeBody[sequencedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact.ID, nil, "alice"))
+				if got.Approval.State != order.second || got.Approval.Seq == nil || *got.Approval.Seq != int64(event.Seq) {
+					readSeq := "none"
+					if got.Approval.Seq != nil {
+						readSeq = strconv.FormatInt(*got.Approval.Seq, 10)
+					}
+					t.Errorf("approval reads %s at sequence %s, want %s, the old pod's newer review (sequence %d)",
+						got.Approval.State, readSeq, order.second, event.Seq)
+				}
+				if seq := reviewEventSeq(t, database, reviewID); seq != int64(event.Seq) {
+					t.Errorf("the previous release's review sequence = %d (0 is none), want its event's %d", seq, event.Seq)
+				}
+			})
+		}
 	}
 }
 
@@ -200,7 +217,7 @@ func TestTheReviewSequenceTriggerTouchesOnlyItsOwnTransactionsReview(t *testing.
 // first fences the owner's events by. The trigger must still take only its own transaction's event:
 // here another transaction committed, at the review's transaction's start time, an event of the
 // same type, document and version that no review holds (such as one whose review committed before
-// migration 0118, which no trigger sequenced). Matched by time alone, the review would take that
+// migration 0120, which no trigger sequenced). Matched by time alone, the review would take that
 // older event, the oldest one no review holds; it takes its own.
 func TestTheReviewSequenceTriggerTakesNoEventOfATransactionStartedAtTheSameMoment(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})

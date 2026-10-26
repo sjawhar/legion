@@ -56,9 +56,9 @@ type DispatchIssue struct {
 	ResolvedRepoMissing bool
 	// ClaimedBy is who the observation shows holding the issue's Dispatch claim, `<kind>:<id>`, or
 	// "" for nobody, and ClaimKnown says the observation showed the claim at all: an event retained
-	// from a Dispatch that did not yet send it, or one whose claim names no actor, says nothing of
-	// it. blockers.Mirror writes a known claim at the observation's Seq, behind the claim's own
-	// fence (record.DispatchIssueRow.ClaimSeq).
+	// from a Dispatch that did not yet send it, or an event or read whose claim names no actor
+	// (dispatch.IssueSummary.ClaimUnread), says nothing of it. blockers.Mirror writes a known claim
+	// at the observation's Seq, behind the claim's own fence (record.PutDispatchClaim).
 	ClaimedBy  string
 	ClaimKnown bool
 	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
@@ -84,7 +84,7 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
 		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy,
-		ClaimedBy: issue.Claim.Holder(), ClaimKnown: true, Observed: true}
+		ClaimedBy: issue.Claim.Holder(), ClaimKnown: !issue.ClaimUnread, Observed: true}
 }
 
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
@@ -96,7 +96,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
 		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy,
-		ClaimedBy: issue.ClaimedBy, ClaimKnown: true}
+		ClaimedBy: issue.ClaimedBy, ClaimKnown: !issue.ClaimUnread}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -243,7 +243,8 @@ func (DispatchApprovalMoved) isFact() {}
 
 // DispatchClaim is the holder Dispatch records for an issue at Seq, from its issue.claimed or
 // issue.released event: ClaimedBy is `<kind>:<id>`, or "" when the release cleared the claim.
-// blockers.Mirror writes it into the issue's mirror row behind the claim's own fence.
+// blockers.Mirror writes it to the claims mirror (record.PutDispatchClaim) behind the claim's own
+// fence, whether or not the issue has a mirrored row yet.
 type DispatchClaim struct {
 	Key       string
 	Seq       int64
@@ -281,8 +282,8 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 // the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
 // turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
 // same sequence-fenced write an event's own row takes, so a view older than an event already
-// applied changes nothing. ClaimedBy and ClaimKnown are DispatchIssue's: the issue reads behind
-// this view always show the claim.
+// applied changes nothing. ClaimedBy and ClaimKnown are DispatchIssue's: the issue read behind
+// this view shows the claim unless it names no actor.
 type IssueStatus struct {
 	Key        string
 	Status     string
