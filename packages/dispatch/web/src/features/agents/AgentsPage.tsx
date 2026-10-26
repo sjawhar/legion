@@ -68,13 +68,7 @@ import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
-import {
-  AgentName,
-  type AgentPart,
-  AgentParts,
-  type AgentText,
-  useAgentText,
-} from "../refs/AgentName";
+import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -205,11 +199,7 @@ export function partitionAgents(
  *  does not take, or there is none (a reply to the agent's own message), it is a Send where the
  *  agent takes it, else a BTW where it takes that, else its plain mode - an Aside to a Claude Code
  *  session, which takes neither. */
-function exchangeDelivery(
-  agent: Agent,
-  read: MessageRead,
-  text: AgentText
-): NonNullable<ReplyTarget["thread"]> {
+function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
   let last: MessageDelivery | undefined;
   for (const attempt of [read.message, ...read.replies].flatMap((item) => item.deliveries)) {
     if (last === undefined || compareTimestamps(attempt.created_at, last.created_at) >= 0) {
@@ -226,11 +216,10 @@ function exchangeDelivery(
     delivery:
       last === undefined || (last.delivery === "steer" && !canSteer) ? fallback : last.delivery,
     target: `session:${agent.session_id}`,
-    title: text.sessionText(agent.session_id, agent.title),
   };
 }
 
-function agentReplyTo(agent: Agent, read: MessageRead, node: Message, text: AgentText): AgentReply {
+function agentReplyTo(agent: Agent, read: MessageRead, node: Message): AgentReply {
   return {
     issueKey: read.message.issue_key,
     target: {
@@ -238,7 +227,7 @@ function agentReplyTo(agent: Agent, read: MessageRead, node: Message, text: Agen
       excerpt: node.body,
       id: node.id,
       parentKind: "message",
-      thread: exchangeDelivery(agent, read, text),
+      thread: exchangeDelivery(agent, read),
       ...(node.issue_key === null
         ? {}
         : { to: buildIssuePath({ id: node.id, key: node.issue_key, kind: "message" }) }),
@@ -275,7 +264,6 @@ function AgentExchangeReply({
         queryKey: agentMessagesQuery(agent.session_id).queryKey,
       }),
   });
-  const text = useAgentText();
   const parent = [read.message, ...read.replies].find((item) => item.id === reply.in_reply_to);
   const answer = read.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
@@ -306,7 +294,7 @@ function AgentExchangeReply({
               targetName: rowTarget(agent),
             }
       }
-      onReply={() => onReply(agentReplyTo(agent, read, reply, text))}
+      onReply={() => onReply(agentReplyTo(agent, read, reply))}
       quote={
         parent === undefined
           ? undefined
@@ -348,7 +336,6 @@ function AgentTargetedMessage({
         queryKey: agentMessagesQuery(agent.session_id).queryKey,
       }),
   });
-  const text = useAgentText();
   const answer = read.replies.find((reply) => reply.author.kind === "session");
   return (
     <TargetedMessageCard
@@ -370,7 +357,7 @@ function AgentTargetedMessage({
       deliveries={deliveryAttempts(read.message.deliveries, rowTarget(agent))}
       header={null}
       isClosed={false}
-      onReply={() => onReply(agentReplyTo(agent, read, read.message, text))}
+      onReply={() => onReply(agentReplyTo(agent, read, read.message))}
       onRetry={retry.mutate}
       replyDisabled={replyDisabled}
       retrying={retry.isPending}

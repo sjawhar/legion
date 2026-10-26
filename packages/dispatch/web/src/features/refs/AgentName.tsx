@@ -1,4 +1,4 @@
-import { actorLabel, actorName, sessionLabel } from "@legion/contracts";
+import { actorAttribution, actorName, sessionLabel, shortSessionId } from "@legion/contracts";
 import { Fragment, type ReactNode, useMemo } from "react";
 import { generatePath, Link } from "react-router-dom";
 
@@ -11,7 +11,7 @@ import {
   offlineDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
-import { type AgentState, useAgentRegistry } from "./agent-registry";
+import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
 import { relativeTimeLabel } from "./Timestamp";
 
@@ -28,6 +28,44 @@ import { relativeTimeLabel } from "./Timestamp";
  */
 
 type SessionActor = Extract<Actor, { kind: "session" }>;
+
+/** An agent to name: an actor, or a bare session id with the title stamped where it was
+ *  recorded. */
+type AgentRef = { actor: Actor } | { sessionId: string; storedTitle: string | undefined };
+
+type SessionRef = { actor: SessionActor } | { sessionId: string; storedTitle: string | undefined };
+
+interface ResolvedAgent {
+  /** The session the agent is; `undefined` for a user or system actor. */
+  readonly sessionId: string | undefined;
+  /** A session's registry title, else the title stamped on the write, else `session:<8>…`; a
+   *  user's or system's id. */
+  readonly name: string;
+  /** What follows the name: ` (for <owner>)`, ` (as <namespace>/<name>)`, or `""`. */
+  readonly attribution: string;
+}
+
+/** The one naming rule: every name this module draws or spells comes from here. */
+function resolveAgent(
+  ref: SessionRef,
+  registry: AgentRegistry
+): ResolvedAgent & { readonly sessionId: string };
+function resolveAgent(ref: AgentRef, registry: AgentRegistry): ResolvedAgent;
+function resolveAgent(ref: AgentRef, registry: AgentRegistry): ResolvedAgent {
+  if ("actor" in ref) {
+    const { actor } = ref;
+    return {
+      attribution: actorAttribution(actor),
+      name: actorName(actor, registry.titles),
+      sessionId: actor.kind === "session" ? actor.id : undefined,
+    };
+  }
+  return {
+    attribution: "",
+    name: sessionLabel(ref.sessionId, registry.title(ref.sessionId) ?? ref.storedTitle),
+    sessionId: ref.sessionId,
+  };
+}
 
 type AgentSubject =
   | { actor: Actor; sessionId?: never; storedTitle?: never }
@@ -90,8 +128,9 @@ function AgentStateMark({
 
 /**
  * An agent, as every place in the app shows one. A `user` or `system` actor is its id as plain
- * text and reads no registry. A session renders in one
- * `<span data-agent-name data-agent-state>`: its state mark, its name, and its attribution.
+ * text (inside the host's control, for `kind="control"`) and reads no registry. A session
+ * renders in one `<span data-agent-name data-agent-state>`: its state mark, its name, and its
+ * attribution.
  */
 export function AgentName(props: AgentNameProps): ReactNode {
   if (props.sessionId !== undefined) {
@@ -106,11 +145,8 @@ export function AgentName(props: AgentNameProps): ReactNode {
   }
   const { actor } = props;
   if (actor.kind !== "session") {
-    return props.className === undefined ? (
-      actor.id
-    ) : (
-      <span className={props.className}>{actor.id}</span>
-    );
+    const named = props.kind === "control" ? props.control(actor.id) : actor.id;
+    return props.className === undefined ? named : <span className={props.className}>{named}</span>;
   }
   return (
     <SessionAgentName
@@ -130,24 +166,11 @@ function SessionAgentName({
 }: {
   className: string | undefined;
   inline: boolean | undefined;
-  subject: { actor: SessionActor } | { sessionId: string; storedTitle: string | undefined };
+  subject: SessionRef;
   variant: AgentVariant;
 }): ReactNode {
   const registry = useAgentRegistry(true);
-  let sessionId: string;
-  let label: string;
-  let name: string;
-  if ("actor" in subject) {
-    sessionId = subject.actor.id;
-    label = actorLabel(subject.actor, registry.titles);
-    name = actorName(subject.actor, registry.titles);
-  } else {
-    sessionId = subject.sessionId;
-    name = sessionLabel(sessionId, registry.title(sessionId) ?? subject.storedTitle);
-    label = name;
-  }
-  // `actorLabel` is `actorName` followed by the attribution, so what follows the name is it.
-  const suffix = label.slice(name.length);
+  const { attribution, name, sessionId } = resolveAgent(subject, registry);
   const state = registry.state(sessionId);
   const to = generatePath(AGENT_LIVE_PATH, { sessionId: encodeURIComponent(sessionId) });
 
@@ -155,7 +178,7 @@ function SessionAgentName({
   let liveLink: ReactNode = null;
   if (variant.kind === "control") {
     named = variant.control(name);
-    const openLabel = `Open live conversation with ${label}`;
+    const openLabel = `Open live conversation with ${name}${attribution}`;
     liveLink = (
       <Link aria-label={openLabel} className={`ml-1 px-1 ${LINK_CLASS}`} title={openLabel} to={to}>
         <span aria-hidden="true">↗</span>
@@ -164,12 +187,10 @@ function SessionAgentName({
   } else if (variant.kind === "static") {
     named = name;
   } else {
+    // No `aria-label`: the link is named by its visible name, and the attribution after it is
+    // read once, as text.
     named = (
-      <Link
-        aria-label={suffix === "" ? undefined : label}
-        className={inline ? `${LINK_CLASS} dispatch-inline-link` : LINK_CLASS}
-        to={to}
-      >
+      <Link className={inline ? `${LINK_CLASS} dispatch-inline-link` : LINK_CLASS} to={to}>
         {name}
       </Link>
     );
@@ -177,24 +198,27 @@ function SessionAgentName({
 
   // The name never widens its host: a flex item may shrink below its text (`min-w-0`), and a
   // long title with no space breaks mid-word; a host's `truncate` (nowrap) still ellipsizes.
+  // The short form `session:<8>…` does not tell sessions apart (ids minted in the same minute
+  // share it), so an agent named by it carries its full id as its tooltip.
   return (
     <span
       className={className === undefined ? AGENT_SPAN_CLASS : `${AGENT_SPAN_CLASS} ${className}`}
       data-agent-name={sessionId}
       data-agent-state={state}
+      title={name === shortSessionId(sessionId) ? sessionId : undefined}
     >
       <AgentStateMark lastSeen={registry.lastSeen(sessionId)} state={state} />
       {named}
-      {suffix}
+      {attribution}
       {liveLink}
     </span>
   );
 }
 
-/** A Conversation avatar's initials: the first letter of the first two words of the agent's
+/** A Conversation avatar's initials: the first letter of the first two words of an agent's
  *  name (never its attribution). */
-function agentInitials(actor: Actor, titles: ReadonlyMap<string, string>): string {
-  return actorName(actor, titles)
+function agentInitials(name: string): string {
+  return name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
@@ -223,21 +247,19 @@ export interface AgentText {
  */
 export function useAgentText(): AgentText {
   const registry = useAgentRegistry(false);
-  return useMemo(
-    () => ({
-      initials: (actor: Actor) => agentInitials(actor, registry.titles),
-      label: (actor: Actor) => actorLabel(actor, registry.titles),
-      part: (part: AgentPart) =>
-        typeof part === "string"
-          ? part
-          : "actor" in part
-            ? actorLabel(part.actor, registry.titles)
-            : sessionLabel(part.sessionId, registry.title(part.sessionId) ?? part.storedTitle),
+  return useMemo(() => {
+    const label = (ref: AgentRef) => {
+      const { attribution, name } = resolveAgent(ref, registry);
+      return `${name}${attribution}`;
+    };
+    return {
+      initials: (actor: Actor) => agentInitials(resolveAgent({ actor }, registry).name),
+      label: (actor: Actor) => label({ actor }),
+      part: (part: AgentPart) => (typeof part === "string" ? part : label(part)),
       sessionText: (sessionId: string, storedTitle: string | undefined) =>
-        sessionLabel(sessionId, registry.title(sessionId) ?? storedTitle),
-    }),
-    [registry]
-  );
+        resolveAgent({ sessionId, storedTitle }, registry).name,
+    };
+  }, [registry]);
 }
 
 const RESOLUTION_VERB: Record<AskResolution["kind"], string> = {
@@ -262,10 +284,7 @@ export function AskResolutionLine({ resolution }: { resolution: AskResolution })
  * the agent keeps its identity (its current name, state and live link) instead of being
  * flattened into a label. A role address is text; only a recorded session is an agent part.
  */
-export type AgentPart =
-  | string
-  | { actor: Actor }
-  | { sessionId: string; storedTitle: string | undefined };
+export type AgentPart = string | AgentRef;
 
 /** Draws `AgentPart`s in a line of text: each text part as is (or through `text`, which the
  *  host uses to mark up its own text), each agent part as an inline `AgentName`. */
@@ -285,10 +304,8 @@ export function AgentParts({
         ) : (
           text(part, index)
         )
-      ) : "actor" in part ? (
-        <AgentName actor={part.actor} inline />
       ) : (
-        <AgentName inline sessionId={part.sessionId} storedTitle={part.storedTitle} />
+        <AgentName {...part} inline />
       )}
     </Fragment>
   ));

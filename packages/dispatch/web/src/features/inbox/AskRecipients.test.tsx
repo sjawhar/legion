@@ -260,7 +260,7 @@ test("AskRecipients adds the issue's subscribers once each, removes one through 
     );
     expect(page.getIssueSubscribers).toHaveBeenCalledWith("CORE-1");
     expect(page.getArtifactSubscribers).not.toHaveBeenCalled();
-    expect(within(section).getAllByTitle("0123456789abcdef")).toHaveLength(1);
+    expect(section.querySelectorAll('[data-agent-name="0123456789abcdef"]')).toHaveLength(1);
 
     const viaIssue = within(section).getByRole("list", { name: "Via issue subscription" });
     const rows = within(viaIssue).getAllByRole("listitem");

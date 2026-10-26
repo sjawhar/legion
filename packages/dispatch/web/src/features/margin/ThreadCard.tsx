@@ -536,7 +536,7 @@ export function ThreadCard({
               onClose={onToggle}
               onSent={() => {}}
               owner={composerOwner(owner)}
-              replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
+              replyTo={{ actor: root.author, excerpt: "", id: root.id, parentKind: "comment" }}
             />
           </div>
         ) : null}

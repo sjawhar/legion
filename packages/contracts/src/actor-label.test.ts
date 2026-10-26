@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 
-import { actorLabel, actorName, sessionLabel, shortSessionId } from "./actor-label";
+import {
+  actorAttribution,
+  actorLabel,
+  actorName,
+  sessionLabel,
+  shortSessionId,
+} from "./actor-label";
 
 const titles = new Map([["abcdef1234567890", "Planner"]]);
 
@@ -96,4 +102,29 @@ test("a session a service token authenticated keeps the service account after th
   expect(actorLabel({ id: "0123456789abcdef", kind: "session", service: "legion-worker" })).toBe(
     "session:01234567… (as legion-worker)"
   );
+});
+
+test("an actor's attribution is what its label adds after its name", () => {
+  expect(actorAttribution({ id: "s", kind: "session", owner: "alice" })).toBe(" (for alice)");
+  // An owner wins over a service: the human the write was made for is the one named.
+  expect(
+    actorAttribution({
+      id: "s",
+      kind: "session",
+      owner: "alice",
+      service: "system:serviceaccount:legion:legion-worker",
+    })
+  ).toBe(" (for alice)");
+  expect(
+    actorAttribution({
+      id: "s",
+      kind: "session",
+      service: "system:serviceaccount:legion:legion-worker",
+    })
+  ).toBe(" (as legion/legion-worker)");
+  expect(actorAttribution({ id: "s", kind: "session", origin: { session_title: "x" } })).toBe("");
+  expect(actorAttribution({ id: "alice", kind: "user" })).toBe("");
+  expect(actorAttribution({ id: "architecture-importer", kind: "system" })).toBe("");
+  const owned = { id: "abcdef1234567890", kind: "session" as const, owner: "bob" };
+  expect(actorLabel(owned, titles)).toBe(`${actorName(owned, titles)}${actorAttribution(owned)}`);
 });

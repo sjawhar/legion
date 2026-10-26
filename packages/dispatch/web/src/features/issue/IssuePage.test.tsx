@@ -271,9 +271,9 @@ test("IssuePage shows a session creator's live title and personal-token owner", 
 
   try {
     const creator = await expectCreator("chief of staff (for sami)");
-    expect(
-      within(creator).getByRole("link", { name: "chief of staff (for sami)" }).getAttribute("href")
-    ).toBe("/agents/creator-session/live");
+    expect(within(creator).getByRole("link", { name: "chief of staff" }).getAttribute("href")).toBe(
+      "/agents/creator-session/live"
+    );
     expect(creator.querySelector("[data-agent-name]")?.getAttribute("data-agent-state")).toBe(
       "running"
     );

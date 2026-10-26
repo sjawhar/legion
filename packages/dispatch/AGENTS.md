@@ -417,9 +417,14 @@ is an `AgentName`; nothing else draws one with markup of its own, hand-builds a 
 or links to `/agents/<id>/live` itself. `<AgentName actor={…} />`, or `sessionId` and
 `storedTitle` for a bare recorded id, names a session by its current registry title while the
 registry lists it, else by the contracts rule (`packages/contracts/src/actor-label.ts`: the title
-stamped on the write, else `session:<8>…`), followed by its attribution (` (for <owner>)`,
-` (as ns/name)`) as text, all in one `<span data-agent-name=<id> data-agent-state=…>`. A `user`
-or `system` actor renders its id as plain text and reads no registry. A role address (`role:…`)
+stamped on the write, else `session:<8>…`), followed by its attribution (`actorAttribution`:
+` (for <owner>)`, ` (as ns/name)`) as text after the name's link, so the link is named by the
+name alone and a screen reader hears the attribution once, all in one
+`<span data-agent-name=<id> data-agent-state=…>`. A name in the short form carries the full
+session id as that span's `title`: ids minted in the same minute share their first 8 characters.
+One resolver in the module (`resolveAgent`) gives the name and attribution to every drawn and
+spelled name there. A `user` or `system` actor renders its id as plain text, inside the host
+control for `kind="control"`, and reads no registry. A role address (`role:…`)
 is an address, not an agent, and stays text. `className` lands on the outer span, which is always
 `min-w-0 [overflow-wrap:anywhere]`, so a name can never widen its host: in a flex row it shrinks
 below its text, and a long title with no space breaks mid-word rather than pushing a 390 px page
@@ -468,7 +473,7 @@ never sets a `refetchInterval` of its own: TanStack runs one interval per observ
 mounted at different times would each poll. That is one request per 15 s per tab however many
 names are on screen, and never a request per agent.
 
-Where only a string fits, `useAgentText()` (`label`, `name`, `sessionText`, `initials`) names an
+Where only a string fits, `useAgentText()` (`label`, `part`, `sessionText`, `initials`) names an
 agent by the same rule: an `aria-label` or `title`, `document.title`, a confirmation dialog's
 sentence, the composer textarea's `@Title` mention text and its notices, a clipboard value, the
 Inbox empty state, and the Conversation avatar's initials. Never a visible name in a byline,
@@ -484,17 +489,18 @@ so there is no one agent to link and they stay text.
 
 A lint rule holds the boundary. The root `biome.json`'s last three `overrides` turn on
 `style.noRestrictedImports` at `error` for `packages/dispatch/web/src/**`, tests included: no
-import of `actorLabel`, `actorName`, `sessionLabel` or `shortSessionId` from `@legion/contracts`,
-and no `AGENT_LIVE_PATH` from a `**/refs/routes` or `./routes` specifier. `app.tsx` keeps the
-naming ban but may import the route path, which it mounts; `AgentName.tsx` and `routes.ts` are
-exempt, the latter for its reference short form (`agent/session:<8>…/slug`), a `dispatch://`
-reference rather than a shown agent. `bun run lint` here and `bunx biome check` at the root both
-fail on it. Where it stops: a namespace import (`import * as contracts from "@legion/contracts"`,
-then `contracts.actorLabel(…)`) is not caught, so review runs the audit, from the repository
+import of `actorAttribution`, `actorLabel`, `actorName`, `sessionLabel` or `shortSessionId` from
+`@legion/contracts`, and no `AGENT_LIVE_PATH` from a `**/refs/routes` or `./routes` specifier.
+`app.tsx` keeps the naming ban but may import the route path, which it mounts; `AgentName.tsx`
+and `routes.ts` are exempt, the latter for its reference short form (`agent/session:<8>…/slug`),
+a `dispatch://` reference rather than a shown agent. `bun run lint` here and `bunx biome check`
+at the root both fail on it. Where it stops: a namespace import
+(`import * as contracts from "@legion/contracts"`, then `contracts.actorLabel(…)`) is not
+caught, so review runs the audit, from the repository
 root, which catches the member use:
 
 ```bash
-rg -n --glob '!*.test.*' "LiveDot|FreshnessDot|liveDotBg|offlineDotBg|/live\`|AGENT_LIVE_PATH|actorLabel|actorName|sessionLabel|shortSessionId|session_title" packages/dispatch/web/src
+rg -n --glob '!*.test.*' "LiveDot|FreshnessDot|liveDotBg|offlineDotBg|/live\`|AGENT_LIVE_PATH|actorAttribution|actorLabel|actorName|sessionLabel|shortSessionId|session_title" packages/dispatch/web/src
 ```
 
 Its only expected hits are `AgentName.tsx`, `routes.ts`, `app.tsx` (the route),

@@ -17,19 +17,9 @@ export interface ComposerAnchor {
   readonly quote: string;
 }
 
-export type ReplyTarget = (
-  | {
-      /** The parent's author, which the Replying-to chip draws through `AgentName`. */
-      readonly actor: Actor;
-      readonly author?: never;
-    }
-  | {
-      readonly actor?: never;
-      /** The parent's author as text, for a target that carries no `actor`: one that quotes no
-       *  parent by author (a thread card's own reply). */
-      readonly author: string;
-    }
-) & {
+export interface ReplyTarget {
+  /** The parent's author, which the Replying-to chip draws through `AgentName`. */
+  readonly actor: Actor;
   readonly excerpt: string;
   readonly id: string;
   readonly parentKind: "comment" | "message";
@@ -39,10 +29,9 @@ export type ReplyTarget = (
   readonly thread?: {
     readonly delivery: DeliveryCapability;
     readonly target: string;
-    readonly title: string;
   };
   readonly to?: string;
-};
+}
 
 /** One accepted mention: the target, and the span of the body that names it. */
 export interface AcceptedMention {

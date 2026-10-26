@@ -41,7 +41,13 @@ import { usePinWrites } from "../issue/usePinWrites";
 import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
-import { AgentName, type AgentPart, AgentParts } from "../refs/AgentName";
+import {
+  AgentName,
+  type AgentPart,
+  AgentParts,
+  type AgentText,
+  useAgentText,
+} from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
@@ -97,11 +103,6 @@ const FILTERS: readonly { readonly label: string; readonly value: ConversationFi
   { label: "Closed", value: "closed" },
 ];
 
-/** The live session behind a stored delivery, by the id the attempt recorded. */
-function sessionTitle(sessionId: string | null, agents: readonly Agent[]): string | undefined {
-  return agents.find((agent) => agent.session_id === sessionId)?.title;
-}
-
 /** A delivery's address as `AgentParts` draws it: a `session:` address is that session, drawn
  *  by `AgentName`; a role address stays text. */
 function targetPart(target: string | null): AgentPart {
@@ -132,11 +133,8 @@ function UnreadMark(): ReactNode {
 }
 
 /** The delivery a reply into this thread inherits: the root's target, in the mode of the
- *  thread's most recent attempt (root or any reply), named after the session that received it. */
-function threadDelivery(
-  root: MessageConversation,
-  agents: readonly Agent[]
-): ReplyTarget["thread"] | undefined {
+ *  thread's most recent attempt (root or any reply). */
+function threadDelivery(root: MessageConversation): ReplyTarget["thread"] | undefined {
   if (root.kind !== "targeted-message" || root.root.target === null) {
     return undefined;
   }
@@ -149,22 +147,16 @@ function threadDelivery(
       last = attempt;
     }
   }
-  const target = root.root.target;
-  return {
-    delivery: last?.delivery ?? "steer",
-    target,
-    title: sessionTitle(last?.session_id ?? null, agents) ?? target,
-  };
+  return { delivery: last?.delivery ?? "steer", target: root.root.target };
 }
 
 /** What the composer quotes when the reader replies to `message`. */
 function replyTargetFor(
   message: Message,
   root: MessageConversation,
-  issueKey: string,
-  agents: readonly Agent[]
+  issueKey: string
 ): ReplyTarget {
-  const thread = threadDelivery(root, agents);
+  const thread = threadDelivery(root);
   return {
     actor: message.author,
     excerpt: message.body,
@@ -238,7 +230,7 @@ function ConversationReply({
               targetName,
             }
       }
-      onReply={isClosed ? undefined : () => onReply(replyTargetFor(reply, root, issueKey, agents))}
+      onReply={isClosed ? undefined : () => onReply(replyTargetFor(reply, root, issueKey))}
       quote={{
         author: parent?.author,
         excerpt: parent?.body ?? "",
@@ -370,7 +362,7 @@ function MessageTurn({
           {isClosed ? null : (
             <ReplyButton
               disabled={replyDisabled}
-              onClick={() => onReply(replyTargetFor(item.root, item, issueKey, agents))}
+              onClick={() => onReply(replyTargetFor(item.root, item, issueKey))}
             />
           )}
           <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
@@ -389,9 +381,11 @@ function MessageTurn({
   );
 }
 
+/** What the composer quotes when the reader replies to `comment`: its author, and the
+ *  mentions the reply starts with, each named as the mention picker names it (`sessionText`). */
 function commentReplyTarget(
   comment: Comment,
-  agents: readonly Agent[],
+  text: Pick<AgentText, "sessionText">,
   issueKey: string
 ): ReplyTarget {
   const author = comment.author;
@@ -399,13 +393,16 @@ function commentReplyTarget(
     author.kind === "session"
       ? [`session:${author.id}`]
       : comment.mentions.map((mention) => mention.target);
-  const mentions = [...new Set(targets)].map((target) => ({
-    target,
-    title: target.startsWith("session:")
-      ? (agents.find((agent) => `session:${agent.session_id}` === target)?.title ??
-        target.slice("session:".length))
-      : target.slice("role:".length),
-  }));
+  const mentions = [...new Set(targets)].map((target) => {
+    const sessionId = sessionOfAddress(target);
+    return {
+      target,
+      title:
+        sessionId === undefined
+          ? target.slice("role:".length)
+          : text.sessionText(sessionId, undefined),
+    };
+  });
   return {
     actor: author,
     excerpt: comment.body,
@@ -552,6 +549,7 @@ function CommentTurn({
   viewerLogin: string;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const agentText = useAgentText();
   const [editingCommentId, setEditingCommentId] = useState<string>();
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   const editComment = useCallback(
@@ -682,7 +680,7 @@ function CommentTurn({
           <ReplyButton
             disabled={replyDisabled}
             onClick={() => {
-              if (onReply(commentReplyTarget(item.root, agents, issueKey)) && !isPhone) {
+              if (onReply(commentReplyTarget(item.root, agentText, issueKey)) && !isPhone) {
                 setExpanded(true);
               }
             }}
@@ -746,7 +744,7 @@ function TargetedMessageTurn({
       deliveries={deliveryAttempts(item.root.deliveries, targetName)}
       header={<Avatar actor={asker} />}
       isClosed={isClosed}
-      onReply={() => onReply(replyTargetFor(item.root, item, issueKey, agents))}
+      onReply={() => onReply(replyTargetFor(item.root, item, issueKey))}
       onRetry={retry.mutate}
       register={register}
       replyDisabled={replyDisabled}

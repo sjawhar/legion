@@ -1208,6 +1208,53 @@ test("at a desktop width, another comment's Reply redirects onto the one whose r
   }
 });
 
+// A comment's Reply prefills its mention as the mention picker names the session
+// (`useAgentText().sessionText`): by its registry title, else as `@session <id>`.
+test("a comment's Reply names its session author's mention as the picker does", async () => {
+  const untitled = "01234567-89ab-7def-8000-000000000001";
+  const stub = stubLists({
+    agents: [agent("planner-session", "Planner")],
+    comments: [
+      comment("comment-a", {
+        author: { id: untitled, kind: "session" },
+        body: "Comment A",
+        created_at: "2026-09-20T00:00:00Z",
+      }),
+      comment("comment-b", {
+        author: {
+          id: "planner-session",
+          kind: "session",
+          origin: { session_title: "Old title" },
+        },
+        body: "Comment B",
+        created_at: "2026-09-20T00:01:00Z",
+      }),
+    ],
+  });
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = (id: string) => {
+    const element = view.container.querySelector<HTMLElement>(`[data-turn="comment:${id}"]`);
+    if (element === null) throw new Error(`expected ${id}'s turn`);
+    return element;
+  };
+
+  try {
+    await screen.findByText("Comment B");
+    await waitFor(() => expect(queryClient.getQueryData(["agents"])).toBeDefined());
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    const field = within(composer).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.click(within(turn("comment-a")).getByRole("button", { name: "Reply" }));
+    await waitFor(() => expect(field.value).toBe(`@session ${untitled}`));
+    fireEvent.click(within(composer).getByRole("button", { name: "Cancel reply" }));
+    fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
+    await waitFor(() => expect(field.value).toBe("@Planner"));
+  } finally {
+    view.unmount();
+    stub.restore();
+  }
+});
+
 // A message's Reply answers the same docked composer at every width (`MessageTurn`'s `onReply`
 // prop in `ConversationTab.tsx`, unconditional - not gated on phone viewport the way a
 // comment's is), so the hazard, and the redirect that closes it, hold here too.

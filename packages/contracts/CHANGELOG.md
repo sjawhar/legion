@@ -4,6 +4,12 @@
 
 ### Added
 
+- `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a
+  session a personal token attributed to a human, ` (as <namespace>/<name>)` for one a service
+  token authenticated, else `""` (always for a user or system). `actorLabel` is now `actorName`
+  followed by it, with the same output as before, so a reader that draws the name and the
+  attribution apart (the Dashboard's `AgentName`) takes the attribution from the one rule
+  instead of cutting it out of the label (INFRA-440).
 - The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
   and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
   frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`

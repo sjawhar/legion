@@ -94,7 +94,19 @@ test("a bare session id is named by its live title over the stored one", async (
   }
 });
 
-test("the owner and service attribution follow the name, outside its link", async () => {
+/** What a screen reader reads of `node`, in order: its text, an element with an `aria-label` as
+ *  that name, and nothing marked `aria-hidden`. */
+function spokenText(node: Node): string {
+  if (node.nodeType === node.TEXT_NODE) return node.textContent ?? "";
+  if (node.nodeType !== node.ELEMENT_NODE) return "";
+  const element = node as Element;
+  if (element.getAttribute("aria-hidden") === "true") return "";
+  const label = element.getAttribute("aria-label");
+  if (label !== null) return ` ${label} `;
+  return Array.from(element.childNodes, spokenText).join("").replace(/\s+/g, " ").trim();
+}
+
+test("the owner and service attribution follow the name, outside its link, read once", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([listed(LISTED_ID, "Planner")]);
   const { view } = renderWith(
     <>
@@ -110,14 +122,44 @@ test("the owner and service attribution follow the name, outside its link", asyn
     </>
   );
   try {
-    const owned = await screen.findByRole("link", { name: "Planner (for alice)" });
-    expect(owned.textContent).toBe("Planner");
-    expect(agentNode(view.container, LISTED_ID).textContent).toBe("Planner (for alice)");
-    const service = screen.getByRole("link", { name: "Implementer (as legion/legion-worker)" });
-    expect(service.textContent).toBe("Implementer");
-    expect(agentNode(view.container, "worker-session").textContent).toBe(
-      "Implementer (as legion/legion-worker)"
+    // The link is named by the visible name; the attribution after it is text, so a screen
+    // reader hears the byline as it reads, never the attribution twice.
+    const owned = await screen.findByRole("link", { name: "Planner" });
+    expect(owned.getAttribute("aria-label")).toBeNull();
+    await waitFor(() =>
+      expect(spokenText(agentNode(view.container, LISTED_ID))).toBe("Running Planner (for alice)")
     );
+    expect(agentNode(view.container, LISTED_ID).textContent).toBe("Planner (for alice)");
+    const service = screen.getByRole("link", { name: "Implementer" });
+    expect(service.getAttribute("aria-label")).toBeNull();
+    expect(spokenText(agentNode(view.container, "worker-session"))).toBe(
+      "Not running Implementer (as legion/legion-worker)"
+    );
+  } finally {
+    view.unmount();
+    agents.mockRestore();
+  }
+});
+
+test("a name in the short form carries the full session id as its tooltip", async () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([listed(LISTED_ID, "Planner")]);
+  const { view } = renderWith(
+    <>
+      <AgentName actor={{ id: LISTED_ID, kind: "session" }} />
+      <AgentName actor={{ id: "0123456789abcdef", kind: "session" }} />
+      <AgentName sessionId="01234567ffffffff" storedTitle={undefined} />
+      <AgentName kind="static" sessionId="fedcba9876543210" storedTitle="Stored" />
+    </>
+  );
+  try {
+    await screen.findByRole("link", { name: "Planner" });
+    expect(agentNode(view.container, LISTED_ID).getAttribute("title")).toBeNull();
+    expect(agentNode(view.container, "fedcba9876543210").getAttribute("title")).toBeNull();
+    // Two sessions minted in the same minute read alike; their tooltips tell them apart.
+    for (const id of ["0123456789abcdef", "01234567ffffffff"]) {
+      expect(agentNode(view.container, id).textContent).toBe("session:01234567…");
+      expect(agentNode(view.container, id).getAttribute("title")).toBe(id);
+    }
   } finally {
     view.unmount();
     agents.mockRestore();
@@ -141,6 +183,38 @@ test("a user or system actor is its id as plain text, with no link, state, or re
     expect(screen.queryByRole("img")).toBeNull();
     expect(agents).not.toHaveBeenCalled();
     expect(client.getQueryCache().find({ queryKey: ["agents"] })).toBeUndefined();
+  } finally {
+    view.unmount();
+    agents.mockRestore();
+  }
+});
+
+test("the control variant keeps the host control around a user or system actor's id", async () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const control = (name: ReactNode) => (
+    <button aria-expanded={false} type="button">
+      {name}
+    </button>
+  );
+  const { view } = renderWith(
+    <>
+      <AgentName actor={{ id: "alice", kind: "user" }} control={control} kind="control" />
+      <AgentName
+        actor={{ id: "architecture-importer", kind: "system" }}
+        className="host-class"
+        control={control}
+        kind="control"
+      />
+    </>
+  );
+  try {
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "alice" })).toBeDefined();
+    const system = screen.getByRole("button", { name: "architecture-importer" });
+    expect(system.parentElement?.className).toBe("host-class");
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(view.container.querySelector("[data-agent-name]")).toBeNull();
+    expect(agents).not.toHaveBeenCalled();
   } finally {
     view.unmount();
     agents.mockRestore();

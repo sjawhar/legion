@@ -226,10 +226,11 @@ test("an agent author and resolver link to their live conversations", () => {
     const card = screen.getByTestId(`margin-comment-${root.id}`);
     expect(card.textContent).toContain("Implementer (as legion/legion-worker) ·");
     expect(card.textContent).toContain("Resolved by Implementer (as legion/legion-worker) ·");
-    const names = within(card).getAllByRole("link", {
-      name: "Implementer (as legion/legion-worker)",
-    });
+    // The author, the resolver, and the thread composer's `Replying to <root author>`.
+    expect(card.textContent).toContain("Replying to Implementer (as legion/legion-worker)");
+    const names = within(card).getAllByRole("link", { name: "Implementer" });
     expect(names.map((name) => name.getAttribute("href"))).toEqual([
+      "/agents/legion-worker-session/live",
       "/agents/legion-worker-session/live",
       "/agents/legion-worker-session/live",
     ]);

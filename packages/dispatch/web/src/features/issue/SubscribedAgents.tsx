@@ -21,9 +21,10 @@ export interface SubscribedAgentsProps {
  * document's page: sessions whose persisted Envoy interests include this owner's topic
  * family, each drawn by `AgentName` (its name, its running state from the agent registry, and
  * a link to its live conversation), how long ago it was last seen, and an Unsubscribe control
- * that confirms before telling the session it was removed. The subscribers endpoint says who
- * is subscribed, whether each can be removed here, and the title each stored; it does not say
- * whether one is running, so one agent never shows two states on one page.
+ * that confirms before telling the session it was removed. The running state is the
+ * registry's alone: the subscribers endpoint's `live` (`Subscriber.live`) is a second snapshot
+ * taken at another time, so it is deliberately ignored and one agent never shows two states on
+ * one page.
  */
 export function SubscribedAgents({
   onUnsubscribe,

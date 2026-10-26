@@ -78,7 +78,13 @@
               "options": {
                 "paths": {
                   "@legion/contracts": {
-                    "importNames": ["actorLabel", "actorName", "sessionLabel", "shortSessionId"],
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
                     "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
                   }
                 },
@@ -105,7 +111,13 @@
               "options": {
                 "paths": {
                   "@legion/contracts": {
-                    "importNames": ["actorLabel", "actorName", "sessionLabel", "shortSessionId"],
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
                     "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
                   }
                 }
