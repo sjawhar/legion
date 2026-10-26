@@ -3,8 +3,8 @@
 # pods cannot reach the devbox at all (no tailnet bridge, no routable private address — GKE's
 # pattern, unlike AWS's directly-reachable private address). Shared by two callers:
 # stage4a-sandbox-runtime.sh's LEGION_E2E_POD_REACHABILITY=bridge mode (two ports: the worker
-# stream and the session database) and claude-backend-sandbox.sh (five ports: the daemon API, the
-# worker stream, Dispatch, the Envoy listener and NATS). Pods dial the Service; the Service's one
+# stream and the session database) and claude-backend-sandbox.sh (six ports: the daemon API, the
+# worker stream, Dispatch, the Envoy listener, NATS and the session database). Pods dial the Service; the Service's one
 # pod runs a chisel reverse-tunnel server (mirror.gcr.io/jpillora/chisel, pulled through the mirror
 # and pinned by digest per AGENTS.md); the devbox reaches that pod's control port only through
 # `kubectl port-forward` (never exposed by the Service, never by the cluster network at all), and a

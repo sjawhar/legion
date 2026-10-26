@@ -18,7 +18,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `dispatch-session-settings.sh` | Dispatch's live view shows a real Oh My Pi session's current model and thinking level and switches them (INFRA-195), run in an issue pod: Oh My Pi in `--mode rpc` with this checkout's Envoy plugin, a real listener, `nats-server`, Postgres and Dispatch, and one held-open Chromium page. Each value the header shows matches the session's own RPC answers, its `/effort` output and its session file: before any turn; within 20 s of a change at the terminal, by a message or by a fallback; after a pick from either picker, including `auto` kept across a model pick, the level a model pick leaves (compared with a twin session), a pick during a turn, a refusal, and a pick to a stopped session that ends in the no-answer line and is refused `ACCEPT_STALE` once it resumes. A forged switch, an Envoy message and an agent's bearer change nothing. Another session, a resumed session and a new session each keep their own values. A session on the released pi-envoy shows the restart notice. A switch is stored under the person who sent it |
 | `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, is reminded by Claude Code's own `Stop` hook when a turn of its ends with that phase still open, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
-| `claude-backend-sandbox.sh` | `worker_backends` under `runtime: kubernetes`, on a real cluster: the implementer's pod launches and its claim registers that pod's Claude Code transcript, under the `CLAUDE_CONFIG_DIR` the launch places on the issue's volume, as its session; its container's command line holds `claude-bridge --` and `--session-id <id>`, runs the pinned Claude Code its generation's start script installed on the issue's volume (the image carries the pin and no Claude Code), and reads its `mcp.json` from the launcher file of its own generation; Claude Code's own `Stop` hook reminds it when a turn of its ends with its phase still open; it completes that phase through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit; and, the pod deleted, its replacement installs its own generation's copy and runs `claude --resume <that id>` with the transcript's earlier bytes unchanged on the volume and an earlier marker quoted back out of its context. Devbox only |
+| `claude-backend-sandbox.sh` | `worker_backends` under `runtime: kubernetes`, on a real cluster: the implementer's pod launches and its claim registers that pod's Claude Code transcript, under the `CLAUDE_CONFIG_DIR` the launch places on the pod's own disk, as its session, which its launcher keeps as a row of the session table; its container's command line holds `claude-bridge --` and `--session-id <id>`, runs the pinned Claude Code its generation's start script installed on the pod's disk (the image carries the pin and no Claude Code), and reads its `mcp.json` from the launcher file of its own generation; Claude Code's own `Stop` hook reminds it when a turn of its ends with its phase still open; it completes that phase through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit; and, the pod deleted, its replacement installs its own generation's copy and runs `claude --resume <that id>` on the transcript its launcher restored from the table, its earlier bytes unchanged, and an earlier marker quoted back out of its context. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the implementer `memory_request: 8Gi` under `memory: 32Gi` is admitted, scheduled and recorded `Burstable` with exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable role and refuses a request past its limit or that is no quantity, naming the key |
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
@@ -765,9 +765,10 @@ LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
 LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 LEGION_E2E_DAEMON_PORT=<port> LEGION_E2E_WORKER_STREAM_PORT=<port> \
 LEGION_E2E_DISPATCH_PORT=<port> LEGION_E2E_ENVOY_PORT=<port> LEGION_E2E_NATS_PORT=<port> \
+LEGION_E2E_SESSION_DB_PORT=<port> \
   bash scripts/e2e/claude-backend-sandbox.sh     # → "claude backend sandbox e2e: PASS", exit 0
 
-# A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway; the five
+# A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway; the six
 # ports are free ports on the devbox, and the runtime kubeconfig is built as below:
 LEGION_E2E_OPERATOR_CONTEXT=<operator context> \
 LEGION_E2E_RUNTIME_KUBECONFIG=<file> \
@@ -780,6 +781,7 @@ LEGION_E2E_POD_REACHABILITY=bridge \
 LEGION_E2E_MODEL_ROUTE=key-file \
 LEGION_E2E_DAEMON_PORT=<port> LEGION_E2E_WORKER_STREAM_PORT=<port> \
 LEGION_E2E_DISPATCH_PORT=<port> LEGION_E2E_ENVOY_PORT=<port> LEGION_E2E_NATS_PORT=<port> \
+LEGION_E2E_SESSION_DB_PORT=<port> \
   bash scripts/e2e/claude-backend-sandbox.sh     # the same, through the bridge; needs passwordless sudo
 ```
 
@@ -794,9 +796,17 @@ carries the pin, `/opt/legion/claude-code`, and no Claude Code), the image's
 `@sjawhar/claude-envoy` as its MCP server and Legion plugin, its `mcp.json` written by the launcher
 into the generation's private directory, and
 its `CLAUDE_CONFIG_DIR` at `/legion/scratch/state/implementer/claude`, the role's own state home on
-the issue's volume. It is the first rig to run `runtime: kubernetes`, so what the tmux proof reads
+the pod's own disk, which dies with the pod (`docs/kubernetes.md`, "The disk dies with its pod").
+Every pod of the run keeps its sessions in a scratch session database of the run's own
+(`session_store: postgres`): the architect's and planner's Oh My Pi sessions are only there, and the
+implementer's launcher saves its transcript there as a row keyed by the file's absolute path and
+restores it from there in a replacement pod (`docs/kubernetes.md`, "Where a Claude Code session
+lives across pods"). It is the first rig to run `runtime: kubernetes`, so what the tmux proof reads
 from `/proc` and a pane's own files this one reads with `kubectl exec` and `kubectl get` against
-that pod. The checks, in order, which is the tmux proof's:
+that pod, and the session table with `psql` in the session database's container. The planner,
+told to plan, has 2700 s to reach implementing, Stage 4b's planning budget (its plan checks, gap
+analyst and plan-review rounds run on the operator route's own models), and the run prints the time
+it took beside that budget. The checks, in order, which is the tmux proof's:
 
 - `claude-implementer-registers`: the implementer's pod launches and its claim registers that pod's
   Claude Code transcript, `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session id>.jsonl`, as its session
@@ -805,12 +815,13 @@ that pod. The checks, in order, which is the tmux proof's:
   spec: the runtime sets only the kubelet-resolved variables on the container and carries every
   plain `NAME=value`, this one among them, in the launcher's start command (`launchEnvironment` in
   `packages/daemon/internal/runtime/sandbox/manifest.go`). The transcript is read in the pod and is
-  not empty.
+  not empty, and the session table already holds its row: the claim registers it only once the
+  launcher's first save has committed.
 - `claude-pod-runs-the-bridge`: the container's command line holds `claude-bridge --` and
   `--session-id <that id>`; the binary the bridge names, and the process under it, is the Claude
   Code this generation's start script installed,
   `/legion/scratch/state/implementer/legion-claude-code/g<generation>/node_modules/@anthropic-ai/claude-code-linux-x64/claude`
-  on the issue's volume (`claudeCodeBinary`, `packages/daemon/internal/runtime/sandbox/plugins.go`),
+  on the pod's disk (`claudeCodeBinary`, `packages/daemon/internal/runtime/sandbox/plugins.go`),
   never `/usr/local/bin/claude`, which the pod's image does not carry; that binary, run in the pod,
   prints the version the image's pin names; and the `--mcp-config` it names is a file of this
   generation's private directory, which the launcher wrote there.
@@ -833,15 +844,23 @@ that pod. The checks, in order, which is the tmux proof's:
   own workspace), which is on `sjawhar/legion-smoke` and which changes `.legion/<issue>/`, and the
   transcript holds the `mcp__legion__legion` call with a result that is not an error. No pull
   request is opened.
-- `pod-deleted-resumes-the-same-claude-session`: the pod deleted, the claim relaunches at a later
+- `pod-deleted-resumes-the-same-claude-session`: the transcript's size and the `sha256sum` of those
+  bytes are read in the pod, and the pod is deleted, its disk and the transcript's file with it.
+  Once no pod holds the deleted one's uid, and before the replacement's turn, the session table is
+  read from the devbox (`docker exec … psql` in the session database's container): the
+  transcript's row has a `byte_len` of at least that size, and the row's content followed by its
+  parts in `start_offset` order, as Oh My Pi and `ompsessions.Read` reassemble it, begins with
+  those bytes (the same `sha256sum` of its first *n* bytes). The claim relaunches at a later
   generation — its `generation` in `legion claims list`, read just before the deletion, which the
   daemon state's claim view does not carry — in a pod of another uid, registers the same session id
   and the same session file, runs `claude --resume <that id>` — the copy the replacement's own
   start script installed under the new generation's directory, the deleted generation's install
-  gone from the volume — and the transcript's bytes from
-  before the deletion are unchanged on the issue's volume (a `sha256sum` of its first *n* bytes,
-  taken in each pod). The resumed session, asked to quote the marker its implementation instruction
-  carried, quotes it, so the earlier turns are in its context and not only on the volume.
+  gone with the deleted pod's disk — and the transcript its launcher restored from the table begins
+  with the same bytes (the same `sha256sum`, taken in the new pod). The issue's architect and
+  planner, which ran in the same pod, each run a later generation in the replacement pod (its uid)
+  and register there: each is an Oh My Pi that loads its session index from the table with the
+  Claude Code rows in it. The resumed session, asked to quote the marker its implementation
+  instruction carried, quotes it, so the earlier turns are in its context and not only in the table.
 
 The image. `LEGION_E2E_IMAGE` must be the branch's own published worker image, by digest: a
 pull-request run of `.github/workflows/worker-image.yaml` publishes
@@ -861,8 +880,9 @@ operator supplies and the run never builds or stands in for (the operator contex
 `LEGION_E2E_OPERATOR_CONTEXT` (default `production`) the admin context this script's own reads of
 the namespace, the pods and its teardown use. `prerequisites` holds the runtime identity to listing
 the namespace's Sandboxes. `LEGION_E2E_IMAGE` (required, by digest) and
-`LEGION_E2E_STORAGE_CLASS` (required: the cluster has no default, and the resume is a read of the
-issue's volume) are the pod's. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the
+`LEGION_E2E_STORAGE_CLASS` (required: the StorageClass of the issue pod's own disk, a generic
+ephemeral volume, since the cluster has no default) are the pod's. `LEGION_E2E_CLAUDE_KEY_FILE`
+(required) names a file holding the
 Anthropic API key the Claude Code implementer reaches its model with; the run copies it once (0600),
 holds the endpoint to accepting it (`GET /v1/models`, the key in a 0600 header file and never an
 argv), and creates the providers Secret the runtime names for the project with it, which
@@ -878,23 +898,33 @@ it: under `gateway`, `{pod,models}.yml` with `LEGION_E2E_MODEL_GATEWAY_URL` and
 `{pod,models}-key-file.yml`, which carry no projected token and read the same Secret's
 `ANTHROPIC_API_KEY`. `LEGION_E2E_POD_REACHABILITY` (required, `aws-private-ip` or `bridge`) is how
 the pods reach the run's services on the devbox ([Pod reachability](#pod-reachability), below).
+The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another deployment's two
+role Apps; a run here sets none and takes this deployment's own. `prerequisites` refuses a
+malformed one by name, never printing it, and proves each key is its id's App
+([`read_app_logins`](#libworkflowsh)) before the run's first write; the daemon's `github_apps` is
+the block proved, and no process the run starts inherits an App key.
 `CLAUDE_SANDBOX_E2E_EVIDENCE_DIR` names the evidence directory; by default it
 is a fresh one under `/tmp`, kept and printed, holding the transcript of the run, the daemon's log,
-the `legion.yaml` and pod fixture the run wrote, the implementer's Claude Code transcript and the
-namespace snapshots.
+the `legion.yaml` and pod fixture the run wrote, the implementer's Claude Code transcript as the
+session table holds it, and the namespace snapshots.
 
-The five ports are required in both modes, have no default and must differ:
+The six ports are required in both modes, have no default and must differ:
 `LEGION_E2E_DAEMON_PORT`, `LEGION_E2E_WORKER_STREAM_PORT`, `LEGION_E2E_DISPATCH_PORT`,
-`LEGION_E2E_ENVOY_PORT` and `LEGION_E2E_NATS_PORT`; `prerequisites` refuses one that is unset, not a
-number, or taken. The rig is the tmux proof's — scratch Postgres, NATS, Envoy listener and
+`LEGION_E2E_ENVOY_PORT`, `LEGION_E2E_NATS_PORT` and `LEGION_E2E_SESSION_DB_PORT`; `prerequisites`
+refuses one that is unset, not a number, the same as another, or taken. The rig is the tmux
+proof's — scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
 [`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, the design gate off, and the smoke
 repository `sjawhar/legion-smoke`, where the implementer pushes a branch and opens no pull request —
-but its services are dialled from inside a pod, so every one of them binds the address
+plus the scratch session database, a second Postgres (the pinned image CI tests against, on tmpfs,
+`--cpus 1`), whose password reaches docker through an owner-only env file and whose pod-facing URL,
+`postgres://legion:<password>@<host>:<port>/sessions`, is written only to an owner-only file the
+providers Secret's `SESSION_DSN` key is made from (`session_dsn_secret: SESSION_DSN`), neither
+printed. Its services are dialled from inside a pod, so every one of them binds the address
 [Pod reachability](#pod-reachability) picks: the devbox's private address under `aws-private-ip`,
 on a port the devbox's security group admits from the Legion nodes
 ([Port admission](#port-admission)), or its loopback under `bridge`, on a port that need only be
-free on the devbox. Postgres is the daemon's and Dispatch's alone and stays
+free on the devbox. The daemon's and Dispatch's own Postgres is theirs alone and stays
 on loopback. Legion's role Apps resolve as the tmux proof's do, through each App's
 `private_key_command` and never this shell, and the proof human is the devbox's ordinary `gh`
 acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts from the
@@ -904,27 +934,28 @@ Everything the run creates in namespace `legion` carries its own `legion.dev/pro
 run's Dispatch project lowercased, which is the daemon's own claim token for it — and
 [`lib/namespace-rig.sh`](#libnamespace-rigsh) owns it: `prerequisites` refuses to start while the
 namespace holds anything under that label, `snapshot` records the run's own objects before it, and
-the `EXIT` trap copies the implementer's transcript out of its pod, stops the daemon and the scratch
-services, removes the containers, deletes everything under that label, closes any pull request of
-the run's project and deletes the issue's branch, and then compares the namespace with its snapshot.
+the `EXIT` trap copies the implementer's transcript out of the session table, stops the daemon and
+the scratch services, removes the containers, deletes everything under that label, closes any pull
+request of the run's project and deletes the issue's branch, and then compares the namespace with
+its snapshot.
 Under `bridge`, the bridge's own pod, Service and auth Secret carry the same label, and
 `bridge_stop` deletes them by their one exact name before that comparison runs. Nothing outside
 `legion` is touched.
 
 ### Pod reachability
 
-`LEGION_E2E_POD_REACHABILITY` picks how the pods reach the run's five services on the devbox, as
+`LEGION_E2E_POD_REACHABILITY` picks how the pods reach the run's six services on the devbox, as
 Stage 4a's does ([The bridge](#the-bridge-legion_e2e_pod_reachabilitybridge)):
 
 - **`aws-private-ip`**: the pods reach the devbox at its private address, which `prerequisites`
   reads from instance metadata, refusing the run when it is unreachable or holds no `local-ipv4`.
-  The five services bind that address, each on a port the devbox's security group admits from the
+  The six services bind that address, each on a port the devbox's security group admits from the
   Legion nodes ([Port admission](#port-admission)). This mode needs no bridge, no sudo and no
   private mount namespace.
 - **`bridge`**: for a cluster whose pods cannot reach the devbox at all (no tailnet, no routable
-  private address — GKE's shape). The five services bind the devbox's loopback, each on a port
+  private address — GKE's shape). The six services bind the devbox's loopback, each on a port
   that need only be free on the devbox, and `begin bridge`, right after `begin snapshot`, stands up
-  [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh) over all five: one pod and one ClusterIP Service of
+  [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh) over all six: one pod and one ClusterIP Service of
   the run's own, both named `bridge-` and the run's project label, whose Service carries one port
   per service, named `p<port>`, and whose reverse tunnel forwards each back to `127.0.0.1:<port>`
   on the devbox. The pods dial the Service's cluster-DNS name,
@@ -940,8 +971,9 @@ own — the one it has under `aws-private-ip`, the caller's less the NATS seeds,
 public-repository token and `ANTHROPIC_API_KEY` — travels NUL-separated in an owner-only file the
 root `bash` reads and removes, never an argument. Every link after sudo execs rather than forks, so
 the pid the wrapper records is the daemon's own. This mode needs passwordless sudo (`sudo -n true`,
-refused by name when it asks for a password), and `sudo`, `setpriv`, `unshare`, `getent` and
-`sha256sum` beside the tools both modes need.
+refused by name when it asks for a password), and `sudo`, `setpriv`, `unshare` and `getent` beside
+the tools both modes need (`sha256sum` among them, which also holds the session table's copy of the
+transcript to the pod's).
 
 `prerequisites` proves that namespace before the run creates anything. A probe runs in it exactly as
 the daemon will and must print the pid the wrapper recorded, the devbox user's own uid and gid, and
@@ -1006,20 +1038,21 @@ Each lane needs the ports it binds itself, and the scripts need different sets, 
 - **Stage 4a**: two, `LEGION_E2E_WORKER_STREAM_PORT` (default `13373`, the same name and default
   Stage 4b reads) and `LEGION_E2E_SESSION_DB_PORT` (required, no default: the run's own scratch
   Postgres, which every check's pods read).
-- **[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh)**: five, `LEGION_E2E_DAEMON_PORT`,
-  `LEGION_E2E_WORKER_STREAM_PORT`, `LEGION_E2E_DISPATCH_PORT`, `LEGION_E2E_ENVOY_PORT` and
-  `LEGION_E2E_NATS_PORT`, all required with no default, all distinct: its daemon's API and worker
-  stream, and the scratch Dispatch, Envoy listener and NATS its pods dial, which are the devbox's
-  own. Under `aws-private-ip`, five of the six leave room for no other lane, so it runs alone;
-  under `bridge` the five need only be free on the devbox.
+- **[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh)**: six, `LEGION_E2E_DAEMON_PORT`,
+  `LEGION_E2E_WORKER_STREAM_PORT`, `LEGION_E2E_DISPATCH_PORT`, `LEGION_E2E_ENVOY_PORT`,
+  `LEGION_E2E_NATS_PORT` and `LEGION_E2E_SESSION_DB_PORT`, all required with no default, all
+  distinct: its daemon's API and worker stream, and the scratch Dispatch, Envoy listener, NATS and
+  session database its pods dial, which are the devbox's own. Under `aws-private-ip` it takes all
+  six admitted ports, leaving none for another lane, so it runs alone; under `bridge` the six need
+  only be free on the devbox.
 
 Both stage scripts default `LEGION_E2E_WORKER_STREAM_PORT` to `13373`, so two lanes at their
 defaults — two Stage 4b's, two Stage 4a's, or one of each — collide there; set at least one
 override to run two lanes together, and give each lane its own session-database port, which
 neither defaults. With six admitted ports, a Stage 4a lane takes two and a Stage 4b lane three, so
 three Stage 4a lanes or two Stage 4b lanes fit at once; more needs the admitted range widened. A
-Claude Code sandbox run under `aws-private-ip` takes five of the six and names every one of them
-itself, so it runs while no stage lane does.
+Claude Code sandbox run under `aws-private-ip` takes all six and names every one of them itself, so
+it runs while no stage lane does.
 
 ## stage4a-sandbox-runtime.sh
 
@@ -1144,9 +1177,9 @@ GKE's pods have no route to the devbox at all: no tailnet bridge, no routable pr
 could reach only in-cluster Services). [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh) stands in for
 that reachability with a reverse tunnel, entirely of the run's own. It serves two callers: this
 stage, over two ports (the worker stream's and the session database's), and
-[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), over five (its daemon's API and worker
-stream, the scratch Dispatch, Envoy listener and NATS; [Pod reachability](#pod-reachability)).
-Here:
+[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), over six (its daemon's API and worker
+stream, the scratch Dispatch, Envoy listener, NATS and session database;
+[Pod reachability](#pod-reachability)). Here:
 
 1. **`begin bridge`**, right after `begin snapshot` (so a leaked bridge object shows up in
    `namespace-clean`'s before/after diff even if its own teardown fails) and before
@@ -3377,7 +3410,8 @@ The reverse-tunnel bridge a stage proof uses when its pods cannot reach the devb
 (`LEGION_E2E_POD_REACHABILITY=bridge`, GKE's shape). Two callers source it, each after
 [`lib/namespace-rig.sh`](#libnamespace-rigsh): Stage 4a, which bridges two ports (the worker stream
 and the session database), and [`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), which
-bridges five (its daemon's API and worker stream, the scratch Dispatch, Envoy listener and NATS).
+bridges six (its daemon's API and worker stream, the scratch Dispatch, Envoy listener, NATS and
+session database).
 
 ```sh
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"     # sourced, never run
