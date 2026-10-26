@@ -53,12 +53,12 @@ type racingRoleClaimResolver struct {
 	releaseCalls       int
 }
 
-func (r *racingRoleClaimResolver) ReleaseExpiredRoleClaim(role, sessionID string, ttl time.Duration) (store.ExpiredRoleClaimRelease, error) {
+func (r *racingRoleClaimResolver) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, ttl time.Duration) (store.ExpiredRoleClaimRelease, error) {
 	r.releaseCalls++
 	if r.releaseCalls == 1 {
 		r.beforeFirstRelease()
 	}
-	return r.Registry.ReleaseExpiredRoleClaim(role, sessionID, ttl)
+	return r.Registry.ReleaseExpiredRoleClaim(ctx, role, sessionID, ttl)
 }
 
 // stalledStreamInfo is a stream-info lookup that never answers until the test ends, like a
@@ -1246,7 +1246,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if claim.Code != http.StatusOK {
 		t.Fatalf("claim role: status = %d, body = %s", claim.Code, claim.Body.String())
 	}
-	persisted, err := firstRegistry.RoleClaim(role)
+	persisted, err := firstRegistry.RoleClaim(context.Background(), role)
 	if err != nil {
 		t.Fatalf("read persisted role claim: %v", err)
 	}

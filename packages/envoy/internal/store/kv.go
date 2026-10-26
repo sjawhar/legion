@@ -353,7 +353,7 @@ func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 }
 
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
-	cur, getErr := r.Get(item.SessionID)
+	cur, getErr := r.Get(context.Background(), item.SessionID)
 	merged, err := mergeForUpsert(cur, getErr, item, topics, r.now().UnixMilli())
 	if err != nil {
 		return Interest{}, err
@@ -401,29 +401,70 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	return item, nil
 }
 
+// ErrMalformedRoleClaim is a role claim record the bucket holds and this build cannot read: one
+// that names no holder, or JSON that is not a claim. The bus answered it, so it is not a read that
+// failed, and reading it again returns the same record; each error wrapping it names which.
+var ErrMalformedRoleClaim = errors.New("malformed role claim")
+
 func decodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
 	err := json.Unmarshal(value, &claim)
 	if err == nil {
 		if strings.TrimSpace(claim.HolderSessionID) == "" {
-			return RoleClaim{}, fmt.Errorf("role claim has no holder")
+			return RoleClaim{}, fmt.Errorf("%w: it names no holder", ErrMalformedRoleClaim)
 		}
 		return claim, nil
 	}
 	if json.Valid(value) {
-		return RoleClaim{}, fmt.Errorf("decode role claim: %w", err)
+		return RoleClaim{}, fmt.Errorf("%w: %w", ErrMalformedRoleClaim, err)
 	}
 	// Accept bare session-ID records so persisted claims remain routable;
 	// a later claim normalizes the row to the structured format.
 	holder := strings.TrimSpace(string(value))
 	if holder == "" {
-		return RoleClaim{}, fmt.Errorf("decode legacy role claim: empty holder")
+		return RoleClaim{}, fmt.Errorf("%w: a legacy record with an empty holder", ErrMalformedRoleClaim)
 	}
 	return RoleClaim{HolderSessionID: holder}, nil
 }
 
-func (r *Registry) roleClaim(role string) (RoleClaim, nats.KeyValueEntry, error) {
-	entry, err := r.roles().Get(role)
+// bounded is call, a bucket call that takes no context, as a caller holding ctx waits for it:
+// nats.go's KV reads and deletes take none and wait out the JetStream MaxWait (10 s), so the wait
+// ends at the earlier of call's answer and ctx's end. answered is false when ctx ended first, and
+// err is then ctx's error; the abandoned call runs on to its own end and its answer is dropped. A
+// ctx that has already ended starts no call, and a ctx that can never end (context.Background, as
+// every caller that answers no request passes) is simply call, in this goroutine.
+func bounded[T any](ctx context.Context, call func() (T, error)) (value T, answered bool, err error) {
+	if ctx.Done() == nil {
+		value, err = call()
+		return value, true, err
+	}
+	if err := ctx.Err(); err != nil {
+		return value, false, err
+	}
+	type answer struct {
+		value T
+		err   error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		value, err := call()
+		answers <- answer{value: value, err: err}
+	}()
+	select {
+	case got := <-answers:
+		return got.value, true, got.err
+	case <-ctx.Done():
+		return value, false, ctx.Err()
+	}
+}
+
+// roleClaim reads role's claim from the bucket, waiting no longer than ctx (bounded).
+func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.KeyValueEntry, error) {
+	roles := r.roles()
+	entry, answered, err := bounded(ctx, func() (nats.KeyValueEntry, error) { return roles.Get(role) })
+	if !answered {
+		return RoleClaim{}, nil, fmt.Errorf("read role %s's claim: %w", role, err)
+	}
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return RoleClaim{}, nil, nil
 	}
@@ -457,7 +498,7 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 // refuses (bus.ErrRefused: too long, or outside its key alphabet) has a holder nothing can tell, so
 // it is left to the role reaper, which deletes it, or skips one no KV call can delete.
 func (r *Registry) releaseRoleClaim(sessionID, role string) error {
-	claim, entry, err := r.roleClaim(role)
+	claim, entry, err := r.roleClaim(context.Background(), role)
 	if errors.Is(err, bus.ErrRefused) {
 		r.logger().Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 		return nil
@@ -482,11 +523,19 @@ func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 //
 // Its result distinguishes a confirmed deletion from a concurrent removal or
 // replacement, so callers never report that a lost conditional delete released
-// a claim.
-func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
-	claim, entry, err := r.roleClaim(role)
+// a claim. A failure is reported retained, its error naming the release.
+//
+// The claim's read and its conditional delete each wait no longer than ctx (bounded): an HTTP
+// route passes its request's own context, role delivery and the reaper context.Background(). A
+// delete ctx abandoned may still land after this answer. That is safe to leave running: it deletes
+// the claim only if the bucket still holds the very revision it read, naming sessionID, whom the
+// caller has just found gone from the session bucket, so at worst a lapsed holder's claim is
+// released a moment after the caller was told the bus did not answer, and a fresh claim that
+// landed meanwhile is never touched.
+func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
+	claim, entry, err := r.roleClaim(ctx, role)
 	if err != nil {
-		return ExpiredRoleClaimRetained, err
+		return ExpiredRoleClaimRetained, fmt.Errorf("release role %s's expired claim held by %s: %w", role, sessionID, err)
 	}
 	if entry == nil {
 		return ExpiredRoleClaimMissing, nil
@@ -500,7 +549,10 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
-	err = r.roles().Delete(role, nats.LastRevision(entry.Revision()))
+	roles := r.roles()
+	_, _, err = bounded(ctx, func() (struct{}, error) {
+		return struct{}{}, roles.Delete(role, nats.LastRevision(entry.Revision()))
+	})
 	switch {
 	case err == nil:
 		return ExpiredRoleClaimReleased, nil
@@ -509,7 +561,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 	case errors.Is(err, nats.ErrKeyExists):
 		return ExpiredRoleClaimSuperseded, nil
 	default:
-		return ExpiredRoleClaimRetained, err
+		return ExpiredRoleClaimRetained, fmt.Errorf("release role %s's expired claim held by %s: %w", role, sessionID, err)
 	}
 }
 
@@ -531,7 +583,7 @@ func (r *Registry) releaseAllRoleClaims(sessionID string) error {
 
 func (r *Registry) Remove(sessionID string, topics []string) error {
 	if len(topics) == 0 {
-		item, err := r.Get(sessionID)
+		item, err := r.Get(context.Background(), sessionID)
 		if err == nil {
 			if err := r.releaseRoleClaims(sessionID, item.Topics); err != nil {
 				return err
@@ -553,7 +605,7 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 	if len(topics) == 0 {
 		return r.deleteInterest(sessionID)
 	}
-	item, err := r.Get(sessionID)
+	item, err := r.Get(context.Background(), sessionID)
 	if err != nil {
 		return err
 	}
@@ -604,7 +656,7 @@ func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, superse
 // evaluated the existing soft-claim rules.
 func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessionID string, soft bool, supersedable ...string) (Interest, error) {
 	roleTopic := contracts.RoleTopicPrefix + role
-	oldClaim, entry, err := r.roleClaim(role)
+	oldClaim, entry, err := r.roleClaim(context.Background(), role)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -680,17 +732,18 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	return item, nil
 }
 
-// RoleClaim returns the durable claim for role. An unclaimed role returns a
-// zero-value claim without an error.
-func (r *Registry) RoleClaim(role string) (RoleClaim, error) {
-	claim, _, err := r.roleClaim(role)
+// RoleClaim returns the durable claim for role, read from the bucket within ctx (bounded). An
+// unclaimed role returns a zero-value claim without an error; a record that is not a claim,
+// ErrMalformedRoleClaim.
+func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error) {
+	claim, _, err := r.roleClaim(ctx, role)
 	return claim, err
 }
 
 // RoleHolder returns the authoritative session ID for role. An unclaimed role
 // returns an empty holder without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
-	claim, err := r.RoleClaim(role)
+	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
 		return "", err
 	}
@@ -699,15 +752,20 @@ func (r *Registry) RoleHolder(role string) (string, error) {
 
 // Get returns the Interest for a session. Cache first, direct KV read on miss.
 // The KV fallback also repopulates the cache, bridging the warm-up window after
-// Open() before watch() has fully populated the cache.
-func (r *Registry) Get(sessionID string) (Interest, error) {
+// Open() before watch() has fully populated the cache. A cache hit answers in the
+// caller's goroutine; only the bucket read on a miss waits on ctx (bounded).
+func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) {
 	r.mu.RLock()
 	item, ok := r.cache[sessionID]
 	r.mu.RUnlock()
 	if ok {
 		return item, nil
 	}
-	entry, err := r.interests().Get(sessionID)
+	interests := r.interests()
+	entry, answered, err := bounded(ctx, func() (nats.KeyValueEntry, error) { return interests.Get(sessionID) })
+	if !answered {
+		return Interest{}, fmt.Errorf("read %s's interest record: %w", sessionID, err)
+	}
 	if err != nil {
 		return Interest{}, err
 	}
@@ -818,7 +876,7 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 	}
 	reaped := 0
 	for _, role := range roles {
-		claim, err := r.RoleClaim(role)
+		claim, err := r.RoleClaim(context.Background(), role)
 		if errors.Is(err, bus.ErrRefused) {
 			switch err := r.roles().Delete(role); {
 			case err == nil:
@@ -837,7 +895,7 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 		if claim.HolderSessionID == "" || isAlive(claim.HolderSessionID) {
 			continue
 		}
-		release, err := r.ReleaseExpiredRoleClaim(role, claim.HolderSessionID, sessionTTL)
+		release, err := r.ReleaseExpiredRoleClaim(context.Background(), role, claim.HolderSessionID, sessionTTL)
 		if err != nil {
 			return 0, err
 		}

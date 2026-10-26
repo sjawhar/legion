@@ -42,7 +42,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 	assertRoleHolder(t, registry, "reviewer", "ses_live")
 	assertRoleHolder(t, registry, readableRole, readableSession)
 	for _, sessionID := range []string{"ses_live", readableSession, unreadableSession} {
-		if _, err := registry.Get(sessionID); err != nil {
+		if _, err := registry.Get(context.Background(), sessionID); err != nil {
 			t.Fatalf("get the %d-byte session's interest: %v", len(sessionID), err)
 		}
 	}
@@ -169,7 +169,7 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 			t.Fatalf("remove a session while a claim is stored under bad:role: %v", err)
 		}
 		assertRoleHolder(t, registry, "reviewer", "")
-		if _, err := registry.Get("ses_leaving"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		if _, err := registry.Get(context.Background(), "ses_leaving"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 			t.Fatalf("ses_leaving's interest after its removal: %v, want it gone", err)
 		}
 	})

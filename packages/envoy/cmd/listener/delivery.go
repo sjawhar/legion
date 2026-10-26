@@ -574,7 +574,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		message.finalize(false)
 		return
 	}
-	interest, err := cfg.registry.Get(sessionID)
+	interest, err := cfg.registry.Get(context.Background(), sessionID)
 	var interestPtr *store.Interest
 	if err == nil {
 		interestPtr = &interest

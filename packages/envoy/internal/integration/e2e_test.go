@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,7 +173,7 @@ func (h *listenerHarness) handleAgent(msg *natsgo.Msg, item contracts.Envelope) 
 		_ = msg.Ack()
 		return
 	}
-	interest, err := h.env.registry.Get(sessionID)
+	interest, err := h.env.registry.Get(context.Background(), sessionID)
 	var interestPtr *store.Interest
 	if err == nil {
 		interestPtr = &interest
@@ -471,7 +472,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		t.Fatalf("upsert stale interest: %v", err)
 	}
 
-	interest, err := env.registry.Get("ses_stale")
+	interest, err := env.registry.Get(context.Background(), "ses_stale")
 	if err != nil {
 		t.Fatalf("get stale interest: %v", err)
 	}
@@ -492,7 +493,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		t.Fatalf("put stale interest: %v", err)
 	}
 	waitUntil(t, 5*time.Second, "stale cache update", func() bool {
-		current, getErr := env.registry.Get("ses_stale")
+		current, getErr := env.registry.Get(context.Background(), "ses_stale")
 		return getErr == nil && current.UpdatedAt == interest.UpdatedAt
 	})
 
@@ -504,7 +505,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		t.Fatalf("expected 1 reaped interest, got %d", reaped)
 	}
 	waitUntil(t, 5*time.Second, "stale interest deletion", func() bool {
-		_, getErr := env.registry.Get("ses_stale")
+		_, getErr := env.registry.Get(context.Background(), "ses_stale")
 		return getErr != nil && errors.Is(getErr, natsgo.ErrKeyNotFound)
 	})
 }

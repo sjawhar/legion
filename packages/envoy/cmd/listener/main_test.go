@@ -1182,7 +1182,7 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 		t.Fatalf("expected role topic, got %v", item.Topics)
 	}
 
-	persisted, err := registry.Get("ses_role")
+	persisted, err := registry.Get(context.Background(), "ses_role")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -1347,7 +1347,7 @@ func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 
 	// Allow watcher to propagate delete event to cache
 	time.Sleep(500 * time.Millisecond)
-	if _, err := registry.Get("ses_delete_target"); err == nil {
+	if _, err := registry.Get(context.Background(), "ses_delete_target"); err == nil {
 		t.Fatal("expected interest to be deleted")
 	}
 }

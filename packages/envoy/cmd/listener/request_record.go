@@ -34,6 +34,10 @@ const (
 	// (errRoleHolderChanged): every bus read answered, so it is deliberately not
 	// outcomeBusUnavailable, which keeps its meaning of a bus that did not answer.
 	outcomeRoleHolderChanged requestOutcome = "role_holder_changed"
+	// outcomeRoleClaimUnreadable is the publish route's role claim record that the bus answered
+	// and no read can decode (store.ErrMalformedRoleClaim): a 500, not outcomeBusUnavailable,
+	// since the bus did answer and retrying reads the same record.
+	outcomeRoleClaimUnreadable requestOutcome = "role_claim_unreadable"
 	// outcomePublishDenied is a publish the server refused under this listener's own publish
 	// permissions (bus.ErrPublishDenied). Only the publish route can record it, and only for a
 	// topic the stream does not capture: bus.ErrPublishDenied is made in one place,
@@ -118,6 +122,15 @@ func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error)
 // and refused" afterwards.
 func (rec *requestRecord) refuseRoleHolderChanged(w http.ResponseWriter, role string) {
 	rec.write(writeRoleHolderChanged(w, role, "publish"), outcomeRoleHolderChanged)
+}
+
+// refuseRoleClaimUnreadable answers a publish whose role claim record cannot be decoded
+// (store.ErrMalformedRoleClaim) with the 500 writeRoleClaimUnreadable writes for both routes that
+// resolve a role, and records it under its own outcome rather than bus_unavailable: the bus
+// answered, so naming it bus_unavailable would send an operator after an outage that never
+// happened instead of after the record.
+func (rec *requestRecord) refuseRoleClaimUnreadable(w http.ResponseWriter, role string, err error) {
+	rec.write(writeRoleClaimUnreadable(w, role, err), outcomeRoleClaimUnreadable)
 }
 
 // refuseRoleHolder answers the publish route's two role-holder refusals. A lapsed holder is the

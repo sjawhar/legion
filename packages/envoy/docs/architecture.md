@@ -104,13 +104,20 @@ recorded `role_holder_changed`: every bus read answered, so no bus was unavailab
 race with the same 503 and `Retry-After: 1`, worded
 `{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; a read
 that did not answer, within its cap or that budget, is the bus-unavailable 503 above with
-`Retry-After: 1`, naming the call, and a key NATS refuses keeps its 413 or 400.
+`Retry-After: 1`, naming the call, and a key NATS refuses keeps its 413 or 400. On both routes a
+claim record no read can decode (`store.ErrMalformedRoleClaim`: one naming no holder, or JSON that
+is not a claim) is `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}`
+with no `Retry-After` (`writeRoleClaimUnreadable`), recorded `role_claim_unreadable` on a publish:
+the bus answered, and a retry reads the same record. `store.Registry` bounds the claim read and
+the release by the caller's context itself (`RoleClaim`, `ReleaseExpiredRoleClaim`), since nats.go's
+KV calls take none.
 
 A send and a publish stamp the envelope's `sender` from the sender's interest record (`senderStamp`,
 `cmd/listener/api.go`), which a cache miss reads through to the bucket within one second of the
-same budget (`senderStampReadTimeout`). The stamp is only enrichment: a read that does not answer
-leaves it the session id and the title this listener's cache holds, and the publish that follows
-meets the same silent bus and answers the 503 above inside the caller's attempt.
+same budget (`senderStampReadTimeout`; `store.Registry.Get` bounds the bucket read alone, so a
+cache hit answers in the caller's goroutine). The stamp is only enrichment: a read that does not
+answer leaves it the session id and the title this listener's cache holds, and the publish that
+follows meets the same silent bus and answers the 503 above inside the caller's attempt.
 
 A publish whose caller's context has already ended puts nothing on the wire; on these two routes it
 is answered the 503 above. A core publish (a role lane or an ad-hoc topic) checks its deadline
@@ -130,10 +137,10 @@ Each inbound send and publish is recorded in one line, INFO when accepted and WA
 `source`, `source_session`, `payload_summary`, `outcome` and `status`, and `holder` as well when a
 role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too_large` and
 `bus_unavailable`, plus `no_live_session` and `capability_refused` for send and `publish_denied`,
-`role_unclaimed`, `role_lapsed` and `role_holder_changed` for publish. Two refusals carry no such
-line, because neither reaches a handler: the 401 the API auth wrapper writes, and a request the
-starting gate turns away while the routes are still opening, which logs `request refused while
-starting` itself.
+`role_unclaimed`, `role_lapsed`, `role_holder_changed` and `role_claim_unreadable` for publish. Two
+refusals carry no such line, because neither reaches a handler: the 401 the API auth wrapper
+writes, and a request the starting gate turns away while the routes are still opening, which logs
+`request refused while starting` itself.
 
 `envoy_messages_delivered_total` counts one delivery attempt per recipient, labelled
 `delivery_status`:

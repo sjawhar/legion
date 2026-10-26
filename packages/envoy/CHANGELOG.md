@@ -640,7 +640,11 @@
   which it answered 500, with the same 503 and `Retry-After: 1`, worded
   `{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; a
   role store that did not answer within its cap or the budget, which it also answered 500, is the
-  bus-unavailable 503 with `Retry-After: 1`, as on the publish route. Both message routes read the
+  bus-unavailable 503 with `Retry-After: 1`, as on the publish route. A role claim record no read
+  can decode (one naming no holder, or JSON that is not a claim) is, on both routes,
+  `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no
+  `Retry-After` and not the bus-unavailable 503: the bus answered it, and a retry reads the same
+  record. Both message routes read the
   sender's interest record for the envelope's `sender` within a second of that budget
   (`senderStampReadTimeout`): a read that does not answer stamps the session id and the title this
   listener's cache holds, and the publish goes on to meet the silent bus itself and answer the
@@ -694,8 +698,8 @@
   `topic`), the envelope's `event_id`, `source`, `source_session` and `payload_summary`, the
   `status` answered, the `holder` a role lane resolved, and an `outcome` of `accepted`,
   `invalid_request`, `too_large` or `bus_unavailable` on either line, `no_live_session` or
-  `capability_refused` on a send, and `publish_denied`, `role_unclaimed`, `role_lapsed` or
-  `role_holder_changed` on a publish (INFRA-141).
+  `capability_refused` on a send, and `publish_denied`, `role_unclaimed`, `role_lapsed`,
+  `role_holder_changed` or `role_claim_unreadable` on a publish (INFRA-141).
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is

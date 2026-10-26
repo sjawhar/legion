@@ -17,8 +17,8 @@ import (
 )
 
 type roleClaimResolver interface {
-	RoleClaim(role string) (store.RoleClaim, error)
-	ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
+	RoleClaim(ctx context.Context, role string) (store.RoleClaim, error)
+	ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
 }
 
 type roleHolderState string
@@ -105,32 +105,16 @@ func writeRoleHolderChanged(w http.ResponseWriter, role, asking string) int {
 	return http.StatusServiceUnavailable
 }
 
-// withinContext is call, a store call that takes no context, as a caller holding ctx waits for it:
-// nats.go's KV reads and deletes take none and wait out the JetStream MaxWait, so the wait ends at
-// the earlier of call's answer and ctx's end, and an ended ctx is reported as what did not answer.
-// An abandoned call runs on to its own end and its answer is dropped. A ctx that can never end
-// (context.Background, as the callers that answer no request pass) is simply call, in this
-// goroutine.
-func withinContext[T any](ctx context.Context, what string, call func() (T, error)) (T, error) {
-	if ctx.Done() == nil {
-		return call()
-	}
-	type answer struct {
-		value T
-		err   error
-	}
-	answered := make(chan answer, 1)
-	go func() {
-		value, err := call()
-		answered <- answer{value: value, err: err}
-	}()
-	select {
-	case got := <-answered:
-		return got.value, got.err
-	case <-ctx.Done():
-		var zero T
-		return zero, fmt.Errorf("%s: %w", what, ctx.Err())
-	}
+// writeRoleClaimUnreadable answers a role-holder resolution that read a claim record it cannot
+// decode (store.ErrMalformedRoleClaim), for both routes that resolve one. The bus answered, and
+// will answer the same record again, so this is not the bus-unavailable 503: it is a 500 with no
+// Retry-After, naming the role and the record. It returns the status it wrote, for the publish
+// route's record (refuseRoleClaimUnreadable).
+func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int {
+	writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf(
+		"envoy: the claim record of role %s is unreadable: %s", role, err,
+	))
+	return http.StatusInternalServerError
 }
 
 // releaseExpiredRoleClaim is the single point in the listener that
@@ -145,15 +129,10 @@ func withinContext[T any](ctx context.Context, what string, call func() (T, erro
 // to make structurally impossible.
 //
 // The release waits no longer than ctx: a route passes its request's own context, role delivery
-// context.Background(). A release ctx abandoned is reported retained with ctx's error, and may
-// still land after that answer. That is safe to leave running: it deletes the claim only if the
-// bucket still holds the very revision it read, naming sessionID, whom the caller has just found
-// gone from the session bucket, so at worst a lapsed holder's claim is released a moment after the
-// caller was told the bus did not answer, and a fresh claim that landed meanwhile is never touched.
+// context.Background(). store.Registry.ReleaseExpiredRoleClaim says why a delete it abandons is safe
+// to leave running.
 func releaseExpiredRoleClaim(ctx context.Context, registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
-	release, err = withinContext(ctx, fmt.Sprintf("release role %s's expired claim held by %s", role, sessionID), func() (store.ExpiredRoleClaimRelease, error) {
-		return registry.ReleaseExpiredRoleClaim(role, sessionID, sessionTTL)
-	})
+	release, err = registry.ReleaseExpiredRoleClaim(ctx, role, sessionID, sessionTTL)
 	if err != nil {
 		return store.ExpiredRoleClaimRetained, false, err
 	}
@@ -228,19 +207,18 @@ var errRoleHolderChanged = errors.New("role holder changed while resolving")
 // resolveLiveRoleHolder resolves role's live holder for an HTTP route, inside ctx: the route's own
 // request context bounded by sendRequestBudget, so a bus that does not answer is reported to the
 // caller within its attempt rather than after it. Every bus call it makes waits no longer than ctx:
-// the claim read and the conditional release through withinContext (neither store call takes a
-// context), the holder's session read through liveSessionEntry, which also keeps
-// roleHolderReadTimeout as its own cap, and a second attempt is not started once ctx has ended.
-// An ended ctx is returned wrapped, naming the call that did not answer, and is answered as a bus
-// that did not answer.
+// the claim read and the conditional release, which store.Registry bounds by ctx, the holder's
+// session read through liveSessionEntry, which also keeps roleHolderReadTimeout as its own cap, and
+// a second attempt is not started once ctx has ended. An ended ctx is returned wrapped, naming the
+// call that did not answer, and is answered as a bus that did not answer. A claim record that
+// cannot be read is store.ErrMalformedRoleClaim, which the routes answer as such
+// (writeRoleClaimUnreadable).
 func resolveLiveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return roleHolderResult{}, fmt.Errorf("resolve role %s's holder: %w", role, err)
 		}
-		claim, err := withinContext(ctx, fmt.Sprintf("read role %s's claim", role), func() (store.RoleClaim, error) {
-			return registry.RoleClaim(role)
-		})
+		claim, err := registry.RoleClaim(ctx, role)
 		if err != nil {
 			return roleHolderResult{}, err
 		}

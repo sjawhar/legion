@@ -340,9 +340,10 @@ func roleNames(topics []string) []string {
 // It only enriches the envelope, so no read it makes may cost the message. The interest record is
 // read from the cache, and a miss - a sender that subscribed to nothing, or any sender while the
 // cache refills after a reconnect - is read through to the bucket within senderStampReadTimeout of
-// ctx, the route's own. A read that does not answer leaves the stamp with what is already known,
-// the session id and the title the session cache holds, and leaves the rest of the budget to the
-// publish that follows, which meets the same silent bus itself and is answered as the named 503.
+// ctx, the route's own (store.Registry.Get bounds that read alone). A read that does not answer
+// leaves the stamp with what is already known, the session id and the title the session cache
+// holds, and leaves the rest of the budget to the publish that follows, which meets the same silent
+// bus itself and is answered as the named 503.
 func senderStamp(ctx context.Context, registry *store.Registry, sessions *session.SessionRegistry, sourceSession string) *contracts.EnvelopeSender {
 	if sourceSession == "" {
 		return nil
@@ -350,9 +351,7 @@ func senderStamp(ctx context.Context, registry *store.Registry, sessions *sessio
 	sender := &contracts.EnvelopeSender{SessionID: sourceSession}
 	readCtx, cancel := context.WithTimeout(ctx, senderStampReadTimeout)
 	defer cancel()
-	if interest, err := withinContext(readCtx, "read the sender's interest record", func() (store.Interest, error) {
-		return registry.Get(sourceSession)
-	}); err == nil {
+	if interest, err := registry.Get(readCtx, sourceSession); err == nil {
 		sender.Machine = interest.MachineID
 		sender.Cwd = interest.Dir
 		sender.Roles = roleNames(interest.Topics)
@@ -595,6 +594,12 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 				record.refuseRoleHolderChanged(w, role)
 				return
 			}
+			if errors.Is(err, store.ErrMalformedRoleClaim) {
+				// The bus answered with a claim record no read can decode, and will answer the same
+				// record again, so this is neither the bus going quiet nor a retry's to fix.
+				record.refuseRoleClaimUnreadable(w, role, err)
+				return
+			}
 			if err != nil {
 				// A role holder read that did not answer - within its own cap or within this
 				// request's budget - says nothing about the role: the claim is not resolved, so the
@@ -653,7 +658,7 @@ func sessionInfoFor(registry *store.Registry, sessionID string, entry session.Se
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
 	}
-	if interest, err := registry.Get(sessionID); err == nil {
+	if interest, err := registry.Get(context.Background(), sessionID); err == nil {
 		info.Topics = interest.Topics
 		info.Roles = roleNames(interest.Topics)
 	}
@@ -745,7 +750,7 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 
 		switch r.Method {
 		case http.MethodGet:
-			item, err := registry.Get(sessionID)
+			item, err := registry.Get(context.Background(), sessionID)
 			// Only a session the registry holds no key for is unknown; a read NATS did not
 			// serve is the listener's failure, which a caller must not take for "no topics".
 			if errors.Is(err, nats.ErrKeyNotFound) {
@@ -872,10 +877,12 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 // does not answer is reported inside the caller's attempt. A resolution that lost the race for the
 // role's claim (errRoleHolderChanged) is the publish route's 503 with Retry-After: 1, worded for a
 // lookup, since every read answered and a fresh lookup wins the race once the replacement claim
-// settles. Any other failure is a role store call that did not answer within its cap or that
-// budget - the claim read, the holder's session read or the conditional release - and is answered
-// as the publish route answers it (writeBusUnavailable): the 503 with Retry-After: 1 whose body
-// begins busUnansweredPrefix and names the call, or the 413 and 400 a refused key gets.
+// settles. A claim record that cannot be decoded (store.ErrMalformedRoleClaim) is the publish
+// route's 500 with no Retry-After (writeRoleClaimUnreadable): the bus answered it. Any other
+// failure is a role store call that did not answer within its cap or that budget - the claim read,
+// the holder's session read or the conditional release - and is answered as the publish route
+// answers it (writeBusUnavailable): the 503 with Retry-After: 1 whose body begins
+// busUnansweredPrefix and names the call, or the 413 and 400 a refused key gets.
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -892,6 +899,10 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		result, err := resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
 		if errors.Is(err, errRoleHolderChanged) {
 			writeRoleHolderChanged(w, role, "lookup")
+			return
+		}
+		if errors.Is(err, store.ErrMalformedRoleClaim) {
+			writeRoleClaimUnreadable(w, role, err)
 			return
 		}
 		if err != nil {
