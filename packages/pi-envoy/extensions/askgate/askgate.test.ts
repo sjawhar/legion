@@ -2777,7 +2777,7 @@ console.log(JSON.stringify(args, null, 2));
       command: "dispatch comment --issue X-1 --body hi # --advisor-rebuttal='a link'",
     });
     expect(inline?.additionalContext).toContain(
-      "You sent this call with --advisor-rebuttal='a link'. AskGate recorded your rebuttal \"a link\", and the call was sent without review. dispatch does not take that flag, so AskGate moved it into a shell comment at the end of the command's first line"
+      "You sent this call with --advisor-rebuttal='a link'. AskGate recorded your rebuttal \"a link\", and the call was sent without review. dispatch does not take that flag, so it stays a shell comment at the end of the command's first line"
     );
   });
   test("a rebuttal's command, its flag a comment, runs in bash with the flag out of the CLI's arguments and the here-document intact", async () => {

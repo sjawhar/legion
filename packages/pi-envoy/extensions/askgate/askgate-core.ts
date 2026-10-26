@@ -2691,7 +2691,7 @@ const renderWarn = (reason: string) =>
 const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override) =>
   `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}", and the call was sent without review. ${
     override.what === "flag"
-      ? "dispatch does not take that flag, so AskGate moved it into a shell comment at the end of the command's first line: it is still in your record of the call, and dispatch never saw it."
+      ? "dispatch does not take that flag, so it stays a shell comment at the end of the command's first line: it is in your record of the call, and dispatch never saw it."
       : `The device does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
   }\n</advisor-gate>`;
 /**
