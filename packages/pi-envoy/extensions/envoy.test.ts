@@ -15549,5 +15549,27 @@ describe("messages missed while the subscription was down", () => {
       expect(sideTurns).toBe(0);
       expect(replies).toHaveLength(0);
     });
+
+    test("whose replayed card the host refuses three times gets a failure notice that starts no turn", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-btw-notice", model, {
+        sessionID: "ses_delivery",
+        turn: "idle",
+        beforeSend: (content) => {
+          if (content.includes("dispatch-replay-btw-notice") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      model.store(session.agentSubject, targetedDispatchEnvelope("btw", "replay-btw-notice"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+
+      const notices = session.notices("dispatch-replay-btw-notice");
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.options).toMatchObject({ triggerTurn: false });
+    });
   });
 });

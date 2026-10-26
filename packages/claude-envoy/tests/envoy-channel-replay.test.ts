@@ -456,6 +456,67 @@ for (const target of SUBJECTS) {
   }
 }
 
+/** A Dispatch BTW addressed to `sessionID`, as the listener would store it on its agent subject. */
+function btwFrame(sessionID: string, label: string): Frame {
+  const eventId = `dispatch-btw-${label}`
+  return {
+    eventId,
+    raw: JSON.stringify({
+      event_id: eventId,
+      dedupe_key: eventId,
+      source: "dispatch",
+      source_event_id: "1",
+      topic: agentSubject(sessionID),
+      issued_at: 1,
+      payload_summary: `BTW ${label}`,
+      trace_id: `trace-${label}`,
+      payload: JSON.stringify({
+        event: {
+          actor: { id: "alice", kind: "user" },
+          issue_key: "CORE-1",
+          payload: {
+            author: { id: "alice", kind: "user" },
+            body: `BTW ${label}`,
+            created_at: "2026-09-12T00:00:00Z",
+            deliveries: [],
+            id: "11111111-1111-4111-8111-111111111111",
+            in_reply_to: null,
+            issue_key: "CORE-1",
+            target: `session:${sessionID}`,
+          },
+          type: "message.created",
+        },
+        delivery: { attempt: 1, mode: "btw" },
+      }),
+    }),
+  }
+}
+
+for (const route of SINKS) {
+  test(`a BTW that reaches replay is passed over, never handed ${route.name}, while the frame after it is shown`, async () => {
+    const directory = await scratchState()
+    const model = new StreamModel()
+    model.store("notifications.agent.ses_other", peerMessage("ses_other", "unrelated").raw)
+    const sink = await route.make(directory)
+    const running = await boot(model, sink, directory)
+    try {
+      const btw = btwFrame(SESSION, "replayed")
+      const after = peerMessage(SESSION, "after-btw")
+      model.store(agentSubject(SESSION), btw.raw)
+      model.store(agentSubject(SESSION), after.raw)
+
+      await running.reconnect()
+      await waitFor(async () => cards(sink, after.eventId).length === 1, "the frame after the BTW")
+      await running.reconnect()
+      expect(sink.shown.filter((shown) => shown.content.includes(btw.eventId))).toHaveLength(0)
+    } finally {
+      await running.session.shutdown()
+      sink.close()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+}
+
 test("a channel started on the same session id 31 days after its state was written shows a frame from an hour before its start once, and still follows its issue topic with the registry empty", async () => {
   const startAt = Date.now()
   const directory = await scratchState()

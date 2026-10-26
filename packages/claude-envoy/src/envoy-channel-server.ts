@@ -445,6 +445,16 @@ export function createChannelDelivery(input: {
     async replay(frame) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject)
       if (replaySuppressed(rendered)) return "suppressed"
+      // A BTW never starts a turn here. The listener sends one only to a session that advertises
+      // `btw`, which this one never does, and neither delivery path can show a message without
+      // starting a turn (the Legion bridge's inbox starts one when Claude Code is idle). So a BTW
+      // that reaches replay anyway is passed over, named on stderr.
+      if (rendered.delivery?.mode === "btw") {
+        process.stderr.write(
+          `envoy-channel: passing over replayed BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn\n`,
+        )
+        return "suppressed"
+      }
       await show(rendered, frame.subject, replayedText(rendered.content, frame.time))
       return "shown"
     },

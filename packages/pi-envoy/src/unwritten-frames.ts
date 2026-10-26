@@ -3,8 +3,13 @@ import { replayLedgerIdentity } from "@legion/envoy-client/replay";
 import type { ContentBlock } from "@legion/pi-shared/pi-types";
 import { writtenCardIdentity } from "./missed-messages";
 
-/** How a card is handed to the host: as a steer, or as an aside. */
-export type CardDelivery = "steer" | "aside";
+/**
+ * How a card is handed to the host: as a steer or an aside, each starting a turn when the host is
+ * idle, or `inert`, a steer that starts no turn (`triggerTurn: false`). An inert card is written at
+ * once on an idle host and, sent while a turn streams, when that turn takes it; either way the host
+ * runs nothing for it (measured on omp 18.8.9). A card handed again keeps its delivery.
+ */
+export type CardDelivery = "steer" | "aside" | "inert";
 
 /**
  * A frame handed to the host that the host has not written to the session's transcript yet. Oh

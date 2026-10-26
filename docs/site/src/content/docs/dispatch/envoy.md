@@ -156,7 +156,9 @@ connection was down.
   too late to find everything still there, it is told once that messages may be missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
-  session does not take it as the person's turn and does not answer a BTW.
+  session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
+  starts no turn at all: an Oh My Pi session shows it as one inert notice, and a Claude Code
+  session, which is never sent a BTW, passes it over.
 - **Once:** the session records what it was shown, in its transcript (Oh My Pi) or in a state
   file per session (Claude Code), so a restart or resume does not show a message again (up to
   20,000 messages shown in 72 hours). An Oh My Pi session counts a message shown only once its

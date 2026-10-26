@@ -238,7 +238,11 @@ the host's `writeSessionID`), so the stream's copy never comes back as a card th
 not while the side turn runs or a reply is in flight, not when a reply fails, and not after the
 process ends mid-turn or mid-reply and the session is resumed. An answered BTW's reply records
 its dedupe key too once posted. A same-mode Retry of a refused one, a new event id under the same
-dedupe key, still reaches the session. A replayed card of a
+dedupe key, still reaches the session. Whatever the record, a BTW that reaches replay is one inert
+notice by construction: its card is handed with `triggerTurn: false` (`CardDelivery` `inert`, kept
+when a withdrawn card is handed again), as is a failure notice naming a BTW, so a stale side
+question never runs as a turn; it says it runs nothing and that Dispatch shows whether it was
+answered. A replayed card of a
 frame the dedupe let go of that the open session's ledger lacks (shown before the host moved to
 this session) waits on its write too, with no claim.
 

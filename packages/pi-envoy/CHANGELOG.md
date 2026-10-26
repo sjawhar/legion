@@ -28,7 +28,9 @@
   recorded by its event id the moment it arrives, before its side turn and before any reply is
   posted, in the session's file even while it shuts down, so no sweep shows it as a card again,
   whether its answer or refusal fails, is still in flight, or the process ends mid-turn or
-  mid-reply and the session is resumed; a Retry of it still runs. A replayed subscription removal takes the
+  mid-reply and the session is resumed; a Retry of it still runs. Whatever the record, a BTW that
+  reaches replay is shown as one notice that starts no turn, saying it runs nothing, and so is a
+  failure notice naming a BTW. A replayed subscription removal takes the
   topic out of the listener's registry too, so a later restart does not follow it again.
   The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
   cards themselves, read back by the event they name) and where it read to

@@ -20,7 +20,9 @@
   included, stamped when it arrived even behind a slow delivery), is replaced by a notice naming
   it, its fields rendered in TOON as a live card's are,
   so a sender's multi-line summary cannot add a field of its own; a listener
-  without the route, or unable to read the stream, is said once on stderr. A followed topic
+  without the route, or unable to read the stream, is said once on stderr. A BTW that reaches
+  replay is passed over and named on stderr, never handed: the listener never sends this session
+  a BTW, and neither delivery path can show one without starting a turn. A followed topic
   reaching a private stream subject, by the listener's own rule (another session's
   `notifications.agent.<id>`, a failed-delivery lane, a `notifications.legion.` controller lane, or
   a wildcard reaching one such as `notifications.agent.*`), is followed live but neither registered

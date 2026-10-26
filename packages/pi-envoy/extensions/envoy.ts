@@ -148,7 +148,7 @@ import {
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
-import { UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
+import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -212,6 +212,13 @@ const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
+/** The most BTW event ids an instance remembers, so a failure notice naming one stays inert. */
+const BTW_EVENTS_LIMIT = 1_000;
+/** The line a replayed BTW's notice ends with: it runs nothing and asks for nothing. */
+const REPLAYED_BTW_NOTE =
+  "This BTW was asked while this session was not taking messages. It is shown for your " +
+  "information only: it runs no side turn and needs no answer. Dispatch shows whether it was " +
+  "answered.";
 
 /** Whether the task that was handed this fence is still the one the queue is waiting on: false
  *  once that task was abandoned at its deadline. */
@@ -1024,10 +1031,10 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
-  // on the message it writes.
+  // on the message it writes. An `inert` card is a steer that starts no turn.
   const handCard = (
     content: string | readonly ContentBlock[],
-    deliverAs: "steer" | "aside",
+    deliverAs: CardDelivery,
     identity: DedupeIdentity | undefined
   ): void => {
     const known = identity === undefined ? {} : replayLedgerIdentity(identity);
@@ -1038,7 +1045,9 @@ export default function envoyExtension(pi: PiApi): void {
         display: true,
         ...(unwrittenCardKeys(known).length === 0 ? {} : { details: { ...known } }),
       },
-      { deliverAs, triggerTurn: true }
+      deliverAs === "inert"
+        ? { deliverAs: "steer", triggerTurn: false }
+        : { deliverAs, triggerTurn: true }
     );
   };
 
@@ -1068,7 +1077,11 @@ export default function envoyExtension(pi: PiApi): void {
   // already is that card's. A frame the dedupe let go of that the open session's ledger does not
   // hold (one shown before the host moved to this session, say) is handed with no claim, and waits
   // on its card's write all the same: nothing records it until the host writes it.
-  const showReplayCard = (content: string, envelope: unknown): "shown" | "queued" => {
+  const showReplayCard = (
+    content: string,
+    envelope: unknown,
+    deliverAs: CardDelivery = "steer"
+  ): "shown" | "queued" => {
     const parsed = ClaimIdentitySchema.safeParse(envelope);
     const identity = parsed.success ? parsed.data : undefined;
     const claim = delivered.claim(identity);
@@ -1079,7 +1092,20 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       return "queued";
     }
-    return unwritten.sendCard(content, "steer", identity, claim);
+    return unwritten.sendCard(content, deliverAs, identity, claim);
+  };
+
+  // The event ids of BTW frames this process met, live or replayed, so a failure notice naming one
+  // is inert too: a BTW never starts a turn. Bounded: the oldest is forgotten first.
+  const btwEvents = new Set<string>();
+  const noteBtw = (eventID: string | undefined): void => {
+    if (eventID === undefined) return;
+    btwEvents.delete(eventID);
+    btwEvents.add(eventID);
+    if (btwEvents.size > BTW_EVENTS_LIMIT) {
+      const oldest = btwEvents.values().next();
+      if (oldest.done !== true) btwEvents.delete(oldest.value);
+    }
   };
 
   // Runs a person's accepted Send or Aside as if typed at the terminal (`pi.sendUserInput`): a
@@ -1314,6 +1340,7 @@ export default function envoyExtension(pi: PiApi): void {
           // shuts down (`recordDeliveredFor`), so a resume of it passes the stream's copy over too.
           // A same-mode Retry carries a new event id under the same dedupe key, and still reaches
           // the session once a refusal released the claim.
+          noteBtw(identity?.event_id);
           if (identity?.event_id !== undefined) {
             await replay?.recordDeliveredFor(deliveredIn, { event_id: identity.event_id });
           }
@@ -1619,7 +1646,15 @@ export default function envoyExtension(pi: PiApi): void {
     }
     if (replaySuppressed(rendered)) return "suppressed";
     if (rendered.envelope !== undefined) noteInbox(rendered.envelope);
-    return showReplayCard(replayedText(rendered.content, frame.time), frame.envelope);
+    const shown = replayedText(rendered.content, frame.time);
+    // A BTW that reaches replay, whatever became of it live (answered, refused, or never received),
+    // is one inert notice: a card that starts no turn, so a stale side question never runs as a
+    // turn. Its answer, if any, is on Dispatch.
+    if (rendered.delivery?.mode === "btw") {
+      noteBtw(rendered.envelope?.event_id);
+      return showReplayCard(`${shown}\n${REPLAYED_BTW_NOTE}`, frame.envelope, "inert");
+    }
+    return showReplayCard(shown, frame.envelope);
   };
 
   // The session this instance and the host are both on: an entry appended now lands in its
@@ -1644,7 +1679,11 @@ export default function envoyExtension(pi: PiApi): void {
             followedSubjects,
             deliver: showReplayed,
             showFailureNotice: async (notice) =>
-              showReplayCard(envoyNoticeText(failureNoticeFields(notice)), notice.envelope),
+              showReplayCard(
+                envoyNoticeText(failureNoticeFields(notice)),
+                notice.envelope,
+                btwEvents.has(notice.eventId) ? "inert" : "steer"
+              ),
             failureNoticeFailed: (notice, error) => {
               logger.warn("envoy: a message this session was not shown could not be reported", {
                 eventID: notice.eventId,

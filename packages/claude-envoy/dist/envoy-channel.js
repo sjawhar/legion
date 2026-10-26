@@ -49480,6 +49480,11 @@ function createChannelDelivery(input) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject);
       if (replaySuppressed(rendered))
         return "suppressed";
+      if (rendered.delivery?.mode === "btw") {
+        process.stderr.write(`envoy-channel: passing over replayed BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn
+`);
+        return "suppressed";
+      }
       await show(rendered, frame.subject, replayedText(rendered.content, frame.time));
       return "shown";
     },
