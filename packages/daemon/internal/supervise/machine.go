@@ -285,13 +285,14 @@ type Deps struct {
 	// owner of the repository the issue works. Every delivery hands it to the agent's working copy
 	// before the task. nil, for a daemon with no workflow or no GitHub Apps, adopts nothing.
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
-	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
-	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
-	// (daemon/outbox.go), so a delivery queued before the phase moved on is that same staleness
-	// one step later and is dropped rather than sent. It is asked only about a delivery that names
-	// a phase; a task an operator delivered by hand names none and is never put to it, which the
-	// machine decides rather than this answer. nil holds every delivery.
-	PhaseHolds func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	// PhaseHolds says whether issue is still in phase p on run generation: the workflow enqueues a
+	// task for the phase and run its issue was in, and the outbox refuses to start a role for a
+	// phase the issue has left (daemon/outbox.go), so a delivery queued before the phase or the run
+	// moved on is that same staleness one step later and is dropped rather than sent. It is asked
+	// only about a delivery that names a phase; a task an operator delivered by hand names none and
+	// is never put to it, which the machine decides rather than this answer. generation is 0 for a
+	// task of no run. nil holds every delivery.
+	PhaseHolds func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked for the operator's own close — the workflow's linger close is its

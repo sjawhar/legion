@@ -452,8 +452,8 @@ func init() { table = build(fillTable) }
 
 func fillTable(t *builder) {
 	// What the runtime says about the process.
-	t.row(onObservation, "judge the process; alive and ready or idle, send what is waiting", observe,
-		[]ClaimState{StateLaunching, StateFailed, StateWorking}, live...)
+	t.row(onObservation, "judge the process; alive and ready or idle, send what is waiting; working after an unanswered ask, ask again whether the turn is over", observe,
+		[]ClaimState{StateLaunching, StateFailed, StateWorking, StateIdle}, live...)
 	t.ignore(onObservation, noProcess, processless...)
 
 	// The shim.
@@ -663,11 +663,15 @@ func (b *builder) ignore(kind eventKind, reason string, states ...ClaimState) {
 // observe is the runtime's sweep. A live process in a ready or idle claim is also the retry of a
 // delivery that is waiting — after a refusal, a prompt that started no turn, or a missing
 // connection — when nothing else will come: the retry is bounded by the sweep's interval and by
-// the prompt budget, never made on the spot.
+// the prompt budget, never made on the spot. In a working claim it asks again whether the turn an
+// earlier daemon saw start is over, when the last ask went unanswered (askTurnOver).
 func observe(m *Machine, ctx context.Context, ev Event) error {
 	return m.judge(ctx, ev.(RuntimeObservation).Observation, func(ctx context.Context) error {
 		if err := m.ensureEnrolled(ctx); err != nil {
 			return err
+		}
+		if m.claim.State == StateWorking {
+			return m.askTurnOver(ctx, ev)
 		}
 		return m.sendPending(ctx)
 	}, TimerProbe, m.deps.Timeouts.Probe)
@@ -712,12 +716,30 @@ func reconnectedMidTurn(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.ensureEnrolled(ctx); err != nil {
 		return err
 	}
+	return m.askTurnOver(ctx, ev)
+}
+
+// askTurnOver asks a restored working claim's agent whether the turn an earlier daemon saw start
+// is still running, and ends it when the agent says it is not. An ask the agent does not answer
+// says nothing about the turn: the claim stays working, the question stays armed, and the next
+// sweep asks again. Taken as "not streaming", it would end a turn still running and set the claim
+// idle, and the sweep would then send the task into the busy agent every interval.
+func (m *Machine) askTurnOver(ctx context.Context, ev Event) error {
 	if !m.askFirst {
 		return nil
 	}
-	m.askFirst = false
 	conn, ok := m.deps.Conns.Conn(m.claim.Token)
-	if !ok || m.streaming(ctx, conn) {
+	if !ok {
+		// No shim yet (a sweep before its hello): the hello asks.
+		return nil
+	}
+	streaming, answered := m.streaming(ctx, conn)
+	if !answered {
+		m.log.Info("supervise: the agent did not say whether the turn an earlier daemon saw start is over; the claim stays working and the next sweep asks again")
+		return nil
+	}
+	m.askFirst = false
+	if streaming {
 		return nil
 	}
 	m.log.Info("supervise: the turn an earlier daemon saw start is over")
@@ -854,7 +876,8 @@ func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 		return err
 	}
 	conn, connected := m.deps.Conns.Conn(m.claim.Token)
-	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && m.streaming(ctx, conn)) {
+	streaming := func() bool { busy, _ := m.streaming(ctx, conn); return busy }
+	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && streaming()) {
 		m.log.Warn("supervise: the agent refused an acknowledged prompt; it is in a turn of its own",
 			"delivery", r.DeliveryID, "error", r.Error)
 		// The agent is in a turn it started itself, so it never read this task: the delivery goes

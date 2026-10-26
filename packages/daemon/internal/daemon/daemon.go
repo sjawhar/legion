@@ -518,7 +518,7 @@ type plan struct {
 	repositories *repositories
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
-	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	phaseHolds   func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.

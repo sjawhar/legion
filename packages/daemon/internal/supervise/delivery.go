@@ -162,9 +162,11 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	// task is prompted into a busy agent and charged for it. A turn of the agent's own moves the
 	// claim to working either way; it confirms the delivery only when there is still one to
 	// confirm, and a dropped task's successor waits for that turn to end.
+	// An agent that cannot say is taken as not streaming here: sending under the same id is what
+	// the shim's dedupe and the next agent_start make safe.
 	if m.askFirst {
 		m.askFirst = false
-		if m.streaming(ctx, conn) {
+		if streaming, _ := m.streaming(ctx, conn); streaming {
 			m.claim.State = StateWorking
 			if !holds {
 				m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
@@ -181,7 +183,7 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	return nil
 }
 
-// phaseHolds asks whether the issue is still in the phase this task was queued for. A delivery
+// phaseHolds asks whether the issue is still in the phase and run this task was queued for. A delivery
 // that names no phase is nobody's to drop — an operator's own, an architect's — and is never put
 // to the answer at all, so the exemption this package documents is this package's own rather
 // than a promise every implementation has to keep. A daemon with no workflow configured supplies
@@ -190,7 +192,7 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 	if m.deps.PhaseHolds == nil || d.Phase == "" {
 		return true, nil
 	}
-	holds, err := m.deps.PhaseHolds(ctx, m.claim.Issue, d.Phase)
+	holds, err := m.deps.PhaseHolds(ctx, m.claim.Issue, d.Phase, d.Generation)
 	if err != nil {
 		return false, fmt.Errorf("read the phase of %s: %w", m.claim.Token, err)
 	}
@@ -246,18 +248,17 @@ func (m *Machine) putPending(ctx context.Context) error {
 	return m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, *m.claim.Pending))
 }
 
-// streaming asks the agent whether a turn is in flight. An agent that cannot say is taken as not
-// streaming: what the caller does next — send under the same id, or end a turn — is what the
-// shim's dedupe and the next agent_start make safe.
-func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
+// streaming asks the agent whether a turn is in flight; answered is false when the agent could not
+// say (the ask failed or timed out), and each caller decides what an unanswered ask means for it.
+func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) (streaming, answered bool) {
 	asking, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
 	defer cancel()
 	state, err := conn.GetState(asking)
 	if err != nil {
 		m.log.Warn("supervise: the agent could not say whether it is in a turn", "error", err)
-		return false
+		return false, false
 	}
-	return state.IsStreaming
+	return state.IsStreaming, true
 }
 
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
