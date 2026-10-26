@@ -2,48 +2,39 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T08:28:46Z",
-  "round": "generation 3, sent back from retro by the implementer at the architect's ruling: unbounded interest reads on GET /v1/sessions, /v1/registry/<id> and /v1/interests/<id>; then main merged forward because GitHub reported the PR CONFLICTING after #2199 (INFRA-122) landed",
+  "completed": "2026-10-26T09:04:02Z",
+  "round": "generation 3, the tester's fail at 8d8816be (an unreadable interest record answered as the bus not answering), settled per the architect's ruling of 08:38Z; no merge of main (MERGEABLE)",
   "proof": [
     {
-      "criterion": "On a cache miss with a bus that is connected but silent, GET /v1/sessions, GET /v1/registry/<id> and GET /v1/interests/<id> answer 503 with Retry-After: 1 and the busUnansweredPrefix body inside the 3.5 s budget, never an empty-topics row",
-      "surface": "the real envoy-listener binary built at this head, connected to a real NATS (internal/testnats/cmd/natsd) through a TCP relay that is then frozen; a session ses_bare registered through /v1/interests/subscribe and its interest record removed through DELETE /v1/interests/ses_bare, so the interest cache misses; driven with curl",
-      "command": "bash smoke.sh listener-new: GET /v1/registry/ses_bare and GET /v1/interests/ses_never (bus up); freeze the relay; GET /v1/sessions, GET /v1/registry/ses_bare, GET /v1/interests/ses_never",
-      "observed": "bus up: registry 200 (topics null), interests 404; frozen: sessions 503 in 1.002319 s, registry 503 in 1.003191 s, both {\"error\":\"envoy: the message bus did not answer: read ses_bare's interest record: context deadline exceeded\"}; interests 503 in 3.503507 s {\"error\":\"envoy: the message bus did not answer: read ses_never's interest record: context deadline exceeded\"}; each Retry-After: 1",
-      "headSha": "dc06110db7c75743ccba166df881760d810e0a8b",
-      "negativeControl": "The same rig with the listener built from the accepted head 0cfb5c6c: all three frozen requests got no answer, 'curl: (52) Empty reply from server' at 10.004 s, 10.002 s and 10.003 s"
+      "criterion": "An interest record the bucket holds and this build cannot decode is not answered as the bus not answering: GET /v1/registry/<id> and GET /v1/interests/<id> answer 500 naming the unreadable record, no Retry-After, no bus prefix; GET /v1/sessions lists the session with no topics and keeps the listing",
+      "surface": "the real envoy-listener binary built at this head against a real NATS (internal/testnats/cmd/natsd); sessions ses_sub and ses_bad registered through /v1/interests/subscribe, then the raw value 'not json at all' written into envoy_interests under ses_bad with a throwaway nats.go client; driven with curl",
+      "command": "bash smoke.sh listener-new: GET /v1/sessions, GET /v1/registry/ses_bad, GET /v1/interests/ses_bad, GET /v1/registry/ses_sub; count 'registry read an interest record it cannot decode' in listener.log",
+      "observed": "sessions 200 [{ses_bad, topics null}, {ses_sub, topics [notifications.agent.ses_sub, notifications.role.reviewer]}]; registry/ses_bad and interests/ses_bad 500 {\"error\":\"envoy: the interest record of session ses_bad is unreadable: malformed interest record: invalid character 'o' in literal null (expecting 'u')\"}, no Retry-After; registry/ses_sub 200 with its topics and roles [reviewer]; 3 WARN lines naming the unreadable record",
+      "headSha": "0ad64d7fbb59887983d3f3094099c8313a6e374f",
+      "negativeControl": "The same rig with the listener built from the previous head 8d8816be: all three routes answered 503 {\"error\":\"envoy: the message bus did not answer: invalid character 'o' …\"} with Retry-After: 1, the listing refused whole, and no WARN line"
     },
     {
-      "criterion": "Pinned by a test that fails before the fix; the rest of the suite stays green",
-      "surface": "go test of ./cmd/listener against the in-process NATS behind the listener test relay (relay.arm freezes it); scripts/e2e-local.sh against the real binary",
-      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip '^(TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills)$' -timeout 20m; go test ./internal/integration -count=1; bash scripts/e2e-local.sh",
-      "observed": "cmd/listener ok 269.432s, no --- FAIL; --- PASS TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget (sessions 1.00 s, registry 1.00 s, interests 3.50 s; stable at -count=3), and both tester's red tests still pass; internal/integration ok 97.569s; e2e-local exit 0, both PASS lines, bus-down send 503 in 3.503728 s, client EnvoyApiError 503; go build ./..., go vet, gofmt and check-private-names.sh clean",
-      "headSha": "dc06110db7c75743ccba166df881760d810e0a8b",
-      "negativeControl": "go test -overlay with the pre-fix api.go: 'GET /v1/sessions answered after 10.001209178s (status 200 …) want inside 4s' and 'GET /v1/registry/ses_interest_routes_subscribed_to_nothing answered after 10.000746867s (status 200 …)'; the test's own control answers 200/404 before the freeze"
-    },
-    {
-      "criterion": "The forward merge of main (#2199, INFRA-122) keeps both changes: this PR's answers and main's serving-port delivery, at the merged head",
-      "surface": "the real envoy-listener binary built from the merge commit against a real NATS (frozen relay rig and scripts/e2e-local.sh); go test against the in-process NATS",
-      "command": "cd packages/envoy && go build ./... && go vet ./... && gofmt -l .; go test ./cmd/listener -count=1 -v -skip <the four testpg tests>; go test ./internal/session ./internal/integration ./internal/store ./internal/bus ./internal/testnats; bash scripts/e2e-local.sh; bash smoke.sh listener-merged",
-      "observed": "build, vet, gofmt clean; cmd/listener ok 348.588s with 0 '--- FAIL' (main's live_topics, shutdown and api tests included); internal/session ok 8.914s, internal/integration ok 98.587s, internal/store ok 19.339s, internal/bus ok 220.079s, internal/testnats ok 10.274s; e2e-local exit 0, both PASS lines, bus-down send 503 in 3.502463 s, client EnvoyApiError 503; frozen relay on the merged binary: sessions 503 in 1.002866 s, registry 503 in 1.002652 s, interests 503 in 3.503645 s, each Retry-After: 1 with the busUnansweredPrefix body",
-      "headSha": "5aee84d6930e8e3ae5e2479435ef4623020377c2",
-      "negativeControl": "Before the merge GitHub reported the PR CONFLICTING/DIRTY and git merge-tree of 1ff60404 with main 748e8d95 listed conflicts in packages/envoy/AGENTS.md, cmd/listener/delivery.go, internal/session/handler.go, handler_test.go and session_test.go; TestE2E_AgentToAgent_RemoteMachine's exactly-one-push check fails against main's owner rule unless its stored subscription names the delivering listener (resolved in the merge)"
+      "criterion": "The tester's red test passes unchanged, the chosen answers are pinned, and the rest stays green",
+      "surface": "go test against the in-process NATS; scripts/e2e-local.sh against the real binary",
+      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip <the four testpg tests>; go test ./internal/store ./internal/session ./internal/integration -count=1; bash scripts/e2e-local.sh",
+      "observed": "cmd/listener ok 333.330s, no --- FAIL; --- PASS TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering (the tester's, unchanged: no diff in its file), TestAnUnreadableInterestRecordIsAnsweredAsUnreadable (new), TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget and both earlier red tests; internal/store ok 19.033s (new TestGetReadsAnUndecodableInterestRecordAsErrMalformedInterest), internal/session ok 7.465s, internal/integration ok 97.454s; e2e-local exit 0, both PASS lines, bus-down send 503 in 3.502959 s, client EnvoyApiError 503; go build ./..., go vet ./..., gofmt -l . and check-private-names.sh clean",
+      "headSha": "0ad64d7fbb59887983d3f3094099c8313a6e374f",
+      "negativeControl": "go test -overlay with the pre-fix api.go and kv.go: TestAnUnreadableInterestRecordIsAnsweredAsUnreadable fails 'status 503, body {\"error\":\"envoy: the message bus did not answer: invalid character …\"}' on registry and interests, and 'GET /v1/sessions: status 503'"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/api.go — sessionInfoFor takes ctx, caps its interest read at sessionInterestReadTimeout (1 s) and returns a read that did not answer; sessionsHandler, sessionEntryHandler and adminInterestsHandler's GET take sendRequestBudget from the request and answer such a read through writeBusUnavailable",
-    "packages/envoy/cmd/listener/interest_read_routes_test.go (new)",
-    "packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, packages/envoy/CHANGELOG.md — the three routes' answers",
-    "merge 5aee84d6 (main 748e8d95): conflicts resolved in packages/envoy/AGENTS.md, cmd/listener/delivery.go, internal/session/handler.go, handler_test.go, session_test.go; adjusted cmd/listener/api_test.go (main's test to Registry.Get(ctx)), cmd/listener/unplaceable_delivery.go and AGENTS.md comments (ErrWrongMachine is now main's OwnedElsewhere), internal/integration/e2e_test.go (TestE2E_AgentToAgent_RemoteMachine's stored subscription names the delivering listener)"
+    "packages/envoy/internal/store/kv.go — ErrMalformedInterest; Registry.Get wraps a decode failure in it, returns a zero Interest and logs one WARN",
+    "packages/envoy/cmd/listener/api.go — writeInterestRecordUnreadable (500, no Retry-After); sessionInfoFor returns the row without topics plus the sentinel; sessionsHandler keeps the row; sessionEntryHandler and adminInterestsHandler answer the sentinel 500",
+    "packages/envoy/cmd/listener/interest_record_unreadable_answer_test.go (new), packages/envoy/internal/store/kv_test.go",
+    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md — the three routes"
   ],
   "trickyParts": [
-    "GET /v1/sessions refuses the whole list with the 503 on the first interest read that does not answer, rather than returning a row with empty topics: a read NATS did not serve must not read as 'subscribed to nothing'. The whole list shares one request deadline, so N cache misses cannot add up past it.",
-    "GET /v1/registry/<id>'s session read still goes through roleHolderSession (2 s cap); with the 1 s interest cap the route's worst case is 3 s, inside the budget.",
-    "Merge: HandleAgentResult carries both main's OwnedElsewhere and this PR's Reason; agentSubjectDelivery acks OwnedElsewhere before this PR's error, delivered and unplaceable handling."
+    "The WARN is written by store.Registry.Get through the registry's JSON logger, since sessionsHandler(registry, sessions) keeps its signature (the red test calls it); it fires once per read of the record on any path.",
+    "Sweep: no other path sends a store or session-store decode error to writeBusUnavailable, refuseBusUnavailable or outcomeBusUnavailable. An undecodable session record is evicted by SessionRegistry.applyWatched and reads as absent (404 on a send); senderStamp and agent delivery drop the interest error and carry on."
   ],
   "deviations": [
-    "The retro notes drafted before the send-back are held outside the workspace and will be committed by the next retro, at the architect's instruction.",
-    "main was merged forward because GitHub reported the PR CONFLICTING (the one case the ruling allows)."
+    "Not changed, reported to the architect: POST /v1/interests/subscribe answers an unreadable existing record with a plain 503 carrying the decode text (no bus prefix, no Retry-After; the same as before this PR), and DELETE /v1/interests/<id> through Registry.Remove answers 500 and cannot clear such a record (Remove reads it first). Both are older than this PR and outside the ruling's sweep.",
+    "The retro notes drafted before the send-back are held outside the workspace for the next retro."
   ],
   "openQuestions": []
 }
