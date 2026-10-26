@@ -39,7 +39,11 @@
 #            BTW's body and the inert note ("runs no side turn and needs no answer"), still one
 #            three heartbeats later. omp's RPC output shows one agent_start and one turn_start
 #            since the long turn's prompt, and no assistant message follows the card: no turn ran
-#            for it.
+#            for it. The mid-turn claim (the card not handed while the turn streams) is checked in
+#            local mode only: there natsd's monitoring shows the session resubscribed inside the
+#            check window, so the replay sweep ran mid-turn. Remote mode cannot see that, so a
+#            remote pass of leg 7 shows only that one inert card appeared after idle with no turn
+#            run for it.
 #   control  leg 1 again with a session running the released plugin (SMOKE_REPLAY_CONTROL_PLUGIN):
 #            it ends with no entry for its publish, while a frame published live afterwards shows
 #            once, so the session was connected and writing cards all along.
@@ -540,17 +544,21 @@ cursor_started() {
   [[ -n "$(cursor)" ]]
 }
 
+# card($id), a jq definition: the entry is an envoy-message entry whose content carries $id. Every
+# helper below that finds a session's cards by id starts its filter with it.
+# shellcheck disable=SC2016 # $id is jq's, not the shell's
+readonly card_jq='def card($id): .type == "custom_message" and .customType == "envoy-message"
+  and (.content | if type == "string" then . else tostring end | contains($id));'
+
 # The session's envoy-message entries carrying an event id.
 card_entries() {
-  jq -cnR --arg id "$1" 'inputs | fromjson? | select(.type == "custom_message" and .customType == "envoy-message")
-    | select(.content | if type == "string" then . else tostring end | contains($id))
+  jq -cnR --arg id "$1" "${card_jq}"' inputs | fromjson? | select(card($id))
     | {timestamp, customType, content}' "$session_file"
 }
 
 cards() {
   local n
-  n="$(jq -nR --arg id "$1" '[inputs | fromjson? | select(.type == "custom_message" and .customType == "envoy-message")
-    | select(.content | if type == "string" then . else tostring end | contains($id))] | length' "$session_file" 2>/dev/null)" ||
+  n="$(jq -nR --arg id "$1" "${card_jq}"' [inputs | fromjson? | select(card($id))] | length' "$session_file" 2>/dev/null)" ||
     n=0
   printf '%s\n' "${n:-0}"
 }
@@ -591,9 +599,8 @@ card_text() {
 # assistant_after ID: the assistant messages the session file holds after the first envoy-message
 # entry carrying ID, in file order or by timestamp, as a JSON array.
 assistant_after() {
-  jq -cnR --arg id "$1" '[inputs | fromjson?] as $entries
-    | first($entries | to_entries[] | select(.value.type == "custom_message" and .value.customType == "envoy-message"
-        and (.value.content | if type == "string" then . else tostring end | contains($id))) | .key) as $at
+  jq -cnR --arg id "$1" "${card_jq}"' [inputs | fromjson?] as $entries
+    | first($entries | to_entries[] | select(.value | card($id)) | .key) as $at
     | [$entries | to_entries[] | select(.value.type == "message" and .value.message.role == "assistant"
         and (.key > $at or .value.timestamp > $entries[$at].timestamp))
       | {timestamp: .value.timestamp, stopReason: .value.message.stopReason}]' "$session_file"

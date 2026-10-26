@@ -339,10 +339,13 @@ new follow, a new session, a reset after a stream recreation), since that cursor
 stream's end, which can be past a frame the live path still held. A frame is stamped when its
 subscription yielded it (`readArrivals`, which reads each subscription as its messages arrive),
 not when the frames queued before it finished delivering. One card that starts no turn
-(`routeReplayNotice` sends this kind to a card) says that the stream was recreated,
-so messages from
-before it may be lost, or that a cursor fell behind the stream's oldest message, so messages
-older than 72 hours may be missing. A listener without the route answers 404; one whose NATS
+(`routeReplayNotice` sends this kind to a card, through `UnwrittenFrames.sendNotice`) says that
+the stream was recreated, so messages from before it may be lost, or that a cursor fell behind the
+stream's oldest message, so messages older than 72 hours may be missing. It is a steer with
+`triggerTurn: false`, so like an inert card it is handed only while the host is settled: raised
+while a turn streams, it is held, and the first settled heartbeat hands it, so no extra model turn
+runs for it; a notice held for a session the host has left is dropped. A listener without the
+route answers 404; one whose NATS
 user lacks the read, or that has no stream, answers 503 `REPLAY_UNAVAILABLE`; either, or a 401 or
 403, is said once as a `logger.warn` and a UI warning that messages published while the
 connection is down are not recovered, live delivery goes on as before, and every heartbeat asks

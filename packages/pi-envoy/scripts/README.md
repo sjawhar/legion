@@ -165,7 +165,10 @@ real JetStream NATS, and the session reaches NATS only through a `socat` proxy t
   still one three heartbeats later. omp's RPC output holds one `agent_start` and one `turn_start`
   since the long turn's prompt, and no assistant message follows the card: no turn ran for it.
   Remote mode sends the BTW through `/v1/messages/send`, which the listener takes only for a
-  session that advertises `btw`.
+  session that advertises `btw`. The mid-turn claim (the card not handed while the turn streams)
+  is checked in local mode only: there natsd's monitoring shows the session resubscribed inside
+  the check window, so the replay sweep ran mid-turn. Remote mode cannot see that, so a remote
+  pass of leg 7 shows only that one inert card appeared after idle with no turn run for it.
 - **Negative control, same run:** leg 1 again with a session running the released plugin
   (`SMOKE_REPLAY_CONTROL_PLUGIN`) ends with no entry for its publish, and a frame published live
   afterwards shows once, so that session was connected and writing cards the whole time.

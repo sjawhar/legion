@@ -177,11 +177,14 @@ code `REPLAY_UNAVAILABLE`: the session then says once, as a warning, that missed
 recovered, and live delivery goes on as before. A session on an older plugin recovers nothing.
 
 The listener trusts the session id a replay names, as it trusts it on every `/v1` route: there is
-no per-session secret, and the listener does not check that the session is live. So whoever holds
-the listener's API credential (its shared token or an accepted service-account token), or reaches
-it on loopback while `/v1` is open, and knows a session's id, live or ended, can read that
-session's stored inbox for the last 72 hours. It refuses a wildcard id, another session's inbox
-reached through a registered topic, and every failed-delivery lane.
+no per-session secret, and the listener does not check that the session is live. So whoever can
+call `/v1` and knows a session's id, live or ended, can read that session's stored inbox for the
+last 72 hours. A listener that requires a bearer serves `/v1` only to a holder of its API
+credential (its shared token or an accepted service-account token). A listener with no bearer
+serves it to any request whose `Host` is loopback or a name in `ENVOY_ALLOWED_HOSTS`, so where that
+list names the hub's own tailnet name, as the GCP hub's listener does with no bearer, every tailnet
+peer the tailnet's access rules let reach the listener's port can call it. It refuses a wildcard id, another
+session's inbox reached through a registered topic, and every failed-delivery lane.
 
 ## The NATS grant a Legion daemon needs
 
