@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // setting is one row of envoy-dispatch's settings table: a Dispatch setting, an environment
@@ -35,7 +36,8 @@ type setting struct {
 
 // settings is every Dispatch setting, in the order an operator meets them: storage, identity,
 // where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
-// service-account tokens, the secrets broker, the dashboard, and local and test runs.
+// service-account tokens, the secrets broker, meaning search's model service, the dashboard, and
+// local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
@@ -107,6 +109,22 @@ var settings = []setting{
 		Description: "Base URL of the secrets broker's API, an absolute http(s) URL with no path; set, the credential-request pages are on."},
 	{Name: "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE", Required: "when `DISPATCH_AGENT_SECRETS_URL` is set",
 		Description: "File holding Dispatch's own projected Kubernetes service-account token, which every call to the secrets broker presents; the broker verifies it and reads the caller from `BROKER_API_ACCOUNTS`. In the cluster it is the projected-token volume's path (`/var/run/secrets/…/token`), which the kubelet rewrites in place; the file is read at call time, so a rotation needs no restart, and a local run writes a token into a file of its own and names that."},
+	{Name: "DISPATCH_EMBEDDER", Default: "`bedrock`", Required: "no",
+		Description: "Where meaning search reaches Cohere Embed v4: `bedrock` (AWS Bedrock, on the AWS SDK's own region and credentials; with no region, search is keyword-only) or `azure` (Azure AI Foundry, configured by the `DISPATCH_AZURE_*` settings, each of which `bedrock` refuses)."},
+	{Name: "DISPATCH_AZURE_EMBED_ENDPOINT", Required: "when `DISPATCH_EMBEDDER` is `azure`",
+		Description: "The base URL the embeddings route is appended to, such as `https://<resource>.services.ai.azure.com/models`: an absolute https URL with a host and no query or fragment."},
+	{Name: "DISPATCH_AZURE_EMBED_DEPLOYMENT", Default: "`embed-v-4-0`", Required: "no",
+		Description: "Name of the Cohere Embed v4 deployment the endpoint serves, sent as each request's model."},
+	{Name: "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE", Required: "when `DISPATCH_EMBEDDER` is `azure`",
+		Description: "The deployment's tokens-per-minute quota, a positive integer; background embedding takes two thirds of it, leaving the rest to search queries."},
+	{Name: "DISPATCH_AZURE_EMBED_KEY", File: true, Required: "when `DISPATCH_EMBEDDER` is `azure` and the keyless sign-in is unset",
+		Description: "The deployment's API key, the key form of credential; refused alongside the keyless sign-in (`DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`)."},
+	{Name: "DISPATCH_AZURE_TENANT_ID", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+		Description: "Microsoft Entra tenant of the identity Dispatch signs in to Azure as, the keyless form of credential: it, `DISPATCH_AZURE_CLIENT_ID` and `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` are set together or not at all."},
+	{Name: "DISPATCH_AZURE_CLIENT_ID", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+		Description: "Client ID of that identity, whose federated credential trusts the token `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` holds."},
+	{Name: "DISPATCH_AZURE_FEDERATED_TOKEN_FILE", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+		Description: "Path of the federated token (a Kubernetes projected service-account token) Dispatch exchanges with Entra for an Azure access token; re-read on every exchange, since the token rotates."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
 	{Name: "DISPATCH_ASSET_STORE_BUCKET", Required: "no",
@@ -126,7 +144,7 @@ var settings = []setting{
 var removedSettings = []struct{ Name, Replacement string }{
 	{"DISPATCH_ALLOWED_LOGINS", "people sign in; DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN names who may"},
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
-	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock on the AWS SDK's default credential chain (the task role in production), never a Cohere API key"},
+	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock (the AWS SDK's default credential chain) or Azure AI Foundry (the DISPATCH_AZURE_* settings), chosen by DISPATCH_EMBEDDER, never with a Cohere API key"},
 	{"DISPATCH_AGENT_SECRETS_TOKEN", noSharedBrokerBearer},
 	{"DISPATCH_AGENT_SECRETS_TOKEN_FILE", noSharedBrokerBearer},
 }
@@ -201,6 +219,25 @@ func (values settingValues) lookup(name string) (string, bool) {
 func (values settingValues) get(name string) string {
 	value, _ := values.lookup(name)
 	return value
+}
+
+// fileSetting resolves a File row's value: the trimmed contents of the file name+"_FILE" names,
+// ahead of name's own trimmed value. A set but unreadable or blank file is an error naming both,
+// never a silent fallback to the bare variable.
+func fileSetting(env settingValues, name string) (string, error) {
+	fileVariable := name + "_FILE"
+	if path := strings.TrimSpace(env.get(fileVariable)); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("%s names %s, which could not be read, and %s is not read in its place: %w", fileVariable, path, name, err)
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" {
+			return "", fmt.Errorf("%s names %s, which is empty, and %s is not read in its place", fileVariable, path, name)
+		}
+		return value, nil
+	}
+	return strings.TrimSpace(env.get(name)), nil
 }
 
 // settingEntry is a row as `envoy-dispatch settings` prints it. Default and File are null when the
