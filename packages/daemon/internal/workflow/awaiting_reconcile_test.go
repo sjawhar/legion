@@ -40,9 +40,13 @@ func TestDecideAwaitsTable(t *testing.T) {
 		{"a root that left the workflow", func(v *awaitView) { v.Root.Status = "backlog" }, actStay, "not an admitted root"},
 		{"a child", func(v *awaitView) { v.Root.Tree = "LEGION-1" }, actStay, "not an admitted root"},
 		{"an architect that handed nothing back", func(v *awaitView) { v.Root.DeclaredSeq = 0 }, actStay, "handed nothing"},
-		{"nothing left with the person", func(v *awaitView) { v.Asks[0].WaitingOn = "agent" }, actStay, "still with the person"},
-		{"a question the root's tree did not open", func(v *awaitView) { v.Asks[0].ByTree = false }, actStay, "still with the person"},
-		{"an approval request rather than a question", func(v *awaitView) { v.Asks[0].Kind = record.AskApproval }, actStay, "still with the person"},
+		{"nothing left with the person", func(v *awaitView) { v.Asks[0].WaitingOn = "agent" }, actTakeIn, "still with the person"},
+		{"a question the root's tree did not open", func(v *awaitView) { v.Asks[0].ByTree = false }, actTakeIn, "still with the person"},
+		{"an approval request rather than a question", func(v *awaitView) { v.Asks[0].Kind = record.AskApproval }, actTakeIn, "still with the person"},
+		{"nothing left with the person while a member is in a phase", func(v *awaitView) {
+			v.Asks[0].WaitingOn = "agent"
+			v.Members = []record.Issue{{Key: "LEGION-209", Tree: "LEGION-208", Phase: phase.Implementing, Status: "in_progress"}}
+		}, actTakeIn, "still with the person"},
 		{"a member of its tree in a phase", func(v *awaitView) {
 			v.Members = []record.Issue{{Key: "LEGION-209", Tree: "LEGION-208", Phase: phase.Implementing, Status: "in_progress"}}
 		}, actStay, "of its tree is in implementing"},

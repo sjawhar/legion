@@ -95,6 +95,12 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 			if err := e.tellInPlace(ctx, tx, root, decision); err != nil {
 				return nil, err
 			}
+		case actTakeIn:
+			if err := e.store.ClearDeclared(ctx, tx, root.Key); err != nil {
+				return nil, err
+			}
+			e.logOnCommit(ctx, "workflow: what a root handed back is no longer with the person, so it starts no wait", "issue", root.Key,
+				"declared_seq", root.DeclaredSeq)
 		default:
 			intake.OnCommit(ctx, func() {
 				e.log.Debug("workflow: a root that handed work to a person keeps its slot", "issue", root.Key, "why", decision.Why)
@@ -114,6 +120,10 @@ const (
 	actEnter
 	// actTellInPlace resumes the root's architect where it stands, its slot kept.
 	actTellInPlace
+	// actTakeIn clears what the root handed back (Store.ClearDeclared): none of it is still with
+	// the person, and the running architect has the act that took it away, so no later change of
+	// the record may start a wait from that hand-back.
+	actTakeIn
 )
 
 // awaitView is what decideAwait reads of one root: its record, whether it holds a slot, the other
@@ -142,8 +152,8 @@ type awaitDecision struct {
 //
 //  0. a root not at admitted, lingering, out of the workflow, or holding no slot stays;
 //  1. one whose architect handed nothing back since it was last given work (DeclaredSeq) stays;
-//  2. one with no question still with the person (withHuman) stays: what it handed back was
-//     answered or closed first, and the running architect has that act;
+//  2. one with no question still with the person (withHuman) takes in what it handed back
+//     (actTakeIn): that was answered or closed first, and the running architect has that act;
 //  3. one whose tree has a member in a phase stays, since that member's work needs the slot;
 //  4. one that could not resume (Unresumable) stays, since released, nothing could resume it;
 //  5. one whose architect still owes the work it was given — a start queued, a claim still
@@ -163,7 +173,7 @@ func decideAwait(v awaitView) awaitDecision {
 	since := record.EventMark{Seq: root.DeclaredSeq}
 	waiting, ok := waitSubject(v.Asks, since)
 	if !ok {
-		return awaitDecision{Why: "nothing it handed back is still with the person"}
+		return awaitDecision{Act: actTakeIn, Why: "nothing it handed back is still with the person"}
 	}
 	for _, member := range v.Members {
 		if InWorkflow(member) && member.Phase != phase.Admitted {

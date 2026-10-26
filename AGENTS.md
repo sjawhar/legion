@@ -253,7 +253,9 @@ open on the person's turn; no other issue of its tree is in a phase; it could re
 on, and no person or session outside the tree holds its Dispatch claim); and its architect has
 taken the work it was last given (no start queued, its claim not still starting, its task
 confirmed), so a suspension never cancels a resume before its turn runs. The wait begins at that
-hand-back and names the oldest question still with the person. When a person already acted after
+hand-back and names the oldest question still with the person. When nothing it handed back is
+still with the person, the hand-back is taken in (`declared_seq` cleared), so an answer the running
+architect already had never starts or ends a later wait. When a person already acted after
 that hand-back, the root keeps its slot and its architect is given the resume task where it
 stands. Every time the daemon gives the architect work — admission, re-admission, a resume
 (`handout_seq`, the highest sequence the record then holds) — what it handed back before is taken
@@ -278,10 +280,12 @@ handed the turn back, answer nothing. An answered root goes to the front of the 
 ahead of every root that never ran, oldest answer first, and the next free slot resumes the same
 architect session with a task naming what answered it, how the spec stands, what is still with
 the person and what waits on the architect. Its tree stays live while it waits, so its children
-do not become orphans. Taking the `legion` label off a waiting root, or a person or a session
-outside the tree claiming it, takes it out of the workflow with an `unslotted` notice; it is never
-resumed under another owner. A session outside the tree writing a lifecycle status on a waiting
-root is set back, as on a root holding its slot, and its architect is told when it resumes. A root
+do not become orphans; no child of it starts while it waits, even once a person's approval opened
+its design gate, and they start with its resume. Taking the `legion` label off a waiting root, or
+a person or a session outside the tree claiming it, takes it out of the workflow with an
+`unslotted` notice; it is never resumed under another owner. A session outside the tree writing a
+lifecycle status on a waiting root is set back, as on a root holding its slot, and its architect
+is told when it resumes. A root
 whose Dispatch claim a person or outside session already holds keeps its slot at `admitted` while
 its architect asks that holder to release it, and so does an admitted root whose label was taken
 off, since only a labelled root is resumed.

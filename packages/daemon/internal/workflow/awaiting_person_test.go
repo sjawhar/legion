@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -343,4 +344,26 @@ func TestAChangesRequestARootNeverResumedForIsNotRecordedAsTold(t *testing.T) {
 	if gate := recordedGate(t, pool); gate == nil || gate.ToldChangesVersion != nil {
 		t.Fatalf("gate = %+v, want the told record cleared with the root's leaving", gate)
 	}
+}
+
+// A child its blockers held does not start while its root waits on a person, though the tree's
+// design gate is open (a person's approval answered the wait): the root holds no slot, and its
+// children start with its resume (advanceAdmittedTree), once it has its slot again.
+func TestAHeldChildDoesNotStartWhileItsRootWaitsOnAPerson(t *testing.T) {
+	pool := migratedPool(t)
+	root := awaitingRoot(3)
+	answered := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	root.Generation = 4
+	root.Awaiting.AnsweredAt, root.Awaiting.AnsweredBy, root.Awaiting.AnsweredDetail = &answered, record.AnsweredByApproval, "version 3"
+	seedIssue(t, pool, root)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
+	seedAdmittedChild(t, pool, "LEGION-209")
+	seedMirror(t, pool, "LEGION-209", "todo", "LEGION-300")
+	seedMirror(t, pool, "LEGION-300", "done")
+
+	startUnblockedChildren(t, pool, testEngine(config.DesignGateRootIssues, nil))
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
+		t.Fatalf("the child = %s, want it admitted until its root resumes", got)
+	}
+	assertOutboxKinds(t, pool, []string{})
 }

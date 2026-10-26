@@ -247,6 +247,44 @@ func TestAnAnsweredHandBackDoesNotStartTheNextWait(t *testing.T) {
 	}
 }
 
+// A hand-back nothing of which is still with the person is taken in on the pass that sees it: the
+// running architect already has the person's answer, so when the question later returns to the
+// person by no hand-back of the architect's (Dispatch's settlement restoring it), no wait starts
+// from the old hand-back and the architect is not resumed with an answer it already read.
+func TestAHandBackNoLongerWithThePersonIsTakenIn(t *testing.T) {
+	pool := migratedPool(t)
+	seedSlotted(t, pool, "LEGION-208", "U")
+	seedArchitectClaim(t, pool, "LEGION-208", true)
+	seedHandBack(t, pool, "LEGION-208", "ask-q", 5)
+	answered := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: false, Seq: 7, WaitingOn: "human",
+		WaitingOnSeq: 5, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, ByTree: true, PersonAnswerSeq: 7}
+	putAsk := func(ask record.RootAsk) {
+		t.Helper()
+		inTx(t, pool, func(tx pgx.Tx) {
+			if err := record.NewStore().PutRootAsk(context.Background(), tx, ask); err != nil {
+				t.Fatalf("record ask-q: %v", err)
+			}
+		})
+	}
+	putAsk(answered)
+	admission := newAdmission(t, 1, nil)
+	tick(t, pool, admission, "tick-answered")
+	if root := issue(t, pool, "LEGION-208"); root.Phase != phase.Admitted || root.DeclaredSeq != 0 {
+		t.Fatalf("root = %+v, want it admitted with its answered hand-back taken in", root)
+	}
+
+	restored := answered
+	restored.Open, restored.Seq = true, 9
+	putAsk(restored)
+	tick(t, pool, admission, "tick-restored")
+	if root := issue(t, pool, "LEGION-208"); root.Phase != phase.Admitted || root.Awaiting != nil {
+		t.Fatalf("root = %+v (awaiting %+v), want it admitted, waiting on nothing", root, root.Awaiting)
+	}
+	if requests := superviseRequests(t, pool, "LEGION-208"); len(requests) != 0 {
+		t.Fatalf("supervise requests = %+v, want the architect neither suspended nor resumed", requests)
+	}
+}
+
 // A root the Dispatch consumer has not caught up to decides nothing: its listing is ahead of the
 // record, so a question it shows may already be answered. The hold's release decides it.
 func TestAHeldRootIsNotDecidedBeforeTheConsumerCatchesUp(t *testing.T) {
