@@ -2816,6 +2816,25 @@ console.log(JSON.stringify(args, null, 2));
     const recorded = (result?.input as { command?: string } | undefined)?.command ?? command;
     expect(`${recorded}\n${result?.additionalContext ?? ""}`).toContain(flag);
   });
+  test("every --advisor-rebuttal flag a call carries stays where the agent reads its call back", async () => {
+    // Live, tester round 7 at 2b7369f4: a call carrying the flag twice ran with both removed and
+    // only the last put back as a comment; the agent found its first flag gone from its record of
+    // the call and reported it through xd://report_issue. Each flag it sent must still show.
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      complete: async () => ({ text: REVISE }),
+    });
+    const first = "--advisor-rebuttal 'first reason'";
+    const second = "--advisor-rebuttal 'second reason'";
+    const command = `dispatch comment --issue X-1 ${first} --body hi ${second}`;
+    const result = await g.bash("b1", command);
+    expect(result?.block).toBeUndefined();
+    const recorded = (result?.input as { command?: string } | undefined)?.command ?? command;
+    const readBack = `${recorded}\n${result?.additionalContext ?? ""}`;
+    expect(readBack).toContain(first);
+    expect(readBack).toContain(second);
+  });
   test("a device call and a command on one target share its breaker", async () => {
     const g = bind({
       env: { ...STUB, OMP_ASKGATE: "block" },
