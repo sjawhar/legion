@@ -14,26 +14,24 @@
 # review or review comment), never its text.
 #
 # It reads the event payload GitHub writes to GITHUB_EVENT_PATH, never the step's environment,
-# which the runner prints in the job log. A pull_request, pull_request_review or
-# pull_request_review_comment payload carries the pull request: its number, title, body, branch
-# name, and the base and head sha the run checks, which is the head the event names rather than
-# whatever head the pull request has by the time a route is read, since a push can land while the
-# job runs and gets a run of its own. An issue_comment payload names the pull request only as an
-# issue, so the rest is read from the pulls route, and a comment on an issue that is no pull
-# request is refused. The rest it reads with gh (GH_TOKEN, GITHUB_REPOSITORY): the commits from the
-# compare route between that base and head, which pages through every commit and reports their
-# total, so a list that comes back shorter than that total is refused loudly here instead of
-# silently scanning part of it; and the issue comments, reviews and review comments from their
-# list routes, which report no total, so each is read 100 at a time until a page comes back short.
-# There is no total to cross-check those lists against, and none is needed: posting, editing or
-# deleting one starts its own run, which reads after the change, so a list that shifted while one
-# run read it is read again by the run its change started. A NUL byte in any of them, which would
-# make `grep -I` treat the file as binary and skip it, is stripped first.
+# which the runner prints in the job log. A pull_request or pull_request_review payload carries
+# the pull request: its number, title, body, branch name, and the base and head sha the run
+# checks, which is the head the event names rather than whatever head the pull request has by the
+# time a route is read, since a push can land while the job runs and gets a run of its own. A
+# payload without one is refused. The rest it reads with gh (GH_TOKEN, GITHUB_REPOSITORY): the
+# commits from the compare route between that base and head, which pages through every commit and
+# reports their total, so a list that comes back shorter than that total is refused loudly here
+# instead of silently scanning part of it; and the issue comments, reviews and review comments
+# from their list routes, which report no total, so each is read 100 at a time until a page comes
+# back short. There is no total to cross-check those lists against, and none is needed: a list
+# that changes while a run reads it is read again by the next push, edit or review run and by the
+# lint job at the next push, and those runs' checks are the ones the merge reads. A NUL byte in any
+# of them, which would make `grep -I` treat the file as binary and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
 # CI runs it in the required lint job of pr-and-main.yaml on every pull request push, and in
-# pr-title.yaml when a pull request is edited or a comment, review or review comment on it is
-# posted, edited or deleted; its tests are in check-private-names.test.sh.
+# pr-title.yaml when a pull request is opened, reopened or edited or a review on it is submitted
+# or edited; its tests are in check-private-names.test.sh.
 set -euo pipefail
 
 event=${GITHUB_EVENT_PATH:?GITHUB_EVENT_PATH must name the pull request event payload}
@@ -44,16 +42,9 @@ work=$(mktemp -d)
 trap 'rm -rf "$text" "$work"' EXIT
 
 pull="$work/pull.json"
-if jq -e 'has("pull_request")' "$event" > /dev/null; then
-  jq '.pull_request' "$event" > "$pull"
-else
-  issue=$(jq -r '.issue | select(.pull_request) | .number' "$event")
-  if ! [[ $issue =~ ^[0-9]+$ ]]; then
-    echo "::error::the event payload names no pull request: it has no pull_request, and no issue" \
-      "that is one" >&2
-    exit 1
-  fi
-  gh api "repos/$repository/pulls/$issue" > "$pull"
+if ! jq -e '.pull_request' "$event" > "$pull"; then
+  echo "::error::the event payload carries no pull request" >&2
+  exit 1
 fi
 number=$(jq -er '.number' "$pull")
 base=$(jq -er '.base.sha' "$pull")
@@ -151,6 +142,8 @@ if [ "$status" -ne 0 ] && grep -q -E "(^|[:=])$kind_pattern:[0-9]+:" "$work/repo
   echo "    now: delete each comment and review comment, since an edit keeps the old text in its"
   echo "    edit history, which anyone who can read the repository can open; a submitted review"
   echo "    cannot be deleted, so edit its body and delete the old revision from that history."
-  echo "    pr-title.yaml checks the pull request again on each deletion and edit."
+  echo "    Editing a review starts a new run by itself; after deleting a comment or review"
+  echo "    comment, re-run the failed run (\`gh run rerun <run-id> --failed\`), which reads the"
+  echo "    comments again."
 fi
 exit "$status"
