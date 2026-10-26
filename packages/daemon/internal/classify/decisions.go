@@ -356,15 +356,15 @@ const (
 // ApplyDesignGateEvent updates a registered gate from one artifact observation, at mark: where
 // Dispatch recorded the review, zero for a version event and for a read that gave none. Approval
 // opens only when it names the latest known version, and the gate keeps that approval's mark; a
-// newer document version and a changes request close it. An approval and a newer version also
-// clear the changes request the architect was told of, which RecordChangesTold writes when it is
-// told, and a changes request and a newer version clear the approval's mark with the approval:
-// neither review outlives the other on the gate.
+// newer document version and a changes request close it. A newer version keeps the approval it
+// closes, with its mark, as the version a human approved below the latest; a changes request
+// clears both. An approval and a newer version also clear the changes request the architect was
+// told of, which RecordChangesTold writes when it is told, so the approval and the told request
+// never stand together on the gate.
 func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int, mark record.EventMark) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
 		gate = clearChangesTold(gate)
-		gate = clearApproved(gate)
 	}
 	switch kind {
 	case DesignGateApproved:

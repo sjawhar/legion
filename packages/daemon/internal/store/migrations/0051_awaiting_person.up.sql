@@ -63,11 +63,12 @@ alter table design_gates add constraint design_gates_told_changes_shape check (
 
 -- design_gates.approved_seq and approved_at are where Dispatch recorded the approval the gate
 -- holds: the review's event sequence on the issue and Dispatch's time of it (either null when the
--- read that carried it gave none). They clear wherever the approval clears, so the gate records
--- the mark of its newest applied review in one of two places — here while it is open, and in
--- told_changes_* while a changes request stands. A review of that version whose own mark is not
--- past the recorded one is one the person has already followed with another, and changes no gate
--- state.
+-- read that carried it gave none). They clear wherever the approval clears (a changes request),
+-- and a newer version keeps them with the approval it closes, so the gate records the mark of its
+-- newest applied review in one of two places — here while it records an approval, and in
+-- told_changes_* while a changes request stands. A review of the version recorded here whose own
+-- mark is not past the recorded one is one the person has already followed with another, and
+-- changes no gate state.
 alter table design_gates add column approved_seq bigint check (approved_seq > 0);
 alter table design_gates add column approved_at timestamptz;
 alter table design_gates add constraint design_gates_approved_mark_shape check (
