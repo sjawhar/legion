@@ -30,7 +30,7 @@ func newComponentTreeServer(t *testing.T) (http.Handler, *fakeGitHubApp) {
 	t.Helper()
 	fake := &fakeGitHubApp{
 		installations: map[string]string{"legion/arch": "read"},
-		commit:        "sha-one",
+		commit:        shaOne,
 		files:         componentTreeFiles(),
 	}
 	handler, _ := newArchitectureSourceServer(t, fake)
@@ -162,7 +162,7 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 	}
 
 	tree := readTree(t, handler)
-	if tree.Source.Repo != "legion/arch" || tree.Source.LastCommit == nil || *tree.Source.LastCommit != "sha-one" {
+	if tree.Source.Repo != "legion/arch" || tree.Source.LastCommit == nil || *tree.Source.LastCommit != shaOne {
 		t.Fatalf("tree source = %+v", tree.Source)
 	}
 	wantCounts := map[string][4]int{
@@ -235,7 +235,7 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 
 	// Retire workspace by re-import: the closed issue keeps the link as unknown, appears in
 	// retired_links, and its live component still counts it.
-	fake.commit = "sha-two"
+	fake.commit = shaTwo
 	delete(fake.files, "workspace.md")
 	syncComponentTree(t, handler)
 	retired := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+done.Key, nil, "alice"))
