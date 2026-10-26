@@ -2,30 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T04:47:09Z",
-  "round": "generation 4, answer to review round 14 (review 5647511344 at 152c849ca282) and the architect's note: skill text only",
+  "completed": "2026-10-26T05:22:12Z",
+  "round": "generation 4, round 15: the reviewer's podkind.go fast-follow done in this PR (architect's send-back under dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830); the round-14 skill fixes (ae3f92ecd6c7) are tested with it",
   "proof": [
     {
-      "criterion": "Review round 14 finding 1: merge-gate.md says what closeCheck does, that a pass or fail takes the issue's Sandbox for a root as for a child (packages/daemon/internal/workflow/check.go:275-302 enqueues record.IssueSuspend for every issue not back in the workflow)",
-      "surface": "the skills the plugins ship: skills/legion-worker/references/merge-gate.md and its claude-envoy legion/ copy, the pi-legion skills guard, and claude-envoy's build",
-      "command": "grep -rn 'Sandbox and volume\\|volume are released\\|volume kept' skills/ packages/daemon/internal/prompts/; cd packages/claude-envoy && bun run build && bun run check-dist; cd packages/pi-legion && bun test src/skills-guard.test.ts; bash .github/scripts/check-private-names.sh",
-      "observed": "merge-gate.md:282-284 now reads '`pass` or `fail` closes the check: your claim is retired and the issue's Sandbox goes with its pod and disk, for a root as for a child.'; the grep finds no remaining claim that a disk is kept or released only for a child; check-dist 'dist/ and legion/ match a fresh build'; skills guard 12 pass 0 fail; check-private-names passes",
-      "headSha": "ae3f92ecd6c70b56788567507ef568be04aa1007",
-      "negativeControl": "the same grep at 152c849ca282 counts 1 hit in skills/legion-worker/references/merge-gate.md ('for a child, the issue's Sandbox and volume are released'), the false sentence the review names"
+      "criterion": "podKind's claimTemplates and diskSource become one method that returns the kind's claim templates and the pod disk's VolumeSource together, with no behaviour change (no manifest golden changes)",
+      "surface": "the Sandbox runtime's manifest builder (sandboxManifest and podTemplate's volumes) for both pod kinds, through its golden manifests and package tests, and the daemon package that drives it",
+      "command": "sha256sum testdata/golden/* before the change, then sha256sum -c after it; cd packages/daemon && gofmt -l ./internal && go build ./... && go vet ./... && go vet -tags e2e ./... && CGO_ENABLED=0 go test ./internal/runtime/sandbox/... (no -update) && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=... CGO_ENABLED=0 go test ./internal/daemon/... -skip '<the env-blocked tests named in deviations>'; grep -rn 'claimTemplates\\|diskSource' packages/daemon --include=*.go",
+      "observed": "all seven goldens (controller-resume, controller, probe, resume, root-enrolled, root, worker .json) OK: byte-identical; gofmt empty, build and both vets clean; sandbox ok (211.7s); internal/daemon ok (551.4s); grep finds no reference to the old names. podKind.disk(r, l) (templates []volumeClaimTemplate, source corev1.VolumeSource): issuePod returns nil and the generic ephemeral source, controllerPod the issueVolume template and the IssueClaimName PVC, so the template and the claim name that refers to it are decided in one method",
+      "headSha": "71705421a303142106f80a5d27bb8d844b376309",
+      "negativeControl": "with controllerPod.disk's ClaimName temporarily set to IssueClaimName(...)+\"-x\", go test -run TestManifest fails (--- FAIL: TestManifestGoldens); restored afterwards"
     },
     {
-      "criterion": "Reviewer's fast-follow, done now under dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830: the child-closed bullet in acceptance.md links merge-gate.md for when the pod goes, rather than restating the look lifecycle",
-      "surface": "skills/legion-architect/references/acceptance.md 'The close' and its claude-envoy copy, read by the architect skill; the skills guard checks its skill:// link",
-      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist; grep -n 'no report\\|bounded at' skills/legion-worker/references/merge-gate.md",
-      "observed": "the bullet keeps the five retired claims and the running implementer, and points to skill://legion-worker/references/merge-gate.md, *The production check after the close*, for when the pod and Sandbox go. That section covers every case the old bullet listed: a pending with no wake queued (pod and disk go), a queued wake (next look on the same pod), a look that reports nothing ('ends as a `pending`', line 272), and pass/fail (line 283). Guard 12 pass, link resolved; check-dist in sync",
-      "headSha": "ae3f92ecd6c70b56788567507ef568be04aa1007",
-      "negativeControl": "with the link temporarily respelled skill://legion-worker/references/merge-gates.md, the skills guard fails (11 pass 1 fail: 'every skill://<name>/<path> link names a file that exists' — '...acceptance.md: skill://legion-worker/references/merge-gates.md names no file'); restored afterwards, 12 pass"
+      "criterion": "Round 14 (review 5647511344): merge-gate.md says a pass or fail takes the Sandbox for a root as for a child, and acceptance.md's child-closed bullet links merge-gate.md (carried at this head from ae3f92ecd6c7)",
+      "surface": "the skills the plugins ship and claude-envoy's generated copy",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist",
+      "observed": "recorded in round 14's handoff at 58d8060c4a43 (guard 12 pass, check-dist in sync); this round changes no skill text",
+      "headSha": "71705421a303142106f80a5d27bb8d844b376309",
+      "negativeControl": "at 152c849ca282 a grep for 'Sandbox and volume' finds the false sentence in merge-gate.md; respelling the new link to merge-gates.md fails the guard with 'names no file'"
     }
   ],
   "filesChanged": [
-    "skills/legion-worker/references/merge-gate.md and packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md",
-    "skills/legion-architect/references/acceptance.md and packages/claude-envoy/legion/skills/legion-architect/references/acceptance.md"
+    "packages/daemon/internal/runtime/sandbox/podkind.go (interface and both kinds: one disk method)",
+    "packages/daemon/internal/runtime/sandbox/manifest.go (the two callers)",
+    "comment-only renames: internal/api/version.go, runtime/sandbox/{relaunch,operatorpod,install}.go, runtime/sandbox/{boundary,live,rig,cleanup}_test.go"
   ],
-  "deviations": [],
+  "deviations": [
+    "internal/daemon tests skipped by name because this pod has no Docker, tmux, gcc or pgvector, each failing identically at main earlier this generation: TestABootWaitsOutAGitHubRequestThatNeverAnswers, TestTmuxBootRewritesEveryOlderClonesCredentialHelper, TestATerminalAttempt*, TestDaemonPermissionsOnRealServers, TestTheWorkflowConnectsAsTheNatsSeedTheDaemonResolved, TestTheWorkflowConnectsAsTheDaemonSeedOverThePaneSeed and the scratch-Dispatch tests. CI's Tests run at 71705421a303 runs them."
+  ],
   "openQuestions": []
 }
