@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-80",
+  "completed": "2026-10-26T03:36:56Z",
+  "round": "tester round 14, generation 4: forward merge b247931acbca -> 0c7467a98747 (plan.json round task M3); fingerprint unchanged, bare gates only",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's fingerprint command myself after jj git fetch, base read from gh pr view 2173 baseRefName: fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9 at b247931acbca, 0c7467a98747 and 69c0dd44b37b; re-ran its negative control on adaa2bcbcb2f (unresolved merge) and got the same d5dde5e010d36c87b655d014973a40f44a0be772f37dbaafc0fbed0783ab8eb6. Independently compared the keep-both resolution per file: sorted +/- lines of main@origin(135d22e0f63b)->0c7467a98747 equal decf80f922a1->8f540bec91d8 for both CHANGELOGs (pi-legion e5fd2fa4…, claude-envoy 2e6c9d10…), no conflict markers; the merge commit's own resolution diff touches only those two files."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "M3: after the conflict-forced forward merge the branch's diff is unchanged from the head the tester last verified (unchanged-diff check)",
+      "surface": "the reference fingerprint command over the real branch history in the issue workspace (jj, shared clone), base from GitHub",
+      "command": "base=$(gh pr view 2173 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj git fetch && jj diff --from \"fork_point(${base}@origin | <h>)\" --to <h> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, for <h> = b247931acbcace344f90e6645e7a12d4dbc5e248, 0c7467a987478e91383b4f692202a435e93be5bd, 69c0dd44b37bdd965900d0ee84f386d3d691599e",
+      "observed": "all three print fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9: unchanged, so bare gates only. main@origin is still 135d22e0f63b with DaemonAPIVersion = 36 (branch 37), so the plan's contingency does not apply. Recorded in the PR body's E2E (tester) round 14.",
+      "headSha": "0c7467a987478e91383b4f692202a435e93be5bd",
+      "negativeControl": "the same command on the merge commit before its conflicts were resolved, adaa2bcbcb2f2aa2106968262f7df54de24b76c1, prints d5dde5e010d36c87b655d014973a40f44a0be772f37dbaafc0fbed0783ab8eb6, not fc66319c…"
+    },
+    {
+      "criterion": "M3 smoke: a legion built at the merged head refuses the file session store at load and accepts the database stores",
+      "surface": "the real legion CLI built with CGO_ENABLED=0 go build ./cmd/legion from the workspace at 69c0dd44b37b (code tree identical to 0c7467a98747; jj diff shows only .legion/INFRA-80/implement.json), run against deploy/kubernetes/daemon/legion.yaml.example with stub 0600 token files, a stub kubeconfig whose context is legion-daemon, and LEGION_POSTGRES_DSN set",
+      "command": "legion start --config <file> --check-config for: the example as shipped (session_store: postgres); session_store: cloudsql-iam with session_database {instance, name, user} in place of session_dsn_secret; session_store: pvc; the session_store line deleted; session_store: file",
+      "observed": "example: 'Config OK: project=WIDGETS' exit 0; cloudsql-iam: 'Config OK' exit 0; pvc: exit 1 'runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80): an issue pod's disk is the pod's own ephemeral volume, deleted with the pod, …'; omitted: exit 1, the same line; file: exit 1 'runtime.kubernetes.session_store must be 'postgres' or 'cloudsql-iam''",
+      "headSha": "0c7467a987478e91383b4f692202a435e93be5bd",
+      "negativeControl": "session_store: pvc and the omitted key, each refused with exit 1 and the INFRA-80 line"
+    }
+  ],
+  "ci": "At 0c7467a98747, read without waiting: lint success (completed_at 03:35:25Z), pr-title success (03:35:54Z), typecheck success (03:36:26Z); test (Tests run 40264431582) and Worker Image run 40264431578 in_progress; Docs run 40264431573 in_progress; Legion Envoy and Contracts run 40264431589 queued. Nothing concluded from unsettled lanes; the daemon reads their settlement.",
+  "notRun": [
+    "The live Stage 4a run (scripts/e2e/stage4a-sandbox-runtime.sh) on the cluster at this head: it cannot run from a pod, the architect is arranging it with the devbox session that holds the cluster credential on the worker image Worker Image run 40264431578 builds. Not run by me and not recorded as passing.",
+    "Stage 4b has run at no head."
+  ]
+}
