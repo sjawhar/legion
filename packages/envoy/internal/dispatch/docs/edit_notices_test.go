@@ -1037,9 +1037,10 @@ func TestEditNoticeABrowserEditAfterAJoinedWriteNamesTheBrowserEditor(t *testing
 			return err
 		}
 		// Zoe types in the browser while adam's transaction is still open, so her edit is the
-		// later one; adam's named version then carries both people.
+		// later one. Her append waits on the document's advisory lock adam's write holds until it
+		// commits, so her credit is still in flight when adam's named version takes its authors:
+		// that version carries both people, ordered by the room sequence each edit took.
 		editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("Second.", "Second, typed by zoe."))
-		waitForLandedAppends(t, service, artifactID)
 		_, err := service.NamedVersion(ctx, artifactID, "adam checkpoint", adam)
 		return err
 	}); err != nil {

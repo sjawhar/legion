@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -539,29 +540,64 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest
 	return capture
 }
 
-// latestEditSource is the sender of the latest edit among the room's unconsumed in-flight credits
-// and the calling transaction's own write, by the sequence each took when its edit was observed
-// or applied, falling to durable only when neither made one. It returns nil when that edit's
-// sender is not known, which is the whole of the answer: the caller names nobody.
+// latestEditSource is the person who made the document's latest edit, read from the senders the
+// room and the calling transaction recorded, newest first by the sequence each took when its edit
+// was observed or applied, and then from durable, the sender the document's last appended update
+// recorded. It never reads a name out of the set of people an edit credits.
+//
+// Walking newest first, each edit answers for itself:
+//   - a known sender that is a person is the answer;
+//   - a known sender that is a session is not an editor, so the walk goes on to the edit before
+//     it: an agent's version written over someone's typing still names that person;
+//   - an unknown sender ends the walk with nobody when that edit credits a person, which is what
+//     a browser edit made while several peers were connected leaves: ygo does not say which of
+//     them sent it, and an older person must not stand in for whoever did;
+//   - an unknown sender that credits only sessions is no person's edit, and the walk goes on.
 func latestEditSource(inflight []*inflightCredit, write *liveWrite, durable *model.Actor) *model.Actor {
-	var newest *inflightCredit
+	sources := make([]editSource, 0, len(inflight)+1)
 	for _, record := range inflight {
-		if newest == nil || record.seq > newest.seq {
-			newest = record
+		sources = append(sources, editSource{
+			seq: record.seq, sender: record.lastActor, creditsPerson: anyPerson(record.authors),
+		})
+	}
+	if write != nil && write.creditSeq > 0 {
+		sources = append(sources, editSource{
+			seq: write.creditSeq, sender: write.actor, creditsPerson: anyPerson(write.credits),
+		})
+	}
+	slices.SortFunc(sources, func(a, b editSource) int { return cmp.Compare(b.seq, a.seq) })
+	for _, source := range sources {
+		switch {
+		case source.sender == nil && source.creditsPerson:
+			return nil
+		case source.sender == nil:
+			continue
+		case source.sender.Kind == "user":
+			return cloneActor(source.sender)
 		}
 	}
-	writeSeq, writeActor := uint64(0), (*model.Actor)(nil)
-	if write != nil {
-		writeSeq, writeActor = write.creditSeq, write.actor
-	}
-	switch {
-	case newest != nil && newest.seq > writeSeq:
-		return cloneActor(newest.lastActor)
-	case writeSeq > 0:
-		return cloneActor(writeActor)
-	default:
+	if durable != nil && durable.Kind == "user" {
 		return cloneActor(durable)
 	}
+	return nil
+}
+
+// editSource is one edit the capture can order: the room sequence it took, the sender it recorded
+// (nil when no one connection can be credited with it), and whether it credits any person.
+type editSource struct {
+	seq           uint64
+	sender        *model.Actor
+	creditsPerson bool
+}
+
+// anyPerson reports whether authors holds a person.
+func anyPerson(authors map[string]model.Actor) bool {
+	for _, author := range authors {
+		if author.Kind == "user" {
+			return true
+		}
+	}
+	return false
 }
 
 // cloneActor copies actor, so a capture never shares the room's or a write's own pointer.
