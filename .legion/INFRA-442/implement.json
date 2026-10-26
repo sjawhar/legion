@@ -2,15 +2,30 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-442",
-  "completed": "2026-10-26T03:32:00Z",
+  "completed": "2026-10-26T04:18:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2227",
   "commits": {
     "tests": "090df44068a3 test(dispatch): red tests only (E1-E3, U1-U7)",
     "change": "0efec370fb53 fix(dispatch): the change",
-    "docs": "404c8295e2c9 docs(dispatch)"
+    "docs": "404c8295e2c9 docs(dispatch)",
+    "round1": "5d49365769e3 fix(dispatch): the hint line says Enter waits while a send is out; keyboard.md Ctrl+Enter wording"
+  },
+  "reviewRound1": {
+    "threads": [
+      "PRRT_kwDORFy7ds6wIULg: fixed in 5d49365769e3 (keyboard.md: the live view is the exception to the Enter row only; Ctrl+Enter sends there too); replied and resolved",
+      "PRRT_kwDORFy7ds6wIULh: fixed in 5d49365769e3 (while a send is out the line reads 'Sending… Enter sends again once Dispatch answers.' and is the disabled Send's description; no empty-box refusal then; U5 extended); replied and resolved"
+    ]
   },
   "harness": "/legion/scratch/harness: run `bash /legion/scratch/harness/setup.sh` once under your LEGION_ROLE (it creates the role's database and port lane: tester = ports 18720-18724, db dispatch_e2e_tester), then `cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/agent-view.e2e.ts --project chromium )`. If @legion/contracts dist is missing, run `bun run build` in packages/contracts first.",
   "proof": [
+    {
+      "criterion": "Review round 1: while this session's send is out, the line under the box does not offer Enter; it says Enter waits",
+      "surface": "Real Dispatch server on a rootless Postgres 17 in the issue pod, Playwright Chromium, a throwaway row (removed after the run) holding the first POST with holdPosts",
+      "command": "cd packages/dispatch && ( . /legion/scratch/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/zz-throwaway-sending-line.e2e.ts e2e/agent-view.e2e.ts --project chromium ); output at https://github.com/sjawhar/legion/pull/2227#issuecomment-6408036391",
+      "observed": "Throwaway row passed: Send reads 'Sending…' and is disabled, the line reads exactly 'Sending… Enter sends again once Dispatch answers.' and is the button's accessible description, the Enter hint absent, a second Enter posts nothing (1 POST while held), after the release Send is enabled and the Enter hint is back; the whole agent-view.e2e.ts file passed in the same run (19 passed, 3 skipped). Unit: bun test web/src/features/agent-view 61 pass.",
+      "headSha": "5d49365769e39d6ea5cb3ca13f48e2681d0dba4e",
+      "negativeControl": "Same row against a build with AgentThread.tsx as at 404c8295e2c9: failed at the sending line (toBeVisible, element(s) not found); unit mutation reverting only the line text makes U5 fail on the new assertion."
+    },
     {
       "criterion": "AC1: mid-turn (a streaming:true message) Send is enabled; clicking Send posts with the picked mode while the turn streams; Enter does too, as its own case; red before, green at head",
       "surface": "Real Dispatch server on a rootless Postgres 17 in the issue pod, Playwright Chromium (packages/dispatch/e2e harness)",
