@@ -2,35 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T20:35:00Z",
-  "round": 11,
-  "headSha": "6f57a71c61d7b07972e24c504fc434c4676fe65c",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6426622994",
-  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn (read from the session files)",
-  "workspaceRecreated": "The pod and volume were replaced at the drain. The workspace holds the pushed branch, and nothing of mine was unpushed (my last handoff 9d617a58 was on origin). The scratch rig under /legion/scratch/tmp was gone and was rebuilt for this round.",
+  "completed": "2026-10-26T20:58:00Z",
+  "round": 12,
+  "headSha": "2f95f13f3965",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6427112216",
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn in both smoke runs",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` (local mode) at this head: SMOKE REPLAY PASS, leg 7 included (a BTW replayed mid-turn is held with no card while the turn streams, then shown once as an inert card after the turn ends, with no extra agent_start and no assistant message after it)."
+    "how": "Ran `bash packages/pi-envoy/scripts/smoke-replay.sh` in remote mode exactly as committed (SMOKE_REPLAY_ENVOY_URL and SMOKE_REPLAY_NATS_URL set to a loopback listener and natsd built from this head): SMOKE REPLAY PASS, legs 1 to 7 and the three controls. Every read-back after /v1/messages/send found its message at once ('/v1/replay after 0 holds it: seq 1', 'after 1 … seq 2', 'after 2 … seq 3'). Local mode at this head: SMOKE REPLAY PASS."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "The architect's question: why smoke-replay.sh remote mode's read-back misses a /v1/messages/send publish; fail if it is a defect. The script's remote mode is part of what this PR delivers.",
-      "evidence": "No message is lost; the script is broken. replay_read reads its cursor from ${2:-} (packages/pi-envoy/scripts/smoke-replay.sh:712), but publish calls replay_read \"$watermark\" (line 774), which passes the cursor as $1. The /v1/replay request therefore carries no 'after', and the route only starts a cursor and returns no messages. Reproduce with the committed script: run it in remote mode against a loopback listener and natsd built from this head (SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:<port> SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:<port> bash packages/pi-envoy/scripts/smoke-replay.sh) -> exit 1, 'SMOKE REPLAY FAIL (leg-1-reconnect): /v1/replay after 0 does not hold 9bfb96ed…', while the answer shows last_seq 1 and messages []. The same read-back driven 67 times missed 67 of 67, and each stayed missing for 10 s while the stream held every message (raw STREAM.MSG.GET next_by_subj returns each). The same 150 sends with 'after' actually sent were all found by the first read-back. Fix: ${2:-} -> ${1:-} in replay_read. The next round re-runs remote mode as committed. No red test in a suite: a test of the script's text is not allowed, and the committed script's own remote run is the failing check."
+      "criterion": "Round 11 failure: smoke-replay.sh remote mode, as committed, passes its read-back after /v1/messages/send",
+      "surface": "real omp --mode rpc 18.12.2 with this checkout's pi-envoy, against a loopback Envoy listener and natsd built from this head, reached only through the script's remote-mode inputs",
+      "command": "SMOKE_REPLAY_ENVOY_URL=http://127.0.0.1:12672 SMOKE_REPLAY_NATS_URL=nats://127.0.0.1:14210 bash packages/pi-envoy/scripts/smoke-replay.sh",
+      "observed": "exit 0, SMOKE REPLAY PASS through legs 1 to 7 and the three controls; each publish found by the first read-back",
+      "headSha": "2f95f13f3965",
+      "negativeControl": "the same command at 6f57a71c (round 11) exited 1 at leg 1: '/v1/replay after 0 does not hold 9bfb96ed…', with the stream holding it"
+    },
+    {
+      "criterion": "Bare gates: local-mode smoke and the red tests",
+      "surface": "real omp, natsd -js and the listener built from this head; the plugin and listener suites",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; bun test extensions/envoy.test.ts -t \"a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
+      "observed": "SMOKE REPLAY PASS; BTW describe 8 pass 0 fail; both listener red tests pass",
+      "headSha": "2f95f13f3965",
+      "negativeControl": "the released plugin loses its messages in the smoke's controls"
     }
   ],
-  "verifiedFixed": [
-    "Review round 3 finding 1 (an inert card handed mid-turn started a turn), on omp 18.12.2: smoke leg 7 PASS; B5 (sent while NATS was down, idle), B7 (sent mid-turn while NATS was down, then interrupted) and B6k (sent while omp was SIGKILLed, then resumed) each show one inert card, no agent_start and no assistant message after it.",
-    "Review round 3 minors: the trust sentence names the API credential, loopback and ended sessions; the pump comment says a recorded BTW is shown by no sweep; the cursor-start window is stated in the cursorStarts comment.",
-    "Red tests 8c4e8911 (BTW describe 8 pass), 9f8ac8ff and 240a4c4ae641 PASS."
-  ],
-  "notDrivenLive": [
-    "Review round 3 finding 2 (readArrivals keeps already-read frames on a clean end): no real surface ends a subscription cleanly with read frames on demand; delivery-arrivals.test.ts drives nats.js's own QueuedIteratorImpl, and CI runs it."
-  ],
-  "proof": [],
-  "ci": {
-    "head": "6f57a71c61d7b07972e24c504fc434c4676fe65c",
-    "observed": "Docs success; Tests and Worker Image in progress; Legion Envoy and Contracts queued (run 40391084978). 02ceb042 got no run (the pull request was conflicting).",
-    "queryTmux": "claude-envoy 'queryTmux is bounded even by a tmux that ignores SIGTERM' passes in CI: job 121528826195 (run 40301975592, e0ed6d23, the last completed claude-envoy job on this branch), 1073 ms, 213 pass 0 fail. Every later run was cancelled by a newer push. Its failure is specific to the pod."
-  }
+  "ci": "At 2f95f13f when read: Tests (40398571761), Legion Envoy and Contracts (40398571826), Docs (40398572028) and Worker Image (40398572144) queued."
 }
