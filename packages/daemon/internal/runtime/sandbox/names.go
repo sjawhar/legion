@@ -3,18 +3,21 @@ package sandbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // The pod's own paths. The issue's disk is the pod's own generic ephemeral volume, created with the
-// pod and deleted with it; it is mounted whole at TreeRoot in workspace-init and each role
-// launcher, and no session is on it — every session is a row in the session database the
+// pod and deleted with it; it is mounted whole at TreeRoot in workspace-init and the pod's one
+// launcher container, and no session is on it — every session is a row in the session database the
 // deployment names (Options.SessionStore). The pod's feed is the volume's feedSubPath directory,
 // mounted at FeedDir: read-write in workspace-fetch, which mounts nothing else of the volume, and
 // read-only over the whole volume's mount in every other container. The clone owns its object-store
@@ -24,27 +27,32 @@ import (
 // of it (workspace.Fetch takes a feed only in the shape it writes), run before any git and in an
 // init container no agent runs beside, is what keeps the token-holding container from running what
 // an agent of this pod wrote.
-// Each role container has its own launcher token projection at LauncherDir, and
-// its own memory-backed LauncherPrivateDir, where its launcher writes the generation's boot token
-// and launch credentials, and StateDir. GHConfigDir is a role container's gh bundle root
-// (LEGION_GH_OWNERS_DIR), in an issue pod or the controller's: the read-only projection of its
-// role Secret's gh files, one directory per GitHub owner of the project (GitHubHostsKey(owner) as
-// <owner>/ghconfig.HostsFile, GitHubConfigKey(owner) as <owner>/ghconfig.ConfigFile), mounted in
-// that role's container alone, whose default owner's directory (GitHubDefaultKey) is its
+// LauncherDir, LauncherPrivateDir, StateDir, GHConfigDir and AgentSecretsKeyDir are where a
+// launcher role's process finds its own launcher token projection, memory-backed private directory
+// (where its launcher writes each generation's boot token and launch credentials), state directory,
+// gh bundle and agent-secrets key directory. The controller's pod mounts them there in its one
+// container. An issue pod's one container runs every workflow role, so it mounts each role's under
+// RolesDir (roleDir) instead, and each role's namespace (`legion launcher role-init`) covers
+// RolesDir and binds its own back at these paths, all but the launcher token, which no role's
+// process sees. GHConfigDir is the role's gh bundle root (LEGION_GH_OWNERS_DIR): the read-only
+// projection of its role Secret's gh files, one directory per GitHub owner of the project
+// (GitHubHostsKey(owner) as <owner>/ghconfig.HostsFile, GitHubConfigKey(owner) as
+// <owner>/ghconfig.ConfigFile), whose default owner's directory (GitHubDefaultKey) is its
 // GH_CONFIG_DIR, and which its gh (the image's `legion gh`) and the clone's `legion git-credential`
 // helper read the token of the owner a command names from. The kubelet rewrites a whole-volume
-// Secret projection in place when the Secret changes, so the refresher's Secret update is what the
-// next gh runs with. CacheRoot is where a repository cache's pod mounts its own volume. The
+// Secret projection in place when the Secret changes, and a bind of it sees the rewrite, so the
+// refresher's Secret update is what the next gh runs with. CacheRoot is where a repository cache's
+// pod mounts its own volume. The
 // issue's scratch is `/legion/scratch` (scratchRoot) on its volume, and the roles of the issue
 // share it: one temporary directory, one cache home, one data home and one bun install cache,
-// `/legion/scratch/{tmp,cache,data,bun/install/cache}`, every role container told the same four
-// (roleEnvironment). The one directory of it that is a role's own is its state home,
+// `/legion/scratch/{tmp,cache,data,bun/install/cache}`, every role told the same four
+// (roleEnvironment). The one directory of it that is one per role is its state home,
 // `/legion/scratch/state/<role>` (roleStateHome), which keeps one role's browser broker lock from
 // blocking its siblings'. The go command's two caches are the issue's too, one pair every role of
 // it is told, `/legion/go/build` and `/legion/go/mod` (goBuildCache, goModCache) under
 // `/legion/go`, a top-level directory of the volume beside the workspaces, the repositories,
-// feedSubPath and uv's own (uvPythonRoot, uvCacheDir). The gigabyte of ephemeral storage the
-// container is admitted with bounds none of them.
+// feedSubPath and uv's own (uvPythonRoot, uvCacheDir). The pod's ephemeral storage bounds none of
+// them.
 const (
 	TreeRoot = "/legion"
 	// SessionsSubPath is the sessions directory of a legion-v10.0.0 tree volume, which no pod
@@ -53,25 +61,77 @@ const (
 	SessionsSubPath    = "sessions"
 	FeedDir            = TreeRoot + "/" + feedSubPath
 	CacheRoot          = "/legion/cache"
-	LauncherDir        = "/var/run/legion/launcher"
-	LauncherPrivateDir = "/var/run/legion/private"
-	LauncherTokenFile  = "LAUNCHER_TOKEN"
-	GHConfigDir        = "/var/run/legion/gh"
-	ProvisionDir       = "/var/run/legion/provision"
-	StateDir           = "/var/run/legion/state"
-	ProvidersDir       = "/var/run/legion/providers"
+	LauncherDir        = launcher.FixedRoot + "/" + launcher.RoleLauncherDir
+	LauncherPrivateDir = launcher.FixedRoot + "/" + launcher.RolePrivateDir
+	LauncherTokenFile  = launcher.LauncherTokenFile
+	GHConfigDir        = launcher.FixedRoot + "/" + launcher.RoleGHDir
+	ProvisionDir       = launcher.FixedRoot + "/provision"
+	StateDir           = launcher.FixedRoot + "/" + launcher.RoleStateDir
+	ProvidersDir       = launcher.FixedRoot + "/providers"
 )
+
+// RolesDir is where an issue pod's one container mounts every workflow role's own volumes, one
+// directory per role (roleDir), and the role homes volume at RoleHomesDir. `legion launcher
+// --roles-dir` reads each role's launcher token there, and `legion launcher role-init` covers the
+// whole directory inside the role's namespaces and binds the role's own gh, private, state and
+// agent-secrets directories back at GHConfigDir, LauncherPrivateDir, StateDir and
+// AgentSecretsKeyDir, and makes the role's home overlay, temporary directories and own config
+// home under its directory of RoleHomesDir. The names under it are internal/launcher's layout
+// (launcher.RoleGHDir and its siblings), which both sides read.
+const (
+	RolesDir     = launcher.FixedRoot + "/roles"
+	RoleHomesDir = RolesDir + "/" + launcher.RoleHomesDir
+	// HomeMountsDir is where an issue pod's roles container mounts every volume that belongs at
+	// or under the image's home (homeMountsView), and where `legion launcher role-init` finds
+	// each to bind it back at its own path under the role's home overlay.
+	HomeMountsDir = launcher.HomeMountsDir
+	// RoleProbeDir is where the image probe's pod mounts a disk volume of its own, as an issue
+	// pod mounts its role homes volume, for `legion probe-image --role-namespaces` to run one role
+	// generation's namespaces over (launcher.CheckRoleNamespaces).
+	RoleProbeDir = launcher.FixedRoot + "/role-probe"
+)
+
+// roleDir is role's own directory of an issue pod's one container, under RolesDir: its launcher
+// token and gh projections of its role Secret, read-only, and its memory-backed private, state and
+// agent-secrets key directories, the last only in a pod enrolled with the secrets broker, each one
+// volume's mount at that name of launcher's layout.
+func roleDir(role claim.Role) string { return RolesDir + "/" + string(role) }
+
+// homeMountsView is mounts as an issue pod's roles container carries them: every mount at or
+// under the image's home (podHome) at the same path relative to HomeMountsDir instead
+// (containerHomePath), so the home itself carries no mount, and every other mount as it is.
+// `legion launcher role-init` binds each back at its own path under the role's home overlay.
+func homeMountsView(mounts []corev1.VolumeMount) []corev1.VolumeMount {
+	out := slices.Clone(mounts)
+	for i := range out {
+		out[i].MountPath = containerHomePath(out[i].MountPath)
+	}
+	return out
+}
+
+// containerHomePath is where an issue pod's roles container, outside every role's namespaces,
+// holds what a role sees at path: a path at or under the image's home is under HomeMountsDir,
+// and any other path is the same in both views.
+func containerHomePath(path string) string {
+	if path == podHome {
+		return HomeMountsDir
+	}
+	if rest, ok := strings.CutPrefix(path, podHome+"/"); ok {
+		return HomeMountsDir + "/" + rest
+	}
+	return path
+}
 
 // feedSubPath is the issue volume's directory that holds the pod's feed (FeedDir). The kubelet
 // makes it on first use.
 const feedSubPath = "feed"
 
-// AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id
-// live in, and AgentSecretsTokenDir where its projected token for the broker's audience is
-// mounted, as AgentSecretsTokenFile. Both are the worker container's alone.
+// AgentSecretsKeyDir is the memory-backed directory a role's agent-secrets key and enrollment id
+// live in, and AgentSecretsTokenDir where the pod's projected token for the broker's audience is
+// mounted, as AgentSecretsTokenFile. The key directory is each role's own; the token is shared.
 const (
-	AgentSecretsKeyDir    = "/var/run/legion/agent-secrets"
-	AgentSecretsTokenDir  = "/var/run/legion/agent-secrets-token"
+	AgentSecretsKeyDir    = launcher.FixedRoot + "/" + launcher.RoleAgentSecretsDir
+	AgentSecretsTokenDir  = launcher.FixedRoot + "/agent-secrets-token"
 	AgentSecretsTokenFile = "token"
 )
 
@@ -84,7 +144,7 @@ const (
 	ompAgentDir    = ompProfileDir + "/agent"
 	ompSessionsDir = ompAgentDir + "/sessions"
 	// podHome is the image's HOME, which the XDG base directories sit under.
-	podHome = "/home/legion"
+	podHome = launcher.Home
 	// imagePath is the image's PATH. A container's env PATH replaces the image's, so the pod's
 	// PATH repeats it after its own directories.
 	imagePath = "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
@@ -110,6 +170,55 @@ const (
 // above one.
 func imageOwnedPaths() []string {
 	return []string{"/opt/legion", "/opt/omp", ompProfileDir + "/plugins", ompAgentDir + "/agent.db", ompAgentDir + "/models.db"}
+}
+
+// imageLinks are the worker image's links to directories, link to target, read from the image built
+// at sha-92cb9728a212 (its Debian base's: the merged /usr, /var/run to /run, /var/lock to
+// /run/lock, /run/shm to /dev/shm). It is the one place that names them. A path spelled through one
+// is the path the link targets, so the kubelet mounts an operator's /run/legion/roles where Legion
+// mounts /var/run/legion/roles, and a mount above a link (/var holds /var/run) hides every path
+// spelled through it. CheckPod compares a mount with every spelling of a path it guards
+// (pathSpellings).
+var imageLinks = map[string]string{
+	"/bin": "/usr/bin", "/lib": "/usr/lib", "/lib64": "/usr/lib64", "/sbin": "/usr/sbin",
+	"/run/shm": "/dev/shm", "/var/lock": "/run/lock", "/var/run": "/run", "/var/spool/mail": "/var/mail",
+}
+
+// resolveImageLinks is p with every link of imageLinks it is spelled through replaced by its target.
+func resolveImageLinks(p string) string {
+	for resolved := false; !resolved; {
+		resolved = true
+		for link, target := range imageLinks {
+			if p == link || strings.HasPrefix(p, link+"/") {
+				p, resolved = target+p[len(link):], false
+			}
+		}
+	}
+	return p
+}
+
+// pathSpellings are p and every other path the worker image's links (imageLinks) make the same
+// path, in a fixed order: p, the path it resolves to, then the other spellings link by link.
+// /run/lock is also /var/lock and /var/run/lock.
+func pathSpellings(p string) []string {
+	links := slices.Sorted(maps.Keys(imageLinks))
+	spellings := []string{p}
+	for pending := []string{resolveImageLinks(p)}; len(pending) > 0; {
+		s := pending[0]
+		pending = pending[1:]
+		if !slices.Contains(spellings, s) {
+			spellings = append(spellings, s)
+		}
+		for _, link := range links {
+			target := imageLinks[link]
+			if s == target || strings.HasPrefix(s, target+"/") {
+				if alias := link + s[len(target):]; !slices.Contains(spellings, alias) && !slices.Contains(pending, alias) {
+					pending = append(pending, alias)
+				}
+			}
+		}
+	}
+	return spellings
 }
 
 // The keys of a claim's Secret that the runtime fills itself: the boot token and the provisioning
@@ -173,11 +282,11 @@ const (
 const maxNameLength = 63
 
 // SandboxName is the Sandbox and pod name for an issue, or for the project controller. The six role
-// claims of an issue share it; their container and generation live in each process locator
-// instead. A role claim's token always ends in one fixed role word, so cutting it (claim.Token.Cut)
-// preserves the project and issue token even where an issue name has hyphens. The controller's
-// token (claim.ControllerToken) ends in no workflow role and names its Sandbox whole,
-// `legion-<project>-controller`, which no issue's can be: an issue's part always ends in
+// claims of an issue share it, and its one container; their generations live in each process
+// locator instead. A role claim's token always ends in one fixed role word, so cutting it
+// (claim.Token.Cut) preserves the project and issue token even where an issue name has hyphens.
+// The controller's token (claim.ControllerToken) ends in no workflow role and names its Sandbox
+// whole, `legion-<project>-controller`, which no issue's can be: an issue's part always ends in
 // `-<digits>`, and one past dnsName's length in a dash and eight hex digits.
 func SandboxName(t claim.Token) string {
 	pod := string(t)
@@ -187,8 +296,8 @@ func SandboxName(t claim.Token) string {
 	return dnsName(pod, maxNameLength)
 }
 
-// launcherRoles is every role a launcher container can run: the six workflow roles of an issue
-// pod, and the controller of the project controller's pod.
+// launcherRoles is every role a launcher can run: the six workflow roles of an issue pod, and the
+// controller of the project controller's pod. Each has a role Secret of its own in its pod.
 var launcherRoles = append(slices.Clone(claim.Roles), claim.RoleController)
 
 // issueSandboxName is SandboxName of issue's role claims, from the issue key. project need not
@@ -234,8 +343,8 @@ func IssueClaimName(t claim.Token) string { return issueVolume + "-" + SandboxNa
 // secretName is the claim's Secret, which its Sandbox owns.
 func secretName(sandbox string) string { return sandbox + "-boot" }
 
-// roleSecretName is one role's private Secret in an issue Sandbox. Its launcher token and every
-// `<NAME>_FILE` credential are projected only into that role's container.
+// roleSecretName is one role's private Secret in its Sandbox: its launcher token and gh files,
+// which only its launcher, and only its role's namespace, read.
 func roleSecretName(sandbox string, role claim.Role) string {
 	return sandbox + "-" + string(role) + "-boot"
 }

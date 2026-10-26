@@ -44,6 +44,7 @@ describe("omp.skills / prepack manifest contract", () => {
       expect(readdirSync(staged).sort()).toEqual([
         "ce-dogfood",
         "ce-simplify-code",
+        "leading-a-work-stream",
         "legion-architect",
         "legion-controller",
         "legion-oracle",

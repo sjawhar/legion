@@ -521,7 +521,7 @@ func TestLiveSetupNeverRecordsAHelperValue(t *testing.T) {
 	}
 }
 
-// Every role container sets XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
+// Every role is told XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
 // global scope when GIT_CONFIG_GLOBAL is unset, so a helper written there must not count.
 func TestLiveSetupIgnoresTheXDGGlobalConfig(t *testing.T) {
 	r := newSetupRig(t, private)
@@ -567,9 +567,10 @@ func TestLiveSetupClassifiesEffectiveRepositoryHelpers(t *testing.T) {
 	extra := func(key, value string) func(t *testing.T, r *setupRig, clone string) {
 		return func(t *testing.T, r *setupRig, _ string) {
 			r.roleEnv()
-			t.Setenv("GIT_CONFIG_COUNT", "4")
-			t.Setenv("GIT_CONFIG_KEY_3", key)
-			t.Setenv("GIT_CONFIG_VALUE_3", value)
+			index := strconv.Itoa(len(gitConfigPairs))
+			t.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(len(gitConfigPairs)+1))
+			t.Setenv("GIT_CONFIG_KEY_"+index, key)
+			t.Setenv("GIT_CONFIG_VALUE_"+index, value)
 		}
 	}
 	for name, tc := range map[string]struct {
@@ -823,9 +824,9 @@ func newSetupRig(t *testing.T, network setupNetwork) *setupRig {
 	return r
 }
 
-// roleEnv sets the role's command-scope git entries, gitCredentialEnv's as the runtime sets them.
+// roleEnv sets the role's command-scope git entries, gitConfigEnv's as the runtime sets them.
 func (r *setupRig) roleEnv() {
-	for _, variable := range gitCredentialEnv() {
+	for _, variable := range gitConfigEnv() {
 		r.t.Setenv(variable.Name, variable.Value)
 	}
 }
@@ -947,7 +948,7 @@ func (r *setupRig) audited(name string) []string {
 }
 
 // wantEnvironment is the whole environment, HOME aside, that liveSetupScript's allowlist gives
-// every git under roleEnv: gitCredentialPairs as command-scope entries, with each helper key's
+// every git under roleEnv: gitConfigPairs as command-scope entries, with each helper key's
 // value emptied for the negative control, the role's PATH (runStart's) and owners directory, the
 // four fixed variables, and, for an ls-remote call, GIT_CEILING_DIRECTORIES at ceiling.
 func (r *setupRig) wantEnvironment(withoutHelper bool, ceiling string) []string {
@@ -955,12 +956,12 @@ func (r *setupRig) wantEnvironment(withoutHelper bool, ceiling string) []string 
 		"PATH=" + r.bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"LEGION_GH_OWNERS_DIR=" + r.owners,
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C",
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(gitCredentialPairs)),
+		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(gitConfigPairs)),
 	}
 	if ceiling != "" {
 		env = append(env, "GIT_CEILING_DIRECTORIES="+ceiling)
 	}
-	for i, pair := range gitCredentialPairs {
+	for i, pair := range gitConfigPairs {
 		value := pair[1]
 		if withoutHelper && strings.HasSuffix(strings.ToLower(pair[0]), "helper") {
 			value = ""

@@ -35,13 +35,14 @@ plugin() {
   case "$1" in
   @sjawhar/pi-envoy)
     entry=envoy
-    skills=(asd-ste100 dispatch dispatch-first dispatch-brainstorming envoy)
+    skills=(asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy)
     ;;
   @sjawhar/pi-legion)
     entry=legion
     skills=(
       legion-architect legion-controller legion-oracle legion-retro legion-worker
-      ce-dogfood ce-simplify-code thermonuclear-code-quality thermonuclear-deep-review
+      leading-a-work-stream ce-dogfood ce-simplify-code
+      thermonuclear-code-quality thermonuclear-deep-review
     )
     ;;
   *)

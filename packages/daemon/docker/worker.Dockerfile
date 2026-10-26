@@ -398,7 +398,7 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
 # util-linux (flock): the install Legion renders for an installing launch serialises on the issue's
 # shared bun install cache with /usr/bin/flock (installBlock,
-# packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
+# packages/daemon/internal/runtime/sandbox/plugins.go), so a pod whose image lacks it
 # fails every installing launch. The entry buys nothing today — Debian's priority:required set
 # already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
 # failure the day a base drops it. Do not delete it as redundant.
@@ -432,9 +432,15 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
 # say how).
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
-# creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
+# creates a missing parent with its own --chown, so a runtime-user copy into /opt/legion would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
+# /var/run/legion/{gh,private,state,agent-secrets} are the empty, root-owned mount points an issue
+# pod's role-init binds each role's own directories back at (packages/daemon/internal/launcher,
+# roleinit_linux.go): inside a role's namespaces the role is the runtime user, which can create
+# nothing under the root-owned /var/run, so the image makes them. The controller's pod mounts its
+# volumes over the same paths, as it always has. The final step refuses an image where any is not
+# root's or is not empty.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
@@ -442,7 +448,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils 
     && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
-    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
+    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin \
+    && install -d -m 0755 -o root -g root /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets
 
 # ------------------------------------------------------------------------------------------------
 # debian-packages (build only): trixie's own dpkg-query over runtime-base's own database, one
@@ -602,8 +610,14 @@ RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-COPY --from=plugin --chown=legion:legion /out/pi-envoy /opt/legion/pi-envoy
-COPY --from=plugin --chown=legion:legion /out/pi-legion /opt/legion/pi-legion
+# The two plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
+# install the plugins loads them from here, one container's filesystem, so a role that could write
+# them could change the plugin code its siblings load. A launch that installs the plugins loads them
+# from the role's state home on the issue volume instead, which every role of the issue can write;
+# nothing here covers that copy. The final step refuses an image where anything under them is not
+# root's or is writable by anyone else.
+COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
+COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
@@ -654,9 +668,9 @@ WORKDIR /home/legion
 #    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
 #    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
 #    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
-#    variant extracts nothing, while a node that selects the other has each role container write
-#    that one into its writable layer at its first OMP run. The probes in the final step never
-#    wait on it.
+#    variant extracts nothing, while a node that selects the other has each role write that one into
+#    its own home overlay's upper layer, on the pod's role-homes volume, at its first OMP run: up to
+#    six copies in an issue pod. The probes in the final step never wait on it.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
@@ -759,7 +773,12 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # directory holds (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
+# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy and
+# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the image's copy
+# of the plugin code (a launch that installs the plugins loads them instead from the role's state
+# home on the issue volume, which every role of the issue can write); the role mount points under
+# /var/run/legion are root's, mode 0755 and empty;
+# and no file under /usr/lib/openssh or /usr/bin/ssh-agent
 # carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
 # ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
@@ -808,9 +827,15 @@ ARG LEGION_REVISION
 ARG PI_LEGION_VERSION
 ARG PI_ENVOY_VERSION
 RUN set -eu; \
-    for dir in /opt/legion /opt/legion/bin; do \
+    for dir in /opt/legion /opt/legion/bin /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    for dir in /var/run/legion/gh /var/run/legion/private /var/run/legion/state /var/run/legion/agent-secrets; do \
+      test -z "$(ls -A "$dir")"; \
+    done; \
+    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
+    echo "plugin files not root's alone: ${plugins:-none}"; test -z "$plugins"; \
     stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
