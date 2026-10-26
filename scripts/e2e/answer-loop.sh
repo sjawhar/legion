@@ -206,7 +206,7 @@ cleanup() {
   local status=$? p
   set +e
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
-  rm -f "$work/anthropic-key" "$work/anthropic-key-header"
+  rm -f "$work/anthropic-key" "$work/anthropic-key-header" "$work/provision-token"
   stop_pid "$daemon_pid"
   [ -z "${tmux_bin:-}" ] || kill_tmux_servers
   stop_pid "$dispatch_pid"
@@ -544,8 +544,9 @@ stop_service() {
 # claims-only (no dispatch_url, no github_apps) unless the review App is granted, the agents'
 # reviewer on Claude Code, the store's runtime, and with ANSWERS=yes the answers block: Anthropic
 # through the recording proxy, the list prices, and BOUNDS (a YAML flow mapping) over the defaults.
-# ANSWERS=base is the base commit's daemon's file: claims-only, on runtime tmux's files store (it
-# has neither session_store nor answers).
+# ANSWERS=base is the base commit's daemon's file, in the same mode, on runtime tmux's files store
+# (it has neither session_store nor answers): an agent it starts works in the same workspace the
+# branch daemon later resumes it in, as an upgrade leaves it.
 write_legion_config() {
   local file=$1 answers=$2 bounds=${3:-}
   {
@@ -558,7 +559,7 @@ write_legion_config() {
     if [ "$store" = postgres ] && [ "$answers" != base ]; then
       printf 'runtime:\n  tmux:\n    session_store: postgres\n    session_dsn_file: %s\n' "$work/sessions-dsn-$store"
     fi
-    if [ "$mode" = workflow ] && [ "$answers" != base ]; then
+    if [ "$mode" = workflow ]; then
       printf 'dispatch_url: http://127.0.0.1:%s\ndispatch_token_file: %s\nprojects:\n  %s: {}\ngates:\n  design: off\n' \
         "$port_dispatch" "$work/dispatch-token" "$project"
       cat "$work/github-apps.yaml"
@@ -691,10 +692,11 @@ write_prompt() {
 }
 
 # spawn_agent NAME ROLE TREE ISSUE TASK spawns the claim through the daemon's operator route and
-# records its token.
+# records its token; with the workflow on, the issue's workspace is provisioned first.
 spawn_agent() {
   local name=$1 role=$2 tree=$3 issue=$4 task=$5 token
   token=$(claim_token_of "$issue" "$role")
+  provision_workspace "$issue"
   claims_cmd spawn --json --tree "$tree" --issue "$issue" --role "$role" --prompt-file "$(write_prompt "$role" "$issue")" \
     --task "$task" >/dev/null
   agent[$store:$name.token]=$token
@@ -727,12 +729,96 @@ write_claude_route() {
   chmod 0700 "$work/claude-key-command"
 }
 
+# ---- the issues' workspaces ------------------------------------------------------------------------
+# With the workflow on, an operator's spawn spec carries the repository Dispatch's repo-projects
+# mapping gives the issue (the smoke repository), and the tmux runtime then works in the issue's jj
+# workspace at workspace.Location's <state>/workspaces/<owner>/<repo>/<issue lower-cased>, which
+# must exist already (internal/runtime/tmux/spawn.go, workspaceDir): the workflow's outbox
+# provisions it for an issue it admits, and it admits no rig issue (none has the `legion` label).
+# provision_workspace ISSUE provisions it as an issue pod's two init containers do, with the branch
+# daemon's own `legion workspace-init`: `fetch` fills the store pass's feed from GitHub once (no
+# repository cache), under an installation token of the implement App for the smoke repository
+# alone, `contents: read`, in a 0600 file removed as soon as the fetch ends; `provision` then makes
+# the shared clone at <state>/repos/github.com/<owner>/<repo> and the issue's workspace on
+# legion/<ISSUE> from main, its clone's credential helper the one a tmux daemon gives every clone it
+# provisions and rewrites at boot (workspace.GitHubCredentialHelper, `!legion git-credential`).
+# Claims-only, a spec has no repository and the runtime makes <state>/workspaces/<issue> itself.
+# The fetch and the provisioning log to $evidence/logs/workspaces-<store>.log.
+provision_workspace() {
+  local issue=$1 feed=$work/feed-$store dir log=$evidence/logs/workspaces-$store.log out code
+  [ "$mode" = workflow ] || return 0
+  dir=$state/workspaces/$repo/${issue,,}
+  [ ! -d "$dir" ] || return 0
+  if [ ! -d "$feed/$repo.git" ]; then
+    rm -f "$work/provision-token"
+    mint_provision_token "$work/provision-token" ||
+      fail "could not mint the implement App's installation token on $repo for the workspaces' fetch"
+    code=0
+    env -u LEGION_REPOSITORY_CACHE_URL -u LEGION_REPOSITORY_CACHE_TOKEN_FILE "PATH=$daemon_path" "TMPDIR=$work/tmp" \
+      "LEGION_PROVISION_TOKEN_FILE=$work/provision-token" \
+      "$work/branch/legion" workspace-init fetch --repo "$repo" --feed "$feed" >>"$log" 2>&1 || code=$?
+    rm -f "$work/provision-token"
+    [ "$code" = 0 ] || fail "legion workspace-init fetch --repo $repo exited $code; see $log"
+    note "fetched $repo into the $store pass's feed $feed: $(grep '^workspace-init fetch:' "$log" | tail -1)"
+  fi
+  code=0
+  out=$(env -u LEGION_PROVISION_TOKEN_FILE -u LEGION_REPOSITORY_CACHE_URL -u LEGION_REPOSITORY_CACHE_TOKEN_FILE \
+    "PATH=$daemon_path" "TMPDIR=$work/tmp" \
+    "$work/branch/legion" workspace-init provision --issue "$issue" --repo "$repo" --default-branch main --root "$state" \
+    --credential-helper '!legion git-credential' --feed "$feed" 2>&1) || code=$?
+  printf '%s\n' "$out" >>"$log"
+  [ "$code" = 0 ] || fail "legion workspace-init provision --issue $issue exited $code: $(tail -1 <<<"$out")"
+  # Its last line names the directory it provisioned, which must be the one spawn.go looks in.
+  [ "$(tail -1 <<<"$out")" = "workspace-init: $dir on legion/$issue from main" ] ||
+    fail "legion workspace-init provision --issue $issue provisioned \"$(tail -1 <<<"$out")\", not $dir"
+  note "provisioned $issue's workspace $dir (legion/$issue from main)"
+}
+
+# mint_provision_token FILE writes an installation token of github_apps.implement in
+# $work/github-apps.yaml on the smoke repository alone, `contents: read`, to the new 0600 FILE
+# (lib/app-logins.ts reads the key, lib/app-installation.ts finds the installation); the key and the
+# token are printed nowhere.
+mint_provision_token() {
+  cat >"$work/mint-provision-token.ts" <<'TS'
+import { readFileSync, writeFileSync } from "node:fs";
+const [lib, config, repo, out] = process.argv.slice(2) as [string, string, string, string];
+const { appJWT, appKeySources, runKeyCommand } = await import(`${lib}/app-logins.ts`);
+const { installationOn } = await import(`${lib}/app-installation.ts`);
+const api = "https://api.github.com";
+const source = appKeySources(readFileSync(config, "utf8"), ["implement"]).implement;
+if (source === undefined) throw new Error("github_apps.implement is not configured");
+const key = runKeyCommand("implement", source.privateKeyCommand);
+const installation = await installationOn(source.appId, key, repo, api);
+if (!installation.installed) throw new Error(`the implement App is not installed on ${repo}`);
+const path = `/app/installations/${installation.installation}/access_tokens`;
+const minted = await fetch(`${api}${path}`, {
+  method: "POST",
+  headers: {
+    authorization: `Bearer ${appJWT(source.appId, key, new Date())}`,
+    accept: "application/vnd.github+json",
+    "x-github-api-version": "2022-11-28",
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({ repositories: [repo.split("/")[1]], permissions: { contents: "read" } }),
+  signal: AbortSignal.timeout(30_000),
+});
+if (!minted.ok) throw new Error(`POST ${path} answered ${minted.status}`);
+const token = ((await minted.json()) as { token?: unknown }).token;
+if (typeof token !== "string" || token === "") throw new Error(`POST ${path} named no token`);
+writeFileSync(out, token, { mode: 0o600, flag: "wx" });
+TS
+  (umask 077 && bun "$work/mint-provision-token.ts" "$root/scripts/e2e/lib" "$work/github-apps.yaml" "$repo" "$1")
+}
+
 # produce_pre_change runs the base commit's daemon on the pass's database and state directory, as the
 # release before this change: one Claude Code reviewer, on a child of a tree of its own, has its
 # conversation, then is suspended and the base daemon stopped. The tree's architect is spawned with
 # no task first, since an operator's spawn opens a tree's lifecycle only for its root architect, and
 # is suspended with it. The branch daemon then boots on the same database and directory, as an
 # upgrade does, and finds the conversation only by its title (A2's conversation from before the change).
+# The base daemon runs in the run's mode, so with the workflow on both issues' workspaces are
+# provisioned first (provision_workspace): the base daemon starts the reviewer there, and the branch
+# daemon resumes it there (A10).
 produce_pre_change() {
   local token architect tree=${agent[$store:pre_change.tree]}
   write_legion_config "$work/base-$store.yaml" base
@@ -741,6 +827,7 @@ produce_pre_change() {
   write_claude_route "$token" "claude-$store"
   start_daemon "$work/base/legion" "$work/base-$store.yaml" "$evidence/logs/base-daemon-$store.log" "$base_home" "$base_profile" \
     "$base_src/packages/claude-envoy"
+  provision_workspace "$tree"
   claims_cmd spawn --json --tree "$tree" --issue "$tree" --role architect --prompt-file "$(write_prompt architect "$tree")" >/dev/null
   spawn_agent pre_change reviewer "$tree" "${agent[$store:pre_change.issue]}" "$(jq -r .agents.pre_change.task "$questions_file")"
   await_turn pre_change
@@ -1355,6 +1442,7 @@ check_a6() {
   note "recorded the running tree $root6 and its child $child6 in the daemon's issues table"
   start_daemon "$work/branch/legion" "$work/answers-$store.yaml" "$daemon_log" "$branch_home" "$branch_profile" "$root/packages/claude-envoy"
   architect=$(claim_token_of "$root6" architect)
+  provision_workspace "$root6"
   claims_cmd spawn --json --tree "$root6" --issue "$root6" --role architect --prompt-file "$(write_prompt architect "$root6")" >/dev/null
   agent[$store:a6_architect.token]=$architect
   agent[$store:a6_architect.issue]=$root6
@@ -1883,6 +1971,7 @@ check_a19() {
   note "opened $repo pull request #$number from $branch at $head as the implement App"
   token=$(claim_token_of "$issue" reviewer)
   write_claude_route "$token" "claude-$store"
+  provision_workspace "$issue"
   claims_cmd spawn --json --tree "$issue" --issue "$issue" --role architect --prompt-file "$(write_prompt architect "$issue")" >/dev/null
   agent[$store:a19_architect.token]=$(claim_token_of "$issue" architect)
   spawn_agent reviewer reviewer "$issue" "$issue" \

@@ -806,6 +806,23 @@ stopped the way the spec's kinds are made:
   of it, its three binaries and installed workspace kept in the cache under `base-<commit>`, with
   that commit's plugins in a profile of its own.
 
+**The issues' workspaces.** With the workflow on, an operator's spawn spec carries the repository
+the project's mapping gives the issue, `sjawhar/legion-smoke`, and the tmux runtime then works in
+the issue's jj workspace, `<state>/workspaces/sjawhar/legion-smoke/<issue lower-cased>`
+(`workspace.Location`), which must exist already: the workflow's outbox provisions it only for an
+issue it admits. So before each spawn, the pre-change ones included (the branch's daemon resumes
+that reviewer in A10), the run provisions the issue's workspace as an issue pod's init containers
+do, with the branch's own `legion workspace-init`: `fetch` fills the pass's feed from GitHub once
+(`LEGION_REPOSITORY_CACHE_URL` unset), under an installation token of the implement App for the
+smoke repository alone (`contents: read`), minted through `lib/app-logins.ts` and
+`lib/app-installation.ts` into a 0600 file in the work directory, removed when the fetch ends and
+never printed; `provision --root <state>` then makes the shared clone at
+`<state>/repos/github.com/sjawhar/legion-smoke` and the issue's workspace on `legion/<ISSUE>` from
+`main`, with the credential helper a tmux daemon gives its clones (`!legion git-credential`). The
+run refuses a provisioned directory other than the one the runtime looks in. Both steps log to
+`logs/workspaces-<store>.log`. Claims-only, a spec has no repository and the runtime makes
+`<state>/workspaces/<issue>` itself, so the run provisions nothing.
+
 **Session waits.** A stopped pane does not unregister its session: its entry in the listener's
 session bucket lapses with the bucket's 5-minute TTL. Every wait for a session to leave (after each
 agent is made, and in `suspend_agent`) is 420 s long; `resume_agent` waits for the session to be
