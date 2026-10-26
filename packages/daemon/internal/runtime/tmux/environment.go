@@ -2,8 +2,10 @@ package tmux
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -75,6 +77,37 @@ func readProviderKeyNames(dir string, dispatchConfigured bool) ([]string, error)
 		names = append(names, name)
 	}
 	return names, nil
+}
+
+// checkPaneEnv refuses an operator's pane variable (Options.PaneEnv, `runtime.tmux.pane_env`) that
+// would change what a pane is told by anything but the operator: a name the runtime sets on a tree
+// or controller pane itself, PATH, which the runtime composes, the git identity each launch sets for
+// its role (runtime.GitIdentity.Env), a provider key or its pointer, which the shim would then
+// refuse to start over or skip (internal/shim/config.go), and a credential-shaped name, since a
+// secret reaches a pane as a file and never as a value on tmux's command line. The loader refuses
+// what it can see without the runtime (config.readPaneEnv); this is the rest, at boot, before any
+// pane opens.
+func checkPaneEnv(env map[string]string, providerKeys []string) error {
+	identity := runtime.GitIdentity{}.Env()
+	for _, name := range slices.Sorted(maps.Keys(env)) {
+		_, isIdentity := identity[name]
+		switch {
+		case !runtime.IsEnvName(name):
+			return fmt.Errorf("tmux runtime: pane variable %q is not an environment variable name", name)
+		case name == "PATH" || runtimeOwned[name] || controllerOwned[name]:
+			return fmt.Errorf("tmux runtime: pane variable %s is one the runtime sets on every pane itself", name)
+		case isIdentity:
+			return fmt.Errorf("tmux runtime: pane variable %s is part of the git identity each launch sets for its role", name)
+		case runtime.HoldsSecretValue(name):
+			return fmt.Errorf("tmux runtime: pane variable %s is credential-shaped: a secret reaches a pane as a file (provider_keys), never as a value", name)
+		}
+		for _, key := range providerKeys {
+			if name == key || name == key+"_FILE" {
+				return fmt.Errorf("tmux runtime: pane variable %s would keep provider key %s from OMP: the shim refuses a key its environment already carries, and skips one whose pointer it carries", name, key)
+			}
+		}
+	}
+	return nil
 }
 
 // xdgDirectories are the four XDG base directories under the daemon's home, in the order the

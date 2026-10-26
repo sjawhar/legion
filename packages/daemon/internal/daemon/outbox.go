@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -1143,28 +1144,72 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.podsProvision() {
 		return nil
 	}
-	if r.tokens == nil {
-		return errors.New("supervise executor has no GitHub App token manager")
-	}
 	repo, err := issue.Repository()
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
+	return r.provisionIn(ctx, issue.Key, repo, issue.DefaultBranch, false)
+}
+
+// ensureWorkspace provisions key's workspace when a launch finds it missing on the daemon's host
+// (the launch's spec, specs.ensureWorkspace): a claim resumed, relaunched or recovered rather than
+// created, whose workspace this host never had — its issue ran in another runtime's pods before —
+// or no longer has. An existing workspace is left as it is. Provisioning checks out the issue's
+// branch legion/<KEY> when GitHub has it, and starts at defaultBranch otherwise
+// (workspace.Provision).
+func (r *outbox) ensureWorkspace(ctx context.Context, key string, repo ghrepo.Repository, defaultBranch string) error {
+	if r.podsProvision() {
+		return nil
+	}
+	missing, err := workspaceMissing(r.stateDir, repo, key)
+	if err != nil || !missing {
+		return err
+	}
+	r.log.Warn("provisioning the workspace a claim's launch found missing", "issue", key, "repository", repo.String())
+	return r.provisionIn(ctx, key, repo, defaultBranch, true)
+}
+
+// workspaceMissing is whether key's workspace directory is absent from the daemon's host.
+func workspaceMissing(stateDir string, repo ghrepo.Repository, key string) (bool, error) {
+	working, err := workspace.Location(stateDir, repo, key)
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(working.Dir); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("read the workspace of %s: %w", key, err)
+	}
+	return true, nil
+}
+
+// provisionIn provisions key's workspace in repo, at defaultBranch for an issue with no branch, as
+// the implement App for repo's owner; with onlyMissing, only when the workspace is still missing
+// once this provision's turn comes, so two launches that both found it missing provision it once.
+func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Repository, defaultBranch string, onlyMissing bool) error {
+	if r.tokens == nil {
+		return errors.New("supervise executor has no GitHub App token manager")
+	}
 	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
 	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), issue.Key, err)
+		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
 	}
 	// One provision at a time (provisionMu): the issue's workspace is added to its repository's
 	// shared clone, which every issue on that repository shares, and a second issue's lane
 	// provisioning beside this one would have the clone fetching and adding under both.
 	r.provisionMu.Lock()
 	defer r.provisionMu.Unlock()
+	if onlyMissing {
+		if missing, err := workspaceMissing(r.stateDir, repo, key); err != nil || !missing {
+			return err
+		}
+	}
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: repo, Issue: issue.Key, DefaultBranch: issue.DefaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
+		StateDir: r.stateDir, Repo: repo, Issue: key, DefaultBranch: defaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
-		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
+		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
 	}); err != nil {
-		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
+		return fmt.Errorf("provision workspace for %s: %w", key, err)
 	}
 	return nil
 }

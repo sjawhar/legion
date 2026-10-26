@@ -956,6 +956,13 @@ func (m *Machine) backOff(ctx context.Context) error {
 	return nil
 }
 
+// start launches the claim's process for this try: a Resume of its recorded session, or a Spawn
+// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing — the
+// session was recorded where it no longer is, such as another runtime's pod — would fail the same
+// way on every try and wedge the claim until its launch budget ran out, so the claim forgets the
+// session and the same try spawns a fresh agent, which registers its own session; the runtime has
+// waited out the previous process and started nothing first. It is logged, never charged: the
+// session's place went, the launch did nothing wrong.
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
@@ -967,7 +974,15 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
-	return m.deps.Runtime.Resume(ctx, m.previous, spec)
+	loc, err := m.deps.Runtime.Resume(ctx, m.previous, spec)
+	if !errors.Is(err, runtime.ErrSessionFileMissing) {
+		return loc, err
+	}
+	m.log.Warn("supervise: the recorded session file is missing; starting a fresh session in its place",
+		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", err)
+	m.forgetSession()
+	spec.ResumeSessionFile = ""
+	return m.deps.Runtime.Spawn(ctx, spec)
 }
 
 // stopPrevious stops the process letGo moved into previous when a launch fails: the claim no longer

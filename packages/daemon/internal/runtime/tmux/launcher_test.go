@@ -109,7 +109,8 @@ func TestAgentMarkersNameEveryConfiguredHarness(t *testing.T) {
 }
 
 // A launch whose backend the daemon resolved no launcher for is refused naming it, before any
-// file is written or tmux is run, and a missing session names the harness it was recorded for.
+// file is written or tmux is run, and a missing session is runtime.ErrSessionFileMissing naming the
+// harness it was recorded for.
 func TestLaunchRefusesWhatItsLaunchersCannotRun(t *testing.T) {
 	stateDir := t.TempDir()
 	bin := t.TempDir()
@@ -141,10 +142,10 @@ func TestLaunchRefusesWhatItsLaunchersCannotRun(t *testing.T) {
 	}
 
 	resumed := spec
-	resumed.ResumeSessionFile = filepath.Join(stateDir, "gone.jsonl")
-	want = "Refusing to start LEGION-43 fresh while respawning: recorded OMP session file is missing: " + resumed.ResumeSessionFile
-	if _, err := rt.Resume(context.Background(), nil, resumed); err == nil || err.Error() != want {
-		t.Errorf("Resume from a missing session = %v, want %q", err, want)
+	resumed.ResumeSessionFile = filepath.Join(stateDir, "sessions", "--work--", "2026-10-26T00-00-00-000Z_ses-gone.jsonl")
+	want = "resume legion-omp-legion-43-tester: the recorded session file is missing: no OMP session at " + resumed.ResumeSessionFile
+	if _, err := rt.Resume(context.Background(), nil, resumed); !errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("Resume from a missing session = %v, want runtime.ErrSessionFileMissing, %q", err, want)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(stateDir, "secrets")); len(entries) != 0 {
 		t.Errorf("a refused launch wrote %d secret files", len(entries))

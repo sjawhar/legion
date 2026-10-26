@@ -24,8 +24,9 @@ var _ supervise.Specs = specs{}
 // specs builds the part of every launch the claim does not carry. An operator may retain a
 // one-off prompt under the state directory for the Stage 2 proof; otherwise the Go daemon
 // composes the shipped role parts plus its own role-specific instructions. The repository is the
-// one the claim's issue's record names, at the default branch the record names; the runtime
-// locates the issue's workspace from the repository and provisions it at the default branch.
+// one the claim's issue's record names, at the default branch the record names; a runtime that
+// provisions workspaces itself (a Sandbox pod's init containers) provisions the issue's workspace
+// from them, and under any other the daemon makes sure the workspace is on its own host first.
 type specs struct {
 	stateDir     string
 	project      string
@@ -64,6 +65,12 @@ type specs struct {
 	// backend is the backend a role runs on (config.Config.BackendFor); nil runs every role on Oh
 	// My Pi.
 	backend func(claim.Role) runtime.Backend
+	// hostWorkspaces is the runtime leaving each claim's workspace to the daemon's own host
+	// (runtime.Runtime.ProvisionsWorkspaces false: tmux). ensureWorkspace then provisions an
+	// issue's workspace a launch finds missing there (outbox.ensureWorkspace, through the
+	// workflow); nil for a daemon with no workflow, whose launches work no repository.
+	hostWorkspaces  bool
+	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -73,12 +80,13 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 
 // SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
-// deployment instructions — and its repository with that repository's default branch; for a claim
-// whose workspace was lost with its session, the issue's branch the recreated workspace is
-// recovered from. The controller's launch (controllerSpawnSpec) is its own. Both name the backend
-// the role runs on and are told its prompt part after the role's parts (launchBackend). Plugins
-// carries the plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the same way
-// for both — the controller the daemon launches (`controller: daemon`) is covered like any claim.
+// deployment instructions — and its repository with that repository's default branch, whose
+// workspace is on the daemon's host by then when the runtime leaves workspaces to the daemon
+// (ensureWorkspace). The controller's launch (controllerSpawnSpec) is its own. Both name the
+// backend the role runs on and are told its prompt part after the role's parts (launchBackend).
+// Plugins carries the plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the
+// same way for both — the controller the daemon launches (`controller: daemon`) is covered like
+// any claim.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	var spec runtime.SpawnSpec
 	var err error
@@ -134,6 +142,15 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 	if s.repository != nil {
 		if spec.Repository, spec.DefaultBranch, err = s.repository(ctx, c.Issue); err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the repository of %s: %w", c.Token, err)
+		}
+	}
+	// Every launch, not only a claim's first: a claim resumed, relaunched or recovered on this host
+	// may have no workspace here — its issue ran in another runtime's pods before, or its tree's
+	// linger removed it — and a pane cannot start without one. Provisioning checks out the issue's
+	// branch legion/<KEY> when GitHub has it, so whatever the claim pushed is there.
+	if s.hostWorkspaces && s.ensureWorkspace != nil && !spec.Repository.IsZero() {
+		if err := s.ensureWorkspace(ctx, c.Issue, spec.Repository, spec.DefaultBranch); err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the workspace of %s: %w", c.Token, err)
 		}
 	}
 	addressing, err := AddressingFragment(s.project, c, spec.Repository, spec.DefaultBranch, s.repositories())

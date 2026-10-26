@@ -42,8 +42,17 @@ func (r *Runtime) Observe(ctx context.Context) (<-chan runtime.Observation, erro
 	return out, nil
 }
 
-// sweep probes every watched process once, reporting false once ctx has ended.
+// sweep reports every displaced locator (displacedObservation) and lets it go, then probes every
+// watched process once, reporting false once ctx has ended.
 func (r *Runtime) sweep(ctx context.Context, out chan<- runtime.Observation) bool {
+	for _, loc := range r.displacedLocators() {
+		select {
+		case <-ctx.Done():
+			return false
+		case out <- r.displacedObservation(loc):
+		}
+		r.forgetDisplaced(loc)
+	}
 	for _, entry := range r.trackedProcesses() {
 		obs, err := r.Probe(ctx, entry.locator)
 		if err != nil {
@@ -76,18 +85,25 @@ func (r *Runtime) sweep(ctx context.Context, out chan<- runtime.Observation) boo
 //
 // A known claim with no locator holds no pane, so it protects nothing here. The located ones also
 // join the watch: they are the processes the daemon recorded before it restarted, and the sweep
-// reports on them from now on.
+// reports on them from now on. A located claim whose locator another runtime recorded (foreign: a
+// Sandbox role process of a daemon that ran the project under kubernetes before this one) names no
+// pane, protects nothing and joins no watch: it becomes displaced, and the next sweep reports it
+// Gone and Displaced, so the claim relaunches here on its session, charged nothing.
 //
 // A listing with nothing behind it (no server, no session) reaps nothing; a listing that failed
 // otherwise is an error, as is a kill that failed for a reason other than its target being gone,
 // after every other candidate has been tried.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
-	var located []runtime.Locator
+	var located, foreigners []runtime.Locator
 	for _, entry := range known {
 		if err := entry.Validate(); err != nil {
 			return fmt.Errorf("reconcile orphans: %w", err)
 		}
 		if entry.Locator == nil {
+			continue
+		}
+		if foreign(*entry.Locator) {
+			foreigners = append(foreigners, *entry.Locator)
 			continue
 		}
 		if _, _, err := paneOf(*entry.Locator); err != nil {
@@ -98,6 +114,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	r.launchMu.Lock()
 	defer r.launchMu.Unlock()
 	r.adoptExactly(located)
+	r.displaceExactly(foreigners)
 	knownWindows, knownPanes := map[string]bool{}, map[string]bool{}
 	for _, entry := range r.trackedProcesses() {
 		knownWindows[entry.locator.Tmux.Window] = true

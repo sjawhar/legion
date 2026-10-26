@@ -46,8 +46,12 @@ type Runtime interface {
 	// when it recorded none, and a hint: a runtime that finds a claim's process by the claim's own
 	// place, as a sandbox finds a role's launcher in its issue's pod, waits out whatever runs
 	// there even when prev is nil. A claim resumes the agent it recorded or none: a fresh agent on
-	// a claim that had one is the failure the same-agent refusal exists to catch. On an error the
-	// caller owns stopping prev (Suspend), and Resume has stopped any process it started itself.
+	// a claim that had one is the failure the same-agent refusal exists to catch. A runtime that
+	// reads the session file where the agent runs, and finds none there, returns an error wrapping
+	// ErrSessionFileMissing, having started nothing and waited prev out: the caller then forgets
+	// the session and starts a fresh agent rather than ask again for a file that is not there. On
+	// an error the caller owns stopping prev (Suspend), and Resume has stopped any process it
+	// started itself.
 	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
 	// Suspend stops the process gracefully, within the runtime's stop grace, and keeps everything
 	// a later Resume needs: the agent's session, and whatever the runtime holds for the claim. The
@@ -108,6 +112,11 @@ type Runtime interface {
 	// nil once nothing of it remains. A runtime that holds nothing per tree returns nil at once.
 	CleanupTree(ctx context.Context, tree string) error
 }
+
+// ErrSessionFileMissing is a Resume that found no file at the spec's ResumeSessionFile where the
+// agent would run: a session recorded under another runtime, or on a volume that is gone. Nothing
+// was started; the claim's recorded session can never be resumed there.
+var ErrSessionFileMissing = errors.New("the recorded session file is missing")
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
 // lock, says the issue's durable close and its complete stored role population allow it (false

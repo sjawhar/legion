@@ -290,8 +290,13 @@ func parseProcStatStartTicks(stat string) (uint64, error) {
 // Probe is one observation of loc's process, now (runtime-tmux.ts:836-857): Alive when the pane
 // verifies as the recorded process, Gone when the pane is provably not there, NotRecordedProcess
 // when something else holds it, and Uncertain when tmux could not be listed — never read as either
-// of the first two. An error is the runtime itself failing, or a locator nothing can be done with.
+// of the first two. A locator another runtime recorded (foreign) is Gone and Displaced: its process
+// is no pane of this server, and the claim is relaunched here uncharged (displacedObservation). An
+// error is the runtime itself failing, or a locator nothing can be done with.
 func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Observation, error) {
+	if foreign(loc) {
+		return r.displacedObservation(loc), nil
+	}
 	pane, inc, err := paneOf(loc)
 	if err != nil {
 		return runtime.Observation{}, err

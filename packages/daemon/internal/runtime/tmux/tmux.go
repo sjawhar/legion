@@ -116,6 +116,15 @@ type Options struct {
 	// 0600 file per key: every pane's shim is started with `--provider-env-dir` on it and exports
 	// each file into OMP's environment alone. "" is none. New reads the key names once.
 	ProviderEnvDir string
+	// PaneEnv is the operator's `runtime.tmux.pane_env`: plain variables added to every pane's
+	// environment, after the runtime's own and before the spec's. New refuses a name the runtime
+	// sets itself, the git identity a launch sets, a provider key or its pointer, and a
+	// credential-shaped name. Nil is none.
+	PaneEnv map[string]string
+	// PiConfigFiles is the operator's `runtime.tmux.pi_config_files`: absolute paths of Oh My Pi
+	// settings overlays every pane names in PI_CONFIG_FILES ahead of the turn-scoping overlay, which
+	// stays last so its keys outrank theirs. Nil is none.
+	PiConfigFiles []string
 	// CommandTimeout bounds each tmux invocation; 30 s when zero.
 	CommandTimeout time.Duration
 	// Conns is the directory of agent connections (the worker stream listener): a stop's graceful
@@ -162,6 +171,8 @@ type Runtime struct {
 	log              *slog.Logger
 	providerEnvDir   string
 	providerKeys     []string
+	operatorEnv      map[string]string
+	piConfigFiles    []string
 
 	// run executes one tmux argv. A field so an in-package test can record every argv the
 	// runtime hands tmux; New sets it to runTmux.
@@ -179,6 +190,10 @@ type Runtime struct {
 	// and those it was told of by ReconcileOrphans. An entry leaves when its process is stopped
 	// or a sweep has reported it gone for good.
 	tracked map[string]*trackedProcess
+	// displaced is every known claim's locator another runtime recorded (foreign), by
+	// incarnation, as the last ReconcileOrphans read them: the next sweep reports each Gone and
+	// Displaced and lets it go. Guarded by trackedMu.
+	displaced map[string]runtime.Locator
 }
 
 // trackedProcess is one watched process: its locator, the issue it works on when the runtime
@@ -241,6 +256,14 @@ func New(opts Options) (*Runtime, error) {
 			return nil, err
 		}
 	}
+	if err := checkPaneEnv(opts.PaneEnv, providerKeys); err != nil {
+		return nil, err
+	}
+	for _, path := range opts.PiConfigFiles {
+		if !filepath.IsAbs(path) || strings.Contains(path, ":") {
+			return nil, fmt.Errorf("tmux runtime: Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", path)
+		}
+	}
 	tmuxPath, ok := lookpath.On(paneEnv["PATH"], "tmux")
 	if !ok {
 		return nil, fmt.Errorf("tmux runtime: tmux is not on the daemon's PATH (%s)", paneEnv["PATH"])
@@ -278,8 +301,11 @@ func New(opts Options) (*Runtime, error) {
 		log:              opts.Log,
 		providerEnvDir:   opts.ProviderEnvDir,
 		providerKeys:     providerKeys,
+		operatorEnv:      opts.PaneEnv,
+		piConfigFiles:    opts.PiConfigFiles,
 		readProc:         os.ReadFile,
 		tracked:          map[string]*trackedProcess{},
+		displaced:        map[string]runtime.Locator{},
 	}
 	if r.commandTimeout == 0 {
 		r.commandTimeout = defaultCommandTimeout
@@ -414,6 +440,24 @@ func paneOf(loc runtime.Locator) (string, incarnation, error) {
 	return loc.Tmux.Pane, inc, nil
 }
 
+// foreign is whether loc is a valid locator another runtime recorded: a Sandbox role process left
+// in the store by a daemon that ran the project under runtime kubernetes before this one. This
+// runtime cannot see that process, stop it, or wait it out — the operator stops the other
+// runtime's processes before a tmux daemon boots on its store (docs/deployment.md, "Moving a
+// project onto tmux") — so its claim is reported Gone and Displaced (Probe, the sweep after
+// ReconcileOrphans), and relaunched here at once on its recorded session, charging nothing.
+func foreign(loc runtime.Locator) bool {
+	return loc.Runtime != runtime.RuntimeTmux && loc.Validate() == nil
+}
+
+// displacedObservation is a foreign locator's one verdict: Gone, Displaced.
+func (r *Runtime) displacedObservation(loc runtime.Locator) runtime.Observation {
+	return runtime.Observation{
+		Locator: loc, Kind: runtime.Gone, At: r.now(), Displaced: true,
+		Detail: fmt.Sprintf("its %s (runtime %s) is not a pane of this daemon's tmux server; the claim is relaunched here", loc.Label(), loc.Runtime),
+	}
+}
+
 func (r *Runtime) track(loc runtime.Locator, issue, ghWriter string) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
@@ -456,7 +500,7 @@ func (r *Runtime) adoptExactly(located []runtime.Locator) {
 	}
 }
 
-// untrackClaim stops watching every process of the claim.
+// untrackClaim stops watching every process of the claim, its displaced one included.
 func (r *Runtime) untrackClaim(token claim.Token) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
@@ -465,6 +509,46 @@ func (r *Runtime) untrackClaim(token claim.Token) {
 			delete(r.tracked, incarnation)
 		}
 	}
+	for incarnation, loc := range r.displaced {
+		if loc.Claim == token {
+			delete(r.displaced, incarnation)
+		}
+	}
+}
+
+// displaceExactly makes the displaced set exactly the foreign locators of the known claims a
+// sweep read (ReconcileOrphans): one the store no longer records is not reported again.
+func (r *Runtime) displaceExactly(foreigners []runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	r.displaced = make(map[string]runtime.Locator, len(foreigners))
+	for _, loc := range foreigners {
+		r.displaced[loc.Incarnation] = loc
+	}
+}
+
+// forgetDisplaced lets go of a foreign locator: reported, or stopped.
+func (r *Runtime) forgetDisplaced(loc runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	delete(r.displaced, loc.Incarnation)
+}
+
+// displacedLocators is the displaced set, ordered by claim then incarnation.
+func (r *Runtime) displacedLocators() []runtime.Locator {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	out := make([]runtime.Locator, 0, len(r.displaced))
+	for _, loc := range r.displaced {
+		out = append(out, loc)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Claim != out[j].Claim {
+			return out[i].Claim < out[j].Claim
+		}
+		return out[i].Incarnation < out[j].Incarnation
+	})
+	return out
 }
 
 // trackedProcesses is every watched process, ordered by claim then incarnation, so a sweep and a
@@ -520,8 +604,15 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 // to its live incarnation, and a stale locator must not shut down the claim's newer process. A
 // pane that is gone, or now holds some other process, is already stopped as far as this locator
 // is concerned, and is not killed. A pane that cannot be verified either way — tmux could not be
-// listed — is an error: a process nobody can confirm stopped is never reported stopped.
+// listed — is an error: a process nobody can confirm stopped is never reported stopped. A locator
+// another runtime recorded (foreign) names no pane here: there is nothing of it this runtime can
+// stop, and it is let go.
 func (r *Runtime) stop(ctx context.Context, loc runtime.Locator) error {
+	if foreign(loc) {
+		r.log.Info("tmux runtime: nothing to stop for a process another runtime recorded", "claim", loc.Claim, "process", loc.Label())
+		r.forgetDisplaced(loc)
+		return nil
+	}
 	pane, inc, err := paneOf(loc)
 	if err != nil {
 		return err

@@ -934,12 +934,18 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Errorf("a release with no locator ran %q", ran)
 	}
 
-	// Resuming from a session file that is gone is a refusal, never a fresh agent.
+	// Resuming from a session file found nowhere starts nothing: the error is
+	// runtime.ErrSessionFileMissing, which the claim's machine answers with a fresh agent.
 	missing := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
-	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil ||
-		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile {
-		t.Errorf("Resume from a missing session file = %v", err)
+	before = len(r.recorded())
+	if _, err := r.rt.Resume(ctx, &loc2, missing); !errors.Is(err, runtime.ErrSessionFileMissing) {
+		t.Errorf("Resume from a missing session file = %v, want runtime.ErrSessionFileMissing", err)
+	}
+	for _, argv := range r.recorded()[before:] {
+		if v := verb(argv); v == "new-window" || v == "split-window" {
+			t.Errorf("a resume of a missing session opened a pane: %q", argv)
+		}
 	}
 }
 

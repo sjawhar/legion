@@ -269,6 +269,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		workflow.controllerFirstWake = o.controllerFirstWake
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
+		plan.ensureWorkspace = workflow.ensureWorkspace
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -513,6 +514,9 @@ type plan struct {
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil without a workflow.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
+	// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
+	// missing (workflowRuntime.ensureWorkspace); nil without a workflow.
+	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
 	repositories *repositories
@@ -708,7 +712,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		return err
 	}
 	if p.newRuntime == nil {
-		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir, cfg.Runtime.Tmux)
 		if err != nil {
 			return err
 		}
@@ -792,9 +796,10 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 }
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
-// stream and the GitHub credential function, which boot hands the factory.
+// stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
+// block's pane variables and Oh My Pi overlays among them.
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
-	return tmux.Options{
+	opts := tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
 		DaemonURL:         cfg.DaemonURL,
@@ -809,6 +814,10 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProviderEnvDir:    providerEnvDir,
 		Log:               log,
 	}
+	if block := cfg.Runtime.Tmux; block != nil {
+		opts.PaneEnv, opts.PiConfigFiles = block.PaneEnv, block.PiConfigFiles
+	}
+	return opts
 }
 
 // reconfigureCloneCredential brings every shared clone an earlier daemon provisioned under the state
@@ -985,7 +994,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			repositories: func() api.RepositoriesView { return p.repositories.view(nil) },
 			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
-			backend: cfg.BackendFor,
+			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 		},
 		Identity:     adoptIdentity(p.identity, p.repository),
 		Secrets:      p.secretsEnroller,
