@@ -394,7 +394,7 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		home := filepath.Join(dir, strings.ReplaceAll(name, " ", "-"))
 		stateHome := filepath.Join(home, "tester")
 		t.Setenv("XDG_STATE_HOME", stateHome)
-		// The scratch the runtime hands a role container, named after the variable that tells it,
+		// The scratch the runtime hands a role, named after the variable that tells it,
 		// under a root nothing has made: every assertion below is about the shim making them.
 		scratch := filepath.Join(home, "scratch")
 		for _, variable := range podsafety.ScratchVariables {

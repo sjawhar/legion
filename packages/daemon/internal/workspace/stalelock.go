@@ -21,7 +21,7 @@ import (
 //
 // A lock some process still holds must never be removed: two writers would then replace one file.
 // So the caller is one that knows no process can hold any: a Kubernetes issue pod's
-// `workspace-init provision`, which runs before any role container of the pod starts, on the
+// `workspace-init provision`, which runs before the pod's launcher container starts, on the
 // issue's own volume, which no other pod mounts. The tmux runtime's provisioning never calls it,
 // since every pane of the repository shares the clone there. jj's own locks need nothing: they are
 // flock(2) locks the kernel releases with their holder, so a lock file one leaves blocks no jj.
@@ -53,7 +53,8 @@ func RemoveStaleGitLocks(workspace Workspace, now time.Time, log func(string)) e
 // logged with the file's path and age, and one it cannot remove is an error naming it. A feed's
 // only writer is Fetch, called by one process at a time: a pod's workspace-fetch, its first init
 // container and the one container that mounts the feed writable, or the repository cache's process
-// under its write lock, so no lock or transfer there is live when Fetch starts.
+// under its maint mutex, which also keeps its repack from running beside a fetch (repocache's
+// refresh), so no lock, transfer or repack there is live when Fetch starts.
 func RemoveStaleFeedLocks(gitDir string, now time.Time, log func(string)) error {
 	why := "a feed's only writer is the fetch now starting"
 	if err := removeLocksUnder(gitDir, "", now, log, why); err != nil {
