@@ -7,6 +7,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The skill-scenario rig takes a third model route, `LEGION_E2E_MODEL_ROUTE=provider`: the
+  anthropic-messages provider block `LEGION_E2E_MODEL_PROVIDER` names in the operator's own
+  `LEGION_E2E_MODEL_PROVIDER_FILE`, copied with its `apiKey: "!cat <absolute file>"` as written, so
+  agents and judges read the key where the operator keeps it and no key is copied into a profile.
+  A judge's container mounts that file's directory read-only. Every transcript names the block as
+  the provider that served each turn. The rig's Postgres, NATS and judge containers now run under
+  CPU and memory limits.
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of

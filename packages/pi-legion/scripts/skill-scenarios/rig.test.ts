@@ -56,7 +56,7 @@ function route(dir: string, env: Record<string, string>) {
     [
       "bash",
       "-c",
-      `${fn("install_model_route")}\ninstall_model_route "$1" skills-test "$2"`,
+      `route_model_id=claude-opus-4-8\n${fn("install_model_route")}\n${fn("install_provider_route")}\ninstall_model_route "$1" skills-test "$2"`,
       "-",
       root,
       dir,
@@ -106,11 +106,92 @@ describe("install_model_route", () => {
     expect(existsSync(path.join(dir, "model-key"))).toBe(false);
   });
 
-  test("an unknown route fails, naming the two it takes", () => {
+  /** An operator's models.yml holding the gateway block the provider route names, and another. */
+  function providerFile(apiKey: string): string {
+    const file = path.join(work, `models-${profiles}.yml`);
+    writeFileSync(
+      file,
+      [
+        "providers:",
+        "  openai:",
+        '    apiKey: "!secrets get --value OPENAI_KEY"',
+        "  box-gateway:",
+        "    baseUrl: http://gateway.internal.example:4000",
+        `    apiKey: "${apiKey}"`,
+        "    api: anthropic-messages",
+        "    authHeader: true",
+        "    models:",
+        "      - id: claude-opus-5-5",
+        "",
+      ].join("\n")
+    );
+    return file;
+  }
+
+  test("provider copies the named block, its !cat key command as written, with the rig's one model", () => {
+    const dir = profileDir();
+    const { code, stderr } = route(dir, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("!cat /run/user/1000/box/gateway-key"),
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect({ code, stderr: code === 0 ? "" : stderr }).toEqual({ code: 0, stderr: "" });
+    const agent = path.join(dir, "home/.omp/profiles/skills-test/agent");
+    expect(JSON.parse(readFileSync(path.join(agent, "models.yml"), "utf8"))).toEqual({
+      providers: {
+        "box-gateway": {
+          baseUrl: "http://gateway.internal.example:4000",
+          apiKey: "!cat /run/user/1000/box/gateway-key",
+          api: "anthropic-messages",
+          authHeader: true,
+          models: [{ id: "claude-opus-4-8" }],
+        },
+      },
+    });
+    const config = readFileSync(path.join(agent, "config.yml"), "utf8");
+    expect(config).toContain("enabledModels:\n  - box-gateway/claude-opus-4-8\n");
+    expect(config).toContain("  - anthropic\n");
+    expect(config).toContain("  default: box-gateway/claude-opus-4-8\n");
+    expect(config).toContain("  task: box-gateway/claude-opus-4-8\n");
+    expect(existsSync(path.join(dir, "model-key"))).toBe(false);
+  });
+
+  test("provider without LEGION_E2E_MODEL_PROVIDER_FILE fails, naming the variable", () => {
+    const dir = profileDir();
+    const { code, stderr } = route(dir, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("LEGION_E2E_MODEL_PROVIDER_FILE is unset");
+  });
+
+  test("provider refuses a block absent from the file, and one whose key is not read by !cat", () => {
+    const missing = route(profileDir(), {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("!cat /run/user/1000/box/gateway-key"),
+      LEGION_E2E_MODEL_PROVIDER: "elsewhere",
+    });
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("has no provider block elsewhere");
+    const literal = profileDir();
+    const inline = route(literal, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("sk-literal-key"),
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect(inline.code).toBe(1);
+    expect(inline.stderr).toContain('does not read its key as "!cat <absolute file>"');
+    expect(existsSync(path.join(literal, "home/.omp/profiles/skills-test/agent/models.yml"))).toBe(
+      false
+    );
+  });
+
+  test("an unknown route fails, naming the three it takes", () => {
     const dir = profileDir();
     const { code, stderr } = route(dir, { LEGION_E2E_MODEL_ROUTE: "bedrock" });
     expect(code).toBe(1);
-    expect(stderr).toContain("it is gateway or key-file");
+    expect(stderr).toContain("it is gateway, key-file or provider");
   });
 });
 
