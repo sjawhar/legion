@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T16:40:50Z",
-  "reviewedHead": "9a6ee1414d48665f33cd9408ef3a96125b24e1f4",
-  "codeHead": "ea0496c2f4",
-  "round": 5,
-  "standard": "The architect's decision of 2026-10-26T15:06Z: round 5 is judged only by round 4's two items (RefLink.tsx:163, a bare autolinked dashboard URL read with the bounded parser; the PR-body sentence on deleted ask blocks) and by round 5's own diff.",
+  "completed": "2026-10-26T19:21:38Z",
+  "reviewedHead": "60888697ba3b36850fdd11107310e608df8c1e25",
+  "codeHead": "e3d0925139",
+  "round": 6,
+  "standard": "The architect's decisions of 2026-10-26T16:42Z and 18:53Z: round 6 is judged only by its two items (the dispatch:// autolink case at RefLink.tsx:143; the forward merge with this branch's migrations after main's) and the merge's own changes.",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
@@ -14,16 +14,15 @@
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:143",
-      "description": "isTextUrl excludes every anchor carrying data-dispatch-href, but Proof's serializer gives a dispatch:// autolink exactly that (href '', target in data-dispatch-href; proof-editor/src/dispatch-links.ts:17-19). So `<dispatch://CORE-1/artifact/<2683-char slug>>` and `[dispatch://X](dispatch://X)`, which the server reads as text and drops past the bounds (text/refs.go:14-22, 87-92), are still titled and opened through nodeRouteFromHref. That contradicts isTextUrl's own doc comment (angle brackets; a link whose words are its target) and AGENTS.md. Both thermonuclear passes reproduced it through the real render pipeline. Fix: compare the words with the target already read at :178 (data-dispatch-href ?? href) instead of excluding data-dispatch-href, and add MarkdownBody rows for both dispatch:// shapes."
+      "file": "packages/dispatch/web/src/features/refs/RefLink.tsx:183",
+      "description": "Past the bounds, `<dispatch://…>` and `[dispatch://X](dispatch://X)` now reach the bounded referenceRouteFromHref, which returns undefined, so collectReferenceAnchors continues and leaves Proof's anchor as written: href=\"\" plus data-dispatch-href. A click on href=\"\" reloads the current page; main and round 5 opened the document. RefPreview's TRIGGER_SELECTOR matches [data-dispatch-href] (RefPreview.tsx:41) and routeOf reads it unbounded (:171-174), so the hover card still shows the document: the dashboard still presents a reference the server does not record. The deep pass rendered MarkdownBody at the head and saw both anchors as {href:\"\", data-dispatch-href:…}. The new tests check only the words and the missing data-dispatch-ref. Fix: when the target is a dispatch:// URL left as text and the bounded read names nothing, replace the anchor with its words as text (as a bare dispatch:// past the bounds already renders), and make both tests assert no link and no hover trigger."
     }
   ],
-  "roundItems": "Item 1 holds for https:// URLs (bare, angle-bracket, [url](url), www.); the dispatch:// form is the finding. Item 2 holds: the body now says the settlement retracts the ask and search still finds it, linked ?ask=<id>.",
-  "notCounted": "GitHub reports the PR CONFLICTING (DIRTY) with main eee16056, 5 commits ahead of the merge base 3f34ba12. Main added migrations 0118_embeddings_pending_since and 0119_drop_embeddings_backfill_progress, which collide with this PR's 0118-0125, so the forward merge must renumber this PR's migrations after 0119. This is outside round 5's diff and is the implementer's conflict procedure, but the head cannot merge until it is done.",
-  "threads": "Replied on PRRT_kwDORFy7ds6wUaFb and unresolved it: fixed for https:// URLs, not for the dispatch:// autolink forms.",
+  "roundItems": "Item 1: the routing holds, the rendered result is the finding. Item 2 holds: merges 56d31191, 44f6cfa2 and e3d09251 keep both sides; migrations renumbered 0120-0127, each .up/.census pair moved together and byte-identical but for the numbers; no stale number; migrator keys by version; no order dependency on main's 0118/0119; the fingerprint 2e83582a… is unchanged from 44f6cfa2 and 2cef697c to e3d09251 (recomputed by the deep pass). Targeted store migration tests pass on a scratch Postgres 17.",
+  "threads": "PRRT_kwDORFy7ds6wUaFb: replied, accepted (https:// case). PRRT_kwDORFy7ds6wW-46: replied and unresolved (the finding above).",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 9a6ee141 (the dispatch:// autolink finding, reproduced through the real render pipeline). Provider: 26 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
-    "codeQuality": "Verdict: CHANGES at 9a6ee141 (the same finding, plus the unit test missing the dispatch:// shapes). Provider: 27 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript."
+    "deepReview": "Verdict: CHANGES at 60888697 (the finding above, rated High there; I rate it Important, reach limited to targets past 2048 bytes or block ids past 256 bytes in these two forms). Provider: 62 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript.",
+    "codeQuality": "Verdict: APPROVE at 60888697. Provider: 37 assistant turns, all anthropic/claude-opus-5-5, read from its session transcript."
   },
-  "ci": "At code head ea0496c2: lint, typecheck and test still queued at 16:34Z (created 15:35Z; 188 runs queued repository-wide). The compare ea0496c2...9a6ee141 touches only .legion/. REQUEST_CHANGES does not wait for CI."
+  "ci": "At code head e3d09251 the first runs were cancelled at 19:05Z. I re-ran Tests (run 40383011699) once at 19:10Z; lint, typecheck and test were queued at 19:21Z, and pr-title was queued. The compare e3d09251...60888697 touches only .legion/. REQUEST_CHANGES does not wait for CI."
 }
