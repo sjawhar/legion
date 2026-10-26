@@ -2753,6 +2753,24 @@ console.log(JSON.stringify(args, null, 2));
     );
     expect(inline?.input).toEqual({ command: "dispatch comment --issue X-1 --body hi" });
   });
+  test("after an --advisor-rebuttal pass, what the agent reads back of its call still shows the flag it sent", async () => {
+    // Oh My Pi records a call as the tool_call hook returns it, so the agent's own transcript
+    // shows the command the gate ran, flag removed. Live, in 2 of 3 sessions told they could
+    // rebut (tester round 6, at a3fc5c94), the agent then read its call as carrying no flag, took
+    // the acknowledgement for a rebuttal it never wrote, and reported the gate as broken. What it
+    // reads back, the recorded command or the note beside it, must show the flag as it sent it.
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      complete: async () => ({ text: REVISE }),
+    });
+    const flag = "--advisor-rebuttal 'the owner asked in writing for this confirmation'";
+    const command = `dispatch comment --issue X-1 ${flag} --body hi`;
+    const result = await g.bash("b1", command);
+    expect(result?.block).toBeUndefined();
+    const recorded = (result?.input as { command?: string } | undefined)?.command ?? command;
+    expect(`${recorded}\n${result?.additionalContext ?? ""}`).toContain(flag);
+  });
   test("a device call and a command on one target share its breaker", async () => {
     const g = bind({
       env: { ...STUB, OMP_ASKGATE: "block" },
