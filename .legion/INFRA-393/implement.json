@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T00:58:00Z",
+  "completed": "2026-10-26T01:02:00Z",
   "round": "answers review round 1 at b505eafc00e5 (code head 55eb49eb71c1): finding 1 (the PR body's Contract change census), finding 2 (rows dead before 0117 re-admitted on Bedrock), minors 3 and 4, and the hardening item on the Azure success body; code head f29797a6693c. The earlier rounds' proof of every other criterion stands: this round changes migration 0117 (one update), comments, and Embed's read of a successful Azure answer.",
   "proof": [
     {
@@ -10,7 +10,7 @@
       "surface": "real envoy-dispatch binaries on a Postgres 17.11 + pgvector 0.8.0 database in the issue pod: main's server (fork point f2c17ded) migrated a fresh database to 0116 and took a project, 5 issues and 3 comments through its API; SQL then gave 6 rows a Bedrock vector (model us.cohere.embed-v4:0, as that release writes) and marked 2 rows (an issue and a comment) dead with 10 confirmed failures and 12 attempts, as that release's queue does; the database was copied twice",
       "command": "serve2.sh EMBED_MODE=bedrock-region (AWS_REGION set, no AWS credentials, so any Bedrock call fails) BIN=envoy-dispatch built at f29797a6693c on copy A; psql select kind, id, dead, dead_model, confirmed_failures, attempt_count from embeddings where dead; curl -H 'Authorization: Bearer e2e-token' …/api/v1/search/coverage",
       "observed": "0117 recorded dead_model us.cohere.embed-v4:0 on both dead rows; the boot pass logged 'coverage pass identity=us.cohere.embed-v4:0 … foreignVectorsDropped=0 … foreignDeadReadmitted=0 identityStepsSkipped=false items=8 current=6 lacking=0 failed=2' with no WARN and no ERROR, and made no Bedrock call (no canary: nothing foreign); both rows stayed dead with 10 and 12; coverage identity us.cohere.embed-v4:0 place bedrock, failed 2",
-      "headSha": "f29797a6693c3d63a0cd88b5c64fc43b5b6dbe9a",
+      "headSha": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
       "negativeControl": "the pre-fix binary (55eb49eb71c1) on copy B, same settings → dead_model null on both rows, and the pass counted them foreign: a Bedrock canary call, then WARN 'coverage pass left other identities' vectors and dead rows in place … foreignVectorsLeft=0 foreignDeadLeft=2', which with working credentials re-admits both"
     },
     {
@@ -18,8 +18,8 @@
       "surface": "the fixed binary on copy A after the Bedrock run, DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment",
       "command": "serve2.sh EMBED_MODE=azure BIN=envoy-dispatch built at f29797a6693c; psql select kind, dead, dead_model, model from embeddings; curl …/api/v1/search/coverage | jq .total",
       "observed": "'coverage pass identity=azure:<resource>.services.ai.azure.com/embed-v-4-0 … foreignVectorsDropped=6 … foreignDeadReadmitted=2 identityStepsSkipped=false'; within 10 s coverage items 8 current 8 lacking 0 failed 0, every issue and comment row under the Azure identity, none dead",
-      "headSha": "f29797a6693c3d63a0cd88b5c64fc43b5b6dbe9a",
-      "negativeControl": "the Bedrock run on the same rows just before → foreignDeadReadmitted=0 and both rows dead; TestCoverLeavesARowDeadUnderBedrockDeadUntilAnotherIdentity holds the same pair, and TestMigrationAddsPendingSince fails with the 0117 update removed (the worker ran it so, then restored the line)"
+      "headSha": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+      "negativeControl": "the Bedrock run on the same rows just before → foreignDeadReadmitted=0 and both rows dead; TestCoverLeavesARowDeadUnderBedrockDeadUntilAnotherIdentity holds the same pair; TestMigrationAddsPendingSince with the 0117 update removed → FAIL 'dead row: dead_model <nil>, want us.cohere.embed-v4:0', ok once restored"
     }
   ],
   "localChecks": [
