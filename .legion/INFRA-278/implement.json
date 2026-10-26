@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-278",
+  "completed": "2026-10-26T03:08:29Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
+  "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+  "proof": [
+    {
+      "criterion": "A1 case 3: a person's answer to an ask another session opened reaches the claimant's own topic",
+      "surface": "real envoy-dispatch built from the head, real NATS (natsd), rootless Postgres 17 + pgvector",
+      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "ok case3-ask-answer: dispatch-5 (ask.answered) on notifications.agent.claimant-e2e-c notifications.agent.claimant-e2e-p; summary: 6 ok, 0 FAIL; exit 0",
+      "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+      "negativeControl": "DISPATCH_BIN built from base 81a3b5ef7b47 (git archive of packages/envoy into $TMPDIR, go build ./cmd/dispatch) -> FAIL case3-ask-answer: dispatch-5 on notifications.agent.claimant-e2e-c only; summary 3 ok, 3 FAIL; exit 1"
+    },
+    {
+      "criterion": "A2 case 2: a person's reply in a person-rooted thread on the issue's spec reaches the claimant",
+      "surface": "same live script",
+      "command": "same run as A1",
+      "observed": "ok case2-thread-reply: dispatch-7 (comment.created) on notifications.agent.claimant-e2e-p",
+      "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+      "negativeControl": "base binary -> FAIL case2-thread-reply: dispatch-7 on agent topics (none)"
+    },
+    {
+      "criterion": "A4 live controls (untargeted message reaches the claimant; targeted message, agent comment and unclaimed issue do not)",
+      "surface": "same live script",
+      "command": "same run as A1",
+      "observed": "ok untargeted-message (dispatch-8 on notifications.agent.claimant-e2e-p), ok targeted-message (none), ok agent-comment (none), ok unclaimed-issue (none)",
+      "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+      "negativeControl": "base binary -> FAIL untargeted-message (none) while the three controls stay ok"
+    },
+    {
+      "criterion": "A3 every listed event type, negatives, one-copy overlaps, mention-only for claimant and followers, edits not suppressed",
+      "surface": "Go outbox suite on real Postgres (regression lock; the live script is the proof)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/outbox_test?sslmode=disable' go test -count=1 -v -run Claimant ./internal/dispatch/outbox/",
+      "observed": "TestClaimantRouteReachesTheSessionHoldingTheIssue (27 rows) and TestRunRecordsTheClaimantRouteSoARetryDoesNotRepublishIt PASS, no SKIP; whole outbox package ok after the simplify pass",
+      "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+      "negativeControl": "removing the actor check fails 'an agent's comment that notifies still does not reach the claimant'; disabling the claimant mention check fails four mention rows; disabling the follower mention check fails 'a person's ask reply mentioning a claimant that follows the ask reaches only the other follower'"
+    },
+    {
+      "criterion": "A5 the Reaches panel shows the claimant (via claim) and the route (via route), counts them, updates on a claim release without reload, dialogs stay true",
+      "surface": "Dispatch browser suite: real Go server, production SPA bundle, Chromium",
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
+      "observed": "4 passed: recipients-claim (Reaches 3 with C, P via claim, R via route; P drops to Reaches 2 on release without reload; follower-claimant's Unfollow dialog says the claim still reaches it; role route row joins over SSE) and both followers.e2e.ts tests",
+      "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+      "negativeControl": "working copy on base 81a3b5ef7b47 with the test file of 1c1c03ae (own releaseClaim helper) -> 2 failed: claimant/route [undefined, undefined]; Unfollow dialog 'Its answer and replies will no longer reach them.'"
+    },
+    {
+      "criterion": "A6 ask reads carry claimant and route",
+      "surface": "the live script's Dispatch",
+      "command": "same run as A1 (GET /api/v1/asks/{id} with the agent token; GET /api/v1/inbox with the dev sign-in cookie)",
+      "observed": "GET /api/v1/asks/{id}: claimant=\"claimant-e2e-p\" route=null; Inbox row's thread: claimant=\"claimant-e2e-p\" route=null",
+      "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+      "negativeControl": "base binary -> claimant=absent route=absent on both reads"
+    },
+    {
+      "criterion": "A7 agent-facing text is true",
+      "surface": "the checkout's dispatch CLI against a live e2e Dispatch (packages/dispatch/e2e/run-server.sh on 18787)",
+      "command": "bash packages/envoy-client/scripts/build-dispatch-cli.sh $TMPDIR/infra278/cli; env -i ... DISPATCH_HOST=omp DISPATCH_SESSION_ID=cli-check-session DISPATCH_URL=http://127.0.0.1:18787 DISPATCH_TOKEN=e2e-token bun $TMPDIR/infra278/cli/dispatch.js claim --issue CLI-1",
+      "observed": "CLI-1: claimed by you since ... release the claim when you stop. A person's answers, comments and messages on CLI-1 now reach you directly. ; claim --help carries 'While you hold it, a person's answers, comments and messages on the issue reach your session directly ...'",
+      "headSha": "c5a3bc5ae3ce27a32abe81abcd150774ef5359c0",
+      "negativeControl": "grep -rn 'Claiming does not deliver' skills docs packages -> no match (exit 1); the base text said claiming delivers none of the issue's comments"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/outbox/publisher.go (publishClaimantRoute, loadSessionClaimant, payloadMentionedSessions; follower route skips a mentioned follower on comment.created)",
+    "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go (new)",
+    "packages/envoy/internal/dispatch/api/{asks.go,inbox.go,inbox_queries.go,routes_table.go} (askReach: claimant, route on ask reads), ask_reach_test.go (new), asks_test.go, inbox_test.go",
+    "packages/contracts/src/dispatch-api.ts (AskThread/AskRead claimant, route), dispatch-tools.ts (dispatch_claim description), dispatch-api.test.ts",
+    "packages/dispatch/web/src/features/inbox/{AskRecipients.tsx,AskCard.tsx,AskRecipients.test.tsx}, web/src/api/sse.ts, web/src/__tests__/sse.test.ts, test fixtures gaining claimant/route: null",
+    "packages/dispatch/e2e/recipients-claim.e2e.ts (new), e2e/api.ts (releaseClaim), packages/dispatch/AGENTS.md",
+    "packages/envoy-client/src/dispatch-execute.ts (claim result) and its test",
+    "packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js (regenerated with bun run build)",
+    "docs/site/src/content/docs/dispatch/{for-agents.md,envoy.md}, skills/dispatch/SKILL.md, skills/dispatch/references/asks.md, packages/envoy/AGENTS.md",
+    "CHANGELOGs: packages/envoy, envoy-client, contracts, pi-envoy, claude-envoy",
+    "scripts/e2e/dispatch-claimant-delivery.{sh,ts} (new), scripts/e2e/README.md"
+  ],
+  "trickyParts": [
+    "Mention suppression keys on a mention that resolved to a live session (mentions[].session_id), the same resolution suppress_route and suppressed_authors use; a mention whose send later failed does not fall back to the claimant route.",
+    "The Reaches panel lists each session once: as a follower, else as a subscriber (both keep their control), else via claim or route; the Unfollow and Unsubscribe dialogs name what still reaches the session.",
+    "issue.claimed/released/updated refresh only cached ask threads on that event's issue (plus threads still on their first load): sse.ts expands an issue-scoped marker at flush time."
+  ],
+  "deviations": [
+    "Plan's subscriber/claim precedence: the worker first listed a subscribed claimant under 'via claim' with no Unsubscribe control; changed so a subscriber keeps its row and Unsubscribe, with the dialog naming the claim or route.",
+    "packages/claude-envoy/dist bundles regenerated (inline the claim text and tool description), not named in the plan.",
+    "The full go test ./internal/dispatch/... ran in the pod (exit 1) with failures only of the documented environment class (docs/solutions/testing/...-LEGION-752.md): api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation), files TestS3AgainstAnS3CompatibleServer (rootless Docker not found), pmdoc linearity tests (gVisor timing). Every other package ok, including outbox and api's other tests; CI's envoy-go job covers the three.",
+    "envoy-client's envoy-config.test.ts '! command still running after 10 s' times out in this gVisor pod; untouched by this change."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "A8 production check waits on a Dispatch deploy (manual, dispatch://INFRA-64)."
+  ]
+}
