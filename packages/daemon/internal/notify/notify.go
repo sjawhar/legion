@@ -77,7 +77,11 @@ func New(baseURL, token string) *HTTPPublisher {
 	return &HTTPPublisher{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: &http.Client{Timeout: requestTimeout}}
 }
 
-// Publish posts the listener envelope that preserves the outbox row's idempotent delivery key.
+// Publish posts the listener envelope that preserves the outbox row's idempotent delivery key. Every
+// publish carries `"handoff": false`: a role with no live holder whose agent the registry names is
+// one the listener hands a message off to its daemon for (handOffToLegion), and a daemon notice is
+// never such a message, so a notice to a stopped architect is still refused ErrNoHolder and held
+// and resent as it always was. A listener that predates the hand-off ignores the field.
 func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payload any, dedupeKey string) error {
 	// The listener carries a payload as a JSON document in a string (its messageBody,
 	// packages/envoy/cmd/listener/api.go:68-80); an object there is refused as invalid JSON.
@@ -90,7 +94,8 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		Message   string `json:"message"`
 		Payload   string `json:"payload"`
 		DedupeKey string `json:"dedupe_key"`
-	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey})
+		Handoff   bool   `json:"handoff"`
+	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey, Handoff: false})
 	if err != nil {
 		return fmt.Errorf("encode notice for %s: %w", topic, err)
 	}

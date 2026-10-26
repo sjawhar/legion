@@ -18,6 +18,8 @@ func TestControllerTopicIsTheControllersNoticeSubject(t *testing.T) {
 	}
 }
 
+// Every publish carries `"handoff": false`, so the listener never hands a daemon notice off to the
+// daemon in place of answering a role with no holder (plan 2.2): the field is present and false.
 func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The Envoy listener answers an unauthenticated publish with 401 (packages/envoy/cmd/listener/apiauth.go).
@@ -33,6 +35,7 @@ func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 			Message   string  `json:"message"`
 			Payload   *string `json:"payload"` // the listener's messageBody (packages/envoy/cmd/listener/api.go:68-80)
 			DedupeKey string  `json:"dedupe_key"`
+			Handoff   *bool   `json:"handoff"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			w.WriteHeader(http.StatusBadRequest) // the listener answers "invalid json"
@@ -40,6 +43,9 @@ func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 		}
 		if body.Topic != "notifications.legion.LEGION.LEGION-208" || body.Message != "worker-died on LEGION-208" || body.DedupeKey != "legion-outbox:42" {
 			t.Fatalf("publish body = %#v", body)
+		}
+		if body.Handoff == nil || *body.Handoff {
+			t.Fatalf("publish handoff = %v, want present and false", body.Handoff)
 		}
 		var payload map[string]string
 		if body.Payload == nil {

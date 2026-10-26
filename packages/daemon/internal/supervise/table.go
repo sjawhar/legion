@@ -1018,6 +1018,7 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
+	m.registered(ctx)
 	// A stale registration's process is let go by its relaunch, so it is never enrolled: the
 	// refusal returns before the enrollment a current registration gets.
 	if err := m.staleRegistration(ctx, r.PluginContract); err != nil {
@@ -1041,6 +1042,7 @@ func reregister(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
+	m.registered(ctx)
 	return m.staleRegistration(ctx, r.PluginContract)
 }
 

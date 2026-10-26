@@ -247,6 +247,8 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
+	history := newConversationHistory(cfg, plan, st, o.environment(), log)
+	plan.registered = history.recorder.Registered
 	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
 	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
 	// after them has a budget of its own.
@@ -393,6 +395,9 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		st.Close()
 		return err
 	}
+	// The backfill and the registry mirror run beside the daemon from here, blocking nothing, and
+	// end before the store closes.
+	stopHistory := history.start(ctx)
 	// From here every way the daemon ends halts supervision before anything waits: the signal, at
 	// once, serve's end, or a start that failed. The signal also ends the boot's own steps, which run
 	// on starting. Everything after the boot record runs on a goroutine of its own, so run waits for
@@ -444,6 +449,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		lived <- err
 	}()
 	liveErr := s.awaitStop(lived, failed, bootID)
+	stopHistory()
 
 	// The stop cancelled store queries in flight, and a pooled connection one of them ran on can
 	// still carry the read deadline that cancellation set, which failed the stamp with `stop boot N:
@@ -516,6 +522,11 @@ type plan struct {
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
+	// registered is supervise's Deps.Registered: the daemon's record of its agents' conversations
+	// (conversationHistory), which run sets once the store is open.
+	registered func(ctx context.Context, c supervise.Claim)
+	// answers is what readBoot read for the answer loop; the zero value when `answers` is unset.
+	answers answersReads
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -653,7 +664,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	p := plan{
 		repositories: newRepositories(cfg.Project),
 		project:      reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
-		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
+		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(), answers: reads.answers,
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
 		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource, checkLaunch: o.checkLaunch,
@@ -992,6 +1003,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		PhaseHolds:   p.phaseHolds,
 		TreeClosable: p.treeClosable,
 		VolumeLost:   sup.volumeLost,
+		Registered:   p.registered,
 		Clock:        p.clock,
 		Log:          log,
 		Limits: supervise.Limits{

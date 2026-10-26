@@ -16,9 +16,11 @@ type Description struct {
 	// custom-title line (Claude Code writes one on the rename and again as each later turn ends),
 	// empty when it has none.
 	Title string
-	// SessionID and Cwd are the first conversation line's.
+	// SessionID, Cwd and Timestamp are the first conversation line's: the session, its working
+	// directory, and when the conversation began.
 	SessionID string
 	Cwd       string
+	Timestamp string
 }
 
 // Describe reads a transcript's content for its Description. A line that is not JSON is skipped,
@@ -71,6 +73,7 @@ func describe(d *Description, read func() ([]byte, error)) error {
 			UUID        string `json:"uuid"`
 			SessionID   string `json:"sessionId"`
 			Cwd         string `json:"cwd"`
+			Timestamp   string `json:"timestamp"`
 			CustomTitle string `json:"customTitle"`
 		}
 		if json.Unmarshal(bytes.TrimSpace(line), &e) != nil {
@@ -80,7 +83,7 @@ func describe(d *Description, read func() ([]byte, error)) error {
 		case e.Type == "custom-title" && e.SessionID != "":
 			d.Title = e.CustomTitle
 		case d.SessionID == "" && transcriptTypes[e.Type] && e.UUID != "":
-			d.SessionID, d.Cwd = e.SessionID, e.Cwd
+			d.SessionID, d.Cwd, d.Timestamp = e.SessionID, e.Cwd, e.Timestamp
 		}
 	}
 }
