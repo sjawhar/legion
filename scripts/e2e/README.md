@@ -789,7 +789,7 @@ LEGION_E2E_RUNTIME_KUBECONFIG=<file> \
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's image> \
 LEGION_E2E_STORAGE_CLASS=standard-rwo \
-LEGION_E2E_PROVIDERS_SECRET=<an existing Secret of the namespace> [LEGION_E2E_PROVIDERS_SECRET_KEY=<its key>] \
+LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
 LEGION_E2E_CLAUDE_MODEL=<model id> \
 LEGION_E2E_POD_REACHABILITY=bridge \
 LEGION_E2E_MODEL_ROUTE=key-file \
@@ -895,20 +895,11 @@ operator supplies and the run never builds or stands in for (the operator contex
 the namespace, the pods and its teardown use. `prerequisites` holds the runtime identity to listing
 the namespace's Sandboxes. `LEGION_E2E_IMAGE` (required, by digest) and
 `LEGION_E2E_STORAGE_CLASS` (required: the StorageClass of the issue pod's own disk, a generic
-ephemeral volume, since the cluster has no default) are the pod's. The Anthropic API key the Claude
-Code implementer reaches its model with comes from exactly one of two sources, and `prerequisites`
-refuses neither or both by name: `LEGION_E2E_CLAUDE_KEY_FILE` names a file holding it on the devbox,
-which the run copies once (0600); or `LEGION_E2E_PROVIDERS_SECRET` names a Secret that already exists
-in the namespace and `LEGION_E2E_PROVIDERS_SECRET_KEY` (default `ANTHROPIC_API_KEY`) its key holding
-it. **What the second input grants:** the operator context reads that Secret's key, and the value
-passes through the devbox's memory alone, in a pipe from `kubectl get` to `kubectl create`, never on
-an argv, in a shell variable, on disk or in the evidence; `prerequisites` checks the Secret and the key
-exist by their names before anything is created, and refuses naming both when either is missing. A
-pod mounts only its own project's providers Secret (`sandbox.ProvidersSecretName`), so the named
-Secret is copied from, never mounted, and the run's own copy carries its label and goes with its
-teardown. Whichever the source, the run holds the endpoint to accepting the key (`GET /v1/models`,
-the header on curl's stdin and never an argv), and creates the providers Secret the runtime names for
-the project with it, which
+ephemeral volume, since the cluster has no default) are the pod's. `LEGION_E2E_CLAUDE_KEY_FILE`
+(required) names a file holding the
+Anthropic API key the Claude Code implementer reaches its model with; the run copies it once (0600),
+holds the endpoint to accepting it (`GET /v1/models`, the key in a 0600 header file and never an
+argv), and creates the providers Secret the runtime names for the project with it, which
 `provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY}` hands every pod — so the key travels as a
 mounted Secret the shim exports into the agent's environment, and never in the pod's spec, which
 refuses a credential-shaped name. `LEGION_E2E_CLAUDE_MODEL` (required) and
