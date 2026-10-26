@@ -773,6 +773,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
       "OMP_PROFILE=judge-ste",
     ]);
     expect(readFileSync(path.join(dir, "out.txt"), "utf8")).toBe("judged\nexit=0\n");
+    expect(existsSync(`${dir}.key`)).toBe(false);
     expect(readFileSync(path.join(dir, "judge-model.txt"), "utf8")).toBe(
       "model anthropic/claude-opus-4-8\nthinking high\n"
     );
@@ -820,6 +821,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     expect(recorded(dir, "env")).toContain("OMP_PROFILE=judge-bare");
     expect(recorded(dir, "probe")).toContain("read-skill denied");
     expect(readFileSync(path.join(dir, "out.txt"), "utf8")).toBe("judged\nexit=3\n");
+    expect(existsSync(`${dir}.key`)).toBe(false);
     expect(
       existsSync(path.join(work, "judge-profiles/bare/home/.omp/profiles/judge-bare/agent/skills"))
     ).toBe(false);

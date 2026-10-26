@@ -94,7 +94,9 @@
 #   LEGION_E2E_ANTHROPIC_KEY_FILE a 0600 file holding a plaintext Anthropic key, how the agents
 #                                 reach Anthropic (scripts/e2e/lib/install-key-file-model-route.sh);
 #                                 the key command that reads it lives in the label's profile
-#                                 directory, and removing that directory removes it
+#                                 directory, and removing that directory removes it; the judges'
+#                                 key commands live in $work/judge-profiles, built once on the
+#                                 file named then, and removing it removes them (judge_profiles)
 # `judge` and `judge-omp` also need Docker: each judge runs in a container (cmd_judge_omp).
 # Optional:
 #   SKILL_SCENARIOS_WORK      work directory, outside any checkout, and with no `.omp` in it or in
@@ -853,7 +855,11 @@ run_spec() {
 # The judge's two profiles, under $work/judge-profiles/<kind>, each its own HOME made by
 # make_omp_home with the model route install_model_route installs and no plugin. `ste` holds one
 # user skill, this checkout's skills/asd-ste100. `bare` holds none. The first judge-omp call builds
-# both, and every other call waits on the same lock, so parallel calls are safe.
+# both, and every other call waits on the same lock, so parallel calls are safe. Each profile's key
+# command (<kind>/model-key) names the key file LEGION_E2E_ANTHROPIC_KEY_FILE named at that first
+# build and lasts as long as $work/judge-profiles: a later call naming another key file still reads
+# the first, so remove $work/judge-profiles to rebuild both on another key file, or to remove the
+# key commands.
 judge_profiles() {
   local dir=$work/judge-profiles kind P commit
   mkdir -p "$dir"
