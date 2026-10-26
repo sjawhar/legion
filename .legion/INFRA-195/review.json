@@ -2,22 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T03:31:30Z",
-  "round": 2,
+  "completed": "2026-10-26T07:43:00Z",
+  "round": 3,
+  "scope": "Narrowed by the architect (dispatch://INFRA-195/comment/8f7a65a2-c3ff-4607-a8b2-a617288b5a71): A2 in Firefox, the rig driver split and the pin wording, plus Send held during a pending switch after the #2227 merge.",
   "decision": "changes_requested",
-  "reviewedCodeHead": "2451b5dcba7766ceea944be791e461b5162fecdb",
+  "reviewedCodeHead": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
   "critical": 0,
   "important": 1,
-  "minor": 0,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/e2e/keyboard-session-pickers.e2e.ts",
-      "description": "CI's dispatch job 121364414957 (run 40258016033, Legion Envoy and Contracts) at code head 2451b5dcba77 failed in Firefox on 2 of the 5 new rows: :193 (11a, line 227: the Thinking level picker is still aria-disabled after the model switch was answered) and :339 (11d, line 372: the status is still 'Switching model to anthropic/model-b…' after the answer). The same rows pass in chromium, iphone and webkit, and the 3 Firefox rows that need no answer pass. Both traces (artifact dispatch-e2e-test-results-1) show the same thing: after the POST and its refetch of /agents/<id>/messages, the page never refetches the messages again, and its /api/v1/events request is opened again about 1 s after the POST and ends with status -1. So the page never sees the session's answer, and in Firefox a switch the session answered stays pending until the 30 s deadline. The plan (decision 6a, rows 11a-11d in every engine) makes these rows part of the A2 proof."
+      "file": "(pull request)",
+      "description": "GitHub reports sjawhar/legion#2205 CONFLICTING with main at 4eb701286cf5. The files changed on both sides are packages/contracts/CHANGELOG.md, packages/envoy/CHANGELOG.md and scripts/e2e/README.md. A forward merge is needed, with one push carrying it and the fix below."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/lib/session-settings-common.ts",
+      "description": "Lines 98-99 export one TextDecoder for the whole driver. session-settings-omp.ts:114 decodes every Oh My Pi process's stdout with it in stream mode, and several processes run at once. session-settings-services.ts:207 decodes NATS messages with it without stream mode, which flushes the pending state. A multibyte character split at one process's chunk boundary is therefore glued onto another stream. The corrupted line fails JSON.parse, and #take (omp.ts:125-129) drops it without a word, so a lost RPC answer would show up as a timeout in an unrelated check. Fix: create a decoder per Omp reader (inside #read), and decode the NATS message on its own; then drop the export."
     }
   ],
-  "roundOneFindings": "All three fixed and verified at 2451b5dcba77: pinned older_pi_envoy=10.24.0 (dispatch-session-settings.sh:62,177); key copies with :- (:54-55,159); keys unset before anything starts (:56), given only to the driver (:277), deleted from process.env at driver load (lib/dispatch-session-settings.ts:35-41) and given only to Oh My Pi (:191). The reviewer replied on threads PRRT_kwDORFy7ds6wG368, PRRT_kwDORFy7ds6wG369 and PRRT_kwDORFy7ds6wG37A and accepts the implementer's resolutions.",
-  "ci": "Required (ruleset lint, typecheck, test, pr-title): all success at CI head 2451b5dcba77 (Tests 40258016015, PR Title 40258069476); compare 2451b5dcba77...03a4f8abf412 touches only .legion/. Not required: Legion Envoy and Contracts run 40258016033, dispatch job 121364414957 failure (Browser-test dispatch dashboard: 2 failed, 158 skipped, 1503 passed); every other job of that run success.",
-  "thermonuclear": "At 03a4f8ab: deep review APPROVE (one nit: the pin's 'last release before the settings frame' wording, since 10.24.1 and 10.25.0 exist), code quality CHANGES (the 2045-line rig driver with a ~1060-line run(); judged a structural cleanup, not a correctness finding, so taken as the fast-follow; and four low items).",
-  "fastFollow": "Split scripts/e2e/lib/dispatch-session-settings.ts: move Omp, Services and Browser into their own modules and make run() a table of named checks; and fix the pin's comment and README row to say 'a release before the settings frame' (10.24.1 and 10.25.0 also lack it)."
+  "verifiedFixed": [
+    "A2 in Firefox: f563ddfd0b71 makes GET /api/v1/events write ': open' with its headers (events.go:148). At ea067bb9, CI dispatch job 121436803081 (run 40280482811) ended success: keyboard-session-pickers.e2e.ts 5/5 in firefox, webkit, chromium and iphone; suite 1513 passed, 0 failed.",
+    "Rig driver split 8898049364bc: the same 20 checks in the same order as the run() table (dispatch-session-settings.ts checks table); Omp, Services, Browser and session-file are now modules of their own.",
+    "Pin wording: dispatch-session-settings.sh:61 and README :1738 say 'a release before the settings frame'.",
+    "Send is held during a pending switch after the #2227 merge: AgentRuntimeThread.tsx:173 isSendDisabled = sending || sendDisabled; AgentThread.tsx held; AgentConversationPage.test.tsx:845-852 asserts it; bun test web/src/features/agent-view 94 pass."
+  ],
+  "accepted": [
+    "Code quality's finding that the composer hold is spread over two booleans and the placeholder (AgentThread.tsx:391,473-493): behaviour is correct and both values come from sessionSwitch.pending in one component. Accepted as is.",
+    "Code quality's finding that the three subtests of TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte run the same write: accepted as is, since it costs nothing and covers the resume paths."
+  ],
+  "ci": "At code head ea067bb9: the required checks lint, typecheck, test (Tests 40280482750) and pr-title (PR Title 40280482818) all success; the Legion Envoy and Contracts dispatch job 121436803081 success; envoy-go-race was still in progress at 07:41Z. The compare from ea067bb9 to 4eb70128 touches only .legion/.",
+  "thermonuclear": "At ea067bb9. Deep review APPROVE, mixed providers by turn: 66 anthropic/claude-opus-5-5, plus 1 openai/gpt-6.1-sol turn that ended in error with no content. Code quality CHANGES, mixed providers by turn: 54 anthropic/claude-opus-5-5, plus 1 openai/gpt-6.1-sol turn that ended in error with no content. Read from each run's own transcript in the session store.",
+  "fastFollow": "none"
 }
