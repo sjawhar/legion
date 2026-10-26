@@ -63,6 +63,16 @@ func ListenerQueue(machineID string) string {
 	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
 }
 
+// ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
+// (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
+// listeners while a rolling deploy runs two. It must differ from ListenerQueue: NATS merges
+// matching queue subscriptions by queue name across subjects and hands each message to one member,
+// so a live lane in the role lanes' group could take a role message its role lane never sees. A
+// space in the machine id is a hyphen in the name.
+func ListenerLiveQueue(machineID string) string {
+	return "envoy-listener-live-" + strings.ReplaceAll(machineID, " ", "-")
+}
+
 // streamDuplicateWindow covers the entire retained notification lifetime, so
 // an outbox retry after a crash before published_at is recorded cannot create a
 // second retained Dispatch event while the original remains observable, and a
@@ -96,13 +106,13 @@ func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)
 }
 
-// streamCaptures reports whether the stream retains a publish to topic: some subject this binary
+// StreamCaptures reports whether the stream retains a publish to topic: some subject this binary
 // compiles into the stream matches it. Every such subject is a literal prefix followed by `.>`
 // (TestEveryStreamSubjectIsALiteralPrefixAndWildcard), which matches a literal topic exactly when
 // the topic extends that prefix by at least one token, so no subject is split. A topic is read
 // literally: a `*` or `>` in it is a character of the topic, not a wildcard, which is what nats.go
 // publishes it as.
-func streamCaptures(topic string) bool {
+func StreamCaptures(topic string) bool {
 	for _, subject := range streamSubjects {
 		prefix := strings.TrimSuffix(subject, ">")
 		if len(topic) > len(prefix) && strings.HasPrefix(topic, prefix) {

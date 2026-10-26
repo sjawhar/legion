@@ -10,14 +10,52 @@
   was not posted and the close was not sent`). It used to rely on a closed issue refusing the
   reason's message; Dispatch now takes messages on a closed issue, so the old order would have left
   a stray reason on it. An open issue still gets its reason posted, then the PATCH (INFRA-448).
-
+- **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
+  one per repository, and prints each source's answer in turn: `Synced P architecture from
+  repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
+  previous model of repo stays up (commit C).`, `The previous model of repo stays up (N
+  components).` (a source re-saved on another branch, whose earlier components stay until an
+  import replaces them) or `No model has ever imported from repo.`; its
+  `details` are `{project, sources: [{repo, branch, commit, error}]}`. `--repo <owner/name>`
+  imports that one source alone, and a credential or branch problem there is still an error exit
+  (`409 SOURCE_ACCESS`); without it, every source is attempted and such a problem is that
+  source's failed line. `DispatchClient` gains `listArchitectureSources(project)`,
+  `syncArchitectureSources(project)` and `syncArchitectureSource(project, repo)`, on the routes
+  under `/api/v1/projects/{key}/architecture-sources`, and loses `getArchitectureSource`; the
+  issue create's architecture guidance reads the list and takes `[]` as no model. A Dispatch older
+  than this release has no route for the list, so the client then reads that server's
+  `GET /api/v1/projects/{key}/architecture-source` (`null`, or a pre-#1522 `404
+  SOURCE_NOT_FOUND`, is no model; a row is one source) and the guidance stays right while the
+  plugin and the server roll out separately; a project the server does not know is still reported
+  as "Could not check whether project … has an architecture model". Against a Dispatch older than
+  this release, `dispatch architecture-sync --project <KEY>` falls back to that server's
+  single-source sync (`POST /api/v1/projects/{key}/architecture-source/sync`) and prints its one
+  line, and `--repo` needs a Dispatch of this release; the other way round, an older plugin's
+  `architecture-sync` keeps working against this release's Dispatch, which keeps the singular sync
+  route for it (INFRA-391).
 - A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
   expires a session record 300 s after its last write, and three refresh attempts plus one whole
   listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between
   them) fit inside that lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may
   fail and the third still completes before a live session's record is dropped.
+- The `envoy_publish` description says who receives a team topic (any `notifications.` topic the
+  stream does not store): every session subscribed to it when it is published, and it is not
+  retained. A session holding its own NATS connection receives it directly, the publisher's own
+  included; a session on a serve port, such as an OpenCode agent, receives it through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where the description said such a session received nothing
+  (INFRA-122).
 
 ### Added
+
+- `dispatch issues --all` reads the whole filtered listing in one request. The client gains
+  `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
+  answers for that request, refusing any other shape by name: a page back from a request carrying
+  no paging is a Dispatch that still pages one. `dispatch_issues` routes `--all` there and leaves
+  every other call on `listIssuePage` with the same default page, and `--all` beside `--limit` or
+  `--offset` is refused before any request goes out. The command is for a caller that must not
+  miss or repeat a row: a row whose status changes between two offset reads comes back twice or
+  never, which bites hardest when the caller's own writes are what move it.
 
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
@@ -117,9 +155,9 @@
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
   code 0.
-- A `dispatch` command that takes `--issue`, given a bare issue key in its place
-  (`dispatch read ACME-12`), names the fix in its refusal: `use --issue <KEY>, as in: dispatch
-  read --issue ACME-12`. The command still refuses a positional value.
+- A `dispatch` command that takes `--issue` takes a bare issue key as its `--issue`
+  (`dispatch read ACME-12` is `dispatch read --issue ACME-12`), once and only when `--issue` is
+  not also given. Every other positional value is still refused.
 - `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse an ask, comment or message link
   as `--ref`, before any request. They take `--ref` as the issue or document they act on, so such
   a link used to post or read on its owner and drop the item: a comment meant for an ask's thread

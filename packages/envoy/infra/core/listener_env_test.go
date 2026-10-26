@@ -132,6 +132,18 @@ func TestListenerConfigEnv(t *testing.T) {
 			urls: []string{"nats://127.0.0.1:4222"},
 			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222"},
 		},
+		{
+			name: "the opt-in off renders no ENVOY_SUBSCRIBE_ALL_TOPICS",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: "127.0.0.1", SubscribeAllTopics: false},
+			urls: []string{"nats://hub.internal.example:4222"},
+			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_HOST_BRIDGE=127.0.0.1"},
+		},
+		{
+			name: "the opt-in on renders ENVOY_SUBSCRIBE_ALL_TOPICS=1 last",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", AllowedHosts: []string{"hub.internal.example"}, SOCKS5Proxy: "127.0.0.1:1055", HostBridge: "127.0.0.1", SubscribeAllTopics: true},
+			urls: []string{"nats://hub.internal.example:4222"},
+			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_ALLOWED_HOSTS=hub.internal.example", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_SUBSCRIBE_ALL_TOPICS=1"},
+		},
 		{name: "no URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, err: "natsUrls needs at least one URL"},
 		{name: "a comma in a URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, urls: []string{"nats://a:1,nats://b:2"}, err: "natsUrls[0] contains a comma"},
 		{name: "an empty URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, urls: []string{" "}, err: "natsUrls[0] is empty"},
