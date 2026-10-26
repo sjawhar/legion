@@ -15,9 +15,13 @@
 #   verdict <scenario> FAIL <reason>
 #   verdict <scenario> INVALID <reason>   the run missed the window it was meant to observe
 #
-# The listener rebuilds a cache whose bucket was recreated from its self-health monitor, which
-# ticks every 30 s from the "envoy-listener ready" line, so a recreate is timed just after a tick:
-# the bucket is full before the next tick reads it.
+# The listener's watcher finds a recreated bucket itself: it reads its bucket's stream every 2 s,
+# and a new stream starts a read of the new bucket at once. The reread and interrupt scenarios stop
+# the listener while the rig recreates and fills a bucket, so that read reads all of it, and time
+# the recreate just after a tick of the listener's self-health monitor, which ticks every 30 s from
+# the "envoy-listener ready" line, so no tick falls while the listener is stopped. recreate-live
+# leaves the listener running and recreates 26 to 28 s before a tick, so the tick cannot be what
+# reads the new bucket.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -26,18 +30,24 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 
 usage() {
   cat <<'EOF'
-Usage: e2e-refill.sh [--scenario reread|interrupt|refuse|all] [--interrupt-by stop|restart|both]
+Usage: e2e-refill.sh [--scenario reread|interrupt|refuse|recreate-live|all]
+                     [--interrupt-by stop|restart|both]
                      [--listener-bin <path>] [--natsd-bin <path>] [--out <dir>]
                      [--during-refuse <command>] [--after-refuse <command>]
 
 Run the listener and a throwaway NATS server and prove, per scenario:
-  reread     a recreated bucket's re-read keeps every record until it completes (session bucket,
-             interest bucket, and a recreate with an identical record set)
-  interrupt  a re-read that NATS interrupts removes nothing and is read again by the listener
-             itself (stop: SIGSTOP past the 10 s idle timer; restart: kill and start NATS again)
-  refuse     both lists answer the refilling 503 or a complete 200 during boot; the refilling 503,
-             with no gauge sample, once NATS has been down past the 2-minute bound, then a complete
-             200 once it is back; 200 [] and a 0 sample for empty buckets
+  reread         a recreated bucket's re-read keeps every record until it completes (session
+                 bucket, interest bucket, and a recreate with an identical record set)
+  interrupt      a re-read that NATS interrupts removes nothing and is read again by the listener
+                 itself (stop: SIGSTOP past the 10 s idle timer; restart: kill and start NATS again)
+  refuse         both lists answer the refilling 503 or a complete 200 during boot; the refilling
+                 503, with no gauge sample, once NATS has been down past the 2-minute bound, then a
+                 complete 200 once it is back; 200 [] and a 0 sample for empty buckets
+  recreate-live  a session bucket recreated under a running listener, 26 to 28 s before a
+                 self-health tick, is found and read by the watcher itself before that tick; no
+                 list answer lacks a record of the old copy, or shows part of the new bucket while
+                 the copy claims to follow it (an old stream shorter than the new one, and one
+                 longer)
 
 Options:
   --listener-bin, --natsd-bin  run these binaries instead of building them from this checkout,
@@ -93,7 +103,7 @@ while (($#)); do
   esac
 done
 case "$scenario" in
-  reread | interrupt | refuse | all) ;;
+  reread | interrupt | refuse | recreate-live | all) ;;
   *)
     printf 'ERR: unknown scenario: %s\n' "$scenario" >&2
     exit 2
@@ -133,6 +143,17 @@ readonly reread_markers=100000
 readonly interrupt_count=40000
 readonly interrupt_side_count=1000
 readonly boot_count=40000
+# recreate-live: same and chg sessions of this many each in the old bucket, which is created with
+# this MaxAge (the listener adopts a bucket's, so the renewed session's old record expires within a
+# minute rather than five); that record expires this long after the recreate; NATS is stopped this
+# long from the watcher's finding, well under the 10 s the listener's JetStream requests wait, so
+# the read of the new bucket comes after that expiry; the longer shape writes same and chg this many
+# times more.
+readonly live_count=1000
+readonly live_ttl_seconds=60
+readonly live_renewed_expiry_ms=3500
+readonly live_stop_seconds=4
+readonly live_pads=2
 readonly outage_count=300
 readonly outage_api_count=3
 # The listener's stale bound: 2 minutes, or half a bucket's MaxAge when that is shorter (the session
@@ -152,6 +173,9 @@ readonly rig="${bin_dir}/refillrig"
 nats_pid=""
 listener_pid=""
 pollers=()
+awaiter=""
+awaiter_out=""
+awaited=""
 run_dir=""
 listener_log=""
 nats_starts=0
@@ -168,7 +192,7 @@ cleanup() {
   local rc=$1
   trap - EXIT INT TERM
   set +e
-  for pid in "${pollers[@]}" "$listener_pid" "$nats_pid"; do
+  for pid in "${pollers[@]}" "$awaiter" "$listener_pid" "$nats_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill -CONT "$pid" 2>/dev/null
       kill "$pid" 2>/dev/null
@@ -197,7 +221,7 @@ trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 
 rm -rf "$bin_dir" "$nats_store_dir" "${out_dir}/reread" "${out_dir}/interrupt-stop" \
-  "${out_dir}/interrupt-restart" "${out_dir}/refuse"
+  "${out_dir}/interrupt-restart" "${out_dir}/refuse" "${out_dir}/recreate-live"
 mkdir -p "$bin_dir"
 
 say "building refillrig, and the listener and natsd unless given"
@@ -255,7 +279,9 @@ stop_nats() {
 }
 
 # start_listener starts the listener on the rig's NATS. Every start of a scenario appends to the
-# scenario's one listener.log, so it records where its own lines begin (listener_start_offset).
+# scenario's one listener.log, so it records where its own lines begin (listener_start_offset). It
+# runs in a session of its own, as NATS does (start_nats), since the reread and interrupt scenarios
+# stop it.
 start_listener() {
   listener_log="${run_dir}/listener.log"
   touch "$listener_log"
@@ -263,7 +289,7 @@ start_listener() {
   PORT="$listener_port" \
     ENVOY_MACHINE_ID=e2e-refill \
     NATS_URLS="$nats_url" \
-    "$listener_binary" >>"$listener_log" 2>&1 &
+    setsid "$listener_binary" >>"$listener_log" 2>&1 &
   listener_pid=$!
 }
 
@@ -271,6 +297,25 @@ start_listener() {
 # time, the time of the signal it sent (0 for none), and the offset past it.
 await_line() {
   "$rig" await -log "$listener_log" "$@"
+}
+
+# await_start runs refillrig await in the background into file, for a line due while this shell is
+# busy: a recreate it runs, or a listener it is about to continue, whose line must be acted on the
+# moment it appears. await_finish waits for it, sets awaited to what it printed, and fails when it
+# found no line. Both run in this shell, never a command substitution, which could not wait for it.
+await_start() {
+  awaiter_out=$1
+  shift
+  "$rig" await -log "$listener_log" "$@" >"$awaiter_out" &
+  awaiter=$!
+}
+
+await_finish() {
+  local rc=0
+  wait "$awaiter" 2>/dev/null || rc=$?
+  awaiter=""
+  awaited="$(cat "$awaiter_out")"
+  return "$rc"
 }
 
 # wait_ready waits for this start's "envoy-listener ready" line, from whose time the listener's
@@ -282,9 +327,10 @@ wait_ready() {
 }
 
 # stop_listener ends the listener with SIGTERM, and with SIGKILL when its ordered shutdown has not
-# ended it within 40 seconds (its own budget is 23).
+# ended it within 40 seconds (its own budget is 23), continuing it first if it was stopped.
 stop_listener() {
   if [[ -n "$listener_pid" ]] && kill -0 "$listener_pid" 2>/dev/null; then
+    kill -CONT "$listener_pid" 2>/dev/null || true
     kill "$listener_pid" 2>/dev/null || true
     local waited=0
     while kill -0 "$listener_pid" 2>/dev/null && ((waited < 160)); do
@@ -342,13 +388,19 @@ wait_whole() {
   return 1
 }
 
-# align_tick returns 1.5 s after the listener's next self-health tick, so a recreate that follows
-# has the 28.5 s before the tick after it, which reads the recreated bucket, to fill the bucket.
+# align_tick returns 1.5 s after the listener's next self-health tick, so a recreate that follows,
+# and the seconds the listener is stopped for it, end long before the tick after it.
 align_tick() {
-  local now_ms phase wait_ms
+  local now_ms phase
   now_ms=$(($(date +%s%N) / 1000000))
   phase=$(((now_ms - ready_ns / 1000000) % 30000))
-  wait_ms=$(((31500 - phase) % 30000))
+  sleep_until_ms $((now_ms + (31500 - phase) % 30000))
+}
+
+# sleep_until_ms sleeps until the Unix time in milliseconds, if it is still ahead.
+sleep_until_ms() {
+  local wait_ms=$(($1 - $(date +%s%N) / 1000000))
+  ((wait_ms > 0)) || return 0
   sleep "$((wait_ms / 1000)).$(printf '%03d' $((wait_ms % 1000)))"
 }
 
@@ -401,8 +453,11 @@ judge() {
 }
 
 # reread_phase recreates one bucket just after a self-health tick, polls both lists until the read
-# of the new bucket has completed, and judges it into phase_result. It runs in this shell, not a
-# command substitution, so the pollers it starts are this shell's to stop on any exit.
+# of the new bucket has completed, and judges it into phase_result. The listener is stopped while
+# the rig deletes, creates and fills the bucket, so the read its watcher begins once it runs again
+# (its stream probe finds the new stream at once) reads the whole bucket, as one that a recreate
+# between two probes gets. It runs in this shell, not a command substitution, so the pollers it
+# starts are this shell's to stop on any exit.
 reread_phase() {
   local name=$1 kind=$2 before=$3 after=$4 steady=$5 universe=$6
   local registry="session registry" steady_list=interests offset begin
@@ -414,13 +469,16 @@ reread_phase() {
   poll_start "$name" sessions "$universe"
   poll_start "$name" interests "$universe"
   align_tick
-  say "${name}: recreating the ${kind} bucket with ${after} and ${reread_markers} delete markers"
+  say "${name}: recreating the ${kind} bucket with ${after} and ${reread_markers} delete markers, the listener stopped"
+  kill -STOP "$listener_pid"
   if ! "$rig" recreate -nats "$nats_url" -bucket "$kind" -sets "$after" -markers "$reread_markers" >&2; then
+    kill -CONT "$listener_pid"
     poll_stop
     phase_result="INVALID the rig could not recreate the ${kind} bucket"
     return 0
   fi
-  if begin="$(await_line -offset "$offset" -match "${registry} bucket was recreated" -timeout 75s)"; then
+  kill -CONT "$listener_pid"
+  if begin="$(await_line -offset "$offset" -match "${registry} bucket was recreated;" -timeout 75s)"; then
     await_line -offset "$offset" -match "${registry} cache warm-up@completed" \
       -after-ns "${begin%% *}" -timeout 90s >/dev/null || true
   fi
@@ -461,8 +519,12 @@ run_reread() {
   verdict reread "$(combine "${phases[@]}")"
 }
 
+# run_interrupt interrupts the read of a recreated 41,000-record session bucket the moment it
+# begins: the listener is stopped while the rig recreates and fills the bucket, and the read its
+# watcher begins once it runs again is the one interrupted, by SIGSTOP (mode stop) or SIGKILL and a
+# restart (mode restart) of NATS, sent the moment that read's install line appears.
 run_interrupt() {
-  local mode=$1 n=$interrupt_count side=$interrupt_side_count offset line interrupted
+  local mode=$1 n=$interrupt_count side=$interrupt_side_count offset line interrupted signal=STOP
   fresh "interrupt-${mode}"
   start_listener
   wait_ready
@@ -475,20 +537,30 @@ run_interrupt() {
   offset="$(log_offset)"
   poll_start interrupt sessions "old=${side},both=${n},new=${side}" -interval 200ms
   align_tick
-  say "interrupt (${mode}): recreating the session bucket with both=${n}:2,new=${side}:2"
+  say "interrupt (${mode}): recreating the session bucket with both=${n}:2,new=${side}:2, the listener stopped"
+  kill -STOP "$listener_pid"
   if ! "$rig" recreate -nats "$nats_url" -bucket sessions -sets "both=${n}:2,new=${side}:2" >&2; then
+    kill -CONT "$listener_pid"
     poll_stop
     verdict "interrupt(${mode})" "INVALID the rig could not recreate the session bucket"
     return 0
   fi
+  [[ "$mode" == stop ]] || signal=KILL
+  await_start "${run_dir}/read.await" -offset "$offset" -match 'session registry bucket was recreated;' \
+    -timeout 75s -signal "$signal" -pid "$nats_pid"
+  sleep 0.2
+  kill -CONT "$listener_pid"
+  if await_finish; then
+    line=$awaited
+  else
+    line="0 0 0"
+  fi
+  interrupted="$(cut -d' ' -f2 <<<"$line")"
   case "$mode" in
     stop)
       # Stopped, NATS sends nothing more, and once the listener has applied what it already
       # received, nats.go's 10 s idle timer ends the scan as timed out (or the watcher ends). NATS is
       # continued only once the listener's log says which, or after a minute.
-      line="$(await_line -offset "$offset" -match 'session registry bucket was recreated' -timeout 75s \
-        -signal STOP -pid "$nats_pid")" || line="0 0 0"
-      interrupted="$(cut -d' ' -f2 <<<"$line")"
       say "interrupt (stop): NATS stopped; continuing it once the scan times out or the watcher ends"
       await_line -offset "$offset" -after-ns "$interrupted" -timeout 60s \
         -match 'session registry cache warm-up@timed out' -match 'session registry watcher stopped' >/dev/null || true
@@ -496,9 +568,8 @@ run_interrupt() {
       say "interrupt (stop): NATS continued $((($(date +%s%N) - interrupted) / 1000000)) ms after it was stopped"
       ;;
     restart)
-      line="$(await_line -offset "$offset" -match 'session registry bucket was recreated' -timeout 75s \
-        -signal KILL -pid "$nats_pid")" || line="0 0 0"
-      interrupted="$(cut -d' ' -f2 <<<"$line")"
+      # A run whose read never began killed nothing: kill NATS here, so the wait cannot hang.
+      kill -KILL "$nats_pid" 2>/dev/null || true
       wait "$nats_pid" 2>/dev/null || true
       nats_pid=""
       say "interrupt (restart): NATS killed; starting it again in 2 s"
@@ -513,6 +584,82 @@ run_interrupt() {
   verdict "interrupt(${mode})" "$(judge interrupt -log "$listener_log" -offset "$offset" \
     -obs "${run_dir}/interrupt-sessions.jsonl" -before "old=${side}:1,both=${n}:1" \
     -after "both=${n}:2,new=${side}:2" -interrupted-ns "$interrupted" -mode "$mode")"
+}
+
+# live_shape runs one shape of recreate-live into phase_result, on a NATS and listener of its own.
+# The old session bucket has a 60 s MaxAge and holds hb, written so its old record expires 3.5 s
+# after the recreate, and same and chg, written pads+1 times, which makes the old stream shorter (0)
+# or longer (2) than the new one. The recreate lands 2 to 4 s after a self-health tick, 26 to 28 s
+# before the next, with the listener running, and 1 s after one of the session watcher's stream
+# probes, which it sends every 2 s from its first read: the fill, some 100 ms, is done before the
+# next probe finds the new stream. The new bucket holds new, chg at a changed value, same as it was
+# and hb renewed. NATS is stopped for 4 s from the moment the watcher logs that finding, which holds
+# the read of the new bucket back, so hb's old record expires after the copy stopped following and
+# before the read delivers its renewal: the copy must keep it. A listener that finds a recreate only
+# by the tick's Check fails both shapes.
+live_shape() {
+  local shape=$1 pads=$2 n=$live_count pad offset line now_ms ready_ms probe_ms recreate_ms
+  local renewed_from renewed_to
+  local before="same=${n}:1,chg=${n}:1,hb=1:1" after="new=${n}:2,chg=${n}:2,same=${n}:1,hb=1:2"
+  local universe="same=${n},chg=${n},new=${n},hb=1"
+  fresh "recreate-live/${shape}"
+  "$rig" seed -nats "$nats_url" -create -buckets sessions -ttl "${live_ttl_seconds}s" -sets "" >&2
+  "$rig" seed -nats "$nats_url" -create -buckets interests -sets "$universe" >&2
+  start_listener
+  wait_ready
+  # The session bucket is empty, so its first read's warm-up line comes as the read begins, and
+  # with it the watcher's first stream probe is armed.
+  line="$(await_line -offset "$listener_start_offset" -match 'session registry cache warm-up' -timeout 10s)"
+  probe_ms=$((${line%% *} / 1000000))
+  now_ms=$(($(date +%s%N) / 1000000))
+  ready_ms=$((ready_ns / 1000000))
+  recreate_ms=$((ready_ms + ((now_ms + 56000 - ready_ms) / 30000 + 1) * 30000 + 2000 + (3000 - (ready_ms - probe_ms) % 2000) % 2000))
+  say "recreate-live (${shape}): recreating the session bucket in $(((recreate_ms - now_ms) / 1000)) s, $(((recreate_ms - ready_ms) % 30000)) ms after a self-health tick"
+  sleep_until_ms $((recreate_ms + live_renewed_expiry_ms - live_ttl_seconds * 1000))
+  renewed_from="$(date +%s%N)"
+  "$rig" seed -nats "$nats_url" -buckets sessions -sets "hb=1:1" >&2
+  renewed_to="$(date +%s%N)"
+  # same and chg are written late enough that their old records outlive the shape, even for a
+  # listener whose copy follows the deleted bucket until the tick's read.
+  sleep_until_ms $((recreate_ms - 22000))
+  for ((pad = 0; pad <= pads; pad++)); do
+    "$rig" seed -nats "$nats_url" -buckets sessions -sets "same=${n}:1,chg=${n}:1" >&2
+  done
+  wait_whole sessions $((2 * n + 1)) 15
+  offset="$(log_offset)"
+  poll_start live sessions "$universe"
+  await_start "${run_dir}/found.await" -offset "$offset" -match 'session registry bucket was recreated under its watcher' \
+    -timeout 40s -signal STOP -pid "$nats_pid" -cont-after "${live_stop_seconds}s"
+  sleep_until_ms "$recreate_ms"
+  say "recreate-live (${shape}): recreating the session bucket with ${after}, the listener running"
+  if ! "$rig" recreate -nats "$nats_url" -bucket sessions -sets "$after" -fill-log "${run_dir}/fill.json" >&2; then
+    kill "$awaiter" 2>/dev/null || true
+    await_finish || true
+    kill -CONT "$nats_pid" 2>/dev/null || true
+    poll_stop
+    phase_result="INVALID the rig could not recreate the session bucket"
+    return 0
+  fi
+  await_finish || say "recreate-live (${shape}): the watcher never logged that it found the recreate; NATS was not stopped"
+  await_line -offset "$offset" -match 'session registry cache warm-up@completed' \
+    -after-ns "$((recreate_ms * 1000000))" -timeout 60s >/dev/null || true
+  sleep 3
+  poll_stop
+  phase_result="$(judge recreate-live -log "$listener_log" -offset "$offset" \
+    -obs "${run_dir}/live-sessions.jsonl" -before "$before" -after "$after" \
+    -fill-log "${run_dir}/fill.json" -ready-ns "$ready_ns" -renewed hb \
+    -renewed-from-ns "$renewed_from" -renewed-to-ns "$renewed_to" -ttl "${live_ttl_seconds}s" -shape "$shape")"
+}
+
+run_recreate_live() {
+  local phases=()
+  live_shape shorter 0
+  phases+=("shorter old stream: ${phase_result}")
+  say "${phases[-1]}"
+  live_shape longer "$live_pads"
+  phases+=("longer old stream: ${phase_result}")
+  say "${phases[-1]}"
+  verdict recreate-live "$(combine "${phases[@]}")"
 }
 
 # run_hook runs a --during-refuse or --after-refuse command with the listener's URL and the seeded
@@ -628,6 +775,7 @@ case "$scenario" in
     [[ "$interrupt_by" == restart ]] || run_interrupt stop
     [[ "$interrupt_by" == stop ]] || run_interrupt restart
     ;;&
+  recreate-live | all) run_recreate_live ;;&
   refuse | all) run_refuse ;;
 esac
 

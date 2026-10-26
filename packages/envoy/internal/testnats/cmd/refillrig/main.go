@@ -6,10 +6,13 @@
 //
 //   - seed writes session and interest records straight into their buckets, and register writes
 //     them through the listener's own registration route (POST /v1/interests/subscribe);
-//   - recreate deletes a bucket and creates it again with the same stream config, then fills it;
+//   - recreate deletes a bucket and creates it again with the same stream config, then fills it,
+//     and can write when each record of the fill was acknowledged, so a judge knows what the new
+//     bucket held at any moment of a fill that a read overlapped;
 //   - poll asks one list route, or /metrics, as fast as it answers until it is signalled, and writes
 //     one line per answer saying which seeded records it held;
-//   - await waits for a listener log line, and can signal a process the moment it appears;
+//   - await waits for a listener log line, and can signal a process the moment it appears (and
+//     continue a stopped one a fixed time later);
 //   - judge reads the polls beside the listener's own log lines and prints the scenario's verdict:
 //     PASS, FAIL <reason>, or INVALID <reason> when the run missed the window it was meant to
 //     observe, which is never a pass.
@@ -215,8 +218,9 @@ func connect(url string) (*nats.Conn, nats.JetStreamContext, error) {
 // on keys no record has spread evenly among them, all published asynchronously and each
 // acknowledged before it returns. A read streams past every delete marker and lists none, so
 // markers lengthen a read, and the time over which it delivers the records, without lengthening a
-// list answer: that is how polls land inside a read.
-func put(js nats.JetStreamContext, kind string, sets []recordSet, role string, markers int) (int, error) {
+// list answer: that is how polls land inside a read. With steps, it appends one step per set each
+// time records of that set are acknowledged: the records below Upto were all stored by Acked.
+func put(js nats.JetStreamContext, kind string, sets []recordSet, role string, markers int, steps *[]fillStep) (int, error) {
 	config, err := bucketConfig(kind)
 	if err != nil {
 		return 0, err
@@ -227,6 +231,8 @@ func put(js nats.JetStreamContext, kind string, sets []recordSet, role string, m
 		records += set.count
 	}
 	var futures []nats.PubAckFuture
+	// written counts the records of each set published so far, logged the ones a step names.
+	written, logged := map[string]int{}, map[string]int{}
 	// settle waits until every publish so far is acknowledged and fails on the first refused one.
 	// nats.go refuses a publish while too many are outstanding rather than wait, so publish settles
 	// every thousand.
@@ -244,6 +250,15 @@ func put(js nats.JetStreamContext, kind string, sets []recordSet, role string, m
 			}
 		}
 		futures = futures[:0]
+		if steps != nil {
+			acked := time.Now().UnixNano()
+			for _, set := range sets {
+				if written[set.name] > logged[set.name] {
+					*steps = append(*steps, fillStep{Set: set.name, Upto: written[set.name], Acked: acked})
+					logged[set.name] = written[set.name]
+				}
+			}
+		}
 		return nil
 	}
 	publish := func(msg *nats.Msg) error {
@@ -290,6 +305,7 @@ func put(js nats.JetStreamContext, kind string, sets []recordSet, role string, m
 				return 0, err
 			}
 			done++
+			written[set.name]++
 			if err := publishMarkers(done); err != nil {
 				return 0, err
 			}
@@ -322,8 +338,12 @@ func runSeed(args []string) error {
 	spec := flags.String("sets", "", "record sets, name=count[:variant],...")
 	role := flags.String("role", "", "role the first session of each set holds")
 	create := flags.Bool("create", false, "create a missing bucket with the listener's config")
+	ttl := flags.Duration("ttl", 0, "with -create, the session bucket's MaxAge in place of the listener's 5 minutes")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *ttl > 0 && !*create {
+		return errors.New("-ttl needs -create: an existing bucket keeps its MaxAge")
 	}
 	sets, err := parseSets(*spec)
 	if err != nil {
@@ -340,6 +360,9 @@ func runSeed(args []string) error {
 	defer conn.Close()
 	for _, kind := range list {
 		config, _ := bucketConfig(kind)
+		if kind == "sessions" && *ttl > 0 {
+			config.TTL = *ttl
+		}
 		if *create {
 			_, err = bus.EnsureKeyValue(js, config)
 		} else {
@@ -349,7 +372,7 @@ func runSeed(args []string) error {
 			return fmt.Errorf("open %s: %w", config.Bucket, err)
 		}
 		started := time.Now()
-		n, err := put(js, kind, sets, *role, 0)
+		n, err := put(js, kind, sets, *role, 0, nil)
 		if err != nil {
 			return fmt.Errorf("seed %s: %w", config.Bucket, err)
 		}
@@ -429,7 +452,9 @@ func runRegister(args []string) error {
 }
 
 // runRecreate deletes the bucket's stream and adds it again with the config it had, so the
-// listener's watcher finds a stream with a new creation time (kvwatch Check), then fills it.
+// listener's watcher finds a stream with a new creation time (its stream probe, or kvwatch Check),
+// then fills it. With -fill-log it writes a fillLog: when the stream was deleted, created and
+// filled, both streams' last sequences, and when each record of the fill was acknowledged.
 func runRecreate(args []string) error {
 	flags := flag.NewFlagSet("recreate", flag.ContinueOnError)
 	url := flags.String("nats", "", "NATS URL")
@@ -437,6 +462,7 @@ func runRecreate(args []string) error {
 	spec := flags.String("sets", "", "record sets the new bucket holds, name=count[:variant],...")
 	role := flags.String("role", "", "role the first session of each set holds")
 	markers := flags.Int("markers", 0, "delete markers to write after the records")
+	fillLogPath := flags.String("fill-log", "", "file to write the fill's timeline to, as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -460,10 +486,12 @@ func runRecreate(args []string) error {
 	}
 	started := time.Now()
 	streamConfig := info.Config
+	fill := fillLog{OldLastSeq: info.State.LastSeq, Deleted: time.Now().UnixNano()}
 	if err := js.DeleteStream(stream); err != nil {
 		return fmt.Errorf("delete %s: %w", stream, err)
 	}
 	created, err := js.AddStream(&streamConfig)
+	fill.Created = time.Now().UnixNano()
 	if err != nil {
 		return fmt.Errorf("add %s again: %w", stream, err)
 	}
@@ -473,14 +501,78 @@ func runRecreate(args []string) error {
 	if created.State.Msgs != 0 {
 		return fmt.Errorf("the recreated %s already holds %d messages of the deleted one", stream, created.State.Msgs)
 	}
-	n, err := put(js, *kind, sets, *role, *markers)
+	var steps *[]fillStep
+	if *fillLogPath != "" {
+		steps = &fill.Steps
+	}
+	n, err := put(js, *kind, sets, *role, *markers, steps)
 	if err != nil {
 		return fmt.Errorf("fill %s: %w", config.Bucket, err)
+	}
+	fill.Filled = time.Now().UnixNano()
+	if *fillLogPath != "" {
+		filled, err := js.StreamInfo(stream)
+		if err != nil {
+			return fmt.Errorf("read %s after its fill: %w", stream, err)
+		}
+		fill.NewLastSeq = filled.State.LastSeq
+		data, err := json.Marshal(fill)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*fillLogPath, data, 0o644); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("recreated %s (created %s, was %s) with %d records and %d delete markers in %s\n", config.Bucket,
 		created.Created.UTC().Format(time.RFC3339Nano), info.Created.UTC().Format(time.RFC3339Nano), n,
 		*markers, time.Since(started).Round(time.Millisecond))
 	return nil
+}
+
+// fillLog is what recreate writes with -fill-log, every time a Unix time in nanoseconds: a read
+// that begins while the rig still fills the new bucket delivers the records stored by then, and the
+// rest arrive as live updates, so a judge must know when each record was there to be read.
+type fillLog struct {
+	Deleted    int64      `json:"deleted"`
+	Created    int64      `json:"created"`
+	Filled     int64      `json:"filled"`
+	OldLastSeq uint64     `json:"old_last_seq"`
+	NewLastSeq uint64     `json:"new_last_seq"`
+	Steps      []fillStep `json:"steps"`
+}
+
+// fillStep says the records of Set below index Upto were all acknowledged, so stored, by Acked.
+type fillStep struct {
+	Set   string `json:"set"`
+	Upto  int    `json:"upto"`
+	Acked int64  `json:"acked"`
+}
+
+// acked is when the record was acknowledged at the latest, or math.MaxInt64 for one the fill never
+// wrote. Steps are in time order, so the first that covers the record is the earliest.
+func (f fillLog) acked(set string, index int) int64 {
+	for _, step := range f.Steps {
+		if step.Set == set && index < step.Upto {
+			return step.Acked
+		}
+	}
+	return math.MaxInt64
+}
+
+func readFillLog(path string) (fillLog, error) {
+	var f fillLog
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return f, err
+	}
+	if err := json.Unmarshal(data, &f); err != nil {
+		return f, fmt.Errorf("%s: %w", path, err)
+	}
+	if f.Deleted == 0 || f.Filled == 0 {
+		return f, fmt.Errorf("%s: no delete or fill time", path)
+	}
+	return f, nil
 }
 
 // observation is one answer a poll got, as one line of its output. Start and End are wall-clock
@@ -794,7 +886,9 @@ func (m matches) any(line logLine) bool {
 
 // runAwait waits for the first log line from offset on that one of the -match values names and
 // whose time is after after-ns, signals pid at once when asked to, and prints the line's time, the
-// signal's time (0 without one) and the offset past the line.
+// signal's time (0 without one) and the offset past the line. With -cont-after it then continues
+// the process it stopped that long after the stop, so a script blocked on that process's work
+// (refillrig recreate filling a stopped NATS) still gets it back.
 func runAwait(args []string) error {
 	flags := flag.NewFlagSet("await", flag.ContinueOnError)
 	path := flags.String("log", "", "listener log")
@@ -805,6 +899,7 @@ func runAwait(args []string) error {
 	timeout := flags.Duration("timeout", time.Minute, "how long to wait")
 	signalName := flags.String("signal", "", "signal to send pid when the line appears: STOP, CONT, KILL or TERM")
 	pid := flags.Int("pid", 0, "process to signal")
+	contAfter := flags.Duration("cont-after", 0, "with -signal STOP, send pid SIGCONT this long after the stop")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -817,6 +912,9 @@ func runAwait(args []string) error {
 		if sig, ok = signals[*signalName]; !ok || *pid <= 0 {
 			return fmt.Errorf("signal %q to pid %d: want STOP, CONT, KILL or TERM and a pid", *signalName, *pid)
 		}
+	}
+	if *contAfter > 0 && sig != syscall.SIGSTOP {
+		return errors.New("-cont-after needs -signal STOP")
 	}
 	file, err := os.Open(*path)
 	if err != nil {
@@ -853,6 +951,12 @@ func runAwait(args []string) error {
 				signalled = time.Now().UnixNano()
 			}
 			fmt.Printf("%d %d %d\n", line.at, signalled, position)
+			if *contAfter > 0 {
+				time.Sleep(*contAfter)
+				if err := syscall.Kill(*pid, syscall.SIGCONT); err != nil {
+					return fmt.Errorf("continue %d: %w", *pid, err)
+				}
+			}
 			return nil
 		}
 		if readErr != nil && readErr != io.EOF {
@@ -1136,17 +1240,18 @@ func complete(o observation, sets map[string]recordSet) bool {
 
 func runJudge(args []string) error {
 	if len(args) == 0 {
-		return errors.New("judge reread|interrupt|boot|outage")
+		return errors.New("judge reread|interrupt|boot|outage|recreate-live")
 	}
 	judges := map[string]func([]string) (verdict, error){
-		"reread":    judgeReread,
-		"interrupt": judgeInterrupt,
-		"boot":      judgeBoot,
-		"outage":    judgeOutage,
+		"reread":        judgeReread,
+		"interrupt":     judgeInterrupt,
+		"boot":          judgeBoot,
+		"outage":        judgeOutage,
+		"recreate-live": judgeRecreateLive,
 	}
 	judge, ok := judges[args[0]]
 	if !ok {
-		return fmt.Errorf("judge %q: want reread, interrupt, boot or outage", args[0])
+		return fmt.Errorf("judge %q: want reread, interrupt, boot, outage or recreate-live", args[0])
 	}
 	v, err := judge(args[1:])
 	if err != nil {
@@ -1165,9 +1270,23 @@ func firstLine(lines []logLine, after int64, match func(logLine) bool) (logLine,
 	return logLine{}, false
 }
 
-func recreatedLine(registry string) func(logLine) bool {
-	return func(l logLine) bool { return strings.HasPrefix(l.msg, registry+" bucket was recreated") }
+// The kvwatch lines about a recreated bucket. The watcher's stream probe (or the gate on a record,
+// or the check before a read completes) logs foundLine when it finds the stream replaced under it,
+// and every watch that installs onto a stream other than the one read before logs installLine as
+// the read of the new bucket begins: after foundLine for a recreate the watcher found itself, alone
+// for one a Rewatch read first (the self-health rebuild after Check, or the reconnect hook).
+func foundLine(registry string) func(logLine) bool {
+	return func(l logLine) bool {
+		return strings.HasPrefix(l.msg, registry+" bucket was recreated under its watcher")
+	}
 }
+
+func installLine(registry string) func(logLine) bool {
+	return func(l logLine) bool { return strings.HasPrefix(l.msg, registry+" bucket was recreated;") }
+}
+
+// installText is installLine's text, for the messages that name it.
+func installText(registry string) string { return registry + " bucket was recreated;" }
 
 func warmUpLine(registry, outcome string) func(logLine) bool {
 	return func(l logLine) bool {
@@ -1209,9 +1328,11 @@ func judgeList(v *verdict, label string, obs []observation, e expectation, origi
 	return after
 }
 
-// judgeReread judges one recreate of a bucket read again by the listener's self-health rebuild
-// (proof P1): the recreated list's answers against before and after, and the other list's
-// answers against its records, which nothing changed.
+// judgeReread judges one recreate of a bucket read again by the listener (proof P1): the recreated
+// list's answers against before and after, and the other list's answers against its records, which
+// nothing changed. The script stops the listener while it recreates and fills the bucket, so the
+// read the listener begins once it runs again (its watcher's probe finds the recreate) reads the
+// whole bucket; one that delivered less began before the fill was done, and the run is INVALID.
 func judgeReread(args []string) (verdict, error) {
 	flags := flag.NewFlagSet("judge reread", flag.ContinueOnError)
 	path := flags.String("log", "", "listener log")
@@ -1239,9 +1360,9 @@ func judgeReread(args []string) (verdict, error) {
 	if err != nil {
 		return v, err
 	}
-	begin, ok := firstLine(lines, 0, recreatedLine(*registry))
+	begin, ok := firstLine(lines, 0, installLine(*registry))
 	if !ok {
-		v.invalid = fmt.Sprintf("the log has no %q line after the recreate: the listener never read the new bucket", *registry+" bucket was recreated")
+		v.invalid = fmt.Sprintf("the log has no %q line after the recreate: the listener never read the new bucket", installText(*registry))
 		return v, nil
 	}
 	end, ok := firstLine(lines, begin.at, warmUpLine(*registry, "completed"))
@@ -1282,8 +1403,12 @@ func judgeReread(args []string) (verdict, error) {
 	if len(v.problems) == 0 && inside == 0 {
 		v.invalid = fmt.Sprintf("no poll fell inside the %s read (%d polls in all)", ms(end.at-begin.at), len(obs))
 	}
-	v.notes = append([]string{fmt.Sprintf("%d of %d polls fell inside the %s read of %d records, %d of them with the new records partly delivered; every record of the old copy held until the read completed, exactly the bucket's after it",
-		inside, len(obs), ms(end.at-begin.at), end.entries, partial)}, v.notes...)
+	found := "no line says the watcher found the recreate itself"
+	if line, ok := firstLine(lines, 0, foundLine(*registry)); ok && line.at <= begin.at {
+		found = fmt.Sprintf("the watcher's probe found the recreate %s before the read began", ms(begin.at-line.at))
+	}
+	v.notes = append([]string{fmt.Sprintf("%d of %d polls fell inside the %s read of %d records, %d of them with the new records partly delivered; every record of the old copy held until the read completed, exactly the bucket's after it; %s",
+		inside, len(obs), ms(end.at-begin.at), end.entries, partial, found)}, v.notes...)
 	return v, nil
 }
 
@@ -1317,9 +1442,9 @@ func judgeInterrupt(args []string) (verdict, error) {
 	if err != nil {
 		return v, err
 	}
-	begin, ok := firstLine(lines, 0, recreatedLine(*registry))
+	begin, ok := firstLine(lines, 0, installLine(*registry))
 	if !ok {
-		v.invalid = fmt.Sprintf("the log has no %q line: the rig never saw the read begin", *registry+" bucket was recreated")
+		v.invalid = fmt.Sprintf("the log has no %q line: the rig never saw the read begin", installText(*registry))
 		return v, nil
 	}
 	first, ok := firstLine(lines, begin.at, warmUpLine(*registry, ""))
@@ -1385,6 +1510,312 @@ func judgeInterrupt(args []string) (verdict, error) {
 		fmt.Sprintf("%d polls during the incomplete read each held every record of the old copy", during),
 		fmt.Sprintf("a complete read of %d records followed at +%s with no action of the rig's, and %d polls after it listed exactly the bucket", completed.entries, ms(completed.at-begin.at), afterSweep))
 	return v, nil
+}
+
+// judgeRecreateLive judges a bucket recreated under a live watcher well before the self-health
+// monitor's next tick, so that tick's Check cannot be what reads it: the watcher must find the
+// recreate itself (its stream probe) and complete its read of the new bucket before that tick, with
+// no self-health failure or rebuild on the way. Every 200 must list each record of the old copy
+// until that read completes, the renewed session's included, whose old record would have expired
+// inside the re-read: after the finding, which stops the copy following, and before the read's
+// completion. A 200 answered while the listener still claimed its copy follows the bucket
+// (before any line says it stopped) must not list records only the new bucket has while it lacks
+// others the new bucket held: that is a consumer nats.go moved onto the new stream, resuming past
+// the records its old sequence covers. After the read a 200 lists every record the read could have
+// delivered, and once the read and the fill are both done, exactly the new bucket.
+func judgeRecreateLive(args []string) (verdict, error) {
+	flags := flag.NewFlagSet("judge recreate-live", flag.ContinueOnError)
+	path := flags.String("log", "", "listener log")
+	offset := flags.Int64("offset", 0, "log offset the shape began at")
+	registry := flags.String("registry", "session registry", "the cache's log name")
+	obsPath := flags.String("obs", "", "the list's polls")
+	before := flags.String("before", "", "sets the old bucket held")
+	after := flags.String("after", "", "sets the new bucket holds")
+	fillPath := flags.String("fill-log", "", "the fill log recreate wrote")
+	ready := flags.Int64("ready-ns", 0, "the listener's ready line, from which its self-health monitor ticks")
+	interval := flags.Duration("tick", 30*time.Second, "the self-health monitor's interval")
+	renewed := flags.String("renewed", "", "the set whose old record would expire inside the read and which the new bucket renews")
+	renewedFrom := flags.Int64("renewed-from-ns", 0, "when the rig began writing the renewed set's old record")
+	renewedTo := flags.Int64("renewed-to-ns", 0, "when that write was acknowledged")
+	ttl := flags.Duration("ttl", 0, "the session bucket's MaxAge")
+	shape := flags.String("shape", "", "shorter or longer: the old stream against the new one")
+	settle := flags.Duration("settle", time.Second, "how long a record stored in a followed bucket may take to be listed")
+	margin := flags.Duration("scan-margin", 250*time.Millisecond, "how long before the read's install line a record must have been stored to be in its scan")
+	var v verdict
+	if err := flags.Parse(args); err != nil {
+		return v, err
+	}
+	if *ready == 0 || *ttl <= 0 || *renewed == "" || *renewedFrom == 0 || *renewedTo == 0 {
+		return v, errors.New("-ready-ns, -ttl, -renewed, -renewed-from-ns and -renewed-to-ns are required")
+	}
+	e, err := newExpectation(*before, *after)
+	if err != nil {
+		return v, err
+	}
+	fill, err := readFillLog(*fillPath)
+	if err != nil {
+		return v, err
+	}
+	lines, err := readLog(*path, *offset)
+	if err != nil {
+		return v, err
+	}
+	obs, err := readObservations(*obsPath)
+	if err != nil {
+		return v, err
+	}
+	invalid := func(format string, args ...any) {
+		if v.invalid == "" {
+			v.invalid = fmt.Sprintf(format, args...)
+		}
+	}
+	origin := fill.Deleted
+	since := func(t int64) string { return fmt.Sprintf("%+.3fs", float64(t-origin)/float64(time.Second)) }
+	tick := *ready + ((origin-*ready)/int64(*interval)+1)*int64(*interval)
+	if (*shape == "shorter" && fill.OldLastSeq >= fill.NewLastSeq) || (*shape == "longer" && fill.OldLastSeq <= fill.NewLastSeq) {
+		invalid("the old stream ended at sequence %d and the new one at %d: not the %s old stream this shape needs", fill.OldLastSeq, fill.NewLastSeq, *shape)
+	}
+
+	found, hasFound := firstLine(lines, origin, foundLine(*registry))
+	install, hasInstall := firstLine(lines, origin, installLine(*registry))
+	var completed logLine
+	hasCompleted := false
+	readEnd := int64(math.MaxInt64)
+	if hasInstall {
+		if completed, hasCompleted = firstLine(lines, install.at, warmUpLine(*registry, "completed")); hasCompleted {
+			readEnd = completed.at
+		}
+	}
+	health, hasHealth := firstLine(lines, origin, func(l logLine) bool {
+		return l.msg == "self-health probe failed" || l.msg == "self-health rebuild started"
+	})
+	hasHealth = hasHealth && health.at <= readEnd
+	healthText := ""
+	if hasHealth {
+		healthText = fmt.Sprintf(" (the self-health monitor's %q at %s)", health.msg, since(health.at))
+	}
+	// stopped is when a line first said the copy no longer follows its bucket: until then the
+	// listener claims its copy is the bucket.
+	stopped := int64(math.MaxInt64)
+	if line, ok := firstLine(lines, origin, func(l logLine) bool {
+		return foundLine(*registry)(l) || installLine(*registry)(l) ||
+			strings.HasPrefix(l.msg, *registry+" bucket was deleted under its watcher") ||
+			l.msg == *registry+" watcher stopped" || strings.Contains(l.msg, "envoy nats disconnected")
+	}); ok {
+		stopped = line.at
+	}
+
+	switch {
+	case !hasFound:
+		v.fail("the watcher never found the bucket recreated under it: no %q line", *registry+" bucket was recreated under its watcher")
+	case found.at >= tick:
+		v.fail("the watcher found the recreated bucket only at %s, after the self-health tick at %s", since(found.at), since(tick))
+	}
+	switch {
+	case !hasInstall:
+		v.fail("no read of the new bucket began: no %q line", installText(*registry))
+	case install.at >= tick:
+		v.fail("the read of the new bucket began only at %s, after the self-health tick at %s%s", since(install.at), since(tick), healthText)
+	case !hasCompleted:
+		v.fail("the read of the new bucket that began at %s never completed", since(install.at))
+	case completed.at >= tick:
+		invalid("the self-health tick at %s fell inside the read of the new bucket, from %s to %s: the run missed its window", since(tick), since(install.at), since(completed.at))
+	case hasHealth:
+		v.fail("the self-health monitor took part before the read of the new bucket completed: %q at %s", health.msg, since(health.at))
+	}
+
+	// The copy must keep the renewed session's old record past its expiry only when it had stopped
+	// following its bucket by then: a copy still following prunes it, as the old bucket would have.
+	expiresFrom, expiresBy := *renewedFrom+int64(*ttl), *renewedTo+int64(*ttl)
+	renewedKept := stopped < expiresFrom
+	if !renewedKept {
+		invalid("the copy still claimed to follow its bucket when %s's old record could expire at %s: the run missed its window", *renewed, since(expiresFrom))
+	}
+
+	settleNs := int64(*settle)
+	scanBy := int64(math.MinInt64)
+	if hasInstall {
+		scanBy = install.at - int64(*margin)
+	}
+	whole := int64(math.MaxInt64)
+	if hasCompleted {
+		whole = max(readEnd, fill.Filled) + settleNs
+	}
+	var wrong, claimed pollRun
+	inside, partial, keptRenewed, exact := 0, 0, 0, 0
+	var previous *observation
+	for i := range obs {
+		o := obs[i]
+		if o.Status != http.StatusOK || o.Transport != "" {
+			v.fail("GET /v1/sessions: %s answered %s", at(o, origin), answer(o))
+			continue
+		}
+		r := newLiveRows()
+		for _, name := range e.names() {
+			chars := o.decoded[name]
+			for index := range max(e.before[name].count, e.after[name].count) {
+				c := charAt(chars, index)
+				bv, inBefore := variantIn(e.before, name, index)
+				av, inAfter := variantIn(e.after, name, index)
+				present := c != '.'
+				if present && !(inBefore && c == bv) && !(inAfter && c == av) {
+					r.wrong[name]++
+					continue
+				}
+				acked := int64(math.MaxInt64)
+				if inAfter {
+					acked = fill.acked(name, index)
+				}
+				// held: the new bucket held the record long enough before o for a copy following
+				// it to list it; scanned: it held it when the read of the new bucket began.
+				held, scanned := acked < o.Start-settleNs, acked < scanBy
+				if present && inAfter && c == av && !(inBefore && bv == av) {
+					r.fresh[name]++
+				}
+				if held && !(present && c == av) {
+					r.lacking[name]++
+				}
+				oldCopy := inBefore && (name != *renewed || renewedKept || o.End < expiresFrom)
+				// required: o must list the record. Until the read completed the copy kept every
+				// record of the old copy; a poll that may have been answered on either side of the
+				// sweep holds the ones the read scanned; after it, every record the read scanned or
+				// the bucket held long enough to arrive as a live update.
+				var required bool
+				switch {
+				case o.End < readEnd:
+					required = oldCopy
+				case o.Start <= readEnd:
+					required = oldCopy && scanned
+				default:
+					required = scanned || held
+					if o.Start > readEnd+settleNs {
+						if present && inAfter && c != av {
+							r.stale[name]++
+						}
+						if present && !inAfter {
+							r.kept[name]++
+						}
+					}
+				}
+				if required && !present {
+					r.missing[name]++
+				}
+				// A record listed at its new value never goes back to its old one, nor away while o
+				// must list it. (A record of the old copy the read did not scan is swept when the
+				// read completes and comes back with its live update.)
+				if previous != nil && inAfter && charAt(previous.decoded[name], index) == av && c != av && (present || required) {
+					r.back[name]++
+				}
+			}
+		}
+		if problem := r.problem(o); problem != "" {
+			wrong.add(o, problem)
+		}
+		previous = &obs[i]
+		if o.Start >= origin && o.End < stopped && r.fresh.any() && r.lacking.any() {
+			claimed.add(o, fmt.Sprintf("records only the new bucket has (%s) while it lacked %s the bucket held", r.fresh, r.lacking))
+		}
+		if hasFound && o.Start >= found.at && o.End <= readEnd {
+			inside++
+			if r.fresh.any() && e.partial(o) {
+				partial++
+			}
+		}
+		if renewedKept && o.Start > expiresBy && o.End < readEnd {
+			keptRenewed++
+		}
+		if o.Start > whole && complete(o, e.after) {
+			exact++
+		}
+	}
+	if claimed.n > 0 {
+		v.fail("GET /v1/sessions listed records of the new bucket while the listener still claimed its copy follows the bucket (no line said it had stopped) and lacked records the bucket held, in %d polls from %s to %s; the first: %s",
+			claimed.n, since(claimed.first.Start), since(claimed.last.Start), claimed.what)
+	}
+	if wrong.n > 0 {
+		v.fail("GET /v1/sessions answered wrong rows in %d polls from %s to %s; the first: %s", wrong.n, since(wrong.first.Start), since(wrong.last.Start), wrong.what)
+	}
+	if !hasFound || !hasCompleted {
+		return v, nil
+	}
+	if inside == 0 {
+		invalid("no poll fell between the watcher's finding at %s and the read's completion at %s", since(found.at), since(readEnd))
+	}
+	if renewedKept && keptRenewed == 0 {
+		invalid("no poll fell between %s's old record's expiry at %s and the read's completion at %s", *renewed, since(expiresBy), since(readEnd))
+	}
+	if exact == 0 {
+		invalid("no poll came once the read and the fill were both done (%s)", since(whole))
+	}
+	v.notes = append(v.notes,
+		fmt.Sprintf("the old stream ended at sequence %d, the new one at %d", fill.OldLastSeq, fill.NewLastSeq),
+		fmt.Sprintf("the watcher's probe found the recreate at %s and its read of the new bucket ran from %s to %s (%d records), before the self-health tick at %s, with no self-health failure or rebuild",
+			since(found.at), since(install.at), since(readEnd), completed.entries, since(tick)),
+		fmt.Sprintf("%d of %d polls fell between the finding and the read's completion, %d of them with the new bucket partly delivered; every poll listed every record of the old copy until the read completed, and none listed the new bucket's records while the copy claimed to follow",
+			inside, len(obs), partial),
+		fmt.Sprintf("%s's old record would have expired at %s, after the finding and before the read completed, and the %d polls from then to the read's completion kept it", *renewed, since(expiresBy), keptRenewed),
+		fmt.Sprintf("%d polls once the read and the fill were done listed exactly the new bucket", exact))
+	return v, nil
+}
+
+// liveRows is what one 200 got wrong under judgeRecreateLive's rules, and what it shows of the new
+// bucket: fresh counts the records listed at a value only the new bucket has, lacking the records
+// the new bucket held by the poll that it does not list at their new value.
+type liveRows struct {
+	missing, stale, kept, wrong, back, fresh, lacking counts
+}
+
+func newLiveRows() liveRows {
+	return liveRows{counts{}, counts{}, counts{}, counts{}, counts{}, counts{}, counts{}}
+}
+
+func (r liveRows) problem(o observation) string {
+	var parts []string
+	if r.missing.any() {
+		parts = append(parts, "missing "+r.missing.String())
+	}
+	if r.kept.any() {
+		parts = append(parts, "still listing "+r.kept.String())
+	}
+	if r.stale.any() {
+		parts = append(parts, "old values of "+r.stale.String())
+	}
+	if r.wrong.any() {
+		parts = append(parts, "values no seeded record has for "+r.wrong.String())
+	}
+	if r.back.any() {
+		parts = append(parts, "no longer listing at their new value records an earlier poll had: "+r.back.String())
+	}
+	if o.Unknowns > 0 {
+		parts = append(parts, fmt.Sprintf("%d rows the rig never seeded (%s)", o.Unknowns, strings.Join(o.Unknown, " ")))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("a 200 of %d rows %s", o.Rows, strings.Join(parts, "; "))
+}
+
+// pollRun gathers the polls one rule found wrong, so a verdict names their span and the first.
+type pollRun struct {
+	n           int
+	first, last observation
+	what        string
+}
+
+func (p *pollRun) add(o observation, what string) {
+	if p.n == 0 {
+		p.first, p.what = o, what
+	}
+	p.last = o
+	p.n++
+}
+
+// charAt is a poll's character for the record at index, '.' past the end.
+func charAt(chars []byte, index int) byte {
+	if index < len(chars) {
+		return chars[index]
+	}
+	return '.'
 }
 
 // metricsIn finds the metrics scrapes of obs inside [from, to).
