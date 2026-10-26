@@ -30,7 +30,9 @@
 #                               profile's default model and the fallback target
 #   SESSION_SETTINGS_CHROMIUM   the Chromium Playwright launches (default /usr/bin/chromium)
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY   the caller's own provider keys, required for a model of that
-#                               provider; passed through to Oh My Pi and to nothing else, never printed
+#                               provider; taken out of the environment once checked and given back
+#                               to the driver alone, which passes them to Oh My Pi and to nothing
+#                               else; never printed
 #   SESSION_SETTINGS_EVIDENCE_DIR   default a fresh directory under TMPDIR; kept and printed: the
 #                               transcript, every service's log, each Oh My Pi's stderr and log, the
 #                               session files, and one screenshot per check
@@ -49,6 +51,8 @@ done
 # The nats-server the run installs when the caller names none: the 2.10 line the daemon's own NATS
 # tests pin (packages/daemon/internal/testnats/nats.go), as merged-root-waits.sh installs it.
 nats_version=v2.10.22
+# The pi-envoy the older-plugin session runs: the last release before the settings frame.
+older_pi_envoy=10.24.0
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 started=$SECONDS
@@ -145,7 +149,12 @@ fi
 [ -x "$nats_bin" ] || fail "LEGION_E2E_NATS_BIN names $nats_bin, which is not an executable file"
 note "Oh My Pi $omp ($("$omp" --version 2>/dev/null | head -1)); nats-server $("$nats_bin" --version); Chromium $chromium"
 note "models ${models[0]} (the profile's default) and ${models[1]}; LEGION_TEST_PG_DSN set (not printed)"
-note "keys: ANTHROPIC_API_KEY ${#ANTHROPIC_API_KEY} chars, OPENAI_API_KEY ${#OPENAI_API_KEY} chars (passed to Oh My Pi only)"
+# The keys leave the environment here, so no build, install or service below inherits them; the
+# driver alone gets them back, and hands them to each Oh My Pi it starts and to nothing else.
+anthropic_key=${ANTHROPIC_API_KEY:-}
+openai_key=${OPENAI_API_KEY:-}
+unset ANTHROPIC_API_KEY OPENAI_API_KEY
+note "keys: ANTHROPIC_API_KEY ${#anthropic_key} chars, OPENAI_API_KEY ${#openai_key} chars (passed to Oh My Pi only)"
 
 # ---- builds ------------------------------------------------------------------------------------------
 (cd "$root" && bun install --frozen-lockfile >"$evidence/logs/bun-install.log" 2>&1) || fail "bun install failed; see $evidence/logs/bun-install.log"
@@ -159,11 +168,12 @@ tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" pi-envoy "$work/pack" 2>"$
   fail "pi-envoy did not pack; see $evidence/logs/pack-pi-envoy.log"
 mkdir -p "$work/pi-envoy"
 tar xzf "$tarball" -C "$work/pi-envoy" --strip-components=1
-# The newest released pi-envoy, for the session that shows the older-plugin notice.
+# A pi-envoy released before the settings frame, for the session that shows the older-plugin notice.
+# Pinned, not the newest release: once this pi-envoy is released, the newest reports its settings.
 mkdir -p "$work/released"
 printf '{"name":"legion-e2e-session-settings-released","private":true}\n' >"$work/released/package.json"
-(cd "$work/released" && bun add @sjawhar/pi-envoy@latest >"$evidence/logs/bun-add-released.log" 2>&1) ||
-  fail "bun add @sjawhar/pi-envoy@latest failed; see $evidence/logs/bun-add-released.log"
+(cd "$work/released" && bun add "@sjawhar/pi-envoy@$older_pi_envoy" >"$evidence/logs/bun-add-released.log" 2>&1) ||
+  fail "bun add @sjawhar/pi-envoy@$older_pi_envoy failed; see $evidence/logs/bun-add-released.log"
 note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json") from this checkout; released pi-envoy $(jq -r .version "$work/released/node_modules/@sjawhar/pi-envoy/package.json")"
 
 # ---- services ----------------------------------------------------------------------------------------
@@ -262,5 +272,6 @@ note "setup took $((SECONDS - started))s"
 
 # ---- the checks --------------------------------------------------------------------------------------
 check=checks
-bun "$driver" run "$work/rig.json" || fail "the driver failed (the failing check is named above)"
+ANTHROPIC_API_KEY=$anthropic_key OPENAI_API_KEY=$openai_key bun "$driver" run "$work/rig.json" ||
+  fail "the driver failed (the failing check is named above)"
 ok=1

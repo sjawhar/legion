@@ -29,6 +29,17 @@ import { agentStreamControlSubject } from "../../../packages/contracts/src/agent
 
 const [command, ...args] = process.argv.slice(2);
 
+// The caller's provider keys, taken off this process's environment at once: Oh My Pi gets them
+// (`Omp`), and nothing else the driver starts inherits them (Chromium, launched by Playwright,
+// inherits `process.env`).
+const PROVIDER_KEYS: Readonly<Record<string, string>> = Object.fromEntries(
+  ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"].flatMap((key) => {
+    const value = process.env[key];
+    delete process.env[key];
+    return value === undefined || value === "" ? [] : [[key, value]];
+  })
+);
+
 function refuse(message: string): never {
   process.stderr.write(`dispatch-session-settings: ${message}\n`);
   process.exit(2);
@@ -177,6 +188,7 @@ class Omp {
     this.label = label;
     this.#log = `${rig.evidence}/logs/omp-${label}.rpc.jsonl`;
     const env: Record<string, string> = {
+      ...PROVIDER_KEYS,
       DISPATCH_TOKEN_FILE: rig.dispatchTokenFile,
       DISPATCH_URL: rig.dispatchUrl,
       ENVOY_MACHINE_ID: "legion-e2e-session-settings",
@@ -188,10 +200,6 @@ class Omp {
       PI_CODING_AGENT_DIR: rig.agentDir,
       TMPDIR: rig.tmp,
     };
-    for (const key of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]) {
-      const value = process.env[key];
-      if (value !== undefined && value !== "") env[key] = value;
-    }
     this.#proc = Bun.spawn([rig.omp, ...argv], {
       cwd: rig.sessionCwd,
       env,

@@ -1644,9 +1644,12 @@ It differs from [`dispatch-user-turns.sh`](#dispatch-user-turnssh) in these ways
   stdout. The profile is an isolated `PI_CODING_AGENT_DIR` under a `HOME` of the run's own. That
   `HOME` links `.omp/natives` to the caller's cache, as [`lib/omp-home.sh`](#libomp-homesh) does.
   The Oh My Pi is `LEGION_TEST_OMP`, not a mise tool spec.
-- **The model turns use the caller's own provider keys, not the Hawk gateway.** The rig passes
-  `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` to Oh My Pi and to no other process, sets no key of its
-  own, and prints only each key's length.
+- **The model turns use the caller's own provider keys, not the Hawk gateway.** The script takes
+  `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` out of its environment once it has checked them, so no
+  build, install or service it starts inherits them, and gives them back to the driver alone, which
+  takes them off its own environment at once and passes them to each Oh My Pi it starts and to no
+  other process (Chromium included). It sets no key of its own, and prints only each key's length.
+  A key is needed only for a model of its provider.
 - **Postgres is a loopback server the caller names**, in `LEGION_TEST_PG_DSN`, as for
   [`merged-root-waits.sh`](#merged-root-waitssh). The rig creates a database of its own in it and
   drops it on any exit. In a pod, start one without root as
@@ -1725,7 +1728,7 @@ also drops the database and removes the work directory.
 | `resume-keeps-switch` | one page, held open from before the first relaunch to the last step, and three steps. **The switch stays (A2):** the process ends and is started again with `--resume <session file>`, which opens the same session; `get_state` and `/effort` show the model and level picked last. **Numbering:** once the resumed process has registered, a bare NATS client subscribes to `agentstream.<session>.control` and waits up to 30 s for the first control message the relay sends there (its `watch`, about every 10 s while a page is open), then 1 s more; RPC `set_thinking_level` to another level then shows on the held page within 20 s with no reload, and the level set back shows too. **Arming:** the process ends again and is started with `--resume <session file> --model <the other model>`; `get_state` shows that model, and with no RPC change and no reload the held page shows it within 20 s of the registration. The screenshot is the held page then. RPC `set_model` (and `set_thinking_level`, when the level moved) puts the session back on the model and level picked last, and the reloaded header shows them. A held-page step that times out reloads the page, to tell a report the page missed from one never made, and fails naming its step |
 | `new-session-defaults` | a new session of the same profile reports the profile's default model and `low`, through RPC and on its own live view |
 | `fallback` | a pick of `rig-broken/broken-model`, then a composer prompt. That request fails, and the session file gains a `model_change` with role `fallback` to the first model. The header shows the first model within 20 s of that entry, with no further user message. The check prints how each request of the run ended, including the retry on the fallback model |
-| `older-plugin-notice` | a session on the newest released `@sjawhar/pi-envoy`, installed with `bun add` into the run's directory, runs one prompt. Its live view shows that turn's model, no picker, and the restart notice |
+| `older-plugin-notice` | a session on `@sjawhar/pi-envoy` 10.24.0, the last release before the settings frame (pinned in the script, since the newest release reports its settings once this one ships), installed with `bun add` into the run's directory, runs one prompt. Its live view shows that turn's model, no picker, and the restart notice |
 | `attribution` | `bob` sends a switch with `X-Dispatch-User: bob`, the header's own body (`/model <id>` as a steer). Dispatch stores it as `bob`'s, the session answers it, and `alice`'s held-open page shows `bob` beside it in the thread |
 
 ## verifiers-staging-token.sh
