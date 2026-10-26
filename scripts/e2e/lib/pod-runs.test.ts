@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { scriptFunctions } from "./script-functions";
 
 // pod_runs POD ROLE COMMAND (stage4b-sandbox-tree.sh): whether a process whose command line
-// contains COMMAND runs in ROLE's container, read from pod_commands (the container's /proc through
-// kubectl exec). It runs under the script's `set -Eeuo pipefail` (lib/rig.sh:16-21 names the
+// contains COMMAND runs in ROLE's PID namespace, read from pod_commands (that namespace's /proc,
+// through pod_exec). It runs under the script's `set -Eeuo pipefail` (lib/rig.sh:16-21 names the
 // hazard): an early-exiting consumer downstream of a live producer turns the producer's SIGPIPE
 // into the pipeline's status, so a match followed by more output than the pipe holds reads as
 // absent. The run at 59e0337c failed a since-removed checkpoint that way: a planner's hold
