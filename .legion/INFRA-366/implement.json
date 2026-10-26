@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T20:20:00Z",
+  "completed": "2026-10-26T21:55:00Z",
   "proof": [
+    {
+      "criterion": "Review round 7 (Minor batch) and the forward merge of main 16e4bb0f: wording and test robustness edits change no behaviour; the merge keeps both sides (#2237's AgentName owner in the shared documentOwner) and migrations 0121-0128 follow main's 0120; upper-case DISPATCH:// matches the server (not a reference on either side)",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server, the dashboard unit suite, and a Go probe of text.Extract/text.ParseRef",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r13?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/pictures.e2e.ts -g 'bare page URL stays a plain link'; after the merge: bun test web/src; bun run e2e -- e2e/pictures.e2e.ts e2e/block-references.e2e.ts e2e/references.e2e.ts plus main's #2237 e2e files",
+      "observed": "Before the merge, pictures test 2 passed and MarkdownBody 23 pass. After the merge, web/src 2456 pass / 0 fail; browser 222 passed, 46 skipped, 5 failed — all five [webkit-iphone] agent-view.e2e.ts (main's file), which fail at browserType.launch because WebKit is not installed in this harness. Probe: Extract('See DISPATCH://CORE-1/spec here.') = [], ParseRef('DISPATCH://CORE-1/spec') not ok, ParseRef('dispatch://CORE-1/spec') ok.",
+      "headSha": "f586da9d4b2db7d30791bd21a6863d5f2d6e969e",
+      "negativeControl": "The round-7 behaviour's controls stand unchanged (e3d09251: link count 1 and a tooltip on hover); the case probe's control is lower-case dispatch://, which the same calls read as a reference"
+    },
     {
       "criterion": "Review round 6: a dispatch:// URL left as text (<dispatch://…>, [X](X), or a #b- id over 256 bytes) that cites nothing past the bounds is its words as plain text: no <a>, no href=\"\", no data-dispatch-href, so no click target and no hover card; https:// forms and author links unchanged",
       "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server, plus MarkdownBody's component test",
@@ -161,7 +169,8 @@
     "Round 11: forward merges of main df396380 and ad909178; migrations renumbered 0120-0127, every reference updated; routes_table_test.go pin 139; search_ask_block_href_test.go vectors carry the embedder's model (56d31191, 44f6cfa2)",
     "Round 12 (after the drain): forward merge of main 6cdb9995 (e3d09251), with packages/envoy/CHANGELOG.md keeping both entries; main added no migration, so this branch keeps 0120-0127; the diff fingerprint is unchanged (2e83582a…), https://github.com/sjawhar/legion/pull/2210#issuecomment-6424826991",
     "Round 12: RefLink.tsx text node for an uncited dispatch:// text URL; MarkdownBody.test.tsx; e2e/pictures.e2e.ts (b4e4a2d2)",
-    "Round 12: forward merge of main b4bea385: migrations renumbered 0121-0128 after main's 0120; skills/dispatch/references deletions kept and the block guidance moved into dispatch read/ask/doc-edit help in contracts dispatch-tools.ts with test rows (1d4f991e)"
+    "Round 12: forward merge of main b4bea385: migrations renumbered 0121-0128 after main's 0120; skills/dispatch/references deletions kept and the block guidance moved into dispatch read/ask/doc-edit help in contracts dispatch-tools.ts with test rows (1d4f991e)",
+    "Round 13: RefLink.tsx doc comment, packages/dispatch/AGENTS.md, e2e/pictures.e2e.ts (REF_PREVIEW_OPEN_DELAY_MS, leftover comment), claude-envoy CHANGELOG (87a81d62); forward merge of main 16e4bb0f with RefPreview documentOwner returning AgentName (f586da9d)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
@@ -180,7 +189,8 @@
     "Round 8: components have Go-only bound rows; the dashboard's text reader parses no component reference (on main either), so a shared-table row would fail its TS reader.",
     "Round 9: the merges after 2ece5e05 change no Dispatch server or dashboard file (only daemon, agent-secrets, contracts' daemon-api fixtures and envoy-client slack-post, plus main's own copy of dispatch-command.ts's args['issue'] line), so the round-9 proofs ran at 2ece5e05's Dispatch code. The Firefox project of picture-link-click.e2e.ts cannot launch in this harness (no Firefox binary); its Chromium run passes.",
     "Round 11: the shared local test database `postgres` had been migrated under the old numbering (version 125), so the renumbered store tests ran on fresh databases; any existing scratch database migrated by this branch before the renumber is stale and must be recreated (no deployed database ever ran this branch's migrations).",
-    "Round 12: the code is unchanged from 44f6cfa2 (fingerprint unchanged), so no proof was re-run; the PR body's CI and E2E (tester) lines were updated from round 9 of test.json and the runs GitHub shows."
+    "Round 12: the code is unchanged from 44f6cfa2 (fingerprint unchanged), so no proof was re-run; the PR body's CI and E2E (tester) lines were updated from round 9 of test.json and the runs GitHub shows.",
+    "Round 13: the five [webkit-iphone] runs of main's agent-view.e2e.ts cannot launch in this harness (only Chromium is installed); they are main's tests and fail before any page loads."
   ],
   "openQuestions": []
 }
