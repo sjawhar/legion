@@ -369,7 +369,8 @@ func (r *noRequiredChecksLive) aPassingRequiredCheckIsGreen() {
 // requiring anything, so b1 has no verdict, and the implementer pushes b2 onto it: the push raises
 // no count and leaves the counted attempt, as a push onto green does. Once the base requires ci
 // again, b2's red is new, not the held attempt's: it sends the work back with a checks-red naming
-// ci, and the count is still 1. Without the change the push stayed in the attempt, and b2's red was
+// ci, and the count is still 1. Had HeadVerdict's change dropped this reset (AdvancePullRequestHead
+// without nothingRequired), the push would have stayed in the attempt, and b2's red would have been
 // held with the issue left in testing.
 func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt() {
 	t := r.t
