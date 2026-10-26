@@ -103,6 +103,22 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The Legion skills this plugin ships are rewritten to the minimum text that carries their
+  instructions (INFRA-353): `legion-architect`, `legion-controller`, `legion-worker`,
+  `legion-retro`, `legion-oracle`, `thermonuclear-code-quality` and `thermonuclear-deep-review`,
+  from about 141,000 bytes of SKILL.md to 50,000. Every rule now carries its reason beside it,
+  detail that only some tasks need moved whole to `references/` files named at the step that
+  needs it, and each skill opens by saying the code and a command's `--help` win over its text.
+  `legion-controller` was 39,275 bytes and is now 7,975, so an agent that keeps only a skill's
+  first 8,000 bytes reads all of it. Each old instruction is kept, moved, or dropped with a
+  recorded reason (most drops repeat a rule the role prompt already gives); the per-skill counts
+  are in the pull request body. One rule is new in `legion-worker`: put back anything copied
+  into the workspace before completing a phase, checked with `jj status`.
+- The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
+  the licence file by hand: the worker image lists every Debian package it carries in
+  `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
+  Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
 - The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
   refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the
   head's check runs or commit statuses. GitHub, under the base branch's own rules, decides whether
