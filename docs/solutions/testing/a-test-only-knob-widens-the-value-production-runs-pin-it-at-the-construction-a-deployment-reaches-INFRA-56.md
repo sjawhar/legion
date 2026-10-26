@@ -85,3 +85,6 @@ Still open in that package: `TestComputeAndPersistSuggestionsRespectsDeadlineUnd
 (`suggestions_test.go:290`, `:326`) assert elapsed time against that same
 `writeSuggestionTimeout + 500 ms` ceiling, doing locked-table work on the same Postgres. The
 arithmetic above indicts them; INFRA-56 left them unedited by its own scope and reported them.
+**Note 2026-10-25 (INFRA-260):** both tests now set the allowance on their own server through
+`suggestionsBehindLock` and assert `Missing` reached while the query waits behind the lock, seen
+in `pg_locks` through the holder's transaction, with no elapsed-time bound.
