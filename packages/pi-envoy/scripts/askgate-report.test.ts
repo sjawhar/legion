@@ -665,6 +665,63 @@ describe("parseArgs", () => {
       parseArgs(["--sessions", "", "--since", SINCE, "--sample", "1", "--out", "o"])
     ).toThrow("--sessions requires a directory");
   });
+
+  test("a flag given twice is never read as its last value alone", () => {
+    // Live, tester round 6 at a3fc5c94: `--sessions <run 1> … --sessions <run 22>` printed
+    // `gated calls: 1`, the last directory's, where the 22 directories held 35, with no error.
+    // A repeated directory or project flag is refused by name or read whole; any other is refused.
+    const both = (argv: string[], flag: string, first: string, second: string) => {
+      let parsed: unknown;
+      try {
+        parsed = parseArgs(argv);
+      } catch (error) {
+        expect((error as Error).message).toContain(flag);
+        return;
+      }
+      expect(JSON.stringify(parsed)).toContain(first);
+      expect(JSON.stringify(parsed)).toContain(second);
+    };
+    both(
+      [
+        "--sessions",
+        "/runs/one",
+        "--sessions",
+        "/runs/two",
+        "--since",
+        SINCE,
+        "--sample",
+        "1",
+        "--out",
+        "o",
+      ],
+      "--sessions",
+      "/runs/one",
+      "/runs/two"
+    );
+    both(
+      ["--dispatch-project", "ACME", "--dispatch-project", "WIDGETS", "--since", SINCE],
+      "--dispatch-project",
+      "ACME",
+      "WIDGETS"
+    );
+    const valid: Record<string, string> = {
+      "--sessions": "d",
+      "--since": SINCE,
+      "--sample": "1",
+      "--out": "o",
+    };
+    for (const [flag, first, second] of [
+      ["--since", SINCE, "2026-10-01T00:00:00Z"],
+      ["--sample", "1", "5"],
+      ["--out", "o", "p"],
+      ["--seed", "1", "2"],
+    ] as const) {
+      const others = Object.entries(valid)
+        .filter(([name]) => name !== flag)
+        .flat();
+      expect(() => parseArgs([...others, flag, first, flag, second])).toThrow(flag);
+    }
+  });
 });
 
 describe("isSentBack and isRefusal", () => {
