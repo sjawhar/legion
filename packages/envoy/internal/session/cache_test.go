@@ -163,7 +163,7 @@ func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	}
 }
 
-// --- Integration tests (testcontainers NATS, shared via setupNATS) ---
+// --- Integration tests (a real NATS server, shared via setupNATS) ---
 
 // pollSessionList retries List() until len matches want or timeout fires.
 func pollSessionList(t *testing.T, r *SessionRegistry, want int, timeout time.Duration) []ListEntry {

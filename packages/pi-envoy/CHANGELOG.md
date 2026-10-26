@@ -4,53 +4,132 @@
 
 ### Added
 
+- The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
+  `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
+  `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
+  issues reference spelled out a hand-built `PATCH` carrying a `rank` body. Its reorder rule now
+  names the agent that keeps each project's order — in a Legion deployment the controller, at
+  `notifications.role.legion-<project>-controller` — in place of the retired `backlog-order`
+  address, and says to raise a wrong order on the issue itself where no Legion controller runs
+  (INFRA-188).
 - AskGate reviews each Dispatch write of a session's main agent before the write posts, and sends
-  back a write that breaks its rules with the reason and the fix. It runs in each session with
-  Dispatch on. `{"askgate":{"enabled":false}}` in the session's envoy.json turns it off.
-  `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry does
-  (`block` when there is none). The gate asks the `askgate` model role, else the `default` role,
-  and refuses the write when neither is set. A switch that does not parse, and a gate that does
-  not load, are said at session start. A gate that does not load (a host module, an
+  back a write that breaks its rules with the reason and the fix. It runs in each session unless
+  `{"askgate":{"enabled":false}}` in the session's own envoy.json turns it off. A checkout cannot
+  turn it off. `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry
+  does (`block` when there is none). The gate asks the `askgate` model role, else the `default`
+  role, and refuses the write when neither is set. A switch that does not parse, and a gate that
+  does not load, are said at session start. A gate that does not load (a host module, an
   `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler time limit too short for a
-  verdict) refuses each write it would review, in both modes, naming the error and the switch. The
-  session's `extensionHandlers.toolCallTimeoutMs` must be at least 17,000 ms: the gate keeps 7 s
-  of it for the aborted call's usage report and the decision record, and does not bind on less
-  than 10 s for a verdict. Set below 17,000 ms, the gate does not load, and so refuses every
-  Dispatch write it would have reviewed.
+  verdict) refuses each write it would review, in both modes, naming the error and the switch.
 - AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
   `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
   its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
-  from the dry run, and one that holds an expansion is refused. For `--path` it reads the file from
-  the directory the `dispatch` command resolves it in. Its rules now also send back a fact the
-  reader does not need and text longer than its decision needs, and a claim about what the person
-  said is sourced only by a link to where they wrote it.
-- AskGate reads the common safe forms of a `dispatch` write. These are `\`-newline continuations,
-  output redirects and a `| head` on the write, literal assignments and a `timeout` before it, and a
-  file as its stdin. Before it, `cd`, `export`, read-only commands and `dispatch` calls that do not
-  write. After it, any command that holds no second write. The dry run keeps only what can change
-  the arguments. A write after a command that can change a file or its text, or with a command
-  substitution, is still refused.
+  from the dry run, and one that holds an expansion is refused. Each posted file is reviewed and
+  posted from a private snapshot. A missing or non-regular file is refused before AskGate reads it,
+  and the refusal names `--content-file -` for an upload's text from standard input.
+  The gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long
+  document. Its rules now also send back a fact the reader does not need and text longer than its
+  decision needs, and a claim about what the person said is sourced only by a link to where they
+  wrote it.
+- AskGate reads one form of a Dispatch write: `[cd <literal path> && ] dispatch <subcommand>
+  <literal words…> [2>&1] [<<'DELIM' … DELIM]`, with every word literal and nothing else in the
+  call. Any other form is `unreadable`, and so is a gated write in the call's own text, which is
+  what `bash -c`, `sh -c`, `eval`, `xargs`, a function or a variable would run. Block mode refuses
+  an unreadable call before anything in it runs; warn mode runs it and returns the reason. A gate
+  that did not load, and a session with no model role, still refuse in both modes.
+- AskGate says it when a write posts unreviewed. A timeout, a model error, an answer with no
+  verdict, a handler exception, a dry run that failed, the pause after three failures, a session
+  on another provider, a rebuttal and a breaker trip each record their outcome and tell the agent
+  that the write went out unreviewed and why, in a headless session too. A failed review hands
+  back the agent's own command, so a gate that fails breaks no valid write.
+- AskGate refuses a posted path that reaches a file descriptor of whichever process opens it, by
+  its own spelling (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`, `/proc/thread-self/fd/N`,
+  `/proc/<n>/task/<m>/fd/N`) or through a symbolic link to one: AskGate would open it in Oh My
+  Pi's process and the command in its own shell. It walks each operand one component at a time,
+  follows every link itself, refuses a component that reaches `/proc` or `/dev`, and opens with
+  `O_NOFOLLOW`. A `--path-file` is refused for the same reason. A `--<field>-file` operand goes
+  to the kernel as written, so a `..` after a symbolic link names the file the CLI opens. An
+  `--image` file is not snapshotted and not reviewed: the model reads its path, and the CLI names
+  the upload after the file it opens when it sends.
+- AskGate reads a write that quotes, hides or expands its own name: `d\ispatch comment …`,
+  `bash -c 'dispatch "comment" …'`, `bash -c "dispatch $SUB …"`, `xargs -I{} dispatch $SUB …`,
+  `F='--spec=x'; dispatch issue … $F` and `"$D" "$S" …` are each unreadable, in both modes.
+- AskGate refuses in both modes when no model role resolves, on every path: a rebuttal, a halt, a
+  breaker trip, a shutdown and a dry run that failed each allowed the write before this.
+- Every note AskGate hands back rides on the call's own result as well as the loop's context, so
+  a write made from an eval cell, which has no loop context, tells the agent what happened.
+- A write that no review stands behind is refused in both modes when AskGate cannot record it:
+  the record is the whole account of what posted unreviewed. A write the model allowed still
+  posts.
+- AskGate keeps a snapshot until the command that reads it has run. A call the host backgrounds
+  (`async: true`, or `bash.autoBackground`) reports its start before the shell runs, so its
+  snapshot stays until the session shuts down, and each gated call removes the snapshots older
+  than a day. A snapshot goes on its own call's `tool_result` or `tool_execution_end`, or at
+  shutdown, and a session switch or branch keeps it, so a background write still finds its file.
+- AskGate binds only in a session that has Dispatch, read from the session's own envoy.json and
+  the variables over it, with a checkout's file left out. A session or a pod with no Dispatch has
+  no write to review and gets no gate. The test runs at load: a session that turns Dispatch on
+  afterwards has no gate until it starts again.
+- `scripts/askgate-report.ts` prints a count for each outcome and names every session that had a
+  write the gate did not review, with its counts. It counts as sent back every entry whose
+  decision is `revise` — a revise verdict, `no-model-role`, and in block mode `abandoned` and
+  `shutdown` — and every `unreadable` or `load-failed` entry; as a refusal a write that did not
+  post; and as unreviewed every `allow` whose outcome is no verdict.
+- AskGate needs `extensionHandlers.toolCallTimeoutMs` at 120000 or more in the session's settings.
+  At the 30 s default its deadline is 20 s, a review of a long session often times out, and the
+  write posts unreviewed. A deadline under 30 s is one warning at start that names the key.
+- AskGate reviews the writes of a cooperating agent and is no sandbox: a process of the same user
+  can replace a snapshot's bytes between the review and the open, turn the gate off in its own
+  envoy.json, point the session at another envoy.json through the launching shell, or call
+  Dispatch's HTTP API with no command. Its scan catches no alias or shell function, no brace or
+  glob program word, no script another tool writes that the call then runs, no copy or link of
+  the CLI under another name, no command built at run time, and nothing nested past its scan
+  depth. The README and AGENTS.md say so.
+- AskGate's scan of a write it cannot read refuses only a Dispatch write. The unknown-program
+  rule applies to text a shell runs (the call, a shell's `-c` operand, `eval`'s arguments, a
+  here-document, a here-string, a pipe into a shell); any other text is read for `dispatch` as a
+  program word alone, so `echo "$a $b"` and `perl -pe 's/(\w+) (\w+)/$2 $1/'` pass. A `dispatch`
+  before a glob, a brace or an expansion is a write of unknown subcommand only under a runner
+  (`xargs`, `sudo`, `env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `command`, `exec`,
+  `time`, `find -exec`), so `grep -rn dispatch packages/*/src` passes.
+- AskGate decodes `$'…'` in a shell's `-c` operand, reads a pipe into a shell with `printf` and
+  `echo -e` escapes decoded, and removes bash's backslashes from an unquoted here-document.
+  `bun <path>/dispatch.js` and any path ending in `dispatch` or `dispatch.js` are the CLI.
+- An `eval` cell that starts the CLI as a process of its own (a JS or Python spawn, exec,
+  `subprocess` or `os` call with an argument vector or a shell string, or the Bun shell) is
+  unreadable: it would post with no `bash` call for the gate to read.
+- An upload's absolute `--path` resolves as the CLI resolves it, which removes a `..` before the
+  kernel follows a link, so the gate reviews and posts the file the CLI opens.
+- In warn mode a write whose review the gate gave up (`abandoned`, `shutdown`) carries the same
+  note as every other unreviewed outcome.
+- The core's header says that `O_NOFOLLOW` guards the last path component only.
+- A leading `cd` is resolved as Oh My Pi resolves it: the dry run and its directory probe run
+  with no `CDPATH`, and a leading `cd /` in a call that names no directory runs in the session's
+  own directory.
 - AskGate's rules check: a second model call judges only the new asks a Dispatch write opens
   against two rules. A new ask is a `dispatch ask`, an ask block that a `doc-edit` inserts or a
   block that it retypes into an ask, and an ask block in an issue spec or in a markdown upload. One
   rule refuses an ask whose own recommendation is to change nothing. The other refuses an ask for a
   step the person must do with their own hands when the agent did not try its own access first. A
-  match refuses the call in `warn` mode as well as in `block` mode. `--advisor-rebuttal '<line>'`
-  on a command, `"advisor_rebuttal": "<line>"` in a device's JSON, or the third attempt at the
-  same thing on the same target sends the call anyway. The breaker counts only the calls the gate
-  refused, so a charter revise in `warn` mode, which sends the call, never moves it. It counts
-  each thing apart: each new ask a call opens, or the call as a whole when it opens none, so its
-  free pass covers only the thing that was refused twice, and an ask refused once on a target
-  whose other ask was refused twice is still reviewed. An upload's ask block is new only while the
-  version it replaces does not already hold it, and when that version cannot be read the blocks
-  carrying an `#id` are left out of the check (`ruleAsksPartial`), so a re-upload of an unchanged
-  document is never refused for an ask block it already held. When every block of such an upload
-  carries an `#id`, the rules check asks no model and refuses nothing, but it is not silent:
-  `ruleOutcome` reads `unjudged`, with `ruleAsksPartial`, and the decision record and the report
-  count it. The `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`,
-  `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial`
-  and `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and
-  errors and the refusals the agent overrode.
+  match refuses the call in `warn` mode as well as in `block` mode. The check runs only on a call
+  the gate reads: a call in any other form is refused before it posts in `block` mode, and in
+  `warn` mode it posts with the note that it went out unreviewed, and the check never sees it.
+  `--advisor-rebuttal '<line>'` on a command, `"advisor_rebuttal": "<line>"` in a device's JSON,
+  or the third attempt at the same thing on the same target sends the call anyway. The breaker
+  counts only the calls the gate refused, so a charter revise in `warn` mode, which sends the
+  call, never moves it. It counts each thing apart: each new ask a call opens, or the call as a
+  whole when it opens none, so its free pass covers only the thing that was refused twice, and an
+  ask refused once on a target whose other ask was refused twice is still reviewed. An upload's
+  ask block is new only while the version it replaces does not already hold it, and when that
+  version cannot be read the blocks carrying an `#id` are left out of the check
+  (`ruleAsksPartial`), so a re-upload of an unchanged document is never refused for an ask block
+  it already held. When every block of such an upload carries an `#id`, the rules check asks no
+  model and refuses nothing, but it is not silent: `ruleOutcome` reads `unjudged`, with
+  `ruleAsksPartial`, and the decision record and the report count it. The `advisor-gate` entry
+  gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`, `ruleLatencyMs`,
+  `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial` and `target`, and
+  `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors and the
+  refusals the agent overrode.
 - AskGate publishes each rule decision, and each refused call the agent sent again with a rebuttal
   or the breaker (recorded with `ruleOutcome: null` and the refusal's own target), to a Dispatch
   project document of the session's own, `askgate-decisions-<session id>.md`, so a session holding
@@ -61,20 +140,51 @@
   else `LEGION_PROJECT` does, and with neither set nothing is written. The write takes a 5 second
   stop of its own, never changes the decision, and leaves `recordError` on the `advisor-gate`
   entry when it fails. `scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339>
-  [--json]` reads those documents back and counts them, split by `source`.
+  [--json]` reads those documents back and counts them, split by `source`. The review's deadline
+  is held 10 s under `extensionHandlers.toolCallTimeoutMs`: 5 s for the aborted call's usage
+  report and the entry, and 5 s for this record. So the 30 s default gives a 20,000 ms deadline,
+  and the key must be at least 20,000 ms: set below that, the gate does not load, and so refuses
+  every Dispatch write it would have reviewed.
 - The `advisor-gate` entry gains `charterLatencyMs`, the charter call's own time on the clock
   `ruleLatencyMs` uses: the two calls run side by side, and the entry's `latencyMs` alone never
   said which of them the gate waited on.
-- The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
-  `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
-  `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
-  issues reference spelled out a hand-built `PATCH` carrying a `rank` body. Its reorder rule now
-  names the agent that keeps each project's order — in a Legion deployment the controller, at
-  `notifications.role.legion-<project>-controller` — in place of the retired `backlog-order`
-  address, and says to raise a wrong order on the issue itself where no Legion controller runs
-  (INFRA-188).
 
 ### Fixed
+
+- A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
+  queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
+  interval: past it the caller's call rejects, the queue starts the next task, and the abandoned
+  task is fenced, so its late continuation writes nothing over what ran after it. The heartbeat
+  tick also re-posts the registration itself, outside the queues, while a pass is still running
+  and the last accepted registration is a whole refresh interval old, so a pane whose pass is
+  wedged keeps its `envoy ps` row and stays resolvable for its role instead of being dropped five
+  minutes in. A stall counts as a failed registration: the next healthy tick re-asserts the role
+  and fires the regain hook (`"reregistered"`), which re-runs a Legion claim's readiness. The pane
+  is told once per episode — one notification and one warning line, not one per tick.
+
+- A role the listener granted is no longer pinned to a session that refuses its traffic. When a
+  role move was abandoned at its deadline while its claim was in flight, `envoy_role_set` threw
+  and discarded the grant, so the listener named that session as the role's holder while this
+  process had opened none of the role's notices and no pass knew of a hold to hand back: every
+  task and notice addressed to the role went to a pane that never showed one, for the life of the
+  process. The granted hold is now recorded as a pending hand-back before the throw, so the next
+  pass hands it back, or keeps it for the session that wants it.
+
+- A pass abandoned mid-hand-back no longer takes over the hand-backs a session event left for the
+  move that replaced it. `settleEndedHolds` reads its fence at the top of each loop iteration, now
+  before its `delete` rather than after the hand-back: a `Map` iterator visits entries inserted
+  after it was created, so an abandoned move could adopt a hold a session event had just ended and
+  record it as the role this process holds. The next pass then found that role unwanted and handed
+  it back, which closes every subject another plugin opened while the role was held — subjects only
+  that plugin reopens, on its next session switch or restart.
+
+- A NATS dial that lands after its pass was abandoned no longer becomes the session's shared
+  connection. `ensureConnection` re-checks its fence, the shutdown flag and whether another pass
+  established a connection meanwhile before assigning the shared field, and closes the dial it
+  loses with. A late dial used to displace the connection a newer pass had established: that one
+  held the session's live subscriptions and went unreferenced, so nothing drained it at session
+  end and `maxReconnectAttempts: -1` kept it reconnecting for the life of the process, while the
+  shared field named a connection carrying no subscriptions at all.
 
 - The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event
   a human already said they will send and that is on its way: such a reply is an event, not an
@@ -198,6 +308,17 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `asd-ste100`: the ASD-STE100 rules (Simplified Technical
+  English) for text a reader must not misread, which a session reads before it writes text a
+  person reads. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69,
+  with its licence and without its linter.
+- `dispatch_read` takes `events` (the issue's last N events) and `all_events` (every one) for an
+  issue read and its `dispatch://KEY/log`, which list the last 10 without either; the `dispatch`
+  command spells them `--events N` and `--all-events`. Both together, or either beside a read
+  that lists no events, are refused before any request. The `dispatch` skill's reading reference
+  names them.
+- `ENVOY_PASS_DEADLINE_MS` sets how long a queued session pass or role move may run before the
+  queue abandons it; the default is the heartbeat interval, or 30 s, whichever is longer.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
   `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
   repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.

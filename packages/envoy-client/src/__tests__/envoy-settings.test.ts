@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { dispatchSettings } from "../dispatch-config";
 import { type EnvoyConfig, readEnvoyConfig } from "../envoy-config";
-import { envoySettings } from "../envoy-settings";
+import { type EnvoyEnvironment, envoySettings } from "../envoy-settings";
 
 /** The error a read failed with, or a test failure naming what it read instead. */
 function errorOf(config: EnvoyConfig): string {
@@ -48,7 +48,9 @@ describe("envoySettings", () => {
         natsUrls: ["nats://nats.internal.example:4222"],
         natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
       },
-      heartbeatMs: 120_000,
+      heartbeatMs: 90_000,
+      passDeadlineMs: 90_000,
+      passDeadlineRaisedFrom: undefined,
     });
   });
 
@@ -74,6 +76,8 @@ describe("envoySettings", () => {
         natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
       },
       heartbeatMs: 25,
+      passDeadlineMs: 30_000,
+      passDeadlineRaisedFrom: undefined,
     });
 
     const tokenFile = secretFile("  pointer-token\n");
@@ -93,6 +97,111 @@ describe("envoySettings", () => {
       inbound: {
         natsSeed: { value: "SUPOINTERSEED", source: `NATS_NKEY_SEED_FILE (${seedFile})` },
       },
+    });
+  });
+
+  // A deadline shorter than the refresh interval abandons every pass before the next tick, so the
+  // heartbeat's `healing` latch is false at every tick and the registration backstop that runs
+  // under it never fires: a pane wedged before `registerSession` would never register at all.
+  test("an ENVOY_PASS_DEADLINE_MS below the heartbeat is raised to the heartbeat", () => {
+    const config = configFrom({ envoy: listener });
+    expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: "7500" }, config)).toMatchObject({
+      heartbeatMs: 90_000,
+      passDeadlineMs: 90_000,
+    });
+    // The 25 ms interval floor cannot shorten it below the heartbeat either.
+    expect(
+      envoySettings({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "10" }, config)
+    ).toMatchObject({ heartbeatMs: 5000, passDeadlineMs: 5000 });
+  });
+
+  // A deadline longer than the heartbeat is the caller's to name: a pass that legitimately takes
+  // longer than one refresh interval — a slow listener, a NATS dial — must not be abandoned at the
+  // interval, or no pass ever finishes.
+  test("an ENVOY_PASS_DEADLINE_MS above the heartbeat is used as given", () => {
+    const config = configFrom({ envoy: listener });
+    expect(
+      envoySettings({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "7500" }, config)
+    ).toMatchObject({ heartbeatMs: 5000, passDeadlineMs: 7500 });
+    expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: "120000" }, config)).toMatchObject({
+      heartbeatMs: 90_000,
+      passDeadlineMs: 120_000,
+    });
+  });
+
+  test("an unusable ENVOY_PASS_DEADLINE_MS falls back to the resolved heartbeat's deadline", () => {
+    const config = configFrom({ envoy: listener });
+    for (const value of ["soon", "0", "-5000"]) {
+      expect(
+        envoySettings({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: value }, config)
+      ).toMatchObject({ heartbeatMs: 5000, passDeadlineMs: 30_000 });
+    }
+    // A pane given a long heartbeat gets a deadline at least that long.
+    expect(envoySettings({ ENVOY_HEARTBEAT_MS: "45000" }, config)).toMatchObject({
+      heartbeatMs: 45_000,
+      passDeadlineMs: 45_000,
+    });
+  });
+
+  // The raise is the resolver's own decision, so the resolver is where it is recorded: the start
+  // notice reads this field rather than testing ENVOY_PASS_DEADLINE_MS a second time
+  // (`startNotice`, session-settings.ts), and the two cannot drift apart.
+  test("a raised ENVOY_PASS_DEADLINE_MS is reported, and nothing else is", () => {
+    const config = configFrom({ envoy: listener });
+    const raisedFrom = (env: EnvoyEnvironment): number | undefined => {
+      const settings = envoySettings(env, config);
+      if (!settings.enabled) throw new Error(`Envoy is off: ${settings.notice ?? settings.error}`);
+      return settings.passDeadlineRaisedFrom;
+    };
+    // Raised: the value the variable named, as written, not the deadline in force.
+    expect(raisedFrom({ ENVOY_PASS_DEADLINE_MS: "7500" })).toBe(7500);
+    expect(raisedFrom({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "1500" })).toBe(1500);
+    // Used as given, at the interval or above it: nothing was raised.
+    expect(
+      raisedFrom({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "5000" })
+    ).toBeUndefined();
+    expect(raisedFrom({ ENVOY_PASS_DEADLINE_MS: "120000" })).toBeUndefined();
+    // Unusable, so the fallback applies: no deadline of the operator's was overridden.
+    for (const value of ["soon", "0", "-5000", ""]) {
+      expect(
+        raisedFrom({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: value })
+      ).toBeUndefined();
+    }
+    expect(raisedFrom({})).toBeUndefined();
+  });
+
+  // A delay past 2_147_483_647 ms overflows the host timer's 32-bit field and fires *at once*, so
+  // an unclamped value turns each setting into its opposite with nothing logged: a heartbeat that
+  // ticks continuously instead of hourly, and a pass deadline that abandons every pass the moment
+  // it is queued.
+  test("a heartbeat or pass deadline past the timer's ceiling is clamped to it", () => {
+    const config = configFrom({ envoy: listener });
+    for (const value of ["2147483648", "99999999999"]) {
+      expect(envoySettings({ ENVOY_HEARTBEAT_MS: value }, config)).toMatchObject({
+        heartbeatMs: 2_147_483_647,
+        // The deadline is never shorter than the heartbeat, so it cannot escape over the ceiling
+        // by that route either.
+        passDeadlineMs: 2_147_483_647,
+      });
+      expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: value }, config)).toMatchObject({
+        heartbeatMs: 90_000,
+        passDeadlineMs: 2_147_483_647,
+      });
+    }
+  });
+
+  // The ceiling is the largest delay a timer takes as asked, so a value just under it is a
+  // legitimate configuration and must come back untouched: clamping low would shorten a deadline
+  // its caller chose and abandon passes that were meant to run on.
+  test("a heartbeat or pass deadline just below the ceiling is used as given", () => {
+    const config = configFrom({ envoy: listener });
+    expect(envoySettings({ ENVOY_HEARTBEAT_MS: "2147483646" }, config)).toMatchObject({
+      heartbeatMs: 2_147_483_646,
+      passDeadlineMs: 2_147_483_646,
+    });
+    expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: "2147483646" }, config)).toMatchObject({
+      heartbeatMs: 90_000,
+      passDeadlineMs: 2_147_483_646,
     });
   });
 
@@ -126,7 +235,9 @@ describe("envoySettings", () => {
       url: "http://127.0.0.1:9020",
       token: undefined,
       inbound: { natsUrls: ["nats://nats.internal.example:4222"], natsSeed: undefined },
-      heartbeatMs: 120_000,
+      heartbeatMs: 90_000,
+      passDeadlineMs: 90_000,
+      passDeadlineRaisedFrom: undefined,
     });
   });
 
@@ -240,7 +351,9 @@ describe("envoySettings", () => {
         url: "http://listener.internal.example:9020",
         token: "file-token",
         inbound: { off: "this session opens no NATS connection" },
-        heartbeatMs: 120_000,
+        heartbeatMs: 90_000,
+        passDeadlineMs: 90_000,
+        passDeadlineRaisedFrom: undefined,
       });
     }
     expect(existsSync(ran)).toBe(false);
@@ -376,7 +489,9 @@ describe("the NATS seed in envoy.json", () => {
       inbound: {
         off: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
       },
-      heartbeatMs: 120_000,
+      heartbeatMs: 90_000,
+      passDeadlineMs: 90_000,
+      passDeadlineRaisedFrom: undefined,
     });
     expect(existsSync(runs)).toBe(false);
     // A set holding one other server is other servers too, whether it replaces one of the file's

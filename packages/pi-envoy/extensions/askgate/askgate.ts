@@ -52,7 +52,10 @@ export interface AskGateHost {
    * gate's own reads of a document go through.
    */
   readonly configFile: { readonly path: string; readonly error: null };
+  /** Where the gate's bind-time warning goes: the host shows it again at each session start. */
   readonly logger: { warn(message: string): void };
+  /** The host's plain log, for a warning one session's gated calls raise while it runs. */
+  readonly runtimeLogger: { warn(message: string): void };
 }
 
 // The core passes the host's objects through untyped: ctx is the ExtensionContext, whose
@@ -67,16 +70,6 @@ type Ctx = {
   modelRegistry: Registry;
   sessionManager: { getEntries(): readonly SessionEntry[]; getLeafId(): string | null };
 };
-
-/** File text, or undefined when no file is there; any other failure (EACCES, EISDIR) throws. */
-function readFile(p: string): string | undefined {
-  try {
-    return fs.readFileSync(p, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-}
 
 /** Appends to the dump, owner-only on every open (not only on creation), and never through a symlink. */
 function appendDump(p: string, text: string): void {
@@ -289,11 +282,11 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     home: os.homedir(),
     now: Date.now,
     logger: host.logger,
+    runtimeLogger: host.runtimeLogger,
     configFile: host.configFile.path,
     dispatchClient,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
-    readFile,
     complete,
     fallbackModels,
     // The runner's tool_call handler ceiling, normalised as the runner does (runner.ts normalizeHandlerTimeout).

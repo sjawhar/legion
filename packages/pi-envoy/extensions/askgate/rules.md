@@ -34,13 +34,13 @@ their taste or their risk appetite. An ask that wants them to ratify a
 judgment the agent can make is not a question. These shapes fail it:
 
 1. **The whole ask is a click on a pull request** — approve, review, or
-   merge a PR; "your approval click is the only remaining step"; "needs your
-   approval, nothing else"; `Done`/`Can't` under "Squash-merge these PRs".
-   Agents merge their own approved PRs and the queue organizer approves
-   them. The person is not a step in a merge.
+   merge a PR, such as "the only step left is your approval", "it needs
+   your approval and nothing more", or `Done`/`Can't` under "Merge the two
+   open pull requests". Agents approve and merge pull requests.
+   The person is not a step in a merge.
    `blocker` when `kind` is `action`. (Not this: a real risk question about
-   *whether* to merge on the evidence in hand — "merge on unit tests or hold
-   for a staging observation" — that is their risk appetite and passes. Not
+   *whether* to merge on the evidence in hand — "merge now on the test
+   results, or wait a week in staging" — that is their risk appetite and passes. Not
    this: an ask whose main action is their own — rotate their keys, log in, tap
    the key — with a PR to look at mentioned alongside; that passes whole.)
 2. **A chore the agent could run with a credential it already holds**: the
@@ -48,19 +48,20 @@ judgment the agent can make is not a question. These shapes fail it:
    names as the agent's — an `aws …` command under a named profile (the
    account being production changes nothing; only their SSO *login* is theirs),
    a `kubectl`/`tmux`/`kill` on this box, a service-quota request, seeding
-   a secret, uploading to Taiga, a Deel bookkeeping entry, a fleetctl read,
-   a Vercel or GitHub CLI step — with no statement of two failed attempts.
+   a secret, an upload to a shared file store, an entry in a bookkeeping
+   tool, a read from a device-management tool, a deploy-tool or GitHub CLI
+   step — with no statement of two failed attempts.
    The agent can run that step itself. `blocker` when
    `kind` is `action`. (Not this: a command the ask says needs *their* token,
    a login of theirs that the transcript shows is not live on this box, YubiKey,
    browser session, SSO, personal PAT, GitHub org-owner or
    Google super-admin console, Slack workspace admin, or their own calendar —
    those pass, however small; so does a vendor-dashboard step behind their own
-   account login, such as re-scoping or minting an API token in Deel or
-   Cloudflare settings, even when the agent holds a working key from that
-   vendor. Not this: creating an account, org, team, repo, or project on an
-   outside platform — their standing rule requires their word for those even
-   when the agent technically could, so such an ask passes. Not this: a
+   account login, such as re-scoping or minting an API token in the
+   vendor's own settings, even when the agent holds a working key from that
+   vendor. Not this: a new account, org, team, repository or project on a
+   service outside the company — the person decides each of those, even
+   when the agent could make it, so such an ask passes. Not this: a
    mutation to a live session, run, or resource belonging to a person —
    a contractor's running sandbox, a colleague's live work — that is their
    risk call and passes.)
@@ -83,8 +84,8 @@ judgment the agent can make is not a question. These shapes fail it:
    customer — what to do about a delivered record is their call. Not this:
    an upstream PR on an outside repo opened under their name, or any PR whose
    disposition the ask says they claimed or held for themselves — those are theirs.
-   Not this: an upgrade that forces running sessions to restart (bun, node,
-   the omp binary) - their standing rule makes that theirs to approve, so such an
+   Not this: an upgrade after which every running session must restart (bun,
+   node, the omp binary) - the person approves each of those, so such an
    ask passes.)
 4. **Allocation of work between agent sessions**: which session takes the
    batch, a second session in parallel or one in sequence, who lands the
@@ -96,7 +97,7 @@ judgment the agent can make is not a question. These shapes fail it:
    passes with the rest. (Not this: an ownership question the ask ties to a
    ruling of theirs that put the work outside the asker's lane — that passes.)
 5. **Tracker housekeeping**: Dispatch tree shape, re-parenting, project keys,
-   "approve as drawn" for an issue structure.
+   "approve this layout" for an issue structure.
 6. **Applying a ruling they already gave**: the ask quotes a ruling of the person's,
    or the transcript above shows them answering this same question (or a
    materially identical one on the same issue) earlier in it, and the ask
@@ -104,15 +105,15 @@ judgment the agent can make is not a question. These shapes fail it:
    approved to the environment it was not yet applied to. That is done, not
    asked: the person already gave the answer. (Also a
    genuine-uncertainty failure; name both, one note. Not this: a revisit
-   prompted by a new fact — "my earlier ask wrongly called it new" — a
+   prompted by a new fact — "my last ask called the bug new, and it is not" — a
    ruling that bears on the question without deciding it, or a question the
    transcript shows as still open.)
 7. **A control nobody asked for**: the ask asks them to approve a control,
    policy, protection or pause, justified by a security, isolation,
    compliance or spend risk the agent inferred, which their own words in the
-   transcript never named. Examples: branch protection for a shared
-   repository, an alarm about a platform's terms, a credential design that
-   keeps agents away from credentials. Fix: retract, record the finding on
+   transcript never named. Examples: a second sign-off before every deploy,
+   a spend limit on a test account, a rule that hides the logs from the
+   agents. Fix: retract, record the finding on
    the issue the work belongs to, keep building what they asked for. (Not
    this: a risk their words named. Not this: deletion or exposure of
    production data. Not this: an IAM change the requested work needs.)
@@ -121,29 +122,27 @@ judgment the agent can make is not a question. These shapes fail it:
 
 7. **An unverified claim that nothing here can do it.** The ask gives "only
    you can" — your token, your login, your account — as the reason it needs
-   the person, but the transcript shows no check of what this session already
-   holds (no `agent-access` output, no credential list) and no attempt to
-   route to the peer role that owns the system (the queue organizer, the
-   GitHub-auth-shim agent, the OMP agent, the SRE, or similar — named
-   elsewhere in the transcript as holding it). The session often holds the
-   access already, or a peer role holds it. Fix: run
-   `agent-access` (it prints the logins and credentials this session holds)
-   or name the peer that owns the access, before concluding only the person can
-   act. `blocker` when `kind` is `action`. (Not this: the transcript already
-   shows the check and the capability genuinely absent. Not this: anything
-   that needs the person's own hardware, browser session, or personal login — a
-   YubiKey tap, their SSO, their personal PAT, their own account — those pass
-   regardless of what this session holds; see non-findings.)
+   the person. But the transcript shows no check of the access this session
+   holds, and no check of the access a peer holds. This session or a peer
+   may already hold the access. Fix: check what access this session and its
+   peers hold before the ask goes to the person. `blocker` when `kind` is
+   `action`. (Not this: the transcript
+   already shows the check and the capability genuinely absent. Not this:
+   anything that needs the person's own hardware, browser session, or
+   personal login, such as a YubiKey tap, their SSO, their personal PAT or
+   their own account. Those pass whatever this session holds. See
+   non-findings.)
 
 ### Genuine-uncertainty failure (`concern`)
 
-Only when the ask's text itself removes the question: it asks them to ratify
-work already done ("as implemented", "already merged — approve?") with no
-open alternative; it says in its own words that the matter is not a
-judgment call ("sourced from the docs, not judgment calls", "mechanical",
-"nothing is uncertain") and still asks; or it presents a hard blocker the
-same text admits is unverified ("I have not checked", "assumed"). A
-recommendation with reasons is not this — every good ask has one.
+Only when the ask's text itself shows that no question is left. Three shapes do this.
+It asks them to ratify work already done ("as built", "already live —
+approve?") with no open alternative. It says in its own words that the
+matter is not a judgment call ("each value comes from the docs",
+"mechanical", "nothing here is open") and still asks. Or it presents a hard
+blocker the same text admits is unverified ("I have not checked",
+"assumed"). A recommendation with reasons is not this — every good ask has
+one.
 
 ### Phone-readability failures (`concern`)
 
@@ -163,8 +162,8 @@ The person answers from their phone. Only these shapes fail:
 
 3. **A label the reader has to know, glossed nowhere.** The call names a
    step, a mechanism, a check, a status, a batch or an identity with a short
-   label ("the intake gate", "the split path", "waves",
-   "bootstrap", "dev-blue", "the v2 freeze") and never says in its own text
+   label ("the intake gate", "the cold pass", "the long road",
+   "stage zero", "dev-blue", "the v2 freeze") and never says in its own text
    what it is, not even in one clause, and the transcript shows no message of
    the person's using that label first. This applies to asks, comments and document
    edits alike, whether or not an option hinges on the label. The person
@@ -175,7 +174,7 @@ The person answers from their phone. Only these shapes fail:
 
 ### Content failures (`concern`)
 
-7. **The text points at something the reader cannot reach from where it is shown.** An ask, comment, or message that says "see my comment above", "the message just before this", "as discussed", "his Tuesday run", "that eval" — with no `dispatch://` link, URL, or inline quote of the thing. The ask view does not show the issue's comments; the inbox does not show the thread. So the person cannot find the thing, and cannot decide. Every reference is a link. Fix: put the content in the text, or link it. (Not this: a `dispatch://` link, a URL, a quoted passage, "the spec" on the same issue, or a name of a thing the person uses — a run id, an eval name, an artifact name — that is the referent itself rather than a pointer to somewhere else.)
+7. **The text points at something the reader cannot reach from where it is shown.** An ask, comment, or message points at a thing and gives no `dispatch://` link, URL, or inline quote of it. Examples of such pointers: "see my note above", "the reply before this one", "as agreed", "the Friday build", "that report". The ask view does not show the issue's comments. The inbox does not show the thread. So the person cannot find the thing, and cannot decide. Every reference is a link. Fix: put the content in the text, or link it. (Not this: a `dispatch://` link, a URL, a quoted passage, or "the spec" on the same issue. Not this: the name of a thing the person uses, such as a run id, a report name or an artifact name. That name is the thing itself, not a pointer to somewhere else.)
 
 8. **A progress or status entry written into a document** (`dispatch doc-edit`, or a `--spec`/`--spec-file` given to `dispatch issue`): inserted text that records what happened or what the agent is doing — a dated line, "Status:", "Update:", "Done:", a checklist of completed steps, a rollout log — rather than what is agreed or proposed. A spec is not a progress log. Fix: drop the op; the issue's status field and the PR carry progress. (Not this: a decision recorded as decided — "the person ruled X on date" — a revised requirement, an acceptance criterion marked as met with its evidence, a "Rejected" entry. Those are the spec doing its job.)
 
@@ -210,12 +209,13 @@ The person answers from their phone. Only these shapes fail:
    fix is the same: link where the person wrote the words, or drop the
    claim. (Not this: a premise that links the person's comment, ask or
    message. Not this: a pointer to the person's request that claims nothing
-   about its content, such as "the stack you asked for".)
+   about its content, such as "the chart you asked for".)
 
 11. **A cause or blocker stated as fact with nothing that shows it.** The
-   call says what is broken, why, or what blocks the work ("the broker is
-   down: two devices hold its name", "no runner picks it up, which means…",
-   "the app lacks packages:write") as settled, and names no command, error
+   call says what is broken, why, or what blocks the work ("the weekly
+   report is blank: its date filter drops every row", "nobody gets the
+   reminder, which means…", "the form has no field for the due date") as
+   settled, and names no command, error
    output, log line or record checked, with its time. Fix: run the check
    now and quote its output and time, or write the cause as a hypothesis
    and say what would confirm it. (Not this: a cause the call shows a check
@@ -265,39 +265,37 @@ without complaint. Each is silence:
 
 We invented these examples. Each one shows a shape that passes.
 
-- "Tap needed: the release tool's PUBLISH_TOKEN grant (human tier)
-  expired… Builds that do not publish are unaffected." `Done`/`Can't`.
-  Pointer-laden, the person's YubiKey: passes.
-- "A candidate's paid trial verdict is owed… and is your hire call… The
-  trial work met two of its three goals." `Done`/`Can't`. A hire decision:
-  passes.
-- "Should a customer's data move to the new region in one cutover or in two
-  stages? … I recommend two stages." Customer-facing sequencing with a
+- "Your YubiKey is needed: the grant that lets the docs site publish ran
+  out… Pages already online stay up." `Done`/`Can't`. Dense, and it needs
+  the person's own YubiKey: passes.
+- "Both finalists for the support job finished their trial task… Who gets
+  the offer? This is your hiring call." with one option per finalist. A
+  hiring decision: passes.
+- "Should we tell customers about the price change a month ahead or a week
+  ahead? … I recommend a month." Customer-facing timing with a
   recommendation: passes.
-- "Design gate for LEGION-N… Change: the config loader takes the
-  environment as an argument… Recommendation: Approve." A configured gate:
-  passes.
-- "All test environments share one database server… Freeing room fast
-  means deleting the test-3 environment… Recommendation: delete test-3 only
-  if you confirm nothing on it is still needed." Deleting a shared
-  environment that others may still use: passes.
-- "Who fixes the PDF export path?… the per-page timings are in
-  dispatch://ACME-5/message/<id>… dispatch://ACME-5/ask/<id> put the export
+- "Design gate for LEGION-N… Change: the import page takes files of any
+  size… Recommendation: Approve." A configured gate: passes.
+- "Every test site shares one disk, and the disk is almost full… The
+  fastest way to make room is to delete the oldest site… Recommendation:
+  delete it only if you confirm nobody still uses it." Deleting a shared
+  resource that others may still use: passes.
+- "Who fixes the slow search page?… the timings are in
+  dispatch://ACME-5/message/<id>… dispatch://ACME-5/ask/<id> put the search
   service outside my area." An ownership boundary they set, with a link and
   vocabulary: passes.
-- "Issue owners: which model? Today three mechanisms coexist… A: one owner
-  field (Recommended) / B: keep labels, show them on the board / C…" A
-  design decision about their own tool, with a recommendation: passes.
-- "D-C - cache keys. Every surveyed library keys a cached page by its full
-  URL… Recommendation: A." An architecture choice the agent could have made,
-  argued and recommended: passes.
-- "Roadmap: which child next? Evidence and a five-step order:
-  dispatch://ACME-12/artifact/…" with a RECOMMENDED option. What to build
-  next, with a link for the evidence: passes.
-- "That ask assumed you had read the attachments. Everything is now on one
-  page: the artifact `pricing-choices.md`… Pick one letter per item" with
-  options 1A/1B/2A/2B/3A/3B. Three decisions, six options, an artifact:
-  passes.
+- "Labels or folders? Today we group issues in two ways… A: labels
+  (Recommended) / B: folders / C…" A design decision about their own tool,
+  with a recommendation: passes.
+- "D-2 - date format. All four libraries we looked at print dates as
+  year-month-day… Recommendation: A." An architecture choice the agent
+  could have made, argued and recommended: passes.
+- "What do we build next, the export or the search filters? The evidence
+  and an order are in dispatch://ACME-12/artifact/…" with a RECOMMENDED
+  option. What to build next, with a link for the evidence: passes.
+- "The three price questions are in the artifact `pricing-choices.md`…
+  Choose one letter for each question" with options 1A/1B/2A/2B/3A/3B.
+  Three decisions, six options, an artifact: passes.
 - "Should the export include archived issues, as
   dispatch://ACME-9/message/<id> proposes? The file gets about twice as
   large." with options `Include them` / `Leave them out`. The link reaches
@@ -309,39 +307,37 @@ We invented these examples. Each one shows a shape that passes.
 We invented these examples. Each one shows a shape that fails, and the
 failure it shows.
 
-- "Approve the pull request that adds the export retry… Your approval click
-  is the only remaining step." `Done`/`Can't` → authority 1, `blocker`. The
-  queue organizer approves pull requests.
-- "Account-level change, your approval: raise the message-queue limit…
-  Command: `AWS_PROFILE=test aws service-quotas
-  request-service-quota-increase …`" → authority 2, `blocker`. The command
-  runs under a profile the ask names as the agent's, so the agent can
-  submit it.
-- "Dead-letter queue: example-queue holds 12 messages, all checked as
-  copies… Recommendation: purge the queue." → authority 3. Cleanup of the
-  agents' own queue: the agent does it and reports it.
-- "Should a second session take the parser half… or should this session do
-  both in sequence?" → authority 4. The agent coordinates with the peer and
-  does not ask the person.
+- "Approve the pull request that adds the retry button… The only step left
+  is your approval." `Done`/`Can't` → authority 1, `blocker`. Agents
+  approve and merge pull requests, and the person is not a step in that.
+- "Your approval is needed to turn on versioning for the test bucket…
+  Command: `AWS_PROFILE=test aws s3api put-bucket-versioning …`" →
+  authority 2, `blocker`. The command runs under a profile the ask names
+  as the agent's, so the agent can run it.
+- "The failed-jobs list holds 12 entries from my own test runs, all of them
+  copies… Recommendation: clear the list." → authority 3. Cleanup of the
+  agents' own test data: the agent does it and reports it.
+- "Should another session write the tests while I write the code, or should
+  I do both, one after the other?" → authority 4. The agent coordinates with
+  the peer and does not ask the person.
 - "dispatch://ACME-3/ask/<id> rules that the report leaves out the old
   formats… Should the report leave them out?" → authority 6. The ruling the
   ask links already answers it.
-- "Retry path: same payload re-sent = fix, or redesign…? export job: page
-  renders 70k chars vs 50k cap…" → phone-readability 1. Fragments, not
-  sentences.
-- "A vendor asked for a delivery date… The reply is drafted at [a temp-file
-  path on the agent's machine]. Send it?" → phone-readability 2. The person
-  cannot open the draft.
+- "Import: dup ids = skip, or fail…? March file: 3 dup rows vs 0 allowed…"
+  → phone-readability 1. Fragments, not sentences.
+- "A customer asked when the fix ships… The reply is drafted at [a
+  temp-file path on the agent's machine]. Send it?" → phone-readability 2.
+  The person cannot open the draft.
 - "Ship the change behind the amber switch, or wait for the next release?"
   with no gloss of "the amber switch" → phone-readability 3. The ask never
   says what the label is.
-- "Only you can do this, because I do not have the credential… [no
-  `agent-access` check shown, no peer named]" → access 7, `blocker`. The
-  session did not check what it holds, and did not ask the peer that owns
-  the access.
-- "Our builds run on the hosted runners, so they cannot share a cache…
-  Recommendation: move the cache to object storage", with no file or
-  command cited → content 9. An unsourced claim about what we run today,
+- "I cannot reach the billing service without a key, so you have to run
+  the refund… [no check shown of the access this session or a peer holds]"
+  → access 7, `blocker`. The session did not check what access it or a
+  peer holds.
+- "We take support requests only through the contact form today, so a chat
+  window would reach nobody… Recommendation: keep the form", with no file
+  or command cited → content 9. An unsourced claim about what we run today,
   driving the whole ask.
 - "Should the search page show 20 or 50 results? The page uses the Inter
   font and was built in March." with options `20` / `50` → content 12. The

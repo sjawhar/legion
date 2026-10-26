@@ -110,8 +110,9 @@ func TestOnlyARedTheBaseBranchRequiresSendsTheWorkBack(t *testing.T) {
 // required check the head's own settlement names cancelled, or does not report, leaves the head
 // undecided: it sends nothing back in any phase and tells nobody, and the head's next settlement
 // decides it - failed, the work goes back naming it. The round reads none of it: a reviewer's
-// approval of the head ends the round with the check still undecided, and a head with no verdict is
-// refused at READY, where the merger reads the head's checks on GitHub.
+// approval of the head ends the round with the check still undecided, and a head with no verdict
+// is sent nowhere; whether such a head merges is GitHub's to decide, under the base branch's own
+// rules.
 func TestARequiredCheckCancelledOrMissingLeavesTheHeadUndecided(t *testing.T) {
 	gateRun := func(id int64) record.AttemptRun { return record.AttemptRun{Name: requiredGate, ID: id} }
 	missing := intake.PullRequestChecks{CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}}, Failing: []string{}}
@@ -326,8 +327,8 @@ func TestAReopenedPullRequestKeepsWhatItsBaseBranchRequires(t *testing.T) {
 
 // A push classified late that completes the carry of the code head's red to the READY head sends
 // nothing back from awaiting_merge, as the settlement it carries would not either
-// (TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing): READY found the head's own CI
-// green on GitHub, which is what GitHub merges by, and only the head's own red withdraws the READY
+// (TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing): the red carried from the code
+// head stood before the READY, and only the head's own red withdraws the READY
 // (classify.RedWithdrawsReady). The CI rule the push applies in every phase before awaiting_merge
 // (standingRed) does not act there, so the READY stands, nobody is told, and nothing is started.
 func TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing(t *testing.T) {

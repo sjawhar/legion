@@ -7,6 +7,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
+  agents write Dispatch specs:
+  - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
+    questions of the INFRA-140 labels, and prints the share of comments that complain about
+    writing. It reads production Dispatch with GET only.
+  - `fetch-spec-sources.ts` reads an issue's or a project document's input from Dispatch into a
+    work directory outside the checkout.
+  - `rig.sh batch spec-writing` and `spec-rewrite` seed a scratch issue with that input and let a
+    fresh agent design the change with a person stand-in that answers its asks and approves its
+    spec.
+  - `rig.sh judge` runs ten judge prompts over each run, and `rig.sh score` scores the spec's
+    outline, checks, refusals, plan, questions, quoting and self-naming.
+- `rig.sh profile` takes the key-file model route (`LEGION_E2E_MODEL_ROUTE=key-file` with
+  `LEGION_E2E_ANTHROPIC_KEY_FILE`). It refuses a work directory with a `.omp` in it or above it,
+  because Oh My Pi would load that directory's plugins and not the label's.
+- `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
+  directory. On the gateway route, the gateway's key command runs on the host once for each judge,
+  and the container gets only its token, which is removed when the judge ends.
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits
@@ -35,7 +53,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `--envoy-json <file>` and merges that object into the envoy.json the label's sessions read, so a
   label can turn AskGate off. A `dispatch` call with `--help` or `--dry-run` sends nothing, and
   AskGate does not review it. A call that AskGate refused as unreadable got no model review. The
-  score reads neither of these calls as a verdict of the gate. The `link` prompt asks a choice that
+  score reads neither of these calls as a verdict of the gate. A `link` run passes only when
+  AskGate allowed its ask on a verdict: a timeout, an error, a skip, an override or no entry is no
+  review, so it fails. A `facts` run reads the refused call's own gate entry, and its reason must
+  name failure 12 (`Content 12`) and both facts. The refusal text is not read for them, because it
+  quotes the question for every failure. The `link` prompt asks a choice that
   the person's comment leaves open, with a link to that comment, because an ask whether to do what
   the person asked fails AskGate's rule authority 6. The seeded issue's title, "Release and nightly
   job settings", fits the write of each case.
@@ -98,6 +120,30 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
+  the licence file by hand: the worker image lists every Debian package it carries in
+  `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
+  Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
+- The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
+  refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the
+  head's check runs or commit statuses. GitHub, under the base branch's own rules, decides whether
+  the merge happens, and one it has not completed within an hour of READY's acceptance tells the
+  issue's architect once (`merge-waiting`). The merger's role prompt and the Legion skills carry
+  the new catalogue, the pull request body has no `CI:` line, and every list read that decides
+  something is paginated (sjawhar/legion#2121).
+  A daemon rolled back to a release before this one refuses what this one writes on a `ready_merge`
+  row and in the notice it adds, as the entry below says of `armed` and `merge-removed`: the
+  payload's `warned` and `queued` fields, which its strict decoder refuses on every retry, and the
+  `merge-waiting` notice kind, which its reader refuses and which holds every waiting notice of the
+  project behind it. Before starting the older daemon, run against its database, with `<KEY>` the
+  Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'warned' - 'queued' where kind = 'ready_merge' and (payload ? 'warned' or payload ? 'queued') and split_part(issue, '-', 1) = '<KEY>';`
+  and
+  `delete from outbox where kind = 'notice' and payload->>'kind' = 'merge-waiting' and split_part(issue, '-', 1) = '<KEY>';`
+  The notice is deleted rather than rewritten to a kind the older daemon knows: it says only that a
+  merge is still waiting, and the nearest older kind, `merge-refused`, would tell an architect that
+  a merge ended when it has not. Dropping it loses one telling; the row goes on submitting.
 - The `legion-controller` skill and its `backlog-stewardship` reference name no person: a ruling is
   a direct Dispatch message to this controller from a person rather than from one named individual,
   and the duty list, the pass trigger and both definitions say so (dispatch://INFRA-227). The
@@ -105,7 +151,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   root `AGENTS.md` now carries the standing rule that a skill, a role prompt and an `AGENTS.md`
   name no person and write the role instead. The controller behaves as it did: a ruling still sets
   off the full reconciliation pass and a weekly-plan record.
-
 - Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits
   touch (INFRA-149). Before, the `legion-worker` skill, the `legion-retro` skill and the daemon's
   worker and implementer prompts all decided the line by the paths a push changed, so a retro with
@@ -116,8 +161,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the absence of a workflow run to that line rather than to the paths; the daemon's own carry of a
   code head's verdict stays keyed to paths, since it classifies by path and reads no commit
   message. The `legion-retro` skill also gives a retro worker the cure for a head it has already
-  pushed with the line.
-
+  pushed with the line. The sentence has a fifth home here,
+  `legion-worker/references/skip-checks-trailer.md`, which the entry above moved the trailer's
+  contract into, and the skills guard counts it in all five.
 - No Legion role, and no subagent of one, files an issue for a problem it finds outside its own
   issue. It opens a `dispatch ask` on the controller's report issue instead, naming the issue it
   came from and where the fix belongs (and that it is not Legion's when it is not), with its
@@ -154,8 +200,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
-  request's remote CI and any `sleep` loop, and the `CI` line names each run's state as GitHub shows
-  it at the completion. Under the Go daemon, a required check that settled red while the issue was
+  request's remote CI and any `sleep` loop, and each role reads the head's CI on GitHub for itself
+  rather than from a line another role wrote (sjawhar/legion#2121 deletes that line). Under the Go
+  daemon, a required check that settled red while the issue was
   still in `implementing` now sends the work back the moment the implementer completes, with a
   `checks-red` naming it, instead of starting a tester round on that head; before, nothing acted on
   that red until a later settlement or a reviewer read it.
@@ -573,6 +620,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
+- Each skill-scenario run has a Dispatch of its own: a database named after the run in the batch's
+  Postgres, and a Dispatch server on it, which the run seeds, captures from and stops when it
+  ends. Before, the runs of a batch shared one Dispatch server. `dispatch search` searches every
+  project of its server, so in one askgate `facts`/`off` batch a run found the four other runs'
+  identical asks and did not post its own. Each run records its Dispatch in `dispatch.json`, and
+  `rig.sh score` does not score a run that records none or that names one database in one Postgres
+  with another run. A brainstorm batch now takes any number of runs.
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and
   quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It

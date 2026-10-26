@@ -177,8 +177,9 @@ const legionSlotView = z.strictObject({
 });
 
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
- * (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
- * `detail` the cause's own detail (the run and its completion, or the build's commit), `at` when. */
+ * (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or
+ * `bound`), `detail` the cause's own detail (the run and its completion, the deploy workflow's run,
+ * attempt, job and step success, or the build's commit), `at` when. */
 const legionCheckWakeView = z.strictObject({
   kind: nonEmptyString,
   detail: z.string(),
@@ -556,9 +557,10 @@ export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
-/** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published
- * without reading the head's checks (the pull request already merged, or its base requiring none);
- * every other completion answers none. */
+/** `api.HandoffCompleteResponse`: `note` is what READY answers when it has something to say about
+ * the merge it publishes - the pull request was already merged, so its head's handoffs went
+ * unread, or a person merges this one (`MANUAL_MERGE_REQUIRED:`); every other completion answers
+ * none. */
 export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });

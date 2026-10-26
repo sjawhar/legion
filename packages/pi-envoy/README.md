@@ -79,8 +79,8 @@ pre-split package beside the new ones.
 
 The tarball is self-contained: it ships `dist/envoy.js` — bundling every dependency except the OMP
 host packages (`@legion/pi-shared`, `@legion/contracts` and `@legion/envoy-client` are inlined) —
-`dist/THIRD_PARTY_NOTICES`, and the four skills every session with Dispatch reads, `dispatch`,
-`dispatch-first`, `dispatch-brainstorming` and `envoy`, staged from the repository's `skills/` at
+`dist/THIRD_PARTY_NOTICES`, and the five skills every session with Dispatch reads, `asd-ste100`,
+`dispatch`, `dispatch-first`, `dispatch-brainstorming` and `envoy`, staged from the repository's `skills/` at
 `dist/skills`. The manifest declares `omp.skills: ["dist/skills"]` alongside `omp.extensions`:
 OMP's own plugin discovery only reads `skill://`-resolvable skills from `<plugin root>/skills` or
 from directories a manifest's `omp.skills` array names, and this package ships skills at
@@ -218,50 +218,100 @@ these calls:
   `--content-file`), a `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that
   ends in `.md`
 
-The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name or
-path from a file (`--name-file`, `--path-file`) is decided from the name and path the dry run
-prints. An upload whose name or path holds an expansion (`"$NAME"`) is refused, as any write the
-gate cannot read is. For an upload given with `--path`, the gate reads that file from the directory
-the `dispatch` command resolves it in and reviews its text, as for `--content-file`. The gate
-judges an upload against content failure 10 alone: a plan or a report is long by nature. An upload
-of any other file is not reviewed. A `task` subagent is not reviewed.
+Every other Dispatch command is outside the gate, and its text posts unreviewed: among them
+`dispatch issue-update --reason`, `dispatch resolve-ask --reason` and `dispatch suggest`.
 
-**The command forms.** The gate reads a write that stands alone, and a write with these things
-around it:
+The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name
+from a file (`--name-file`) is decided from the name the dry run prints. `--path-file` is refused:
+its content names a file the gate cannot capture before Dispatch opens it. An upload whose name or
+path holds an expansion (`"$NAME"`) is unreadable, as any write the gate cannot read is. The gate
+copies each file whose text the write posts, a `--<field>-file` operand and an upload's `--path`,
+into a private snapshot. It reviews the snapshot and changes
+the command to post that snapshot. An `--image` file is not one of them: the model reads the
+path, not the picture, and the gate takes no snapshot of it, because the CLI names the upload
+after the file it opens at send time. The file must be a regular file. The gate refuses a missing
+file, a directory, a device and a FIFO before it reads them, and a path that reaches a file
+descriptor of whichever process opens it (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`,
+`/proc/thread-self/fd/N`, `/proc/<n>/fd/N`, and any link to one): AskGate would open it in Oh My
+Pi's process and the command in its shell. For
+text from standard input, use `--<field>-file -` with a quoted here-document. For an upload, that
+is `--content-file -`: the CLI reads `--path -` as a file named `-`. The gate cuts all arguments
+at 64 KiB as one JSON block, so it reviews only part of a long document. It judges an upload
+against content failure 10 alone: a plan or a report is long by nature. An upload of any other
+file is not reviewed. A `task` subagent is not reviewed.
 
-- `\`-newline continuations, and `2>&1`, `>/dev/null` or `2>` to a file on the write
-- a later stage of its pipeline that holds no `dispatch` word (`| head -3`, `| tail -1`)
-- literal `NAME=value` words and one `timeout <duration>` before its program, and a file as its
-  stdin (`< q.md`)
-- before it, joined by `&&`, `;` or a newline: `cd <path>`, `export NAME=value`, read-only
-  commands (`wc`, `cat`, `ls`, `grep`, `head`, `[` …) and `dispatch` calls that do not write
-  (`claim`, `read`, `issue-update` …)
-- after it: any command that holds no second write
-- `$NAME` in the write when an earlier command of the call sets NAME to a literal, and a `~/`
-  path to `dispatch`
+**The form the gate reads.** One `dispatch` call, alone in the bash call:
 
-The dry run keeps the `cd`, the assignments, the prefixes and the stdin, and leaves out the rest.
-The gate refuses, before anything in the call runs, a write after a command that can change a file
-or the text (`python3`, `sed -i`, `cat > f`, `make`), with a command or process substitution, sent
-to the background with `&`, beside a second write, or with a variable the call does not set. The
-refusal tells the agent to send the write again on its own.
+```
+[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM]
+```
 
-**The switch.** AskGate runs in each session that has Dispatch on, unless the session's envoy.json
-turns it off. Write this top-level section beside `dispatch`:
+- The program is `dispatch` by name, or a literal path that ends in it.
+- Every word is literal. Outside quotes a word holds only letters, digits and `._/+@%:,=-`, so no
+  `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash; inside double quotes, no `$`, backtick
+  or backslash. Single quotes make every character literal.
+- One `cd <literal path> &&` may stand before it, and one `2>&1` after it.
+- One here-document may feed it, with its delimiter in quotes (`<<'EOF'` or `<<"EOF"`), opened on
+  the command's first line, before or after the `2>&1`.
+- Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no
+  assignment, no other redirect and no line continuation.
+
+**Everything else is unreadable.** A gated write in any other form, and a `dispatch` whose
+subcommand an expansion names, is `unreadable`: the gate cannot prove the bytes it reviews are the
+bytes that post. The gate reads the text another command would run as that command runs it: a
+shell's `-c` operand (with `$'…'` decoded), `eval`'s arguments, a here-document, a here-string,
+and a pipe into a shell (`… | bash`, with `printf` and `echo -e` escapes decoded and an unquoted
+here-document's backslashes removed), four levels deep. A gated write there is unreadable too.
+
+Text that no shell runs — a quoted word, a here-document `cat` writes, a line of a Makefile — is
+read for `dispatch` as a program word alone, so `echo "$a $b"`, `msg="$x $y $z"` and
+`perl -pe 's/(\w+) (\w+)/$2 $1/'` pass. A `dispatch` followed by a glob, a brace or an expansion
+is a write of unknown subcommand only where a runner runs it: `xargs`, `sudo`, `env`, `nice`,
+`nohup`, `timeout`, `stdbuf`, `setsid`, `command`, `exec`, `time`, and `find -exec`/`-execdir`.
+So `grep -rn dispatch packages/*/src`, `grep -l dispatch "$f"` and `rg dispatch src | head` pass,
+and `xargs dispatch`, `printf 'comment\n' | xargs -I % dispatch % …` and
+`D=dispatch; nice "$D" comment …` are unreadable. The CLI is also its bundle:
+`bun <path>/dispatch.js`, and any path whose last segment is `dispatch` or `dispatch.js`.
+
+An `eval` call is read as well. A cell that starts the CLI as a process of its own — a JS or
+Python spawn, exec, `subprocess` or `os` call with an argument vector or a shell string, or the
+Bun shell — posts with no `bash` call for the gate to read, so the call is unreadable. A cell that
+only names `dispatch` in text, or that calls the bash tool, is not: the gate reviews that `bash`
+call on its own.
+
+A call that holds no Dispatch write is never refused. When a search pattern or a message holds
+that text and no write, put the text in a file and name the file. In `block` mode nothing in the
+call runs and the refusal says which form to send; in `warn` mode the call runs and the same
+explanation comes back as context.
+
+**Where the gate binds.** AskGate binds only in a session that has Dispatch, judged at load from
+the session's own envoy.json and the variables over it (`DISPATCH_URL` and the other Dispatch
+variables), with a checkout's `.envoy/envoy.json` left out of that test: a checkout can turn off
+the Dispatch of its own directory, but not the gate, which a later command can still pass with
+`DISPATCH_URL`. A session or a pod with no Dispatch has no write to review, so it gets no gate and
+no refusal. The test runs once, at load: a session that turns Dispatch on afterwards has no gate
+until it is started again.
+
+**The switch.** In a session with Dispatch, AskGate runs unless the session's own envoy.json turns
+it off. Write this top-level section beside `dispatch`:
 
 ```json
 { "askgate": { "enabled": false } }
 ```
 
-No section, or `enabled: true`, keeps it on. A checkout's `.envoy/envoy.json` cannot set it. A
-section that does not parse keeps AskGate on, and the start notice names the file.
+No section, or `enabled: true`, keeps it on. A checkout's `.envoy/envoy.json` cannot set it, and a
+checkout's `dispatch.enabled: false` does not turn it off. A section that does not parse keeps
+AskGate on, and the start notice names the file.
 
 **The modes.** In `block` mode a write that the gate sends back does not post. In `warn` mode the
 write posts, and the reason comes back to the agent as context. A match of the rules check (below)
 refuses the write in both modes. `OMP_ASKGATE=warn` or `OMP_ASKGATE=block` sets the mode. AskGate
 ignores any other value, `off` included, and the first review shows one notice that names
 `askgate.enabled` as the switch. With no such variable, the session's latest `experiments` entry
-decides: its `askgate_block` arm off is `warn`. Every other session uses `block`.
+decides: its `askgate_block` arm off is `warn`. Every other session uses `block`. A call the gate
+cannot read follows the mode. Two refusals do not: no model role and a gate that did not load
+refuse in both modes, since neither can review anything, and a gate that cannot review is no off
+switch.
 
 **The rules check.** A call that opens a new ask for the person gets a second model call. That
 call knows two rules (`extensions/askgate/rule-check.md`) and judges only the new asks:
@@ -282,6 +332,12 @@ upload's ask blocks that carry an `#id` are left out — a stored version may ho
 and only the blocks with no id are judged, so a re-upload of an unchanged document is never
 refused for an ask block it already held.
 
+The rules check runs only on a call the gate reads. A call in any other form — a quoted body
+that runs over several lines, `'\''`, an unquoted `?`, a pipe or an `&&` chain, or
+`--<field>-file -` with no quoted here-document — is refused before anything posts in `block`
+mode. In `warn` mode it posts with the note that it went out unreviewed, and the rules check never
+sees it.
+
 A match refuses the call in `warn` mode and in `block` mode, so no part of the call posts. The
 refusal names the matching asks, each with its rule and the words that match. It says what to do
 instead and how to send the call anyway. The agent sends the call anyway in one of three ways:
@@ -301,8 +357,9 @@ instead and how to send the call anyway. The agent sends the call anyway in one 
 
 A rebuttal sends the call with no review by either check, and the entry records the line. A rules
 call that ends in an error, a timeout or an answer that does not parse refuses nothing: the
-charter check decides. After three such rules calls in a row, AskGate logs one warning, and a
-session with a UI also shows a notice.
+charter check decides. The third such rules call in a row writes one warning to the host's plain
+log, shows it as a notice in a session with a UI, and adds it to that call's own result. It is not
+one of the notices a session shows at its start.
 
 **The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
 role is not set, they ask the `default` role. A model that answers with an error passes the request
@@ -311,14 +368,48 @@ role resolves, the gate refuses the write in both modes and names the two roles.
 main model is on another provider than the gate's model is not reviewed: its transcript stays on
 that provider.
 
-`OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit (90 s, less than the host's limit for one
-`tool_call` handler). `OMP_ASKGATE_DUMP` names a file that gets the two prompts of each model call.
+**When a write posts unreviewed.** Each of these lets the write out, records an `advisor-gate`
+entry with its outcome, and hands the agent a note that says the write went out unreviewed and
+why. The note reaches a headless session too:
 
-The session's `extensionHandlers.toolCallTimeoutMs` must be at least 17,000 ms. The gate keeps
-7 s of that for the two stops its handler still pays once the review's time limit passes — the
-aborted call's usage report and the decision record — and it does not bind on less than 10 s for
-a verdict. A session set under 17,000 ms gets a gate that does not load, and a gate that did not
-load refuses every Dispatch write it would have reviewed.
+| Outcome | What happened |
+| --- | --- |
+| `timeout` | the review did not answer within its deadline |
+| `error` | the review failed: a model error, a handler exception, or a dry run that failed |
+| `no-verdict` | the model answered with no verdict the gate could read |
+| `halted` | three calls in a row reached no verdict, and the gate is paused for the session |
+| `skipped` | the session's main model is on another provider than the gate's |
+| `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and removed |
+| `breaker` | the third attempt at one thing on one target, after the gate refused it twice there |
+| `unreadable` (warn mode) | the gate could not read the call's form |
+| `abandoned` (warn mode) | the call or the run ended before the review answered |
+| `shutdown` (warn mode) | the session shut down before the review answered |
+
+In `block` mode `unreadable`, `abandoned` and `shutdown` refuse the call instead. Only
+`askgate.enabled: false`, and a session with no Dispatch, are silent. Each outcome after a failure
+returns the agent's own command, never the one naming a snapshot: a gate that fails breaks no
+valid write.
+
+**The time limit.** `OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit. The default is 90 s. The
+gate holds the limit 10,000 ms under `extensionHandlers.toolCallTimeoutMs`, the host's limit for
+one `tool_call` handler: 5 s for the aborted call's usage report and the entry, and 5 s for the
+decision record, the two stops its handler still pays once the limit passes. That key is 30 s by
+default, so the limit is then 20,000 ms. A review of a long session often takes longer than 20 s,
+and a review that times out lets the write post. Three timeouts in a row stop the gate for the
+rest of the session. Set the key to 120000 or more in the session's settings, for example in
+`~/.omp/agent/config.yml` or an overlay in `PI_CONFIG_FILES`:
+
+```yaml
+extensionHandlers:
+  toolCallTimeoutMs: 120000
+```
+
+When the limit is under 30 s, the gate logs one warning at start that names the key, the host's
+limit and the review's limit. It still reviews each write. The key must be at least 20,000 ms,
+since the gate does not bind on a limit under 10 s. A session set under 20,000 ms gets a gate that
+does not load, and a gate that did not load refuses every Dispatch write it would have reviewed.
+
+`OMP_ASKGATE_DUMP` names a file that gets the two prompts of each model call.
 
 **The record.** Every gated call writes one `advisor-gate` entry into the session's transcript.
 Every entry but an `unreadable` one carries `target`, the call's target in readable form: the tool
@@ -357,11 +448,22 @@ rules check:
 
 `decision` is `revise` on a rules refusal in `warn` mode too. The gate refused a call exactly when
 `decision` is `revise` and one of these is true: `verdictMode` is `block`, `outcome` is
-`unreadable`, `no-model-role` or `load-failed`, or `rule` is set. To find the refusals that the agent overrode,
-join each rules refusal to the next entry with the same `target`. The agent overrode the refusal
-when that entry's `outcome` is `rebuttal` or `breaker`. `scripts/askgate-report.ts` reports what
-the entries sent back and what they cost, the outcomes and errors of the rules check, and the
-rules refusals that the agent overrode.
+`no-model-role` or `load-failed`, or `rule` is set. An `unreadable` entry is a refusal in `block`
+mode only, where its `decision` is `revise`; in `warn` mode its `decision` is `allow`, and the call
+ran with the note that it went out unreviewed. To find the refusals that the agent overrode, join
+each rules refusal to the next entry with the same `target`. The agent overrode the refusal when
+that entry's `outcome` is `rebuttal` or `breaker`.
+
+`scripts/askgate-report.ts` reports over those entries: what the gate sent back and what the
+reviews cost, a count for each outcome, every session that had a write the gate did not review,
+with its counts, the outcomes and errors of the rules check, and the rules refusals that the agent
+overrode. The report counts a write as **sent back** when the gate did not pass it as sent: every
+entry whose decision is `revise` — a revise verdict, a rules refusal, `no-model-role`, and in block
+mode `abandoned` and `shutdown` — and every `unreadable` or `load-failed` entry, counted over every
+gated call, since some of them never reach a review; as a **refusal** when the write did not post
+(one sent back in block mode, and `no-model-role`, `load-failed` and a rules refusal, which refuse
+in warn mode too); and as **unreviewed** when it posted with no review behind it, which is every
+`allow` whose outcome is no verdict (the table above, a rebuttal and a breaker trip included).
 
 **The Dispatch record.** The entry above reaches only the machine the session ran on. A session
 that counts the rule decisions over a fortnight — a standing session holding a Dispatch token and
@@ -391,3 +493,21 @@ documents and prints the day's refusals by rule, the refusals the agent overrode
 judged on part of their asks and those that judged none, and the rules-call error rate, each split
 by `source`, with the documents and lines it could not read counted beside them. The same script's
 `--sessions <dir>` mode still reports the entries on disk.
+
+**What AskGate is not.** AskGate reviews the writes of a cooperating agent, so that a write that
+breaks its rules comes back with the reason before it posts. It is no sandbox. A process that
+runs as the same user as the session defeats it: it can replace a snapshot's bytes between the
+review and the open (a snapshot is `0600` in a `0700` directory, which keeps out other users, not
+this one), set `askgate.enabled` to false in its own envoy.json, point the session at another
+envoy.json with `OMP_PROFILE`, `PI_CODING_AGENT_DIR`, `ENVOY_CONFIG_FILE`, `XDG_CONFIG_HOME` or
+`HOME` in the launching shell, or post straight to Dispatch's HTTP API and run no command at all.
+
+The scan does not catch these, and is not made to: an alias or a shell function defined in the
+call or left in the persistent shell; a brace or a glob as the program word (`{,dispatch}`,
+`dispatc?`); a script another tool writes that the call then runs; a copy or a link of the CLI
+under another name; a command the call builds at run time, whose words its text does not hold;
+text nested deeper than four levels; and any other program that reaches Dispatch's HTTP API. A
+cooperating agent writes none of them, and precision comes first: a call that holds no Dispatch
+write must never be refused, because in block mode a false refusal stops real work. Use the gate
+for the writes of an agent that wants the review, and not as a boundary against a program that
+wants around it.

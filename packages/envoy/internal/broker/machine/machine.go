@@ -369,18 +369,22 @@ func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time
 // (against clock_timestamp(), as in Refreshed) is ErrNotLive. A revoke
 // (enroll.Service.RevokeCredential locks the same row) either commits first, so Live finds no live
 // row, or waits for the device code grant's tokens to commit and then ends them.
+//
+// The lock itself is oauthstore.LockCredential, which the RFC 8693 exchange of a machine access
+// token takes too: one statement decides what a live credential is, so the device grant and the
+// exchange cannot drift apart on the question a revoke turns on. Only the sentinel differs, since
+// this service's callers read ErrNotLive.
 func (s *Service) Live(ctx context.Context, credentialID string) error {
-	tx, err := tokenTx(ctx)
-	if err != nil {
+	if _, err := tokenTx(ctx); err != nil {
 		return err
 	}
-	var one int
-	err = tx.QueryRow(ctx, `select 1 from launcher_credentials
-		where id = $1 and revoked_at is null and expires_at > clock_timestamp() for no key update`, credentialID).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotLive
+	if err := oauthstore.LockCredential(ctx, credentialID); err != nil {
+		if errors.Is(err, oauthstore.ErrCredentialEnded) {
+			return ErrNotLive
+		}
+		return err
 	}
-	return err
+	return nil
 }
 
 // tokenTx is the token request's transaction ctx carries (oauthstore.TxFrom): the row locks the

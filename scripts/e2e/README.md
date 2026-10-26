@@ -56,7 +56,7 @@ itself (`unreviewedChange`) on the same two heads with the implement App's token
 publishes a pull request already merged without reading it. With `LEGION_READY_SCOPE_REFUSE` set,
 both must be refused `READY_UNREVIEWED_CHANGE` naming that path. Unset, the check must pass, and
 READY must be accepted, or refused only by a check that runs after it: the head's handoffs, a
-conflict, a by-hand file list or a required check. It only reads GitHub; the pull request and its
+conflict or a by-hand file list. It only reads GitHub; the pull request and its
 two heads are the operator's to make and close.
 
 
@@ -652,8 +652,13 @@ pane. The checks:
 
 - `claude-implementer-registers`: the implementer's claim registers its Claude Code transcript,
   `<state>/claude/<claim token>/projects/<cwd>/<session id>.jsonl`, as its session file and the
-  session id as its session; its `claude` runs as a child of `legion claude-bridge`, started with
-  `--session-id <that id>`.
+  session id as its session; its `claude` runs as a child of the run's `legion claude-bridge`,
+  started with `--session-id <that id>`. The parent counts as the bridge only when its executable
+  (`/proc/<pid>/exe`) is the run's `legion` and its arguments, read whole from the NUL-delimited
+  `/proc/<pid>/cmdline` in the shell, are `claude-bridge`, `--` and the run's `claude`, in that
+  order, after the executable's name: no other word of the command line counts, the pane's system
+  prompt (past 64 KB, with newlines) included, and no pipe can end early on it. A failure prints
+  the claude's ancestry.
 - `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write
   and push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records
   the completion's commit, which the implement App authored and committed, which is on
@@ -665,7 +670,9 @@ pane. The checks:
   marker its earlier instruction carried, quotes it, so the earlier turns are in its context and
   not only on disk.
 - `every-launch-endpoint-checked`: every pane the daemon launched, Oh My Pi or Claude Code, was
-  checked by the watcher before it registered.
+  checked by the watcher before it registered. The watcher reads an agent's environment once,
+  NUL-delimited; an environment it cannot read is not checked, never clean, and is recorded with
+  why in the evidence's `pane-endpoints-unchecked.txt`, which this check's failure names.
 
 Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
@@ -674,20 +681,25 @@ the variable, before anything else, and refuses a key Anthropic's `GET /v1/model
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
 the daemon creates only when missing) before the claim exists: a `settings.json` whose
 `apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
-pane's environment carries `ANTHROPIC_API_KEY`, which the watcher checks for every agent process,
-and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is the Oh My
-Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
+pane's environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
+`ANTHROPIC_FOUNDRY_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, which the watcher checks for every agent
+process, and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is
+the Oh My Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
 ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
 the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
 [`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, and the design gate off, so the
-architect's gate registration starts planning with no approval. The daemon is started with
-`LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` set to the `claude` and `bun` on the operator's `PATH`,
-and `LEGION_CLAUDE_PLUGIN_DIR` set to this checkout's `packages/claude-envoy`, whose
-`dist/envoy-channel.js` and generated `legion/` must be built. Legion's role Apps resolve as Stage
-3's do: the daemon runs `secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
+architect's gate registration starts planning with no approval. The daemon is started with the
+real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, which every pane
+inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
+box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
+pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
+`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
+`packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
+Legion's role Apps resolve as Stage 3's do: the daemon runs
+`secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
 GH_REVIEW_APP_PRIVATE_KEY_B64 -- …` as each App's `private_key_command`, and `prerequisites`
 checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, and
 refuses one that does not resolve to the agent tier. The proof human is the devbox's ordinary
@@ -2134,14 +2146,15 @@ and OMP's `logs/`).
 
 ### The natives download
 
-OMP's native modules (`pi_natives.linux-x64-{baseline,modern}.node`, ~350 MB) live in
+OMP's native module (`pi_natives.linux-x64-modern.node` or `…-baseline.node`, the one the CPU
+selects, 111 MiB at the pin; builds before 18.11.0 wrote every variant they embed, about twice that) lives in
 `$HOME/.omp/natives/<omp version>/` — `$XDG_DATA_HOME/omp/natives/` when `$XDG_DATA_HOME/omp`
-exists — and every profile under that `HOME` shares them (`getNativesDir`,
-`@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes them
+exists — and every profile under that `HOME` shares it (`getNativesDir`,
+`@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes it
 on its first run under a `HOME` that has not run this OMP version, and in this script that run is
 `omp plugin install`. The run's own home links `.omp/natives` to the operator's
 ([`lib/omp-home.sh`](#libomp-homesh)), so a fresh CI runner, a container, or a newly bumped OMP pin
-pays ~350 MB there, once, into the operator's cache; on a box where the pinned OMP has already run,
+pays that once, into the operator's cache; on a box where the pinned OMP has already run,
 a fresh profile pays nothing. Measured on the
 devbox with OMP 18.2.2: build, pack, install and verify took 2 s into a new profile, the profile got
 no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.

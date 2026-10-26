@@ -4,7 +4,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,20 +24,37 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 type Deps struct {
 	PublicURL string
-	// UIToken is BROKER_UI_TOKEN: the shared bearer uiAuth compares against (constant-time),
-	// authenticating Dispatch's server, which vouches for the approver login it sends.
-	UIToken      string
-	Enroll       *enroll.Service
-	Machine      *requests.Machine
-	MachineLogin *machine.Service
-	Proof        *proof.Verifier
+	// APIAccounts is BROKER_API_ACCOUNTS: the ServiceAccount subject of each listed caller of the
+	// routes accountAuth authenticates, answering the caller's name. A subject it does not name
+	// is refused, so an account taken off it stops calling as soon as the broker reads it again.
+	APIAccounts map[string]string
+	// AccountTokens verifies those callers' projected ServiceAccount tokens, against the same
+	// Kubernetes issuer and audience a pod enrolls with (cmd/broker passes the one verifier it
+	// builds). Nil is a broker that trusts no Kubernetes issuer, where every such route refuses
+	// every caller.
+	AccountTokens enroll.PodVerifier
+	Enroll        *enroll.Service
+	Machine       *requests.Machine
+	MachineLogin  *machine.Service
+	Proof         *proof.Verifier
 	// Policy is the live agent-secret policy, which POST /v1/secrets/{name}/reread rereads one
 	// name of (policy.Current.RefreshOne).
 	Policy *policy.Current
+	// NotifyReread tells every other pod serving this database to reread name, the fan-out
+	// internal/broker/reread's Notifier sends over Postgres LISTEN/NOTIFY; nil means no fan-out,
+	// which is a single-pod broker and every test that wires none. POST
+	// /v1/secrets/{name}/reread is its one call site (rereadSecret), which explains there both
+	// when it is called and why it is called from the route rather than from RefreshOne.
+	//
+	// It reports nothing, because the handler has nothing to do with a failure: the local reread
+	// has already succeeded and its answer stands, so whether a failed fan-out is logged, and at
+	// what level, belongs to the function cmd/broker supplies.
+	NotifyReread func(ctx context.Context, name string)
 	// SecretsPrefix is BROKER_SECRETS_PREFIX, the namespace GET /v1/settings answers.
 	SecretsPrefix string
 	// SecretsStore is BROKER_SECRETS_STORE, the store GET /v1/settings names: secrets.StoreAWS or
@@ -52,21 +68,29 @@ type Deps struct {
 	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
-	// DefaultRereadLimit.
+	// RereadLimitFor of the shared bucket this process mounted - RereadOverallLimit, or
+	// DefaultRereadOverallLimit when that is nil too - so that an address's own rate is ordered
+	// against the bucket this process actually has rather than against a constant derived from a
+	// bucket it may never mount.
 	RereadLimit *ratelimit.Limit
 	// RereadOverallLimit bounds that route across every caller at once; nil means
 	// DefaultRereadOverallLimit.
 	RereadOverallLimit *ratelimit.Limit
 	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
 	TokenLimit *ratelimit.Limit
+	// AccountLimit bounds every route accountAuth authenticates per source address, in one bucket
+	// the whole class shares and spent before the caller's token is verified; nil means
+	// DefaultAccountLimit.
+	AccountLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
 	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
 	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
-	// OAuth is the machine login's OAuth provider. POST /v1/oauth/device_authorization and POST
-	// /v1/oauth/token are mounted only when it is set, with DeviceLogin and both TokenHooks, which
-	// it then requires (Register panics without them).
+	// OAuth is the machine login's OAuth provider and the token exchange. POST
+	// /v1/oauth/device_authorization, POST /v1/oauth/token and POST /v1/oauth/introspect are
+	// mounted only when it is set, with DeviceLogin and both TokenHooks, which it then requires
+	// (Register panics without them).
 	OAuth *oauth.Provider
 	// DeviceLogin opens a device login's record from the device authorization request's form and
 	// the user code the provider minted, in the provider's transaction (oauthstore.TxFrom on ctx);
@@ -74,6 +98,18 @@ type Deps struct {
 	DeviceLogin func(ctx context.Context, form url.Values, userCode string) error
 	// TokenHooks are the broker's steps around each token the provider issues.
 	TokenHooks oauth.TokenHooks
+	// Draining reports whether this process has begun stopping, which GET /healthz answers 503
+	// SHUTTING_DOWN for while every other route goes on being served; nil means it never does.
+	//
+	// This is how a pod stops being sent traffic before it stops accepting it. Kubernetes removes
+	// a terminating pod from its Service's EndpointSlice concurrently with the kubelet beginning
+	// termination, not before it, so a pod that simply closed its listener at SIGTERM would be
+	// refusing connections that were still being routed to it. Failing the health check is what
+	// makes a readiness probe, and anything else reading readiness, stop choosing this pod, which
+	// is why the drain has to show up here rather than in the listener. nil is every caller that
+	// never stops in the first place - brokertest and the in-process rigs - for which the broker
+	// is never draining.
+	Draining func() bool
 }
 
 type server struct {
@@ -84,8 +120,10 @@ type server struct {
 	// neither.
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
-	// tokenLimiter is TokenLimit applied per source address (clientAddress).
-	tokenLimiter *ratelimit.Keyed
+	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own
+	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route shares.
+	tokenLimiter   *ratelimit.Keyed
+	accountLimiter *ratelimit.Keyed
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -96,17 +134,25 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
-	reread := DefaultRereadLimit
-	if deps.RereadLimit != nil {
-		reread = *deps.RereadLimit
-	}
 	rereadOverall := DefaultRereadOverallLimit
 	if deps.RereadOverallLimit != nil {
 		rereadOverall = *deps.RereadOverallLimit
 	}
+	// Derived from the shared bucket resolved just above, and only when the caller named no
+	// bucket of its own: a caller that passes one - the rows that drive the per-address bucket
+	// on its own - keeps what it passed, exactly as every other optional dep here is defaulted
+	// rather than overridden.
+	reread := RereadLimitFor(rereadOverall)
+	if deps.RereadLimit != nil {
+		reread = *deps.RereadLimit
+	}
 	token := DefaultTokenLimit
 	if deps.TokenLimit != nil {
 		token = *deps.TokenLimit
+	}
+	account := DefaultAccountLimit
+	if deps.AccountLimit != nil {
+		account = *deps.AccountLimit
 	}
 	s := &server{
 		deps:            deps,
@@ -114,6 +160,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 		rereadLimiter:   ratelimit.NewKeyed(reread),
 		rereadOverall:   ratelimit.NewBucket(rereadOverall),
 		tokenLimiter:    ratelimit.NewKeyed(token),
+		accountLimiter:  ratelimit.NewKeyed(account),
 	}
 	for _, route := range routes() {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
@@ -134,18 +181,18 @@ const oauthRoutes = "/v1/oauth/"
 
 // authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad
-// credential.
+// credential. A route a ServiceAccount token authenticates first spends its source address's
+// bucket (DefaultAccountLimit), a refusal being 429 RATE_LIMITED with Retry-After, so a flood of
+// forged tokens past that bucket costs no verification and no fetch of the issuer's keys.
 func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth routeAuth) (caller, bool) {
 	switch auth {
 	case authNone:
 		return caller{}, true
-	case authUI:
-		token := bearer(r)
-		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.deps.UIToken)) != 1 {
-			writeError(w, http.StatusUnauthorized, "UI_INVALID", "the UI bearer token is not valid")
+	case authAccount:
+		if s.refuseAccountAddress(w, r) {
 			return caller{}, false
 		}
-		return caller{}, true
+		return s.accountCaller(w, r)
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
@@ -197,6 +244,42 @@ func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCo
 		return caller{}, false
 	}
 	return caller{enrollment: subject.EnrollmentID}, true
+}
+
+// accountCaller authenticates a listed caller's own projected ServiceAccount token for
+// authenticate, the credential accountAuth's routes take. It is the check a service's token login
+// makes (machine.Service.VerifyServiceToken), against the same verifier and with the same
+// taxonomy: a broker that trusts no Kubernetes issuer, a token that has expired, one that does
+// not verify, one that lives longer than machine.MaxTokenLoginLifetime from its issue (so a
+// copied token is spendable for at most an hour), and an account BROKER_API_ACCOUNTS does not
+// name. Only the last is a 403: the credential is sound and it is the broker's list that refuses.
+// No refusal repeats the token.
+func (s *server) accountCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	if s.deps.AccountTokens == nil {
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no caller authenticates with a ServiceAccount token")
+		return caller{}, false
+	}
+	claims, err := s.deps.AccountTokens.VerifyAccount(r.Context(), bearer(r))
+	switch {
+	case errors.Is(err, oidc.ErrExpired):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_EXPIRED", "the ServiceAccount token has expired")
+		return caller{}, false
+	case err != nil:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID", "the ServiceAccount token does not verify")
+		return caller{}, false
+	case claims.IssuedAt.IsZero():
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token names no issue time (iat)")
+		return caller{}, false
+	case claims.Expiry.Sub(claims.IssuedAt) > machine.MaxTokenLoginLifetime+s.deps.Proof.Skew:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token lives longer than an hour from its issue")
+		return caller{}, false
+	}
+	name, listed := s.deps.APIAccounts[claims.Subject]
+	if !listed {
+		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", "this ServiceAccount is not in BROKER_API_ACCOUNTS")
+		return caller{}, false
+	}
+	return caller{account: name}, true
 }
 
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher
@@ -310,13 +393,25 @@ type stateResponse struct {
 	State string `json:"state"`
 }
 
-// healthResponse is GET /healthz's answer while the broker can reach Postgres.
+// healthResponse is GET /healthz's answer while the broker is not draining and can reach
+// Postgres. Neither refusal has a type of its own: both are the ordinary broker error object
+// writeError writes, so this stays the route's one named response type.
 type healthResponse struct {
 	// "ok".
 	Status string `json:"status"`
 }
 
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
+	// A draining pod fails its health check before anything else, the Postgres ping included: the
+	// answer has to flip the moment the process begins stopping, whatever the database is doing,
+	// because this is what takes the pod out of its Service's endpoints while it goes on serving
+	// the requests already routed to it. The refusal is an ordinary broker error object rather
+	// than a healthResponse with some other status, so a caller reads the same {code, error}
+	// shape every other refusal has.
+	if s.deps.Draining != nil && s.deps.Draining() {
+		writeError(w, http.StatusServiceUnavailable, "SHUTTING_DOWN", "the broker is shutting down and is no longer taking new traffic")
+		return
+	}
 	if err := s.deps.Enroll.Store.Pool.Ping(r.Context()); err != nil {
 		writeUnavailable(w, "DATABASE_UNAVAILABLE", "ping Postgres", err)
 		return

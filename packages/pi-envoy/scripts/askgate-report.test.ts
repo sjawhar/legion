@@ -91,7 +91,9 @@ const sessionA = [
   gate({ id: "a4", decision: "allow", latency: 400, cost: null }),
   gate({ id: "a5", decision: "allow", latency: 500 }),
   gate({ id: "old", decision: "revise", latency: 9999, ts: "2026-10-01T00:00:00.000Z" }),
-  gate({ id: "a6", outcome: "unreadable", decision: "revise", latency: 5 }),
+  // An unreadable call in each mode: warn ran it and returned the reason, block refused it.
+  gate({ id: "a6", outcome: "unreadable", decision: "allow", mode: "warn", latency: 5 }),
+  gate({ id: "a8", outcome: "unreadable", decision: "revise", mode: "block", latency: 6 }),
   gate({ id: "a7", outcome: "timeout", decision: "allow", latency: 7 }),
 ].join("\n");
 
@@ -283,7 +285,7 @@ afterAll(async () => {
 describe("parseSessionText", () => {
   test("skips bad lines, keeps gate entries and joins the call text", () => {
     const parsed = parseSessionText(sessionA, "s");
-    expect(parsed).toHaveLength(8);
+    expect(parsed).toHaveLength(9);
     const a1 = parsed.find((r) => r.toolCallId === "a1");
     expect(a1?.text).toBe("dispatch ask --issue ACME-1 --question 'Ship it?'");
     expect(parsed.find((r) => r.toolCallId === "a3")?.text).toBeNull();
@@ -315,7 +317,7 @@ describe("parseSessionText", () => {
 
 describe("readSessions and computeStats", () => {
   test("walks subdirectories, reads only .jsonl and applies --since", () => {
-    expect(records).toHaveLength(10);
+    expect(records).toHaveLength(11);
     expect(records.some((r) => r.toolCallId === "old")).toBe(false);
     expect(records.some((r) => r.toolCallId === "x")).toBe(false);
     expect(new Set(records.map((r) => r.session)).size).toBe(2);
@@ -323,26 +325,32 @@ describe("readSessions and computeStats", () => {
 
   test("counts, latency, cost, refusals and per-tool shares", () => {
     const s = computeStats(records);
-    expect(s.gatedCalls).toBe(10);
+    expect(s.gatedCalls).toBe(11);
     expect(s.reviews).toBe(8);
-    expect(s.sentBack).toBe(4);
+    // Every call the gate did not pass as sent: four revises, and the two it could not read,
+    // which never reached a review (a6 ran in warn mode, a8 was refused in block mode).
+    expect(s.sentBack).toBe(6);
+    // Every write that posted with no review behind it: the warn-mode unreadable call and the
+    // timeout. A revise in warn mode posted, but a review stands behind it.
+    expect(s.unreviewed).toBe(2);
     // Review latencies 100..800: nearest-rank median is the 4th, p90 the 8th.
     expect(s.latencyMedian).toBe(400);
     expect(s.latencyP90).toBe(800);
     // Costs 0.01, 0.02, 0.03, 0.04: nearest-rank median is the 2nd.
     expect(s.costMedian).toBe(0.02);
-    // a1 (block) and a6 (unreadable).
+    // a1 (a revise in block mode) and a8 (unreadable in block mode); a6, unreadable in warn, ran.
     expect(s.refusals).toBe(2);
     expect(s.perTool).toEqual([
-      { tool: "dispatch_ask", reviews: 5, sentBack: 2 },
-      { tool: "dispatch_comment", reviews: 3, sentBack: 2 },
+      { tool: "dispatch_ask", calls: 8, reviews: 5, sentBack: 4 },
+      { tool: "dispatch_comment", calls: 3, reviews: 3, sentBack: 2 },
     ]);
     const lines = formatReport(s, 42);
-    expect(lines).toContain("sent back: 50.0% (4 of 8 reviews)");
+    expect(lines).toContain("sent back: 54.5% (6 of 11 gated calls)");
+    expect(lines).toContain("unreviewed sends: 2");
     expect(lines).toContain("review latency median: 400 ms");
     expect(lines).toContain("review latency p90: 800 ms");
     expect(lines).toContain("review cost median: $0.0200 (4 reviews with a cost)");
-    expect(lines).toContain("tool dispatch_ask: 5 reviews, sent back 40.0% (2)");
+    expect(lines).toContain("tool dispatch_ask: 8 gated calls, 5 reviews, sent back 50.0% (4)");
     expect(lines.at(-1)).toBe("seed: 42");
   });
 
@@ -351,7 +359,7 @@ describe("readSessions and computeStats", () => {
     expect(lines).toContain("review latency median: n/a");
     expect(lines).toContain("review latency p90: n/a");
     expect(lines).toContain("review cost median: n/a");
-    expect(lines).toContain("sent back: n/a (0 of 0 reviews)");
+    expect(lines).toContain("sent back: n/a (0 of 0 gated calls)");
     expect(lines).toContain("rules calls: 0");
     expect(lines).toContain(
       "rules outcomes: match 0, none 0, error 0, timeout 0, no-verdict 0, abandoned 0, shutdown 0, unjudged 0"
@@ -401,7 +409,11 @@ describe("the rules check", () => {
     expect(isRefusal(c1)).toBe(true);
     expect(isRefusal({ ...c1, rule: null })).toBe(false);
     expect(isRefusal({ ...c1, rule: null, outcome: "no-model-role" })).toBe(true);
-    expect(isRefusal({ ...c1, rule: null, outcome: "unreadable" })).toBe(true);
+    // A call the gate could not read is one call's form: warn mode runs it, so it is no refusal.
+    expect(isRefusal({ ...c1, rule: null, outcome: "unreadable" })).toBe(false);
+    expect(isRefusal({ ...c1, rule: null, outcome: "unreadable", verdictMode: "block" })).toBe(
+      true
+    );
     expect(isRefusal({ ...c1, rule: null, verdictMode: "block" })).toBe(true);
     expect(isRefusal({ ...c1, decision: "allow" })).toBe(false);
     // c1, c3 and c4 (warn, with a rule) and c6 (block); c12, a charter revise in warn, is not.
@@ -529,6 +541,46 @@ describe("the rules check", () => {
   });
 });
 
+describe("outcome counts and the sessions whose gate did not review", () => {
+  test("every outcome is counted, in a fixed order", () => {
+    const lines = formatReport(computeStats(records), 1);
+    expect(lines).toContain("outcome verdict: 8");
+    expect(lines).toContain("outcome unreadable: 2");
+    expect(lines).toContain("outcome timeout: 1");
+  });
+
+  test("a session with an unreviewed write is named with its counts", () => {
+    const lines = formatReport(computeStats(records), 1);
+    const named = lines.filter((line) => line.startsWith("session "));
+    // Session A holds one timeout and one unreadable call warn mode ran; session B's entries are
+    // all reviews or revises, each of which a review stands behind.
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain("sessA.jsonl");
+    expect(named[0]).toContain("timeout 1");
+    expect(named[0]).toContain("unreadable 1");
+  });
+
+  test("a rebuttal and a breaker trip name their session too", () => {
+    const unreviewed = parseSessionText(
+      [
+        gate({ id: "rb", outcome: "rebuttal", decision: "allow", mode: "block" }),
+        gate({ id: "bk", outcome: "breaker", decision: "allow", mode: "block" }),
+      ].join("\n"),
+      "sessC.jsonl"
+    );
+    const stats = computeStats(unreviewed);
+    expect(stats.unreviewed).toBe(2);
+    expect(formatReport(stats, 1)).toContain("session sessC.jsonl: breaker 1, rebuttal 1");
+  });
+
+  test("no unreviewed write names no session", () => {
+    const reviewed = records.filter((r) => r.outcome === "verdict");
+    expect(formatReport(computeStats(reviewed), 1).some((l) => l.startsWith("session "))).toBe(
+      false
+    );
+  });
+});
+
 describe("sampleSentBack", () => {
   test("a fixed seed gives the same sample; another seed differs", () => {
     const many: GateRecord[] = Array.from({ length: 40 }, (_, i) => ({
@@ -614,6 +666,20 @@ describe("isSentBack and isRefusal", () => {
     );
     expect(record && isSentBack(record)).toBe(true);
     expect(record && isRefusal(record)).toBe(true);
+  });
+
+  test("a warn-mode unreadable call was sent back and not refused; a block-mode one was refused", () => {
+    const [warned] = parseSessionText(
+      gate({ id: "uw", outcome: "unreadable", decision: "allow", mode: "warn" }),
+      "s"
+    );
+    expect(warned && isSentBack(warned)).toBe(true);
+    expect(warned && isRefusal(warned)).toBe(false);
+    const [blocked] = parseSessionText(
+      gate({ id: "ub", outcome: "unreadable", decision: "revise", mode: "block" }),
+      "s"
+    );
+    expect(blocked && isRefusal(blocked)).toBe(true);
   });
 });
 
@@ -1136,7 +1202,7 @@ describe("CLI", () => {
     const first = run();
     expect(first.exitCode).toBe(0);
     const stdout = first.stdout.toString();
-    expect(stdout).toContain("gated calls: 10");
+    expect(stdout).toContain("gated calls: 11");
     expect(stdout).toContain("reviews: 8");
     expect(stdout).toContain("refusals: 2");
     expect(stdout).toContain("seed: 11");

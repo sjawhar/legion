@@ -8,10 +8,10 @@
 // or late decision changes nothing. A request that needs approval also freezes an append-only
 // credential-request record (internal/broker/record): the requester's signed request object plus
 // the broker's decision fields. The record is decided by a Dispatch login, which Dispatch's server
-// sends on the UI routes and the UI bearer vouches for: its approver's, or anyone's for a record
-// whose approver is record.AnyoneApprover. Every release of a grant it produced re-verifies the
-// whole chain — record hash, requester signature, one approval by a login the record allows — so
-// a row written by anyone but the broker releases nothing.
+// sends on the UI routes and its listed ServiceAccount (BROKER_API_ACCOUNTS) vouches for: its
+// approver's, or anyone's for a record whose approver is record.AnyoneApprover. Every release of a
+// grant it produced re-verifies the whole chain — record hash, requester signature, one approval
+// by a login the record allows — so a row written by anyone but the broker releases nothing.
 package requests
 
 import (
@@ -92,6 +92,10 @@ const jtiRetentionMargin = time.Minute
 
 // DefaultMissRereads bounds the policy rereads one enrollment's unknown-name requests trigger:
 // a session inventing names costs at most Burst DescribeSecret calls, refilled one per Every.
+// The budget is per process, so two broker pods make two of it for the same enrollment. That is
+// left as it is because this bounds load rather than authority - a reread only moves a pod
+// toward the secret store's own truth, and grants nothing - so the cost of sharing it across
+// pods, a store read's worth of state in Postgres on every miss, buys nothing an operator needs.
 var DefaultMissRereads = ratelimit.Limit{Every: 10 * time.Second, Burst: 10}
 
 // SecretDecision is how the policy decided one name of a request.

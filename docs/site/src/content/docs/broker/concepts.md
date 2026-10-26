@@ -228,9 +228,22 @@ five minutes, a fixed time rather than a setting (`policyRefresh` in
 reread it: `POST /v1/secrets/{name}/reread`, which `agent-secrets secret` sends after each write it
 makes and any caller may send right after writing a secret, and a request naming a secret the
 broker does not serve yet, which makes it reread that one name before refusing it (up to ten such
-rereads at once per session, refilled one every ten seconds: `DefaultMissRereads` in
-`packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
-served on its first request. A reread reads the one secret from
+rereads at once per session in each broker process, refilled one every ten seconds:
+`DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a secret
+created a moment ago is served on its first request.
+
+A reread asked for over `POST /v1/secrets/{name}/reread` is the whole broker's, not one process's.
+A deployment may run several broker processes against one database, and the one such a reread
+reaches tells the others to read that same name again,
+so a retag that narrows who may have a secret is in force everywhere within seconds rather than at
+each process's own next five-minute read. The miss-path reread above is the other way round: it
+stays in the process that served the request, deliberately, since fanning it out would spend every
+peer a store read for a name that peer may never be asked for. One exception is worth stating: a process whose
+connection to the database has dropped hears nothing while it is reconnecting, and nothing is
+replayed to it when it reconnects, so until its own five-minute read it goes on serving what it
+last read. That read is the backstop for everything the telling can miss.
+
+A reread reads the one secret from
 the store (on AWS, `DescribeSecret`, which shows a write at once; on Google Secret Manager,
 `GetSecret`, which Google documents as eventually consistent, so a reread made right after a write
 can still find the old state, usually for seconds) and serves it, or stops serving it,
@@ -351,11 +364,13 @@ nothing. To end every session's automatic access to a secret, change its tags
 An approval happens in Dispatch, never in the broker. The broker holds no Dispatch credential and
 sends Dispatch nothing: Dispatch's server reads the broker's pending list and records for the
 person signed in, and when that person clicks **Approve** or **Deny**, Dispatch's server calls the
-broker with the shared UI token (`BROKER_UI_TOKEN`) and that person's email, taken from their
-Dispatch session. The broker then checks that email against the record's approver: anyone else is
-refused `NOT_APPROVER`, whatever state the record is in. A request for a shared human-tier secret,
-or for a shared agent-tier secret its session's operator withheld from it, names the approver
-`anyone`: it waits in every person's Inbox, any person signed in to Dispatch may decide it, and the
+broker as its own Kubernetes ServiceAccount, which the broker lists as a caller
+(`BROKER_API_ACCOUNTS`), with that person's email, taken from their Dispatch session. No secret
+is shared between them. The broker then checks that email against the record's approver: anyone
+else is refused `NOT_APPROVER`, whatever state the record is in. A request for a shared
+human-tier secret, or for a shared agent-tier secret its session's operator withheld from it,
+names the approver `anyone`: it waits in every person's Inbox, any person signed in to Dispatch may
+decide it, and the
 broker records the email of whoever did. A withheld secret is its owner's to approve for that
 session even in a request that was already waiting when the operator withheld it: a request that
 waited on anyone for a shared human-tier secret and the operator's own withheld secret is then the
@@ -391,9 +406,9 @@ approved before it wherever the new tags want the secret approved for that sessi
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
 `RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than
-a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`). Because the UI token
-vouches for whoever Dispatch says is approving, it is an approval credential: only Dispatch's
-server may hold it.
+a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`). Because the broker
+records whoever a listed caller says is approving, a listed account's token is an approval
+credential: list Dispatch's own account and nothing else.
 
 ## The audit record
 

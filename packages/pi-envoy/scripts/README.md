@@ -118,17 +118,41 @@ has one session read every file of a skill and reports whether each arrived whol
 ```bash
 cd packages/pi-legion/scripts/skill-scenarios
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout>
-./rig.sh batch ask-on-message 5 head base   # starts and stops the scratch Dispatch, Postgres, NATS, listener
+# or, with no gateway: LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>
+./rig.sh batch ask-on-message 5 head base   # starts and stops Postgres, NATS, the listener, and each run's own scratch Dispatch
 ./rig.sh batch tester-proof 5 head base
 ./rig.sh score
 ```
 
+The spec-writing and spec-rewrite scenarios measure how an agent writes a Dispatch spec:
+
+```bash
+bun fetch-spec-sources.ts --out "$SKILL_SCENARIOS_WORK/sources" <issue key | dispatch://PROJECT/artifact/slug>
+SKILL_SCENARIOS_SUPERPOWERS=<superpowers plugin> ./rig.sh profile main <checkout>
+SKILL_SCENARIOS_SOURCE=<directory under sources/> ./rig.sh batch spec-writing 1 main
+./rig.sh judge "$SKILL_SCENARIOS_WORK"/runs/spec-writing-main-1
+./rig.sh score spec-writing
+```
+
 The scenarios and every input are in the script's header (`./rig.sh` with no arguments prints it),
-and each scenario's scoring rule is on the `score.ts` function that scores it. It needs the model
-gateway and Docker. Its bounded waits, port picks and process stops are
-[`scripts/e2e/lib/rig.sh`](../../../scripts/e2e/README.md#librigsh)'s. Nothing it runs reaches
+and each scenario's scoring rule is on the `score.ts` function that scores it. It needs a model
+route (the gateway or an Anthropic key file) and Docker. `SKILL_SCENARIOS_WORK` must have no `.omp`
+in it or above it, so not under your home directory: Oh My Pi would load that directory's plugins
+and not the label's. Its bounded waits, port picks and process stops are
+[`scripts/e2e/lib/rig.sh`](../../../scripts/e2e/README.md#librigsh)'s. Nothing a batch runs reaches
 production Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's `DISPATCH_*`,
 `ENVOY_*` or `NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or
 `E2E_AGENT_TOKEN` is set. That is the environment only: an agent reads the whole filesystem, the
 other label's checkout included, so `score.ts` does not score a run that read outside its own
-label.
+label. A judge is held tighter: `rig.sh judge-omp` runs each one in a Docker container that sees
+only its own directory, read-only but for its one answer file and its transcript, so a judge
+cannot read the run's transcript or another judge's input. On the key-file route the container
+reads the key file itself. On the gateway route the gateway's key command runs on the host, once
+for each judge, because it needs the operator's home and session bus. The container gets only the
+token, from an owner-only file that is removed when the judge ends.
+
+Two tools read production Dispatch, with GET requests only, as the calling session does (its
+envoy.json, or `DISPATCH_URL` with a token): `fetch-spec-sources.ts`, which writes a source's input
+into the work directory for the spec scenarios, and `label-comments.ts`, which labels the comments
+people wrote in a window and prints the share that complain about writing. Neither writes inside a
+checkout. Text either one reads from production stays in the work directory and is never committed.

@@ -5,6 +5,20 @@
 // Usage: bun askgate-report.ts --sessions <dir> --since <RFC 3339> --sample <n> --out <dir>
 //   [--seed <n>]
 //   bun askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]
+//
+// What the counts mean, as `isSentBack`, `isRefusal` and `isUnreviewed` read an entry:
+//   - sent back: the gate did not pass the write as sent. Every entry whose decision is
+//     `revise` — a revise verdict, `no-model-role`, and, in block mode, `abandoned` and
+//     `shutdown`, the two causes of a call given up with no verdict — and every `unreadable` or
+//     `load-failed` entry, whatever its mode.
+//   - refusal: a write that did not post. Every sent-back entry of a session in block mode,
+//     plus `no-model-role` and `load-failed` in warn mode too, since neither gate can review
+//     anything and a gate that cannot review is no off switch, and every entry with a `rule`,
+//     since the rules check refuses in either mode. A warn-mode `unreadable`, `abandoned` or
+//     `shutdown` is sent back and no refusal: its write posted.
+//   - unreviewed: a write that posted with no review behind it. Every `allow` whose outcome is
+//     not `verdict`: timeout, error, no-verdict, halted, skipped, rebuttal, breaker, and in
+//     warn mode `unreadable`, `abandoned` and `shutdown`.
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
@@ -50,6 +64,8 @@ export interface GateRecord {
 
 export interface ToolShare {
   tool: string;
+  /** Every gated call of the tool, reviewed or not. */
+  calls: number;
   reviews: number;
   sentBack: number;
 }
@@ -83,10 +99,19 @@ export interface RuleStats {
   overridden: { rebuttal: number; breaker: number };
 }
 
+export interface SessionOutcomes {
+  session: string;
+  /** Each unreviewed outcome of that session and how many times it happened, by outcome name. */
+  counts: Array<[string, number]>;
+}
+
 export interface Stats {
   gatedCalls: number;
   reviews: number;
+  /** Every gated call the gate did not pass as sent, reviewed or not (`isSentBack`). */
   sentBack: number;
+  /** Every write that posted with no review behind it (`isUnreviewed`). */
+  unreviewed: number;
   latencyMedian: number | null;
   latencyP90: number | null;
   costMedian: number | null;
@@ -94,6 +119,10 @@ export interface Stats {
   refusals: number;
   perTool: ToolShare[];
   rules: RuleStats;
+  /** Every outcome seen and how many entries carried it, most first. */
+  byOutcome: Array<[string, number]>;
+  /** The sessions where the gate reviewed nothing at least once, named with their counts. */
+  unreviewedSessions: SessionOutcomes[];
 }
 
 /** The report over the session files on disk. */
@@ -228,17 +257,28 @@ export function isReview(record: GateRecord): boolean {
   return record.outcome === "verdict";
 }
 
-/** The gate did not pass the write as sent: a revise, a refusal, or a gate that did not load. */
+/**
+ * The gate did not pass the write as sent: a revise, a call the gate could not read (which in warn
+ * mode runs with the reason returned, so its decision is `allow`), or a gate that did not load.
+ */
 export function isSentBack(record: GateRecord): boolean {
-  return record.decision === "revise" || record.outcome === "load-failed";
+  return (
+    record.decision === "revise" ||
+    record.outcome === "unreadable" ||
+    record.outcome === "load-failed"
+  );
 }
 
-/** A write that did not post: refused in block mode, or refused in every mode (a rules refusal is one in warn mode too). */
+/**
+ * A write that did not post: sent back in block mode, or refused in every mode. `no-model-role`
+ * and `load-failed` mean the gate can review nothing, so each refuses in warn mode too, and a
+ * rules refusal (an entry with a `rule`) refuses in either mode; an `unreadable` call is one
+ * call's form, which warn mode lets through.
+ */
 export function isRefusal(record: GateRecord): boolean {
   return (
     isSentBack(record) &&
     (record.verdictMode === "block" ||
-      record.outcome === "unreadable" ||
       record.outcome === "no-model-role" ||
       record.outcome === "load-failed" ||
       record.rule !== null)
@@ -368,21 +408,49 @@ export function computeRuleStats(records: GateRecord[]): RuleStats {
   };
 }
 
+/**
+ * A write that posted with no review behind it: the gate failed, gave up, was paused, had no
+ * model for the session's provider, took a rebuttal or tripped its breaker, or could not read the
+ * call and warn mode ran it. Every one of them is an `allow` whose outcome is not a verdict, and
+ * only a reader who counts them can tell "no writes" from "no gate".
+ */
+export function isUnreviewed(record: GateRecord): boolean {
+  return record.decision === "allow" && record.outcome !== "verdict";
+}
+
 export function computeStats(records: GateRecord[]): Stats {
   const reviews = records.filter(isReview);
   const latencies = reviews.flatMap((r) => (r.latencyMs === null ? [] : [r.latencyMs]));
   const costs = reviews.flatMap((r) => (r.cost === null ? [] : [r.cost]));
   const byTool = new Map<string, ToolShare>();
-  for (const review of reviews) {
-    const share = byTool.get(review.tool) ?? { tool: review.tool, reviews: 0, sentBack: 0 };
-    share.reviews += 1;
-    if (isSentBack(review)) share.sentBack += 1;
-    byTool.set(review.tool, share);
+  // Every gated call of the tool, not its reviews alone: a call the gate could not read, and one
+  // a gate that did not load refused, was sent back without any review.
+  for (const record of records) {
+    const share = byTool.get(record.tool) ?? {
+      tool: record.tool,
+      calls: 0,
+      reviews: 0,
+      sentBack: 0,
+    };
+    share.calls += 1;
+    if (isReview(record)) share.reviews += 1;
+    if (isSentBack(record)) share.sentBack += 1;
+    byTool.set(record.tool, share);
+  }
+  const byOutcome = new Map<string, number>();
+  const bySession = new Map<string, Map<string, number>>();
+  for (const record of records) {
+    byOutcome.set(record.outcome, (byOutcome.get(record.outcome) ?? 0) + 1);
+    if (!isUnreviewed(record)) continue;
+    const counts = bySession.get(record.session) ?? new Map<string, number>();
+    counts.set(record.outcome, (counts.get(record.outcome) ?? 0) + 1);
+    bySession.set(record.session, counts);
   }
   return {
     gatedCalls: records.length,
     reviews: reviews.length,
-    sentBack: reviews.filter(isSentBack).length,
+    sentBack: records.filter(isSentBack).length,
+    unreviewed: records.filter(isUnreviewed).length,
     latencyMedian: percentile(latencies, 50),
     latencyP90: percentile(latencies, 90),
     costMedian: percentile(costs, 50),
@@ -390,6 +458,13 @@ export function computeStats(records: GateRecord[]): Stats {
     refusals: records.filter(isRefusal).length,
     perTool: [...byTool.values()].sort((a, b) => (a.tool < b.tool ? -1 : a.tool > b.tool ? 1 : 0)),
     rules: computeRuleStats(records),
+    byOutcome: [...byOutcome.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)),
+    unreviewedSessions: [...bySession.entries()]
+      .map(([session, counts]) => ({
+        session,
+        counts: [...counts.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)),
+      }))
+      .sort((a, b) => (a.session < b.session ? -1 : 1)),
   };
 }
 
@@ -413,20 +488,33 @@ export function formatReport(stats: Stats, seed: number): string[] {
   const overridden = rules.overridden.rebuttal + rules.overridden.breaker;
   return [
     "A gated call is any advisor-gate entry. A review is one where the model gave a verdict.",
-    "Sent back means the decision was revise.",
+    "Sent back means the gate did not pass the write as sent: a revise verdict, a call it could",
+    "not read, or a gate that did not load. It is counted over every gated call, since two of",
+    "those three never reach a review. A refusal is a write that did not post: one sent back",
+    "in block mode, `no-model-role` and `load-failed`, which refuse in warn mode too, and a",
+    "rules refusal, which refuses in either mode.",
+    "Unreviewed is a write that posted with no review behind it: every allow whose outcome is no",
+    "verdict, a rebuttal, a breaker trip and a warn-mode unreadable call among them.",
+    "A session named below had at least one such write, with each outcome's count.",
     "A rules call is an entry with a ruleOutcome. A rules refusal is an entry with a rule.",
     "A rules refusal was overridden when the next entry on its target, in its session, is a rebuttal or a breaker.",
     `The rules error lines show the ${ERROR_TEXTS_SHOWN} commonest error texts.`,
     `gated calls: ${stats.gatedCalls}`,
     `reviews: ${stats.reviews}`,
-    `sent back: ${share(stats.sentBack, stats.reviews)} (${stats.sentBack} of ${stats.reviews} reviews)`,
+    `sent back: ${share(stats.sentBack, stats.gatedCalls)} (${stats.sentBack} of ${stats.gatedCalls} gated calls)`,
     `review latency median: ${ms(stats.latencyMedian)}`,
     `review latency p90: ${ms(stats.latencyP90)}`,
     `review cost median: ${cost}`,
     `refusals: ${stats.refusals}`,
+    `unreviewed sends: ${stats.unreviewed}`,
+    ...stats.byOutcome.map(([outcome, count]) => `outcome ${outcome}: ${count}`),
     ...stats.perTool.map(
       (t) =>
-        `tool ${t.tool}: ${t.reviews} reviews, sent back ${share(t.sentBack, t.reviews)} (${t.sentBack})`
+        `tool ${t.tool}: ${t.calls} gated calls, ${t.reviews} reviews, sent back ${share(t.sentBack, t.calls)} (${t.sentBack})`
+    ),
+    ...stats.unreviewedSessions.map(
+      ({ session, counts }) =>
+        `session ${session}: ${counts.map(([outcome, count]) => `${outcome} ${count}`).join(", ")}`
     ),
     `rules calls: ${rules.calls}`,
     `rules outcomes: ${rules.outcomes.map((c) => `${c.name} ${c.count}`).join(", ")}`,

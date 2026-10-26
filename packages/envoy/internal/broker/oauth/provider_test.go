@@ -33,12 +33,13 @@ const deviceGrant = "urn:ietf:params:oauth:grant-type:device_code"
 // userCodePattern is the shape of every user code the provider mints.
 var userCodePattern = regexp.MustCompile(`^[0-9A-Z]{4}-[0-9A-Z]{4}$`)
 
-// fixture is a provider on a fresh schema, mounted alone on an httptest.Server: its device
-// authorization endpoint at /device_authorization and its token endpoint at /token. onRequest
-// records each user code it is given and answers refuse (nil by default); the token hooks record
-// what they saw and answer before (nil by default).
+// fixture is a provider on a fresh schema (dsn names it), mounted alone on an httptest.Server:
+// its device authorization endpoint at /device_authorization and its token endpoint at /token.
+// onRequest records each user code it is given and answers refuse (nil by default); the token
+// hooks record what they saw and answer before (nil by default).
 type fixture struct {
 	url      string
+	dsn      string
 	pool     *pgxpool.Pool
 	provider *oauth.Provider
 
@@ -59,7 +60,14 @@ func newFixture(t *testing.T) *fixture {
 // newFixtureWith is newFixture with adjust applied to the provider's Config.
 func newFixtureWith(t *testing.T, adjust func(*oauth.Config)) *fixture {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), storetest.URL(t))
+	return newFixtureOn(t, storetest.URL(t), adjust)
+}
+
+// newFixtureOn is newFixtureWith on the database dsn names rather than a fresh one, which is how a
+// test starts a second broker process beside a first.
+func newFixtureOn(t *testing.T, dsn string, adjust func(*oauth.Config)) *fixture {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open pool: %v", err)
 	}
@@ -73,16 +81,18 @@ func newFixtureWith(t *testing.T, adjust func(*oauth.Config)) *fixture {
 	cfg := oauth.Config{
 		Secret:          secret,
 		DeviceLifetime:  15 * time.Minute,
+		AccessLifetime:  15 * time.Minute,
 		RefreshLifetime: time.Hour,
 		ProofSkew:       10 * time.Second,
 		VerificationURL: "https://dispatch.example/credentials/machine",
+		Exchange:        oauth.ExchangeConfig{Policy: newPolicy(t, nil, nil)},
 	}
 	adjust(&cfg)
 	provider, err := oauth.New(cfg, store)
 	if err != nil {
 		t.Fatalf("oauth.New: %v", err)
 	}
-	f := &fixture{pool: pool, provider: provider}
+	f := &fixture{dsn: dsn, pool: pool, provider: provider}
 	hooks := oauth.TokenHooks{
 		Before: func(_ context.Context, _ oauth2.GrantType, _ map[string]any) error {
 			f.mu.Lock()
@@ -624,17 +634,33 @@ func TestABeforeFailureIsAServerError(t *testing.T) {
 	}
 }
 
-func TestNewRefusesLifetimesAndASkewThatAreNotPositive(t *testing.T) {
+// TestNewRefusesAConfigurationItCouldNotServe: every lifetime and the proof skew must be
+// positive, the secret long enough, and an issuer named must be named whole.
+func TestNewRefusesAConfigurationItCouldNotServe(t *testing.T) {
 	secret := make([]byte, 32)
-	for _, c := range []oauth.Config{
-		{Secret: secret, DeviceLifetime: 0, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: 0, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: -1, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine"},
+	sound := oauth.Config{
+		Secret: secret, DeviceLifetime: time.Minute, AccessLifetime: time.Minute, RefreshLifetime: time.Hour,
+		VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute,
+		Exchange: oauth.ExchangeConfig{Policy: newPolicy(t, nil, nil)},
+	}
+	for name, spoil := range map[string]func(*oauth.Config){
+		"no device lifetime":          func(c *oauth.Config) { c.DeviceLifetime = 0 },
+		"no refresh lifetime":         func(c *oauth.Config) { c.RefreshLifetime = 0 },
+		"a negative refresh lifetime": func(c *oauth.Config) { c.RefreshLifetime = -1 },
+		"no access lifetime":          func(c *oauth.Config) { c.AccessLifetime = 0 },
+		"no proof skew":               func(c *oauth.Config) { c.ProofSkew = 0 },
+		"a secret too short":          func(c *oauth.Config) { c.Secret = make([]byte, 31) },
+		"an issuer configured in part": func(c *oauth.Config) {
+			c.Exchange.Kubernetes = oauth.IssuerConfig{Issuer: "https://kubernetes.example"}
+		},
 	} {
-		if _, err := oauth.New(c, nil); err == nil {
-			t.Errorf("oauth.New(device %v, refresh %v, skew %v) = nil, want an error", c.DeviceLifetime, c.RefreshLifetime, c.ProofSkew)
-		}
+		t.Run(name, func(t *testing.T) {
+			c := sound
+			spoil(&c)
+			if _, err := oauth.New(c, nil); err == nil {
+				t.Errorf("oauth.New with %s = nil, want an error", name)
+			}
+		})
 	}
 }
 

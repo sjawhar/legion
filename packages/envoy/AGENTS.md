@@ -36,6 +36,7 @@ events to the right session.
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
 | Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*`, the AWS SDK's `AWS_*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`); a migration runs while the build before it is still serving, which is what it may add and what it must split across two releases (`cmd/dispatch/README.md`, "Database migrations") |
+| Postgres LISTEN loop's shared rules | `internal/pglisten/` | Dispatch's and the secrets broker's listeners: one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66). Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its stale-room evictor (`internal/dispatch/docs`); each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch` |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once, and deploy runs' `created_at` once more under its own step; a pull request ships with the earliest-finishing successful production deploy whose run GitHub created after its merge (`delivery/containment.go`, `DeliveryRun.Created`) |
@@ -682,7 +683,7 @@ version, a fork of the live tree or a rebuild from a room behind the head is ref
 What is per-process is the room: while a room is resident in one process it receives none of the
 other's updates, so presence and cursors show only the peers on that process. Every durable
 change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory
-lock, and the other process's listener (`docs/stale_room.go`, over `internal/dispatch/pglisten`)
+lock, and the other process's listener (`docs/stale_room.go`, over `internal/pglisten`)
 closes the room that notification leaves behind the head, so within that round trip the browser
 reconnects, re-syncs and shows the current text - a brief reconnect, never stale text a reader
 can act on. Cross-process live co-editing of one document, two rooms with updates streaming
@@ -1180,16 +1181,25 @@ client timeout (`internal/dispatch/envoy/client.go`), and production runs one Di
 a pool of `store.sharedPoolSize` connections, so a call made inside a transaction holds one of
 them - and the rows it locked - until the listener answers; that many concurrent ones empty the
 pool and stall every unrelated request, which a listener restart alone is enough to cause. A
-read (`Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held; the
-transaction then re-reads under its own lock whatever the resolution depended on and decides
-with the resolution only while the locked row still agrees, taking it once more when it does
-not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
+read (`Session`, `Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing
+held; the transaction then re-reads under its own lock whatever the resolution depended on and
+decides with the resolution only while the locked row still agrees, taking it once more when it
+does not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
 (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through
 (`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`,
 `claimLapsed`, `deliveryOutcome`, `receiptError`); its callers are `api/comment_create.go`
 (the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and
 `api/message_delivery.go` (a delivery's recipient, its claim and its settle) and
-`api/issue_claim.go` (the holder's liveness, on both the claim and the release route). A write -
+`api/issue_claim.go` (the holder's liveness, on both the claim and the release route). Three of
+those decisions now read one session by id rather than scanning the live list: a comment mention's
+`session:` target, each selected recipient of a broadcast (`resolveBroadcastSessions`, eight reads
+in flight under one five-second budget) and whether an issue's claim holder is still working
+(`fetchHolderLiveness`). A list is one listener's cache of the session registry, so only the
+per-session read tells a session that ended from one that cache has not refilled yet, and a read
+that did not answer never reports the session gone: a broadcast and a claim are refused `503
+ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still
+created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
+listener: …` text. A write -
 `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
 sent, and settled by a second short transaction, so a process that dies in between leaves a
 record of the attempt rather than losing it.
@@ -1836,8 +1846,8 @@ from and that ask's document.
 - `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and the human-only `pinned`) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more; alone it pages `contracts.DefaultIssuePageLimit`, 50): `{issues, total, limit, offset}` (`model.IssueSummaryPage`), the count beside the rows as `GET /api/v1/asks/open` carries it. `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter; so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406: the route ignored all three and answered every row). The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match. The order ends on the key, the one column no two issues share: nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still. A walk of the pages is exact only on an unchanged listing: an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never. The unpaged array is the only exact set one read gives. The `dispatch issues` command always sends `limit` and `offset` (`DispatchClient.listIssuePage`, `packages/envoy-client`) and refuses an array answered to that paged request, which means a Dispatch older than #1612 or a regression of the page. So a Dispatch rolled back past #1612, or one that stops paging, fails every `dispatch issues` call with that refusal; the SPA and both daemons send neither parameter and keep reading the array.
 - Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project; it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
 - Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`) and leaves the new issue at most `parentDepthCap` (32) links below its root (`409 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents. Parent changes, and creates with a parent, take the project's dependency advisory lock, serializing with blocker writes; a parent change then locks the issue, its old parent and the proposed parent together in one key order, as a status write locks the issue and its parent (`409 PARENT_CONTENDED` when a concurrent reparent moves the parent at both attempts). Plain, depth-capped reads refuse a missing, self, or foreign-project parent (`400 PARENT_INPUT`), a parent cycle (`409 PARENT_INPUT`), a parent that would put the deepest issue under the moved one more than 32 links below its root (`409 PARENT_INPUT`), or a wait cycle through parent and `blocked_by` edges (`409 DEPENDENCY_CYCLE`); unrelated row activity adds no refusal. A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, a reopening `status` — any status but `done` — and an `external_links` write that adds no new URL, so a link can move to the issue that replaced it; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
-- Every issue has a nullable `assignee`: the **lowercase** email of the person who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). Both identity implementations name a person by lowercase email, so `model.CanonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; the SPA lowercases the `/auth/whoami` viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must name a row of `people` (migration `0068`: everyone who has signed in) — else `400 ASSIGNEE_NOT_ALLOWED` naming the email; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's email; a personal token's `Owner`; the parent's assignee (which may be null); null — so the shared token's parentless issues are unassigned and a daemon status PATCH (no `assignee` key) never touches it. `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
-- Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener no longer lists as live (`fetchLiveSessions` takes that snapshot of the same live list `GET /api/v1/agents` serves, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer `claimAnswer`: the issue flat, with `legion_managed_status` — whether Legion owns its status, the walk `claimLegionManagedStatus` runs under the issue's row lock before the claim is written — beside it, omitted when that walk failed or timed out, which costs the field and never the claim. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status; closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, repo, resolved_repo, claim, previous_claim?, reason}` (`repo` and `resolved_repo` as on every issue event); the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
+- Every issue has a nullable `assignee`: the **lowercase** email of the person who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). Both identity implementations name a person by lowercase email, so `model.CanonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; the SPA lowercases the `/auth/whoami` viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must name a row of `people` (migration `0068`: everyone who has signed in) — else `400 ASSIGNEE_NOT_ALLOWED` naming the email; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's email; a personal token's `Owner`; the parent's assignee when it names someone; the project's `default_assignee` when that still names a row of `people` (`projects.default_assignee`, migration `0116`; a default left stale by a restore or a direct write falls through to nobody rather than refusing the create, so the check is one query on the create's own transaction and not `allowedLogin`); null — so an issue the shared token creates with no assignee named and no parent assignee lands on the project's default, and one it creates where the project names none stays unassigned; nothing back-fills issues already filed, an explicit `null` on the create still means nobody, and a daemon status PATCH (no `assignee` key) never touches it. A project's default is set by a person alone, through `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee` `{assignee}` (an email of a row of `people`, or `null` to clear it; `400 ASSIGNEE_NOT_ALLOWED` otherwise, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, and a `settings.project_default_assignee.updated` event); no agent command, flag or route sets it, which is deliberate (`api/project_default_assignee.go`). `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
+- Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener's session store no longer holds a record of (`fetchHolderLiveness` reads that one session's record by id, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer `claimAnswer`: the issue flat, with `legion_managed_status` — whether Legion owns its status, the walk `claimLegionManagedStatus` runs under the issue's row lock before the claim is written — beside it, omitted when that walk failed or timed out, which costs the field and never the claim. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status; closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, repo, resolved_repo, claim, previous_claim?, reason}` (`repo` and `resolved_repo` as on every issue event); the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
 - Every issue has a nullable `repo`: its own repository, `owner/name` (`issues.repo`, migration `0113`), which must be a mapping of its project; the composite foreign key `issues_repo_mapped_to_project` to `repo_projects (repo, project)` makes that a database invariant. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` take it (`api/issue_repo.go`: absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is; not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits; a closed issue refuses it, `409 ISSUE_CLOSED`). Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoLateral`: the nearest issue on the parent chain (itself first) whose own `repo` is set, else the project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`), else null. The walk keeps a depth counter and stops at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 steps per issue; a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default. An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop: its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running). Only this release's API holds the cap after that, under the project's dependency lock; nothing in the database does. So no server of the earlier release may serve once `0113` applies, whether left serving or started again by a rollback: stop it, or scale it to zero, before this release boots (a Recreate rollout, never a rolling one), and recover a failed deploy forward (`cmd/dispatch/README.md`, "Database migrations"; the auto-deployer refuses such a rollback, `deploy/README.md`). A chain built anyway, by an earlier release or by direct SQL, fails every read of its issues (500). The API repairs an acyclic one: `PATCH` an ancestor that still reads (its `GET` answers 200) with `{"parent": null}`. The `PATCH` reads the issue it changes first (`issue_patch.go`), so a parent loop none of whose members reads, which only direct SQL can write, needs a database repair (`update issues set parent_key = null` on one member). A mapping's `PUT` takes `default` and moves the project's default in one transaction; a mapping that issues name is neither deleted nor moved to another project (`409 REPO_PROJECT_IN_USE`, counted under the mapping's row lock); and a moved mapping emits `settings.repo_project.updated` on the project it left (`deleted: true`) as well as the one it joined. Every writer of a mapping, the `PUT`, the `DELETE` and the boot seed of `DISPATCH_REPO_PROJECTS` (`api.SeedRepoProjects`), takes `lockRepoProjectWrite`'s locks in one order: an advisory lock on the repository, the event owners of every project it touches, then the row. So two writes to one repository serialize, even while it has no row yet, and the seed's own additions are announced like any other.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`), and `answers`, every user-authored answer read back from `ask.answered` events oldest first, with settlement's restoration of the same `answer.at` collapsed. A human answer must carry the `edited_at` revision it reviewed; a mismatch returns `409 ASK_EDITED` without closing the ask. The answerer changes an answered question with `expected_answer_at` naming the current answer's `at`: a stale value or an open ask is `409 ASK_ANSWER_CHANGED`, another person is `403 NOT_ANSWERER`, and an approval is `409 ASK_APPROVAL_REVIEW`. The change appends another `ask.answered` whose payload adds `previous_answer`, so its asker and followers receive it through the first answer's route. `GET /api/v1/me/answers` lists the caller's answer events and ask replies, newest first, through migration 0082's partial indexes.
@@ -1849,7 +1859,7 @@ from and that ask's document.
 - A reply to an open ask (`ask_id` set on `POST /api/v1/issues/{key}/comments` or `POST /api/v1/artifacts/{id}/comments`) records `turn` (`comments.turn`, migration 0028): who holds the turn after it. A human author's reply always stores `agent` whatever the request says; a session author's stores `human` unless the request says `turn: "agent"` (a progress note - the agent still owes the next move). A reply under an answered or resolved ask records no turn (nothing is waiting; a requested `turn` is ignored there, as a human's is). `turn` on a comment that is not an ask reply is `400 TURN_REQUIRES_ASK`; any value but `human`/`agent` is `400 INVALID_COMMENT`. Comment objects carry `turn` (null under a closed ask and off ask replies). The column's only constraint is `turn requires ask_id`, so a pre-0028 server still draining during a deploy inserts its ask replies with a null turn; every reader coalesces a null newest-reply turn to `human`.
 - Every ask the API serves is read through one row shape: `docs.AskColumns` + `docs.ScanAsk` decode the ask row (the document settler uses the same pair for indexed blocks and anchor-refresh events), while `api/ask_rows.go` extends it with the block ask's document (`askRowColumns`) and, for reads, the newest comment in its thread (`askReadColumns`, a `lateral ... limit 1` join). `opened_event_id` is attached afterwards by `attachOpenedEventIDs`, one `events` query per read served by the partial index `events_ask_payload_id` (`store/migrations/0030_events_ask_payload_id.up.sql`; its `type in (...)` list mirrors that query and must change with it). `asks.options` is always a JSON array, never null.
 - Every open ask read carries `waiting_on` (`human` | `agent`), and `waitingOnExpression` (`api/ask_rows.go`) is the rule's one home: the ask reads (`askReadColumns`, which alias it `waiting_on` so the Inbox order names that column and evaluates the rule once a row), `listOpenAsks`, a document's awaiting approval (`attachApprovals`), and the approval route's hand-back decision (`askWaitingOn`) all embed it. A reply learns its `ask_waiting_on` with no second statement: the comment write reads the ask it joins with the rule's moved-request arm, `approvalMoved` (`describeAsk`), under the owner row every version write and hand-back takes first, and once inserted the reply is the thread's newest, so `commentThreadTarget.waitingOnAfter` applies the rule to it in Go - `agent` for a moved request, otherwise the reply's own `turn`. An approval request whose `requested_version` is below its current `version` is waiting on its agent. One whose newest thread reply is the reply its last hand-back answered (`handed_back_reply_id`) is waiting on the human, and so is one nobody has replied to; otherwise the newest comment's `turn` decides. The newest reply is the one that committed last: `comments.created_at` defaults to `clock_timestamp()` (migration 0065), the moment its insert runs, and both comment inserts (`createCommentFor`, `replyComment`) leave it to the default and run once their transaction holds the owner row. The old default, `now()`, was the transaction's start, which sorted a reply that began first but waited for the row before one that committed while it waited; an older binary still serving during a rollout names no `created_at` either, so the default orders its replies too. The hand-back reads that reply under the same owner row, so a reply that inserts after the hand-back sorts after the reply it recorded and decides the turn, however early its own transaction began. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; closed asks and every `ask.*` event payload omit it. A `comment.created` or `comment.answered` payload that replies to an open ask carries the resulting `ask_waiting_on`, and every route that writes a comment (`POST /api/v1/issues/{key}/comments`, `POST /api/v1/artifacts/{id}/comments`, and the delivery callback `POST /api/v1/comments/{id}/reply`) answers the same `ask_waiting_on` beside the comment row (`commentWriteResponse`, `api/comment_projection.go`; `model.Comment` is the stored row and carries no derived turn), so a stream consumer or the writing agent reports the value every ask read has without a refetch. A replayed delivery callback, which writes nothing, answers the stored reply alone.
-- Every ask read also carries `referenced_by_count`: how many `graph_edges` rows point at that ask, counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; mutation responses omit it, and so does an `ask.*` event off the live broker — `attachAskEventFields` (`api/events.go`) stamps the count only on replayed event reads, and nothing builds a card from an event payload. A card that needs the count reads one of the routes above. `GET /api/v1/issues/{key}` carries the issue's own `referenced_by_count` the same way, so the issue page renders its header count without a graph request; `GET /api/v1/artifacts/{id}` carries no backlinks at all — the graph is `GET /api/v1/references?to=` (or `GET /api/v1/artifacts/{id}/references` for agents). An ask's own `replies_to` edges — its clarification thread, which every ask surface already renders — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
+- Every ask read also carries `referenced_by_count`: how many `graph_edges` rows point at that ask from a node kind this build reads (`refs.BacklinkCounts` binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list), counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; mutation responses omit it, and so does an `ask.*` event off the live broker — `attachAskEventFields` (`api/events.go`) stamps the count only on replayed event reads, and nothing builds a card from an event payload. A card that needs the count reads one of the routes above. `GET /api/v1/issues/{key}` carries the issue's own `referenced_by_count` the same way, so the issue page renders its header count without a graph request; `GET /api/v1/artifacts/{id}` carries no backlinks at all — the graph is `GET /api/v1/references?to=` (or `GET /api/v1/artifacts/{id}/references` for agents). An ask's own `replies_to` edges — its clarification thread, which every ask surface already renders — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
 - A write that moves the reference graph names what it moved. `refs.ReplaceCounted` is the one way to index a body: it reconciles that source's edges (`replace`, unexported, so no producer can reconcile without holding what moved) and keeps the targets whose readers carry a batched count — an issue and an ask — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?}]`), with `references_changed_truncated: true` past `refs.CountedChangeLimit`. A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail) instead of sweeping every list; a write that cited nothing counted carries neither field. `grep -rn 'refs\.ReplaceCounted(' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
 - Every payload family that can carry reference changes is built by a helper that takes them, so a producer that forgets does not compile: `artifact.*` through `api.artifactCreatedEventPayload` and `docs.ArtifactVersionEventPayload` (`writeVersionTx` returns `model.ReferenceChanges`, `SnapshotVersion` and `NamedVersion` return them on a `docs.VersionResult`, and the six producers — a settle, an upload, `POST /artifacts/{id}/versions`, `POST /artifacts/{id}/edits` (the route `dispatch doc-edit` uses), accepting a suggestion, and an anchor snapshot on an ask or a comment — each pass what their write moved); `ask.*` through `model.NewAskEventPayload` / `model.NewAskEditEventPayload`; `message.*` through `messageReplyThread.payload`; `comment.*` through `s.commentEventPayload`; and `issue.*` through `model.NewIssueEventPayload`, which is how `POST /api/v1/issues` names what the spec it seeds cited. A transition that writes no text passes `model.ReferenceChanges{}` rather than omitting the argument. The guard is the required argument plus review, not the compiler alone: a struct literal (`model.AskEditEventPayload{Ask: …}`, as `outbox/publisher_test.go` builds) still compiles. Re-runnable inventory: `grep -rn 'NewAskEventPayload\|NewAskEditEventPayload\|NewIssueEventPayload\|commentEventPayload\|artifactCreatedEventPayload\|ArtifactVersionEventPayload\|thread.payload(' --include=*.go internal`.
 - The reference grammar accepts any segment as an id, so `dispatch://CORE-1/ask/hello` parses and is stored like any other target. Every lookup that resolves a stored target skips what resolves to nothing rather than failing the write: issue and artifact targets compare text (`key = any($1)`, `project_key || '/' || id = any($1)`) and ask targets are filtered to syntactically valid uuids in Go before `id = any($1)`, which keeps the `asks` primary key on a query that runs inside every body-indexing transaction. A uuid cast in SQL would turn one malformed citation into a 500 on the write, and — because such rows are already stored — into a comment that can never be edited again.
@@ -1944,10 +1954,10 @@ served. `/healthz`, `/metrics` and the webhook routes are served to any `Host`.
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
 | `/v1/interests/subscribe` | POST | Persists session topics, route metadata, optional delivery `capabilities`, and `host` (where the session process actually runs, as the client's `machineID()` reports it — distinct from `machine_id`, always the registering listener's own machine, which keeps its routing meaning); registrations without capabilities persist `[]`, and one without `host` (an older plugin) falls back to `machine_id` on every read. The response can include `warnings` when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard. When a kind follows the extra tokens, or the name holds an empty token, the name was spelled with its dot, and the warning names the spelling Envoy publishes (`notifications.github.acme.site.io.pr.7.>` → `acme.site_io`). Otherwise the warning says the token is not a GitHub topic kind and names the kinds (`notifications.github.acme.widgets.checks.>`). |
 | `/v1/interests/unsubscribe` | POST | Removes the supplied topics and returns them in `removed`. |
-| `/v1/sessions` | GET | Lists live sessions; optional case-sensitive substring filters are `dir` and `title`. Rows include `roles`, `capabilities`, `last_seen`, `machine_id` (the registering listener's own machine; routing stays keyed on this) and `host` (the session's real machine, falling back to `machine_id` for a session whose plugin predates the field). |
+| `/v1/sessions` | GET | Lists live sessions; optional case-sensitive substring filters are `dir` and `title`. Rows include `roles`, `capabilities`, `last_seen`, `machine_id` (the registering listener's own machine; routing stays keyed on this) and `host` (the session's real machine, falling back to `machine_id` for a session whose plugin predates the field). The rows come from this listener's cache of the session registry, and a list cannot be made authoritative key by key: while that cache refills, a working session is simply missing from it, and a caller cannot tell that from a session that ended. A caller holding one session id asks `/v1/registry/<session_id>` instead. |
 | `/v1/interests/` | GET | Lists persisted interests. |
 | `/v1/interests/<session_id>` | GET, DELETE | Gets or removes a session's persisted interests. |
-| `/v1/registry/<session_id>` | GET | Gets a live session registry entry. |
+| `/v1/registry/<session_id>` | GET | The authoritative answer for one session: is it live, and how is it named? The read goes through this listener's cache to the session bucket, so a session the cache does not hold yet — the bucket was recreated and the watcher is still refilling it, or another listener registered the session — is still found. A 200 carries the same body a row of `GET /v1/sessions` does (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`, `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`). It refuses three ways: a 413 naming its size or a 400 naming the key for an id NATS would refuse as a KV key, `404 {"error":"no live session <id>"}` only when the bucket holds no key for it, and `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` for a read that did not answer — never a session a caller may take for ended. |
 | `/v1/sessions/<session_id>` | DELETE | Removes a live session registration. |
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`,
@@ -2259,13 +2269,17 @@ its environment. Its `secret` forms are how a person manages the agent secrets t
 broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
-its server, carrying the UI bearer and the deciding person's Dispatch login, their email, in the
-body's `approver` field. The bearer
-vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
-and the broker checks it against the record's approver and records it on the decision event. The
-UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
-agents is the deployment's job; a person's own machine ends their machine logins and grants through
+revoking a grant, ending a machine login — made in Dispatch reaches the broker's approval routes
+from its server, carrying Dispatch's own projected Kubernetes ServiceAccount token and the
+deciding person's Dispatch login, their email, in the body's `approver` field. The token says
+only which service is calling: the broker verifies it against `BROKER_K8S_OIDC_ISSUER` and reads
+the caller's name off `BROKER_API_ACCOUNTS` (`accountAuth`, below), and then takes the approver
+on that caller's word — Dispatch fills it from its own signed-in session, never from the browser,
+and the broker checks it against the record's approver and records it on the decision event.
+Reaching those routes is therefore reaching an approval credential, and keeping Dispatch's
+ServiceAccount and its identity closed to agents is the deployment's job; dispatch://INFRA-314 is
+what replaces that trust with a credential the approver's own session holds. A person's own
+machine ends their machine logins and grants through
 the operator routes instead (below), under its machine login. `internal/broker/enroll` turns a
 launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
@@ -2472,6 +2486,40 @@ request ended first; the public `GET /v1/settings`
 answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefix and, per store,
 the key ARN with its region and account (`secrets.AWSKeyARNParts`) or the Cloud KMS key name with the
 project number (`secrets.GCPProject`), the other store's fields omitted.
+
+That reread is fleet-wide. On its 200 path alone `rereadSecret` calls `Deps.NotifyReread`, which
+`cmd/broker` fills with `reread.Notifier(st.Pool, senderID)`: one parameterized Postgres `NOTIFY`
+on `reread.Channel` (`broker_secret_reread`, `internal/broker/reread`, the one place the name is
+written, since `pglisten` splices a channel into its listen statement as written), carrying the
+secret's name and this process's own boot-minted sender id, under `notifyRereadTimeout` (5 s) on a
+context of its own, so a caller that hangs up cannot stop the other pods from learning of a reread
+that already happened. Every process runs `reread.Listener` for its whole life (started after the
+first policy load, and the bind then waits up to `rereadListenWait` (5 s) for its `OnConnected`,
+which `pglisten` runs only once the `LISTEN` statement itself has returned, so an address the load
+balancer can reach is an address a retag can reach; a pod whose dial or `LISTEN` failed waits the
+bound out, warns and serves anyway. Once that `LISTEN` is in place the boot takes **one more
+whole-namespace load** before `net.Listen`, so the subscription exists before the read whose
+result it is meant to invalidate: Postgres delivers nothing to a session for a `NOTIFY` committed
+before that session's `LISTEN`, so without it a retag a peer served while this pod was reading the
+namespace would be lost here until the five-minute reload. A failed catch-up warns and the boot
+carries on, and the timeout branch takes none, there being no subscription to order a read
+against). It
+runs on a context derived with `context.WithoutCancel` from the signal's, not on the signal's own,
+and so does the five-minute policy reload: a pod is sent requests for the whole of its drain, so a
+listener and a reload stopped at `SIGTERM` would leave the one pod the load balancer is still
+choosing serving the tags it read before the retag, with no backstop either. Both end after
+`srv.Shutdown` returns, where `st.Close` then releases the store. The listener drops what carries its own
+sender id, and calls `Current.RefreshOne` under `refreshTimeout` (30 s) on the listener's one
+goroutine. It dials `store.Store.Listener`: a one-connection pool opened from `s.Pool.Config()`
+(so `BeforeConnect`'s RDS IAM minter still mints a token per redial) and hijacked, which costs one
+Postgres connection per pod outside `pool_max_conns`, held for the life of the process since a
+`LISTEN` ends when a pooled connection is recycled, and needs a session-mode path to Postgres,
+never a transaction pooler. A notification sent while a pod is redialing is lost and nothing is
+caught up (`onConnected`), deliberately: the catch-up available there is a whole-namespace read on
+every redial, and the pod's own `policyRefresh` already is the backstop, so the documented promise
+is "within seconds, except while a pod's listener is redialing". A failed notify is one WARN in
+`cmd/broker` and nothing else. The miss path (`requests/machine_state.go`) does not fan out, and
+`RefreshOne` itself does not notify: only this public route does.
 
 `agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
 its AWS side in `secret_aws.go`, its GCP side in `secret_gcp.go`) is the person's side of that
@@ -2933,8 +2981,17 @@ imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new c
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
 `BROKER_MACHINE_LOGIN_URL` (required; absolute http(s) URL — Dispatch's `/credentials/machine`
 page, the device grant's `verification_uri`, where a person types a machine login's code),
-`BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
-proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
+`BROKER_API_ACCOUNTS` (optional; whitespace-separated `<caller>=<service account>` entries, such
+as `dispatch=system:serviceaccount:example-ns:example-dispatch`: the ServiceAccounts that reach
+the routes `accountAuth` authenticates — the approval routes Dispatch's server calls on a
+person's behalf, and the introspection route a resource server reads an access token back
+through. Each caller presents its own projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified
+against `BROKER_K8S_OIDC_ISSUER` as every other ServiceAccount token is, so this needs that pair;
+a token living longer than an hour from its issue is refused, as a service login's is. The
+caller's name (lowercase letters, digits and hyphens, at most 64) is only what the log calls it
+when it acts. A namespace's `default` account is refused, as is an account given twice, since
+each account names one caller. Keyed by account. Unset, no caller reaches those routes, which is
+how a local run without a cluster leaves them),
 `BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
 which store the secrets live in, deciding the prefix's form and which key variable is read),
 `BROKER_SECRETS_PREFIX` (required; the namespace: a Secrets Manager name prefix ending in `/`, or
@@ -2960,6 +3017,32 @@ once and named exactly, keyed by account in `Config.ServiceLogins`; read by the 
 is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
 it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
+`BROKER_EXCHANGE_K8S_AUDIENCE` (optional; the audience a pod's projected token must carry to be
+exchanged for a Dispatch access token — its own, beside `BROKER_K8S_OIDC_AUDIENCE`, so neither
+token is spendable where the other is; its issuer is the one cluster the broker is told about,
+`BROKER_K8S_OIDC_ISSUER`, which it needs; unset, no pod exchanges),
+`BROKER_EXCHANGE_GITHUB_ISSUER` / `BROKER_EXCHANGE_GITHUB_AUDIENCE` (optional, set together or
+not at all; the issuer of a continuous-integration workflow run's token,
+`https://token.actions.githubusercontent.com` for runs on GitHub's own hosts, and the audience
+the run asks GitHub to mint it for; neither, and no workflow token is accepted at all),
+`BROKER_EXCHANGE_ACCOUNTS` (optional; whitespace-separated
+`<service account>=<project>=<person>[=<session>]` entries, such as
+`system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com`: the token minted for a
+pod of that account may write that one project, acts for that person, and writes under the
+session the entry fixes — an entry that fixes none requires the pod to name its own. The session
+is everything after the third `=`, so it alone may carry one; a namespace's `default` account and
+an account listed twice are refused. Needs `BROKER_K8S_OIDC_ISSUER` and
+`BROKER_EXCHANGE_K8S_AUDIENCE`; unset, no account exchanges),
+`BROKER_EXCHANGE_WORKFLOWS` (optional; whitespace-separated
+`<repository>=<workflow path>=<ref>=<project>=<person>[=<session>]` entries, such as
+`example-org/example-repo=.github/workflows/release.yaml=refs/heads/main=EXAMPLE=ada@example.com`.
+Every field is compared exactly and nothing is wildcarded, so a run of another workflow, or of
+this one on another ref, is not this entry; the session is everything after the fifth `=`, and a
+workflow listed twice is refused. Needs `BROKER_EXCHANGE_GITHUB_ISSUER` and
+`BROKER_EXCHANGE_GITHUB_AUDIENCE`; unset, no workflow exchanges),
+`BROKER_ACCESS_TOKEN_SECONDS` (default 900, min 1, max 3600 — how long an access token the OAuth
+provider issues lasts, a machine login's and an exchanged one's alike: it trades how often every
+caller renews against how long a revoked credential's last token stays spendable),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
@@ -2968,7 +3051,11 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 mints its credential for this long, and each refresh of its device login moves its expiry to this
 long from then; past it the machine logs in again, new key, new code, new human approval),
 `BROKER_SWEEP_SECONDS` (default 5, max 60 —
-`requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
+`requests.Sweeper`'s tick interval, the poller's replacement), `BROKER_DRAIN_SECONDS` (default 5,
+min 0, max 120 — how long a stopping process goes on serving while `/healthz` answers 503; it is
+configuration rather than a constant because the right value is the cluster's EndpointSlice
+propagation time, which lives in the deployment's own repository, and 0 is for a local run), and
+`BROKER_TRUSTED_PROXY_HEADER`
 (optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
 limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
 comma-separated entry, the hop your own reverse proxy appended, never an earlier client-supplied
@@ -2976,12 +3063,14 @@ one. Unset, the default, keys on
 `r.RemoteAddr` directly, correct only when the broker is reached without a proxy in front of it;
 behind one — this broker's documented production shape, the shared internal ALB — `r.RemoteAddr`
 is the proxy's own address for every caller, collapsing each per-address bucket into one shared by
-everyone unless this variable is set). `BROKER_UI_TOKEN` and `BROKER_ENVOY_TOKEN` follow the
+everyone unless this variable is set). `BROKER_ENVOY_TOKEN` follows the
 broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
-environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
+environment — the removed `BROKER_UI_TOKEN[_FILE]` (the approval routes take the calling
+service's own ServiceAccount token, so its account goes in `BROKER_API_ACCOUNTS` instead of a
+bearer shared with Dispatch's server), `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
 checks no WebAuthn origin), `BROKER_DATABASE_PASSWORD` (on RDS the broker signs in by IAM token,
@@ -2997,7 +3086,11 @@ store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or ho
 and a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed elsewhere, and a
 bare key id names no account); with the GCP store, a prefix not of its form (a project id in place
 of the number among them) and a key name outside `global`; the other store's key variable set; exactly one of
-`BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
+`BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; a `BROKER_API_ACCOUNTS`,
+`BROKER_SERVICE_LOGINS` or `BROKER_EXCHANGE_K8S_AUDIENCE` set with no cluster issuer, a
+`BROKER_EXCHANGE_ACCOUNTS` with no `BROKER_EXCHANGE_K8S_AUDIENCE` and a
+`BROKER_EXCHANGE_WORKFLOWS` with no `BROKER_EXCHANGE_GITHUB_ISSUER`, each naming the pair whose
+tokens its callers present; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
 same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
 opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
@@ -3006,6 +3099,33 @@ credentials=aws-sdk|application-default|fake secrets file`; the AWS config is lo
 AWS store or an RDS-form database URL), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
 `BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
+
+`cmd/broker`'s stop is a drain and then a shutdown, and it logs the whole budget at boot, before
+anything else: `broker stop budget drain=<BROKER_DRAIN_SECONDS> shutdown=60s total=<their sum>`
+(`wholeSeconds`, whole seconds because its reader is a deployment's
+`terminationGracePeriodSeconds`). That line and the operate page stand in for the guard this
+repository cannot write, the Deployment being another repository's. On SIGTERM it logs
+`broker draining`, sets the atomic flag `api.Deps.Draining` reports, and goes on serving: `healthz`
+answers `503 SHUTTING_DOWN` before its Postgres ping while every other route answers exactly as
+before, because a pod is removed from its Service's EndpointSlice concurrently with the kubelet
+beginning termination, so new connections still arrive after the signal — which is why
+`GET /healthz` is a readiness probe and must never be a liveness probe, one being enough to have
+the kubelet kill the container mid-drain. It waits `BROKER_DRAIN_SECONDS` (a second signal ends
+the wait at once: that channel is registered unconditionally before any boot work, since
+`signal.NotifyContext`'s context is already cancelled by the first signal, and one watchdog
+goroutine is its only reader, deciding from `serveStarted`'s state — never from a `select` over
+both — whether the second signal is the drain's, handed over on `drainNow`, or an exit that
+skips it. A zero drain takes neither the timer nor that select) and only then closes the listener
+and calls `srv.Shutdown` under `shutdownTimeout`, which is `writeTimeout` (`requestDeadline` 45 s
+plus 15 s) rather than a figure of its own: the longest exchange the server itself allows a
+request past its headers, so one admitted in the drain's last instant still gets its whole handler
+deadline. Go resets the write deadline once the headers are read, so it bounds that exchange
+rather than the whole accepted connection, and `Shutdown` closes an idle connection at once, treating
+one that has gone five seconds without its headers as idle, rather than waiting the budget out
+for it. A deployment's
+`terminationGracePeriodSeconds` therefore has to cover any preStop pause plus the drain plus 60 s,
+65 s at the defaults with no pause, the pause and the drain being paid out of the one grace
+period.
 
 `docker/rds-global-bundle.pem`, the RDS CA bundle an IAM-form URL's `sslrootcert` names (the image
 ships it at `/etc/ssl/rds/global-bundle.pem`), is a dated snapshot of AWS's global bundle. Refresh it
@@ -3036,29 +3156,90 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 29 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 30 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
-wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
-which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
-launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
-proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
-decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
-`?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
+wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`,
+`renewAuth`, `accountAuth`),
+which fixes both the credential `server.authenticate` checks and the caller the handler receives
+(a launcher `enroll.Credential`, an enrollment id, or, for an `accountAuth` route, the name
+`BROKER_API_ACCOUNTS` gives the calling service — which is all that credential says, so every
+such handler takes its subject from the path or body: a decision or a revoke names the deciding
+human in `approver`, and a list the person it lists for in `?approver=`, which Dispatch filled
+from its own session; an empty one is `400 APPROVER_REQUIRED`. Taking the approver on the
+caller's word is what dispatch://INFRA-314 replaces, and each of those rows says so),
 so a handler cannot be wired to the wrong kind of caller. A bad credential is a 401
-(`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); `renewAuth` alone adds
+(`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `accountAuth`, `ACCOUNT_TOKENS_OFF` on a broker
+that trusts no Kubernetes issuer, `ACCOUNT_TOKEN_EXPIRED`, `ACCOUNT_TOKEN_INVALID` and
+`ACCOUNT_TOKEN_TOO_LONG_LIVED` for a token that names no `iat` or whose `exp` lies more than
+`machine.MaxTokenLoginLifetime` plus the proof skew past it, with the one 403,
+`ACCOUNT_NOT_LISTED`, for a sound token of an account `BROKER_API_ACCOUNTS` does not name: the
+credential is good and it is the broker's list that refuses, and no refusal repeats the token.
+`accountCaller` is the check a service's token login makes
+(`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
+`renewAuth` alone adds
 `ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment. A store that
 cannot answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
 unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
-every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, since each reread holds
+every caller at once (the per-address bucket, which is `RereadLimitFor` of the shared bucket this
+process mounts — burst `DefaultRereadBurst` (30) and one back every `2 ×` that bucket's `Every` —
+and `DefaultRereadOverallLimit`, burst 10 and one back every second — under the GCP store
+`GCPRereadOverallLimit`, burst 10 and one back every 4 s, which `cmd/broker` passes as
+`Deps.RereadOverallLimit` — since each reread holds
 the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
 reload; a reread spends a token from either bucket only when both allow it
 (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
-with the refusing limit's `Retry-After`), and the
+with the refusing limit's `Retry-After`: 1 s for the shared bucket, 4 s for the GCP one, and the
+address's own is twice whichever of those the process mounted — 2 s on the default store, 8 s
+under Secret Manager).
+The two shared buckets' **rate** is the fleet's whole store budget divided by
+the replica count **squared**, because one accepted reread costs the store one read
+per pod — the pod that served it and every peer the fan-out tells — so the fleet spends
+replicas × rate × replicas (default: 2 pods × 1 reread/s × 2 store reads = the 4 store reads a
+second one pod alone was allowed, which is the policy writer lock's budget and not a provider's,
+since AWS serves `DescribeSecret` at 40,000 a second; GCP: 2 pods × 0.25 reread/s × 2 store reads
+× 2 metadata reads = the same 120 reads a minute, a fifth of the 600 a minute per project Secret
+Manager serves, the rest being every pod's reload, its miss-path rereads and its releases) — read
+them as that arithmetic, never as the number two, since a
+third replica divides by nine rather than by four. Their **burst** does **not** divide at all: it
+stays at the budget's ten. A burst is a depth and what it must admit is one person's write burst,
+which is a hard floor fixed in the replica count, while what it guards — each pod's own transient,
+its own burst plus every peer's — is a soft cost, latency against the reload and the miss-path
+rereads rather than a quota, spent once and re-bounded immediately by the rate. One side is a hard
+floor and the other is a soft cost, and sizing by the soft one is the error this corrects: `10 / N`
+put the depth at 3 for a three-pod fleet, under the floor its own guard enforces. That floor is
+four, measured against the live row with an overlay changing only this burst (2 FAIL, 3 FAIL,
+4 ok, 5 ok), since `cmd/agent-secrets/secret_e2e_test.go`'s
+`TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce` sends four rereads — delete, restore,
+retag, and the `NO_VALUE_KEY` retag that expects `no-current-value` and meets `RATE_LIMITED`
+instead when the bucket is spent — so ten carries six tokens of headroom and that row is the
+burst's pin. The momentary cost is two quantities, never one: a burst lets the fleet accept
+`replicas × burst` rereads and each costs a store read on every pod, so the fleet's momentary
+store cost is `replicas² × burst` — 40, 90 and 160 store reads at two, three and four pods, twice
+that in metadata reads under Secret Manager (80, 180, 320), which against the cited 600 a minute
+is 8, 18 and 32 seconds of quota, each a transient spent once and re-bounded by the rate, which is
+the half of the pair that protects the provider. That cost grows with the square of the replica
+count while the rate is already divided by it, so there is a count beyond which this shape stops
+making sense; nothing in the code bounds it, because the fleet is two.
+`RereadLimitFor` derives the per-address rate from the shared bucket **this process mounts**,
+rather than from a constant: `cmd/broker` mounts the GCP bucket only under `gcp-secret-manager`,
+so one constant derived from the Google figure tightened every AWS deployment fourfold for a quota
+it never touches. Half that bucket's refill means at least two addresses on either store to hold
+the fleet's budget at zero — the route takes no credential, and
+`AllowBothAt` charges a refusal to neither bucket, so a caller that merely keeps succeeding at the
+shared refill starves the fan-out for everyone. That is a weakening on the default store, which
+used to take eight; the eight was never designed, and buying it back costs every bulk writer there
+a fourfold tightening for the difference between two attackers and eight on a route with no
+credential. The two shared rates are re-derived when the replica
+count changes (at four pods: 4 s and 16 s), and the per-address one follows them without being
+touched. A reread `reread.Listener` drives spends no
+token at all, since the pod that served the original call already paid for it. Every other limiter
+is one process's and unchanged, so a fleet of N pods allows N times each: the per-address reread
+bucket, both `LauncherLimits` buckets, `DefaultTokenLimit` and `DefaultMissRereads`. The
 unauthenticated `POST /v1/oauth/device_authorization` spends its source address's bucket before
 the provider does any work, then verifies the request object locally and spends a per-login
 bucket keyed on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
@@ -3073,6 +3254,62 @@ token signature makes the verifier fetch the issuer's keys again; a verified acc
 an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
 pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
 bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+
+The RFC 8693 token exchange is the token endpoint's other grant (`POST /v1/oauth/token`,
+`oauth.Provider.exchangeGrant`): a caller presents the platform identity it already holds and
+gets back one of the broker's access tokens, which it writes Dispatch with. Three subject tokens
+reach it, each under its own `subject_token_type` (`internal/broker/oauthwire`, the wire contract
+the broker and its callers share): a pod's projected ServiceAccount token
+(`urn:envoy:params:oauth:token-type:kubernetes-service-account`, minted for
+`BROKER_EXCHANGE_K8S_AUDIENCE` and verified against `BROKER_K8S_OIDC_ISSUER`, and it must carry
+the pod it is bound to); a continuous-integration workflow run's GitHub token
+(`urn:envoy:params:oauth:token-type:github-workflow-run`, against
+`BROKER_EXCHANGE_GITHUB_ISSUER`/`_AUDIENCE`, single use, since a run mints a fresh one per
+request, while a pod's standing token is exchanged as often as its role needs); and a dev box
+session's own machine access token (`urn:ietf:params:oauth:token-type:access_token`), which no
+entry lists, because the person is the approver its machine login already records. A subject
+token must be signed with one of its issuer's published asymmetric keys — `none` and a shared
+secret are refused before any key is fetched — and its audience is checked by the broker itself,
+which the library does not do. Every caller presents the same client id,
+`dispatch-token-exchange`, and no client credential at all (`exchangeClientAuth`): shipping a
+secret to every pod is the shared secret this whole slice removes, and keying client
+authentication would lock out the workflow caller, which has no enrolled key. RFC 8693 Section
+2.1 leaves that choice to the deployment; the subject token is the credential the request is
+judged on, and the caller's DPoP proof binds the minted token to its own key. Any other request
+— another client presenting nothing, this client on another grant, this client presenting a
+credential of any kind — goes to the library and is answered as it always was.
+`internal/broker/exchange` is the policy half and nothing else (it verifies no token, reads no
+configuration and takes no clock): handed the verified claims, it answers the session the token
+writes as, the person it acts for, and its project scope — `named`, the one project
+`BROKER_EXCHANGE_ACCOUNTS`/`BROKER_EXCHANGE_WORKFLOWS` fixes, or `person`, every project its
+person may write, which is what a person's own credential gets. Its refusals are one answer an
+operator can act on each: `ErrNoEntry`, `ErrNoPodBinding`, `ErrSessionMismatch`,
+`ErrSessionRequired`, `ErrSessionInvalid` and `ErrClaimMissing`. The whole exchange runs in one
+transaction, because the claim on the session name and the token it is claimed for must land
+together or not at all.
+
+`POST /v1/oauth/introspect` (RFC 7662, `handlers_introspect.go`) is how a resource server reads
+one of those opaque access tokens back: the broker's tokens carry no claims in their own bytes,
+so what a token says lives on its stored session and this route is the only way to read it. It
+is an `accountAuth` route — the caller's own ServiceAccount token, which RFC 7662 Section 2.1
+allows in place of OAuth client authentication, so the provider's `Introspect` answers it
+directly rather than authenticating an OAuth client. The form's `token` parameter names the
+token (missing, `400 TOKEN_REQUIRED`), and the answer is `oauth.Introspection`: `active`, and
+when it is live the `session` the token's writes are recorded as, the `person` it acts for, the
+`project_scope` (`named` or `person`) and the `project` a named one may write, the `scope`, `exp`
+and `client_id`, and `jkt`, the thumbprint of the key the token is DPoP-bound to — which is what
+makes a stolen token useless, since whoever reads this answer checks the caller's proof against
+it. A machine login's own token carries neither project field, no exchange having decided for
+it. A token the broker does not know, one it revoked and one that has expired are all `active`
+false and nothing else (Section 2.2), so an answer discloses nothing to a caller holding a string
+at random. So is any token that is not an access token, a machine login's refresh token among
+them: the answer names no token type, and a refresh token, which outlives the access token issued
+beside it, answered live would pass for a credential no request can present, so `Introspect`
+checks the kind the library reports finding rather than trusting the `access_token` hint it
+passes. Only the broker's own failure to read its storage is a refusal (503), since answering
+that as "not live" would deny a sound token and hide the outage. It spends its source address's
+own bucket (`DefaultIntrospectLimit`) before the provider reads anything, `429 RATE_LIMITED` with
+`Retry-After`, and logs no caller: reading a token back acts on nobody's behalf.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
 token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then
@@ -3410,8 +3647,8 @@ machine login. Dispatch's machine-login page lists and revokes, through these tw
 signed-in person's own machines' logins and every service's.
 
 The operator routes (`api/handlers_operator.go`) are the same lists and revokes for a person at
-their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than the
-UI bearer, and acting for the calling credential's `operator`. `GET /v1/operator/grants` answers
+their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than by
+a listed caller's ServiceAccount token, and acting for the calling credential's `operator`. `GET /v1/operator/grants` answers
 exactly what `GET /v1/grants` answers for that person, and `POST /v1/operator/grants/{id}/revoke`
 revokes as that person through `RevokeByApprover`, with the same refusals and the operator's
 withhold (one function each, `writeApproverGrants` and `revokeGrantAs`). The machine routes cover
@@ -3459,12 +3696,27 @@ or revoke holds are left to the next tick. Each ended enrollment's live grants a
 lookup each rather than a scan of `grants`.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
-./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather
+./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`. The Postgres-backed tests skip, rather
 than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
 CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
-`BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`. Every client-facing
+`BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
+`storetest.URL` stays the helper for everything ordinary: a migrated schema of its own per test,
+cheaper than a database and isolating rows just as well. `storetest.DatabaseURL` hands out a
+fresh, unmigrated database instead, for the two things that are per database rather than per
+schema — a `LISTEN`/`NOTIFY` channel name, so a test on a schema would hear a sibling test's
+notifications on the one channel constant, and the migration advisory lock, which `Migrate` takes
+database-wide. `cmd/broker/multiprocess_test.go` builds under the `multiprocess` tag alone and
+starts real `cmd/broker` binaries against one such database, driving them over real HTTP
+(`brokertest`'s client) and their own logs: one refresh token and one device code each raced
+against both processes, both migrating one empty database at once, a retag one process is told to
+reread being enforced by the other through the fan-out, that fan-out spending no rate-limit token
+on the pod it reaches, and a signalled process failing readiness while it serves a request out
+past the old ten-second shutdown budget. CI's `broker-multiprocess` job runs them —
+`go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of
+its own, since each row waits out tens of seconds and `envoy-go`'s unit step runs under go test's
+default ten-minute package deadline. Every client-facing
 lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services)
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
 `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
@@ -3473,14 +3725,30 @@ rather than a hand-rolled fake standing in for broker behavior — `internal/bro
 (settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI
 binary's own request-building and response-parsing logic, not broker behavior;
 `secret_e2e_test.go` runs the same forms against the real rig.
-`packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
-for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login, as Dispatch does
-when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
-testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
-`envoy-dispatch`, `envoy-broker`, and `agent-secrets`. `dev-broker.sh` prints the exports a second
-shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`, the helper's
-`AGENT_SECRETS_HELPER_SOCK` and `AGENT_SECRETS_OPERATOR_FILE`, both in its workdir, where it writes
-the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.sh` run creates
+`packages/envoy/scripts/dev-broker.sh`, `cmd/agent-secrets-devrelay` (a stand-in for Dispatch's
+relay: it presents a listed caller's ServiceAccount token, read from `--account-token-file` /
+`AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a
+signed-in human clicks Approve) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's
+ServiceAccount token issuer) run a whole local broker stack by hand for manual smoke testing, with
+no cluster and no Docker beyond the Postgres below; none ships in `docker/Dockerfile`, which builds
+exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
+`dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port
+(a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token
+<audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`,
+bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet
+rewrites a projected token; it logs `issuer listening url=<url>` once every file is written. Its
+key lives in its memory alone, so its tokens stop verifying when it stops. `dev-broker.sh` starts
+it with two tokens, `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the
+broker's `BROKER_API_ACCOUNTS` caller `dispatch`) and `exchange-token` for
+`system:serviceaccount:example-ns:example-worker`'s pod at the exchange audience (its
+`BROKER_EXCHANGE_ACCOUNTS` entry, project `EXAMPLE` for `ada@example.com`, no fixed session),
+points the broker's `BROKER_K8S_OIDC_ISSUER` at it, and stops it on exit. It prints the exports a
+second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`,
+`AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE`
+and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes the operator file, and
+`DEV_BROKER_DIR`, the workdir itself). The docs rig (`docs/site/media/broker/rig.sh`) starts the
+same issuer for Dispatch's own token.
+Each `dev-broker.sh` run creates
 and drops its own isolated database, on the shared `dispatch-pg` container, which it boots through
 `dev-postgres.sh` (so a `dispatch-pg` off that script's pinned image is refused before anything is
 created), or, with `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no
@@ -3488,8 +3756,9 @@ Docker), so concurrent instances never see each other's enrollments, requests or
 listens on the
 port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so
 concurrent instances can never collide on a shared port either.
-`dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
-runs in CI's `envoy-go` job.
+`dev-broker.test.sh` proves both kinds of isolation, and that each instance's broker trusts the
+issuer that instance started, lists its dev caller, exports the caller token that issuer wrote and
+stops the issuer on exit, with fakes (no real Postgres or network) and runs in CI's `envoy-go` job.
 
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
 image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,

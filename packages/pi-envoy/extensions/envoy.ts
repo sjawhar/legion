@@ -30,6 +30,7 @@ import {
 import {
   type ActiveDispatchConfig,
   activeDispatchSettings,
+  dispatchSettings,
 } from "@legion/envoy-client/dispatch-config";
 import {
   dispatchFirstSkillFile,
@@ -45,7 +46,8 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
-import { askgateSetting } from "@legion/envoy-client/envoy-config";
+import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
+import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
@@ -142,16 +144,68 @@ const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 
+/** Whether the task that was handed this fence is still the one the queue is waiting on: false
+ *  once that task was abandoned at its deadline. */
+type Fence = () => boolean;
+
+/** The fence a call outside any queue gets: nothing can abandon it. */
+const UNFENCED: Fence = () => true;
+
+/** A queued task abandoned at its deadline: the queue has moved on, and the task's own
+ *  continuation writes nothing when its await finally resolves. */
+class AbandonedTaskError extends Error {}
+
 /**
  * Runs tasks one at a time, in the order they were queued; a task that fails does not stop the
  * ones after it. `settled()` resolves once every task queued so far has finished.
+ *
+ * Each task gets `deadlineMs()` milliseconds, read when that task starts (never cached, so a
+ * setting read later is the one that applies), after which the caller's promise rejects with
+ * `AbandonedTaskError` and the queue starts the next task at once. Without that, one task that
+ * never settles — a listener call whose socket neither answers nor errors — stops every later
+ * task for the life of the process, and the heartbeat's registration renewal, which is the last
+ * step of a pass, is queued behind unrelated work: the session's registry record then lapses
+ * while the pane is still running, and other agents are told there is no live session for it.
+ *
+ * The abandoned task is not cancelled — JavaScript cannot cancel a pending await — it is fenced:
+ * `live()` answers false from the moment the deadline fired, and every continuation that could
+ * write shared state checks it, so a task that wakes up late writes nothing over the state a
+ * newer task has since settled. Its eventual settlement is swallowed here: an unhandled
+ * rejection is fatal to Oh My Pi (postmortem `exitAfterFatal`).
  */
-function serialQueue() {
+function serialQueue(deadlineMs: () => number) {
   let tail: Promise<unknown> = Promise.resolve();
   return {
-    run<T>(task: () => Promise<T>): Promise<T> {
+    run<T>(task: (live: Fence) => Promise<T>): Promise<T> {
       // `tail` never rejects (it is always `next.catch(…)`), so a failed task never stops the next.
-      const next = tail.then(task);
+      const next = tail.then(
+        () =>
+          new Promise<T>((resolve, reject) => {
+            let abandoned = false;
+            const taskDeadlineMs = deadlineMs();
+            const timer = setTimeout(() => {
+              abandoned = true;
+              reject(
+                new AbandonedTaskError(
+                  `a queued task did not settle within ${taskDeadlineMs}ms and was abandoned; the queue moved on`
+                )
+              );
+            }, taskDeadlineMs);
+            // The task runs inside this promise so a synchronous throw is its rejection too.
+            void (async () => task(() => !abandoned))().then(
+              (value) => {
+                // Clear first: a healthy task must not leave a pending timer holding the process
+                // open for a whole deadline.
+                clearTimeout(timer);
+                if (!abandoned) resolve(value);
+              },
+              (error: unknown) => {
+                clearTimeout(timer);
+                if (!abandoned) reject(error);
+              }
+            );
+          })
+      );
       tail = next.catch(() => undefined);
       return next;
     },
@@ -489,19 +543,28 @@ export default function envoyExtension(pi: PiApi): void {
   // interface's `claim` and `subscribe` refuse naming why (`requireInbound`).
   const inbound = envoy.enabled && !("off" in envoy.inbound);
   const startNotice = atStart.notice ?? "";
-  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts. It runs in a session
-  // with Dispatch on at load, unless the session's envoy.json turns it off (`askgate.enabled`,
-  // read once, here). Its one `tool_call` handler registers with this factory's own handlers (after
-  // this entry's `tool_call` handler, below) and waits for the Oh My Pi modules the gate loads. A
-  // switch that cannot be read, and a gate that did not load, are said at every session start; a
-  // gate that did not load refuses each write it would review.
+  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts, in a session that
+  // has Dispatch: its own envoy.json and the variables over it name one. A session or pod with no
+  // Dispatch has no write to review, so the gate binds nothing there and says nothing. A
+  // checkout's file is left out of that test: it can turn off the Dispatch of its own checkout,
+  // but not the gate, which a later shell command can still pass with DISPATCH_URL. The session's
+  // own envoy.json is the gate's only switch. Its one `tool_call` handler registers with this
+  // factory's own handlers (after this entry's handler, below) and waits for the Oh My Pi modules
+  // the gate loads. A switch that cannot be read, and a gate that did not load, are said at every
+  // session start; a gate that did not load refuses each write it would review.
   const askgateNotices: string[] = [];
   let askgateLoad: Promise<void> = Promise.resolve();
-  let askgateOn = false;
-  if (atStart.dispatch.enabled && CONFIG_FILE.path !== null) {
-    const setting = askgateSetting(CONFIG_FILE.path);
+  let askgateFile: string | null = null;
+  const configPath = CONFIG_FILE.path;
+  const ownDispatch = (file: string): boolean => {
+    const own = readEnvoyConfig(file, process.env, { cwd: process.cwd() });
+    return dispatchSettings(process.env, own.kind === "read" ? { ...own, checkout: null } : own)
+      .enabled;
+  };
+  if (configPath !== null && (atStart.dispatch.enabled || ownDispatch(configPath))) {
+    const setting = askgateSetting(configPath);
     if (setting.error !== null) askgateNotices.push(setting.error);
-    askgateOn = setting.enabled;
+    if (setting.enabled) askgateFile = configPath;
   }
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
@@ -522,6 +585,10 @@ export default function envoyExtension(pi: PiApi): void {
     }
     return active;
   };
+  // The deadline each queued task gets, read afresh at every task start. Tolerant of Envoy being
+  // off, unlike `requireEnvoy`, which throws: the queues exist whatever the session resolved, and
+  // a queue cannot answer a throw with a deadline.
+  const passDeadlineMs = (): number => active?.settings.passDeadlineMs ?? MIN_PASS_DEADLINE_MS;
   const subscriptions = new Map<string, Subscription>();
   const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
@@ -574,13 +641,18 @@ export default function envoyExtension(pi: PiApi): void {
   // `<topic>@<session>`: a session event that ends the role at once leaves its hold here, and the
   // next pass hands it back (`settleEndedHolds`).
   const pendingHandBacks = new Map<string, { readonly topic: string; readonly id: string }>();
-  // Per role topic, a hold this process gave up under a session it has left whose hand-back the
-  // listener refused, left for the listener to reap: a claim the listener refuses naming it records
+  // Holds this process gave up whose hand-back the listener refused, whatever session they are
+  // under, keyed by `<topic>@<session>` as `pendingHandBacks` is, so holds of one role under two
+  // sessions are two entries. Any registration this process makes of a hold's session, in a pass
+  // or not and answered or not, first takes it back as a pending hand-back (`registerSession`);
+  // until then it is left for the listener to reap: a claim the listener refuses naming it records
   // no refusal, and a later pass claims again, for as long as the listener's `last_seen` for that
   // session stands still (`lastSeen`, read at each such refusal). Once it moves, another process
-  // registers that session, which is then the newer holder. A pass that registers that session
-  // itself takes the hold back as a pending hand-back, under the host session's own id.
-  const abandonedHolds = new Map<string, { readonly id: string; readonly lastSeen?: number }>();
+  // registers that session, which is then the newer holder.
+  const abandonedHolds = new Map<
+    string,
+    { readonly topic: string; readonly id: string; readonly lastSeen?: number }
+  >();
   // Per session, a role the listener refused to that session's automatic claim because another
   // live session holds it: that holder is the newer one, so no pass claims the role for that
   // session again until a session event lands on it, the model or a plugin claims a role for it,
@@ -600,7 +672,9 @@ export default function envoyExtension(pi: PiApi): void {
   // at a session start, switch or drift heal) runs one at a time and decides inside its turn: it
   // reads the session and the role it leaves when it runs, so its checks and its `released`
   // describe the role it actually ends. A role-bound subscribe waits for the moves in flight.
-  const roleMoves = serialQueue();
+  // A role move that never settles is abandoned at `passDeadlineMs`, so a heartbeat pass's own
+  // move is not held behind it for the life of the process.
+  const roleMoves = serialQueue(passDeadlineMs);
   const isRoleBound = (subject: string): boolean => roleNoticeSubjects.has(subject);
   // The role this session holds, if any.
   const heldRole = (): string | undefined => claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
@@ -833,10 +907,10 @@ export default function envoyExtension(pi: PiApi): void {
     return inbound;
   };
 
-  const ensureConnection = async (): Promise<NatsConnection> => {
+  const ensureConnection = async (live: Fence = UNFENCED): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
     const { natsUrls, natsSeed } = requireInbound();
-    connection = await connect({
+    const dialled = await connect({
       servers: [...natsUrls],
       name: `omp-${sessionID || "unknown"}`,
       ...natsAuthOptions(natsSeed),
@@ -846,6 +920,20 @@ export default function envoyExtension(pi: PiApi): void {
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,
     });
+    // Another pass can establish the connection, and the session's shutdown drop it, while this
+    // dial is in flight, and an abandoned pass must not put its dial in the shared field: cleanup
+    // drains `connection` alone, and `maxReconnectAttempts: -1` keeps anything else alive for the
+    // process's life. The loser of either race is this dial, closed here rather than left dangling.
+    if (!live() || shuttingDown || connection?.isClosed() === false) {
+      await dialled.close().catch(() => {});
+      if (!shuttingDown && connection?.isClosed() === false) return connection;
+      throw new AbandonedTaskError(
+        shuttingDown
+          ? "the session shut down while its NATS dial was in flight; the connection it opened was closed"
+          : "the pass that dialled NATS was abandoned at its deadline while the dial was in flight; the connection it opened was closed"
+      );
+    }
+    connection = dialled;
     return connection;
   };
 
@@ -1262,12 +1350,15 @@ export default function envoyExtension(pi: PiApi): void {
     retry(RESUBSCRIBE_DELAY_MS);
   };
 
-  const subscribe = async (topic: string): Promise<boolean> => {
+  const subscribe = async (topic: string, live: Fence = UNFENCED): Promise<boolean> => {
     const subjects = expandSubscriptionTopics([topic]).filter(
       (candidate) => !subscriptions.has(candidate)
     );
     if (subjects.length === 0) return false;
-    const activeConnection = await ensureConnection();
+    const activeConnection = await ensureConnection(live);
+    // The pass that asked for this topic was abandoned while the connection was made: it opens
+    // nothing, so a subject a newer pass has since settled is not reopened behind its back.
+    if (!live()) return false;
     for (const subject of subjects) {
       const subscription = activeConnection.subscribe(subject);
       // A fresh subscription supersedes any earlier deliberate close of this topic.
@@ -1403,7 +1494,7 @@ export default function envoyExtension(pi: PiApi): void {
     }, RESUBSCRIBE_DELAY_MS);
   };
 
-  const watchAgentStream = async (session: string): Promise<void> => {
+  const watchAgentStream = async (session: string, live: Fence = UNFENCED): Promise<void> => {
     if (agentStreamControlSession === session && agentStreamControl !== undefined) return;
     agentStreamControl?.unsubscribe();
     agentStreamControl = undefined;
@@ -1415,8 +1506,11 @@ export default function envoyExtension(pi: PiApi): void {
       agentStreamCommandsRefreshedOnWatchAt = -Infinity;
     }
     agentStreamControlSession = session;
-    const active = await ensureConnection();
-    const subscription = active.subscribe(agentStreamControlSubject(session));
+    const connected = await ensureConnection(live);
+    // Abandoned while connecting: a newer pass's control subscription is the live one, and
+    // overwriting it here would leave this session deaf to watch and replay.
+    if (!live()) return;
+    const subscription = connected.subscribe(agentStreamControlSubject(session));
     agentStreamControl = subscription;
     void pumpAgentStreamControl(subscription, session);
   };
@@ -1513,37 +1607,54 @@ export default function envoyExtension(pi: PiApi): void {
     return false;
   };
 
+  // When the listener last accepted a registration, and the session it was accepted for. The
+  // heartbeat needs both: a registration accepted for an earlier session says nothing about the
+  // one running now, so it reads as no registration at all. A session that has never had one
+  // accepted reads as older than any age.
+  let registeredFor = "";
+  let registeredAt = -Infinity;
+
   // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
   // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
   // stays out of them. A registration moves the session's `last_seen` at the listener, even one
-  // whose answer is lost, so a hold this process abandoned under that session is its own again
-  // first: a pending hand-back under that session's id, which the next pass settles.
+  // whose answer is lost, so every hold this process abandoned under that session is its own again
+  // first: a pending hand-back under that session's id, under the same key, which the next pass
+  // settles.
+  // Every accepted registration is timed here — the pass's, `envoy_subscribe`'s and the
+  // heartbeat's own direct refresh all feed the one clock.
   const registerSession = () => {
-    for (const [topic, hold] of abandonedHolds) {
+    const registeringFor = sessionID;
+    for (const [key, hold] of abandonedHolds) {
       if (hold.id !== sessionID) continue;
-      abandonedHolds.delete(topic);
-      pendingHandBacks.set(`${topic}@${sessionID}`, { topic, id: sessionID });
+      abandonedHolds.delete(key);
+      pendingHandBacks.set(key, { topic: hold.topic, id: sessionID });
     }
-    return requireEnvoy().client.subscribe({
-      sessionID,
-      directory: sessionDirectory,
-      topics: [
-        ...new Set([
-          agentSubject(sessionID),
-          ...[...subscriptions.keys()].filter((subject) => !isRoleBound(subject)),
-        ]),
-      ],
-      port: 0,
-      // Read at every registration: the heartbeat re-registers, which picks up
-      // titles assigned after session_start and later renames.
-      title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
-      capabilities:
-        sideTurn(activeSessionContext) === undefined
-          ? CAPABILITIES_WITHOUT_BTW
-          : DELIVERY_CAPABILITIES,
-      driving: false,
-      selfSubscribed: true,
-    });
+    return requireEnvoy()
+      .client.subscribe({
+        sessionID,
+        directory: sessionDirectory,
+        topics: [
+          ...new Set([
+            agentSubject(sessionID),
+            ...[...subscriptions.keys()].filter((subject) => !isRoleBound(subject)),
+          ]),
+        ],
+        port: 0,
+        // Read at every registration: the heartbeat re-registers, which picks up
+        // titles assigned after session_start and later renames.
+        title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
+        capabilities:
+          sideTurn(activeSessionContext) === undefined
+            ? CAPABILITIES_WITHOUT_BTW
+            : DELIVERY_CAPABILITIES,
+        driving: false,
+        selfSubscribed: true,
+      })
+      .then((result) => {
+        registeredFor = registeringFor;
+        registeredAt = Date.now();
+        return result;
+      });
   };
 
   /**
@@ -1566,10 +1677,16 @@ export default function envoyExtension(pi: PiApi): void {
     id: string,
     role: string,
     afterOutage: boolean,
-    context: SessionContext
+    context: SessionContext,
+    live: Fence
   ): Promise<boolean> => {
     const topic = ROLE_TOPIC_PREFIX + role;
     const { client } = requireEnvoy();
+    // The two questions every guard below asks, each named once: add an await, then re-read them
+    // before writing shared state. A move abandoned at its deadline, or one whose session moved,
+    // decides nothing; the move that replaced it owns the role from there.
+    const owns = (): boolean => live() && sessionOpen(id);
+    const stillHolds = (): boolean => claimedRoleTopic === topic;
     const holder = await client.getRole(role).then(
       (info) => info.holder,
       (error: unknown) => {
@@ -1580,18 +1697,19 @@ export default function envoyExtension(pi: PiApi): void {
     );
     // A switch during the read ended this role or moved the session: the pass it queued owns the
     // role now, and a regain fired for the old session would re-run its daemon ready call; one
-    // owed for the role is kept for the session that carries it.
-    if (claimedRoleTopic !== topic || !sessionOpen(id)) return false;
+    // owed for the role is kept for the session that carries it. A move abandoned at its deadline
+    // reads the same way: the move that replaced it owns the role, and this one decides nothing.
+    if (!owns() || !stillHolds()) return false;
     let reason: RoleRegainReason;
     if (holder === id) {
       if (!afterOutage) return true;
       reason = "reregistered";
     } else {
       const result = await client.setRole({ sessionID: id, role, soft: true });
-      // The host moved, or a session event ended the role, while the claim was in flight: a hold
-      // it left is this process's own, which the pass the move queued keeps or hands back
-      // (`settleRole`, from the hold or from the hand-back the event left).
-      if (claimedRoleTopic !== topic || !sessionOpen(id)) return false;
+      // The host moved, a session event ended the role, or this move was abandoned, while the
+      // claim was in flight: a hold it left is this process's own, which the pass the move queued
+      // keeps or hands back (`settleRole`, from the hold or from the hand-back the event left).
+      if (!owns() || !stillHolds()) return false;
       if (!result.claimed) {
         endRole();
         refusedRoles.set(id, role);
@@ -1634,6 +1752,10 @@ export default function envoyExtension(pi: PiApi): void {
     // would kill a live session. Warn once per outage; registration
     // self-heals on the next successful tick.
     let heartbeatOutageNotified = false;
+    // Said once per stall episode, by whichever symptom shows first: a tick that had to refresh
+    // the registration itself because a pass was still running, or a pass abandoned at its
+    // deadline. One episode, one notification and one log line; cleared when a pass next settles.
+    let stallNotified = false;
     // Set only by a failed registration, never by a failed role check afterwards: the listener
     // answers "no holder" for a session whose registry entry lapsed, not for a role read that
     // failed, and only the former warrants a `"reregistered"` regain on the next healthy tick.
@@ -1641,22 +1763,65 @@ export default function envoyExtension(pi: PiApi): void {
     // whose role read errors, or whose pass the host overtook, still owes the regain.
     let registrationFailed = false;
     let healing = false;
+    // The pane hears about a stall as it hears about a registry outage, and for the same reason:
+    // the session is at risk of being reaped by the listener while the pane runs on.
+    const noteStall = (detail: string): void => {
+      if (stallNotified) return;
+      stallNotified = true;
+      logger.warn("envoy: reconcile pass stalled; registration refreshed on its own", {
+        detail,
+        sessionID: context.sessionManager.getSessionId(),
+      });
+      context.ui.notify(
+        `envoy: a reconcile pass has stalled (${detail}); the session registration is being refreshed on its own, and recovers once the pass settles`,
+        "warning"
+      );
+    };
     context.setInterval(() => {
       // Sessions can be created lazily after session_start (a fresh TUI has no session yet); until
       // the host mints an id there is nothing to register.
       if (context.sessionManager.getSessionId() === "") return;
-      if (healing) return;
+      if (healing) {
+        // A pass that has not settled holds the queue, and with it the registration refresh that
+        // is its last step. The age is measured from the last registration accepted for the
+        // session running now: one accepted for an earlier session, which is what a `/new` during
+        // a wedged pass leaves behind, counts as none at all, or the new session would sit out of
+        // the listener's sessions for a whole interval while its pane runs. A session with no
+        // accepted registration of its own counts as older than any age. A pass still running a
+        // whole refresh interval later has already spent 90 s of the record's 300 s lifetime, so
+        // the refresh goes out on its own, outside the queues, exactly as `envoy_subscribe` posts
+        // it. A failure is ignored: the next tick tries again.
+        const refreshMs = requireEnvoy().settings.heartbeatMs;
+        if (registeredFor === sessionID && Date.now() - registeredAt < refreshMs) return;
+        noteStall(
+          "a pass has not settled a whole refresh interval after the last accepted registration"
+        );
+        void registerSession().catch(() => undefined);
+        return;
+      }
       healing = true;
       const afterOutage = registrationFailed;
       const settled = (decided: boolean) => {
         if (decided) registrationFailed = false;
         heartbeatOutageNotified = false;
+        stallNotified = false;
       };
       void reconcile(context, { heartbeat: true, afterOutage })
         .then(settled, (error: unknown) => {
           // NATS is down but the registration and the role went through: the session's start or
           // its session event warned of the outage, and every tick tries the agent subject again.
           if (error instanceof InboundError) return settled(error.decided);
+          // The pass, or the role move inside it, was abandoned at its deadline. That is an
+          // outage like a failed registration: the listener reaps a role claim whose holder left
+          // the session registry after one record lifetime, so the next healthy tick re-asserts
+          // the role and fires the regain hook (`"reregistered"`), which makes a Legion worker
+          // known to its daemon again. One notification per episode, so it stops here rather
+          // than becoming a second `registry heartbeat failed` line.
+          if (error instanceof AbandonedTaskError) {
+            registrationFailed = true;
+            noteStall(messageFor(error));
+            return;
+          }
           if (error instanceof RegistrationError) registrationFailed = true;
           throw error instanceof RegistrationError ? error.cause : error;
         })
@@ -1675,7 +1840,7 @@ export default function envoyExtension(pi: PiApi): void {
     heartbeatRegistered = true;
   };
 
-  const recoverRegisteredInterests = async (): Promise<void> => {
+  const recoverRegisteredInterests = async (live: Fence): Promise<void> => {
     // Registered interests deliver only through this session's own NATS
     // subscriptions — the listener skips push delivery for self-subscribed
     // sessions — so a resumed process must rebuild them or stay deaf to
@@ -1690,7 +1855,7 @@ export default function envoyExtension(pi: PiApi): void {
     // channels through the subscriptions its role owns (pi-legion's controller-session.ts).
     const { client } = requireEnvoy();
     const registry = await client.getInterest(sessionID).catch(() => undefined);
-    if (registry === undefined) return;
+    if (registry === undefined || !live()) return;
     const retired =
       publishedInterface?.roleClaim.slackRoleOwned === true
         ? registry.topics.filter((topic) => slackTopicChannel(topic) !== undefined)
@@ -1704,10 +1869,13 @@ export default function envoyExtension(pi: PiApi): void {
         });
       });
     }
+    // Abandoned during the unsubscribe: a newer pass reads the registry itself, and this one
+    // registers nothing further.
+    if (!live()) return;
     for (const topic of registry.topics) {
       if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
       if (retired.includes(topic)) continue;
-      await subscribe(topic);
+      await subscribe(topic, live);
     }
   };
 
@@ -1716,26 +1884,39 @@ export default function envoyExtension(pi: PiApi): void {
   // whether the claim waits on it. The first read is recorded on the hold; one that differs from
   // it means another process registers that session (this process's own registration of it takes
   // the hold back first, in `registerSession`), which is the newer holder from then on, and the hold
-  // is dropped. A read that fails, or finds another holder, leaves the next pass to decide.
+  // is dropped. A read that fails, or finds another holder, leaves the next pass to decide, and so
+  // does one the caller's deadline outran: every caller runs inside a queued task, so the fence is
+  // a parameter with no default.
   const observeAbandonedHold = async (
     topic: string,
     role: string,
-    holder: string | undefined
+    holder: string | undefined,
+    live: Fence
   ): Promise<boolean> => {
-    const abandoned = abandonedHolds.get(topic);
-    if (abandoned === undefined || abandoned.id !== holder) return false;
+    const key = `${topic}@${holder}`;
+    const abandoned = abandonedHolds.get(key);
+    if (abandoned === undefined) return false;
     const seen = await requireEnvoy()
       .client.getRole(role)
       .then(
         (info) => (info.holder === holder ? info.last_seen : undefined),
         () => undefined
       );
-    if (seen === undefined) return true;
+    // Add an await, then re-read the fence before writing shared state. A read this move's
+    // deadline outran is a read that failed: it records nothing on the hold, and the move that
+    // replaced it observes it afresh. Both answer true, the answer that records no refusal —
+    // a refusal written in error outlives every later pass (`refusedRoles`), while a refusal left
+    // unwritten costs one more claim.
+    if (!live() || seen === undefined) return true;
+    // The bound on reading another process's refusal as this process's own stale hold: the
+    // `last_seen` recorded here is the holder's, and a later read that differs drops the hold, so
+    // the misreading costs at most one extra soft claim and ends itself — if another process is
+    // running that session, its registrations move `last_seen`.
     if (abandoned.lastSeen !== undefined && seen !== abandoned.lastSeen) {
-      abandonedHolds.delete(topic);
+      abandonedHolds.delete(key);
       return false;
     }
-    abandonedHolds.set(topic, { id: abandoned.id, lastSeen: seen });
+    abandonedHolds.set(key, { topic, id: abandoned.id, lastSeen: seen });
     return true;
   };
 
@@ -1750,10 +1931,15 @@ export default function envoyExtension(pi: PiApi): void {
    *
    * Refused, with nothing sent, when another session is open by the time the claim runs: every
    * caller decides its claim for one session, and a switch can land while it reads first.
+   *
+   * A move abandoned at its queue's deadline throws `AbandonedTaskError` instead of answering
+   * false: false here means "the listener refused the claim", which makes a caller end the role,
+   * and an abandoned claim decided nothing of the sort.
    */
   const setEnvoyRole = async (
     role: string,
     forSession: string,
+    live: Fence,
     options: { soft?: boolean; previousSessionID?: string } = {}
   ): Promise<boolean> => {
     if (!sessionOpen(forSession)) {
@@ -1772,12 +1958,24 @@ export default function envoyExtension(pi: PiApi): void {
       soft: options.soft,
       previousSessionID: options.previousSessionID,
     });
+    if (!live()) {
+      // The listener may have granted the claim while this move was abandoned. Nothing of it goes
+      // in the transcript — the move that replaced this one owns the role from here — but the hold
+      // is real at the listener, so leave it pending for the next pass to hand back. The role this
+      // process holds is untouched: this claim is not adopted, so no previous topic ends here.
+      if (result.claimed) pendingHandBacks.set(`${topic}@${id}`, { topic, id });
+      throw new AbandonedTaskError(
+        `the role move that claimed ${role} for session ${id} was abandoned at its deadline while the claim was in flight; ${result.claimed ? "the hold the listener granted is left for the next pass to hand back" : "nothing was claimed"}`
+      );
+    }
     if (result.claimed) {
       refusedRoles.delete(id);
       holdUnconfirmed = false;
       // The listener names this claim's session for the role now, so no hold of it this process
       // gave up is left to hand back or wait on (one under this same id would end the new hold).
-      abandonedHolds.delete(topic);
+      for (const [key, hold] of abandonedHolds) {
+        if (hold.topic === topic) abandonedHolds.delete(key);
+      }
       for (const [key, hold] of pendingHandBacks) {
         if (hold.topic === topic) pendingHandBacks.delete(key);
       }
@@ -1805,12 +2003,24 @@ export default function envoyExtension(pi: PiApi): void {
       // Only a soft claim is refused. A holder that is this process's own abandoned hold is waited
       // out, since the listener reaps it; any other is the newer holder, and the role stays its
       // for this session.
-      const waitingOnReap = await observeAbandonedHold(topic, role, result.holder);
-      if (!waitingOnReap) refusedRoles.set(id, role);
+      const waitingOnReap = await observeAbandonedHold(topic, role, result.holder, live);
+      // Add an await, then re-read both before writing shared state: this move was abandoned at
+      // its deadline, or its session moved, while the hold was read, and the claim that replaced
+      // it may already have cleared the refusal it is about to record. Nothing is written then,
+      // and the line says so: one that reads "not reclaimed" when no refusal was recorded sends
+      // the next reader after a `refusedRoles` entry that does not exist.
+      const notRecorded = !live()
+        ? "the move was abandoned at its deadline before the refusal was recorded"
+        : sessionOpen(id)
+          ? undefined
+          : `the session moved to ${hostSessionID()} before the refusal was recorded`;
+      if (notRecorded === undefined && !waitingOnReap) refusedRoles.set(id, role);
       logger.warn(
-        waitingOnReap
-          ? "envoy: role still held by a session this process left; claiming again once the listener reaps it"
-          : "envoy: role held by another live session; not reclaimed",
+        notRecorded !== undefined
+          ? `envoy: role held by another live session; ${notRecorded}`
+          : waitingOnReap
+            ? "envoy: role still held by a session this process left; claiming again once the listener reaps it"
+            : "envoy: role held by another live session; not reclaimed",
         { role, sessionID: id, holder: result.holder }
       );
       return false;
@@ -1966,7 +2176,9 @@ export default function envoyExtension(pi: PiApi): void {
     readonly afterOutage?: boolean;
   }
 
-  const passes = serialQueue();
+  // A pass that never settles is abandoned at `passDeadlineMs` so the ticks behind it — the
+  // registration refresh above all — are not stopped for the life of the process.
+  const passes = serialQueue(passDeadlineMs);
 
   // Converges this process to the host's session as it is now: that session's agent subject open
   // and registered and Dispatch bound to it, every other agent subject this process opened
@@ -1975,7 +2187,7 @@ export default function envoyExtension(pi: PiApi): void {
   // the host moved after any await stops, and the pass the move queues converges. Answers whether
   // it decided the role.
   const reconcile = (context: SessionContext, cause: PassCause = {}): Promise<boolean> =>
-    passes.run(() => reconcileNow(context, cause));
+    passes.run((live) => reconcileNow(context, cause, live));
 
   // The sessions whose agent subject this process may have open: a pass closes every one but the
   // host session's, those an earlier pass opened before the host moved under it included.
@@ -1983,8 +2195,16 @@ export default function envoyExtension(pi: PiApi): void {
   // The session whose agent subject, stream watch and registered interests a pass opened in full.
   let inboundOpenFor = "";
 
-  const reconcileNow = async (context: SessionContext, cause: PassCause): Promise<boolean> => {
+  const reconcileNow = async (
+    context: SessionContext,
+    cause: PassCause,
+    live: Fence
+  ): Promise<boolean> => {
     const host = context.sessionManager.getSessionId();
+    // The question every guard below asks, named once: add an await, then re-read `owns` before
+    // writing shared state. A pass abandoned at its deadline, or one the host moved out from
+    // under, records nothing of what it opened; the pass the move queues converges from there.
+    const owns = (): boolean => live() && sessionOpen(host);
     noteMove(host);
     if (sessionID !== host) restoreLocalSessionState(context);
     if (establishedSession !== host) {
@@ -2018,20 +2238,26 @@ export default function envoyExtension(pi: PiApi): void {
     if (inbound && inboundOpenFor !== host) {
       try {
         agentSessions.add(host);
-        await ensureConnection();
-        await subscribe(agentSubject(host));
+        await ensureConnection(live);
+        // Each await is a place the host can move and a place this pass can be abandoned at its
+        // deadline: a fenced pass opened nothing, so it records nothing as open either.
+        if (!owns()) return false;
+        await subscribe(agentSubject(host), live);
+        if (!owns()) return false;
         // A viewer's replay request and its watch pings reach the session here. Opening it costs
         // one core subscription and publishes nothing: a session nobody opens stays silent.
-        await watchAgentStream(host);
+        await watchAgentStream(host, live);
+        if (!owns()) return false;
         if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
-          await recoverRegisteredInterests();
+          await recoverRegisteredInterests(live);
+          if (!owns()) return false;
         }
         inboundOpenFor = host;
       } catch (error) {
         inboundFailure = error;
       }
     }
-    if (hostSessionID() !== host) return false;
+    if (!owns()) return false;
     // Every session subscribes to its own agent subject, so every session is registered;
     // envoy_send treats an unregistered id as dead. The listener rejects a claim from a session it
     // does not currently know, so this comes before the role.
@@ -2039,13 +2265,17 @@ export default function envoyExtension(pi: PiApi): void {
       () => undefined,
       (error: unknown) => ({ error })
     );
+    if (!owns()) return false;
     if (registration === undefined) {
       establishedSession = host;
       ensureHeartbeat(context);
     }
-    const decided = await roleMoves.run(() =>
-      settleRole(context, host, cause, registration === undefined)
+    // The nested move has its own queue and its own deadline: it is fenced by `roleMoves`, not
+    // by this pass.
+    const decided = await roleMoves.run((moveLive) =>
+      settleRole(context, host, cause, registration === undefined, moveLive)
     );
+    if (!owns()) return false;
     if (registration !== undefined) {
       throw new RegistrationError(messageFor(registration.error), { cause: registration.error });
     }
@@ -2062,22 +2292,39 @@ export default function envoyExtension(pi: PiApi): void {
   let lastHeard = "";
 
   // Settles the holds session events gave up (`pendingHandBacks`), once the pass has handed back
-  // any other role it held. One of the role the host session wants (a resume Oh My Pi rolled back
-  // to the session that held it) is this process's hold again, unconfirmed until a soft claim
-  // naming it checks it at the listener (`holdUnconfirmed`), and kept, carried or handed back as
-  // any hold from then on, so no hand-back opens the role to another claim on the way; a claim of a
-  // role drops every hand-back of it left pending, so there is at most one.
-  // Any other is handed back. One the listener does not take back stays pending while it is under
-  // the host session's own id (a tree navigation), which this process heartbeats and no other can
-  // rightly hold; under a session it has left, it is abandoned to the listener's reaping
-  // (`abandonedHolds`), since nothing heartbeats that session any more and a later try could take
-  // a hold another process made under that id. Answers whether a hold came back.
-  const settleEndedHolds = async (host: string, wanted: string | undefined): Promise<boolean> => {
+  // any other role it held. A hold is two facts, its role topic and the session id it was
+  // registered under, and nothing else decides what becomes of it.
+  // One of the role the host session wants is this process's hold again only while this process
+  // registers the session it is under, read as it is adopted (`sessionOpen`): a resume Oh My Pi
+  // rolled back to the session that held it. It is unconfirmed until a soft claim naming it checks
+  // it at the listener (`holdUnconfirmed`), and kept, carried or handed back as any hold from then
+  // on, so no hand-back opens the role to another claim on the way; holds are keyed by role and
+  // session, so at most one is adopted. One under a session this process has left is never
+  // adopted: another process may run that session now, and a claim naming it as this pane's
+  // predecessor would take the role from that live process.
+  // Every hold not adopted is handed back. One the listener does not take back is abandoned
+  // (`abandonedHolds`), whatever session it is under: any registration this process makes of that
+  // session, in a pass or not and answered or not, first makes it a pending hand-back again
+  // (`registerSession`), for the pass after to hand back. Until then it waits for the listener's
+  // reaping and is never tried again: under a session this process has left, nothing heartbeats
+  // that session any more, and a later try could take a hold another process made under that id.
+  // Answers whether a hold came back.
+  const settleEndedHolds = async (wanted: string | undefined, live: Fence): Promise<boolean> => {
     let restored = false;
     const failed: { readonly key: string; readonly topic: string; readonly id: string }[] = [];
     for (const [key, hold] of pendingHandBacks) {
+      // Abandoned at the deadline, mid-hand-back: the move that replaced this one settles what is
+      // still pending, so stop before the delete — a `Map` iterator visits entries inserted after
+      // it was created, and an entry a session event added behind this loop belongs to that move,
+      // not this one. The holds whose hand-back already failed are abandoned below: they are in
+      // neither map while this runs, and dropping them would leak them with nothing to settle them.
+      if (!live()) break;
       pendingHandBacks.delete(key);
-      if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {
+      if (
+        wanted !== undefined &&
+        hold.topic === ROLE_TOPIC_PREFIX + wanted &&
+        sessionOpen(hold.id)
+      ) {
         claimedRoleTopic = hold.topic;
         claimedRoleSessionID = hold.id;
         holdUnconfirmed = true;
@@ -2095,10 +2342,10 @@ export default function envoyExtension(pi: PiApi): void {
           });
         });
     }
-    for (const { key, topic, id } of failed) {
-      if (id === host) pendingHandBacks.set(key, { topic, id });
-      else abandonedHolds.set(topic, { id });
-    }
+    for (const { key, topic, id } of failed) abandonedHolds.set(key, { topic, id });
+    // Abandoned during the last hand-back, or at the break above: the restore this pass made is
+    // the replacing move's to decide, so answer that no hold came back.
+    if (!live()) return false;
     return restored;
   };
 
@@ -2111,15 +2358,21 @@ export default function envoyExtension(pi: PiApi): void {
     context: SessionContext,
     host: string,
     cause: PassCause,
-    registered: boolean
+    registered: boolean,
+    live: Fence
   ): Promise<boolean> => {
-    if (!sessionOpen(host)) return false;
+    // The question every guard below asks, named once: add an await, then re-read `owns` before
+    // writing shared state. A move abandoned at its deadline, or one whose host moved, decides
+    // nothing, and the move the next pass queues converges from the state this one left.
+    const owns = (): boolean => live() && sessionOpen(host);
+    if (!owns()) return false;
     const branch = context.sessionManager.getBranch?.() ?? [];
     // The rows are read until a pass has decided for this session, except for a brand-new first
     // session, which has none.
     const readRows = roleSettledFor !== host && (branch.length > 0 || roleSettledFor !== "");
     const desired = await desiredRole(host, branch, readRows);
-    if (!sessionOpen(host)) return false;
+    // A move abandoned at its deadline decided nothing, exactly as one the host overtook.
+    if (!owns()) return false;
     const unheard = lastHeard !== host;
     const held = heldRole();
     if (held !== undefined && held !== desired) {
@@ -2127,12 +2380,12 @@ export default function envoyExtension(pi: PiApi): void {
       // A role end after a move no session event announced is one no plugin heard: say so, and
       // who claims it again.
       if (ended !== undefined && unheard) warnRoleEnded(context, host, ended);
-      if (!sessionOpen(host)) return false;
+      if (!owns()) return false;
     }
-    if ((await settleEndedHolds(host, desired)) && unheard && desired !== undefined) {
+    if ((await settleEndedHolds(desired, live)) && unheard && desired !== undefined) {
       warnNoticesClosed(context, desired);
     }
-    if (!sessionOpen(host)) return false;
+    if (!owns()) return false;
     if (!registered) return false;
     if (desired === undefined) {
       roleSettledFor = host;
@@ -2141,7 +2394,7 @@ export default function envoyExtension(pi: PiApi): void {
     if (!holdUnconfirmed && heldRole() === desired && claimedRoleSessionID === host) {
       roleSettledFor = host;
       return cause.heartbeat === true
-        ? reassertRoleNow(host, desired, cause.afterOutage === true, context)
+        ? reassertRoleNow(host, desired, cause.afterOutage === true, context, live)
         : true;
     }
     // A role a session holds by its records, with inbound messages off, is never claimed: every
@@ -2166,22 +2419,27 @@ export default function envoyExtension(pi: PiApi): void {
           () => undefined
         );
       if (holder !== undefined && holder !== host && lineage.includes(holder)) supersedes = holder;
-      if (!sessionOpen(host)) return false;
+      if (!owns()) return false;
     }
     try {
-      const claimed = await setEnvoyRole(desired, host, {
+      const claimed = await setEnvoyRole(desired, host, live, {
         soft: true,
         previousSessionID: supersedes,
       });
       if (claimed && unheard) warnNoticesClosed(context, desired);
     } catch (error) {
-      if (error instanceof SessionLeftError) return false;
+      // Both say the same thing: this move decided nothing, and the move or pass that replaced
+      // it does. Neither is a failure to report.
+      if (error instanceof SessionLeftError || error instanceof AbandonedTaskError) return false;
       logger.warn("envoy: role reclaim failed", {
         role: desired,
         sessionID: host,
         error: messageFor(error),
       });
     }
+    // The claim, or the unsubscribe of the role it moved off, can outrun this move's deadline:
+    // a move that no longer decides for `host` records nothing of its pass either.
+    if (!owns()) return false;
     roleSettledFor = host;
     return true;
   };
@@ -2244,7 +2502,7 @@ export default function envoyExtension(pi: PiApi): void {
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
     await registerSession();
-    await roleMoves.run(() => setEnvoyRole(role, targetSessionID));
+    await roleMoves.run((live) => setEnvoyRole(role, targetSessionID, live));
   };
 
   const subscribeNotice: LegionNoticeSubscription = async (
@@ -2659,7 +2917,7 @@ export default function envoyExtension(pi: PiApi): void {
       legionManaged(id) ||
       // The host's live id, never the module's `sessionID`: a fresh TUI mints its id after
       // `session_start`, so the two disagree until the registration heartbeat heals the drift
-      // (up to `ENVOY_HEARTBEAT_MS`, 120 s by default) and a brand-new terminal went unchecked
+      // (up to `ENVOY_HEARTBEAT_MS`, 90 s by default) and a brand-new terminal went unchecked
       // for that whole window. The period already carries the id that armed it, and a session
       // change resets the period to 0 and bumps the generation, so this is the discriminator —
       // `before_agent_start` and `tool_result` read the live id for the same reason. A `task`
@@ -2800,16 +3058,30 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // AskGate's `tool_call` handler, registered now, in the factory, so it is there for the first
-  // call; it waits for the modules the gate loads (`registerAskGate`).
-  if (askgateOn && CONFIG_FILE.path !== null) {
-    const configFile = CONFIG_FILE.path;
-    askgateLoad = registerAskGate(pi, { configFile: CONFIG_FILE, logger }).catch(
-      (error: unknown) => {
-        const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
-        logger.warn(notice);
-        askgateNotices.push(notice);
-      }
-    );
+  // call; it waits for the modules the gate loads (`registerAskGate`). Only a session with
+  // Dispatch and the switch on has one (`askgateFile`, above).
+  if (askgateFile !== null) {
+    const configFile = askgateFile;
+    // What the gate logs at bind is also a notice at session start: the one it logs there says
+    // the review deadline is under 30 s, which at the host's default handler limit is every
+    // profile that sets nothing, and a review that times out lets the write post. A warning a
+    // gated call raises later goes to the plain log alone (`runtimeLogger`): it is about that
+    // session's calls, and a notice here would show again at every later session start.
+    const gateLogger = {
+      warn: (message: string) => {
+        logger.warn(message);
+        askgateNotices.push(message);
+      },
+    };
+    askgateLoad = registerAskGate(pi, {
+      configFile: { path: configFile, error: null },
+      logger: gateLogger,
+      runtimeLogger: logger,
+    }).catch((error: unknown) => {
+      const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+      logger.warn(notice);
+      askgateNotices.push(notice);
+    });
   }
 
   pi.on("tool_result", async (event, context) => {
@@ -2996,7 +3268,7 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
           // Read and checked inside the move, so a move landing first is the role this one leaves.
-          const released = await roleMoves.run(async () => {
+          const released = await roleMoves.run(async (live) => {
             const held = heldRole();
             const moving = held !== undefined && held !== role;
             // Moving off a role closes every subscription another plugin opened `whileHolding`
@@ -3007,7 +3279,7 @@ export default function envoyExtension(pi: PiApi): void {
                 `This session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
               );
             }
-            await setEnvoyRole(role, sessionID);
+            await setEnvoyRole(role, sessionID, live);
             return moving ? held : undefined;
           });
           return toolSuccess(
