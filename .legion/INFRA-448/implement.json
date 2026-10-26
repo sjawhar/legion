@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T20:55:00Z",
+  "completed": "2026-10-26T22:30:00Z",
   "proof": [
     {
       "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening works",
@@ -83,6 +83,14 @@
       "observed": "all pass under -race three times, and the whole listener package passes; a connection event to a closed connection during the open gives 503, and the next healthy connection serves with a store opened on it and PUT 200; close returns at once with an open held, and no open runs after it",
       "headSha": "05b29be5dd913cc247b7632092bf74775a91c456",
       "negativeControl": "the same two tests against legion_agents.go at 7912696a: the first answers GET 200 on the dead connection; close takes 10.000 s with an open held"
+    },
+    {
+      "criterion": "Forward merge after INFRA-440: on a closed issue, comments, messages, Reply, Retry and margin comments still post with INFRA-440's AgentName code in place",
+      "surface": "Dispatch browser suite, chromium and iphone, at the merged head",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/mention-composer.e2e.ts e2e/keyboard-agents-picker.e2e.ts e2e/phone-conversation.e2e.ts e2e/margin-composer-hold.e2e.ts e2e/conversation.e2e.ts",
+      "observed": "166 passed, 6 skipped; conversation, agents, doc and margin unit tests 535 pass, 0 fail; tsc and biome clean",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "main's ConversationTab.tsx and AgentsPage.tsx unchanged (isClosed gating kept) are what the closed-issue-posting spec fails against: at main 135d22e0 and bc307fb5 it failed 10 of 10 on missing Comment composer, Reply and Retry"
     }
   ],
   "filesChanged": [
@@ -115,7 +123,8 @@
     "Review round 1 (review at 034ed9d8): all nine threads fixed in 3d1609ce71f6 and a5770f5d20f2 and resolved one by one; then a third forward merge of main because GitHub reported the pull request CONFLICTING: 3d1609ce \u2192 adb397f9, fingerprint unchanged d4b3f860\u2026 (https://github.com/sjawhar/legion/pull/2234#issuecomment-6419935961); the one conflict was an envoy CHANGELOG entry. The access-mode change also touched VersionView.tsx (readOnly \u2192 access: \"read\"). The stale LEGION-781 testing note was corrected; dated docs/superpowers plans keep requireOpenIssue as history.",
     "Test round 2: fixed the tester's two red tests (unchanged) in 659a3263: proof-editor's touch focus loss hides the bar only on an editable view, and ProofDocument re-admits its document connection (connection.readmit closes the socket; the provider reconnects) when the issue reopens. Then a fourth forward merge of main because GitHub reported the pull request CONFLICTING: 659a3263 \u2192 27a6de48, fingerprint changed by one line (route-count pin 138 \u2192 139, main added a route) (https://github.com/sjawhar/legion/pull/2234#issuecomment-6422391370). The tester's observation that the Comment chord ($mod+Alt+m) runs only on an editable view stands: a read-only editor cannot hold keyboard focus, and the bar's Comment button is the closed document's path.",
     "Review round 2 (review.json at e5363042): the three findings fixed in c8b202a69ac5 (registry open retried in the background with backoff and the reviewer's wording; connection.ts re-runs pending-sync's restore when a later admission turns read-write, and pending-sync's restore skips this page's own unacknowledged rows so a second restore cannot drop them; Get puts the session-key entry into the role listing before succession). Two forward merges of main because GitHub reported the pull request CONFLICTING and main moved during the round: 27a6de48 \u2192 a97f0749 fingerprint unchanged; c8b202a6 \u2192 7912696a fingerprint changed only in the regenerated claude-envoy dist bundles (https://github.com/sjawhar/legion/pull/2234#issuecomment-6425388970). The workspace and scratch volume were recreated before this round; the Postgres and browser harness was rebuilt under /legion/scratch/tmp/infra448 (Postgres 17.11 + pgvector from Debian .debs, ICU en-US collation, port 55448; e2e ports 18448, 19448-19451). The two cleanups the review named are on the PR's Fast-follow line.",
-    "Review round 3 (review at aceea5e1, two inline threads): both fixed in 05b29be5dd91 with a test each and resolved. The failure-once log flag became the kind of failure (open or move), so a failed move logs once even after a failed open. The nats async error wording is on the PR's Fast-follow line, as the architect directed; no merge of main (GitHub reported MERGEABLE)."
+    "Review round 3 (review at aceea5e1, two inline threads): both fixed in 05b29be5dd91 with a test each and resolved. The failure-once log flag became the kind of failure (open or move), so a failed move logs once even after a failed open. The nats async error wording is on the PR's Fast-follow line, as the architect directed; no merge of main (GitHub reported MERGEABLE).",
+    "Forward merge after INFRA-440 (#2237) merged: 05b29be5 \u2192 51c56482, fingerprint changed only in ConversationTab.tsx, its test and the regenerated claude-envoy dist (https://github.com/sjawhar/legion/pull/2234#issuecomment-6428218975). Resolution as sent to INFRA-278's architect: INFRA-440's code kept, only the isClosed prop and its checks removed; nothing else changed."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
