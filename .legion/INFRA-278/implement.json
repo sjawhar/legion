@@ -2,60 +2,47 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T06:40:10Z",
-  "round": 3,
-  "answersReview": "review round 2 at code head 5ab9e45980a5 (threads PRRT_kwDORFy7ds6wJl9x, Jl9z, Jl91, Jl94, Jl96, each replied to and resolved)",
+  "completed": "2026-10-26T20:34:08Z",
+  "generation": 3,
+  "round": 1,
+  "plan": "plan.json generation 3 (forward merge of main, reviewer Minors 1 and 2, re-proof); the architect chose option A, merging now (Envoy 19:01Z)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
+  "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
+  "mergedMain": "d1f4b8a64a964d962d1a2991fd6b926a39cd0756 (M), merge commit 9a8af2f1743e4823a91b86c714c4974727dad932; fingerprint e40fb5bd… → ed31f5f8…, changed (PR comment 6426673319); main then moved to ffe540b4, and a trial merge of it was clean, so there was no second merge; GitHub reports MERGEABLE at 48d9dd1c",
   "proof": [
     {
-      "criterion": "Round-1 finding 3 in the browser: an issue.closed that carries a route change moves the open card's route row without a reload",
-      "surface": "Dispatch browser suite: real Go server built from the checkout, production SPA bundle, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "7 passed, including 'a route change that closes the issue moves the open card's route row without a reload' (one PATCH sets session:e2e-reach-routed-next and done, emitting issue.closed only; the row shows 'Routed next (e2e)' via route, Reaches 2); --repeat-each 3 on the two new scenarios -> 6 passed",
-      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
-      "negativeControl": "the same scenario on a checkout of 15e414ed9b6b with this head's test file -> failed, Expected substring 'Routed next (e2e)' not found; at the head, removing issue.closed from askThreadsIssue fails it"
-    },
-    {
-      "criterion": "Round-1 finding 3 in the browser: a claim landing while the Inbox fetch is in flight reaches the card that mounts from the stale body",
-      "surface": "same browser suite (page.route holds the Inbox; the body fetched before the claim is fulfilled after it)",
-      "command": "same run",
-      "observed": "'a claim that lands while the Inbox is loading reaches the card that mounts from the earlier list' passed: the card shows Reaches 2 with 'Claimant (e2e)' via claim",
-      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
-      "negativeControl": "on 15e414ed9b6b -> failed, Expected 'Reaches 2' Received 'Reaches 1'; at the head, a no-op markPendingAskThreadsOnIssue fails it the same way"
-    },
-    {
-      "criterion": "Round-2 finding 2: ask reads carry route_status, and an unknown reach is not shown as reaching nobody",
-      "surface": "api suite on real Postgres with a failing and an unconfigured listener; AskRecipients unit suite",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/api_test?sslmode=disable' go test -count=1 -timeout 30m -run 'Ask|Inbox|RouteStatus|Comment|Mention|Delivery' ./internal/dispatch/api/; cd packages/dispatch && bun test web/src/features/inbox",
-      "observed": "api ok: TestAskReadsReachUnknownWhenTheListenerDoesNotAnswer and TestAskReadsReachUnknownWithoutAConfiguredListener read route_status unknown, route_holder null on all three reads; web 327 pass incl. unknown role (bare row with 'Route reach unknown', label 'Reaches N + route (unknown)') and unknown session (counted, no offline claim)",
-      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
-      "negativeControl": "at 5ab9e459 the reads carried no route_status and reachRows rendered a role route with route_holder null as unheld and uncounted (the review's finding)"
-    },
-    {
-      "criterion": "Delivery unchanged by the shared claim-lapse constant",
+      "criterion": "G2: the claimant route works at the merged head",
       "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
       "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "summary: 9 ok, 0 FAIL, PASS in 54s (mention-failed-claimant and mention-failed-follower ok)",
-      "headSha": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
-      "negativeControl": "the 15e414ed9b6b binary fails mention-failed-claimant and mention-failed-follower (recorded in round 2)"
+      "observed": "summary: 9 ok, 0 FAIL, PASS in 122s (case3-ask-answer, case2-thread-reply, untargeted-message, the three controls, and the delivered, failed-claimant and failed-follower mention cases)",
+      "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
+      "negativeControl": "DISPATCH_BIN built from main d1f4b8a6 (git archive into $TMPDIR, go build ./cmd/dispatch) -> 5 ok, 4 FAIL (case3-ask-answer, case2-thread-reply, untargeted-message, mention-failed-claimant), exit 1"
+    },
+    {
+      "criterion": "G4 and Minor 1: the Reaches panel at the merged head, and the Unfollow text under an unknown role route",
+      "surface": "Dispatch browser suite: real Go server built from the checkout, production SPA bundle, Chromium",
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
+      "observed": "8 passed, including 'unfollowing a follower while a role route's holder is unknown says the route may still reach it, under the issue page's marker' (the dialog reads 'A person's answer and replies may still reach them through the route: Dispatch could not tell who holds it.', and the marker title equals the header's)",
+      "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
+      "negativeControl": "recipients-claim.e2e.ts on a checkout of main d1f4b8a6 with the head's test file -> 6 failed; the Minor 1 scenario with only its dialog fix removed -> Received '… Its answer and replies will no longer reach them. …'"
+    },
+    {
+      "criterion": "G3: the outbox rules hold after the merge",
+      "surface": "Go suites on real Postgres (regression lock)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -count=1 -timeout 30m -v -run Claimant ./internal/dispatch/outbox/; then go test -count=1 -timeout 50m ./internal/dispatch/...",
+      "observed": "Claimant run ok, 47 PASS, no SKIP; whole tree ok except the documented pod-environment failures: TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation), TestS3AgainstAnS3CompatibleServer (no rootless Docker), and pmdoc linearity under gVisor",
+      "headSha": "48d9dd1c08c165fa6de3126a8d9cc758154aaab9",
+      "negativeControl": "the live script's main-built binary run above fails the claimant cases"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/{inbox.go,inbox_queries.go,envoy_resolve.go,ask_reach_test.go,asks_test.go,inbox_test.go}",
-    "packages/envoy/internal/dispatch/model/model.go (DeliveryClaimLapse, DeliveryClaimLapseInterval)",
-    "packages/envoy/internal/dispatch/outbox/publisher.go (mentionDeliveryQuery from the constant; reorder note on errMentionPending)",
-    "packages/contracts/src/dispatch-api.ts (AskReach extends IssueRouteReach) and fixtures across packages/dispatch/web/src",
-    "packages/dispatch/web/src/features/inbox/{AskRecipients.tsx,AskRecipients.test.tsx,AskCard.tsx}, packages/dispatch/AGENTS.md",
-    "packages/dispatch/e2e/recipients-claim.e2e.ts (two refresh scenarios)",
-    "packages/envoy/AGENTS.md, docs/site dispatch envoy.md and for-agents.md, skills/dispatch/SKILL.md, packages/contracts/src/dispatch-tools.ts, claude-envoy dist, CHANGELOGs (envoy, contracts, pi-envoy, claude-envoy)"
-  ],
-  "trickyParts": [
-    "The in-flight Inbox scenario holds the first two Inbox requests: holding only the first let the post-claim refresh cancel it, so the issue mark was never exercised and the mutation passed.",
-    "The closing-route scenario uses an unclaimed issue: closing a claimed issue also emits issue.released, which would refresh the card without the issue.closed path."
+    "merge 9a8af2f1: five CHANGELOGs and scripts/e2e/README.md with both sides kept; skills/dispatch/SKILL.md takes main's rewrite (and main's deletion of references/asks.md), with its claim line rewritten to say what a claim brings while keeping the route option and 'Never route such an issue' under the 2,000-word guard; pi-envoy and claude-envoy CHANGELOG entries reworded to match; claude-envoy rebuilt with Bun 1.3.14 (no file changed, check-dist fresh)",
+    "c99f2708 (Minor 2): ROUTE_REACH_UNKNOWN and ROUTE_REACH_UNKNOWN_TITLE exported from features/issue/RouteReach.tsx, used by IssueHeader.tsx and AskRecipients.tsx",
+    "48d9dd1c (Minor 1): AskRecipients.tsx issueReach under an unknown role route, AskRecipients.test.tsx, e2e/recipients-claim.e2e.ts scenario, packages/dispatch/AGENTS.md"
   ],
   "deviations": [
-    "The unknown-reach label wording is 'Reaches N + route (unknown)'; the row reuses the issue page's 'Route reach unknown' marker and title."
+    "The skill's claim sentence no longer carries the mention detail: the three Dispatch skills sit at the 2,000-word guard, so it lives in the docs, the dispatch_claim description and packages/envoy/AGENTS.md.",
+    "The Minor commits were made before the merge and then moved onto it (unpushed, own commits, no other descendants) so the merge commit carries only the merge."
   ],
   "openQuestions": []
 }
