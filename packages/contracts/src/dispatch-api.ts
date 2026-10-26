@@ -6,6 +6,7 @@ import type {
   ISSUE_ROUTE_STATUSES,
   IssueStatus,
 } from "./dispatch-tools";
+import type { LegionRole } from "./legion-roles";
 
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
 export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
@@ -1545,6 +1546,64 @@ export interface Subscriber {
   readonly topics: readonly string[];
   readonly removable: boolean;
   readonly via?: string;
+}
+
+/** One way a collaborator worked an issue, in the order `reasons` lists them. */
+export type CollaboratorReason = "assignee" | "claimed" | "posted" | "answered";
+
+/**
+ * A person on `GET /api/v1/issues/{key}/collaborators`, one per lowercase login. `last_at` is the
+ * newest event that made them a collaborator; null for an assignee who did nothing else on it.
+ */
+export interface IssueCollaboratorPerson {
+  readonly kind: "user";
+  readonly login: string;
+  readonly reasons: readonly CollaboratorReason[];
+  readonly last_at: string | null;
+}
+
+/**
+ * The Legion agent registry's entry for a collaborator session. `replaced_by`/`replaced_at` name
+ * the next session of the same role token and its start; null for the role's newest session.
+ */
+export interface IssueCollaboratorLegion {
+  readonly role: LegionRole;
+  readonly role_token: string;
+  readonly started_at: string;
+  readonly replaced_by: string | null;
+  readonly replaced_at: string | null;
+}
+
+/**
+ * An agent session on `GET /api/v1/issues/{key}/collaborators`, one per session id. It carries no
+ * running state: a reader takes that from the live agents registry. `title` is the registry's,
+ * else the session's newest stamped title, null when neither names one; `reasons` is empty and
+ * `last_at` null for a registry entry with no event on the issue; `legion` is null for a session
+ * the registry does not record for the issue, or when it did not answer.
+ */
+export interface IssueCollaboratorAgent {
+  readonly kind: "session";
+  readonly session_id: string;
+  readonly title: string | null;
+  readonly reasons: readonly CollaboratorReason[];
+  readonly last_at: string | null;
+  readonly legion: IssueCollaboratorLegion | null;
+}
+
+/**
+ * `GET /api/v1/issues/{key}/collaborators`: everyone who worked an issue, running or not. `people`
+ * are the assignee and everyone who claimed it, posted on it or its documents, or answered one of
+ * its asks, newest first; `agents` are those writers that are sessions (the Legion daemon's own
+ * `legion-daemon:<PROJECT>` writer left out) merged with the listener's Legion agent registry
+ * entries for the issue, the registry's first in its order (by role in workflow order, then
+ * newest first), then the rest newest first. `legion_registry` is `"unavailable"` when the
+ * listener did not answer; `agents` then holds only the sessions the issue's events name.
+ */
+export interface IssueCollaborators {
+  readonly issue_key: string;
+  readonly people: readonly IssueCollaboratorPerson[];
+  readonly agents: readonly IssueCollaboratorAgent[];
+  readonly legion_registry: "ok" | "unavailable";
 }
 
 export interface ReferencedBy {

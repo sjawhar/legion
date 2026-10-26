@@ -358,7 +358,8 @@ replacing them, and an explicit empty list (`--clear-external-links`) clears eve
 above that issue, below it, or between the two — and go as the server's `rank` field on the same
 PATCH only when a neighbour is named, since a `rank` with neither neighbour ranks the issue last
 in its project. Closing an issue (`status: "done"`) requires `reason`, which it posts as an issue
-message before the PATCH, since a closed issue refuses messages; a failed post sends no PATCH, and
+message before the PATCH, so the close carries its note; an issue already closed when it is read
+is refused `ISSUE_CLOSED` before anything is posted. A failed post sends no PATCH, and
 a PATCH that fails after the post names the posted message. The result is one line —
 `KEY: status a -> b; priority -> P1; rank -> before KEY; linked <url> (N links)`, with
 `priority cleared` on a clear and `reason posted as message <id> (<ref>)` ahead of a close — and a

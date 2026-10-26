@@ -16,14 +16,27 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// lockedComment is the prologue of every comment mutation: read the comment, refuse a closed
-// owner, then re-read it `for update` so the mutation holds its row lock.
+// lockedComment is the prologue of every change to an existing comment - resolve, reopen,
+// edit, accept, reject: read the comment, refuse a closed owner, then re-read it `for update`
+// so the mutation holds its row lock.
 func (s *server) lockedComment(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
+	return s.lockComment(ctx, tx, id, true)
+}
+
+// lockedCommentForDelivery is the same prologue for a comment's mention delivery and the
+// mentioned agent's reply to it, which a closed issue still takes: it takes the owner's lock in
+// the same order without the closed refusal.
+func (s *server) lockedCommentForDelivery(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
+	return s.lockComment(ctx, tx, id, false)
+}
+
+func (s *server) lockComment(ctx context.Context, tx pgx.Tx, id string, refuseClosed bool) (model.Comment, error) {
 	unlockedComment, err := s.loadComment(ctx, tx, id)
 	if err != nil {
 		return model.Comment{}, err
 	}
-	if err := s.requireOpenOwner(ctx, tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
+	owner := ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)
+	if _, err := ownerStatus(ctx, tx, owner, ownerRowLock, refuseClosed); err != nil {
 		return model.Comment{}, err
 	}
 	return s.loadCommentForUpdate(ctx, tx, id)

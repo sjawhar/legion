@@ -29,6 +29,28 @@ var ErrReceiptTimeout = errors.New("envoy listener did not answer the send in ti
 // ErrNotFound reports that the listener has no record of the requested session.
 var ErrNotFound = errors.New("envoy listener: session not found")
 
+// ErrNoHolder reports that the listener holds no live holder for a role: its 404, whose reason
+// is unclaimed or holder_lapsed (cmd/listener/api.go writeRoleHolderError). The error Role
+// returns carries the listener's own text and matches ErrNoHolder under errors.Is.
+var ErrNoHolder = errors.New("envoy listener: no live role holder")
+
+// noHolderError is Role's 404: the listener's text, so a caller recording it records exactly
+// what the listener said, and ErrNoHolder under errors.Is.
+type noHolderError struct{ text string }
+
+func (e noHolderError) Error() string { return e.text }
+
+func (e noHolderError) Is(target error) bool { return target == ErrNoHolder }
+
+// noSessionError is Send's 404: the listener holds no live session under the target and handed
+// the message to no daemon (cmd/listener/api.go). It carries the listener's text, so a caller
+// recording it records exactly what the listener said, and matches ErrNotFound under errors.Is.
+type noSessionError struct{ text string }
+
+func (e noSessionError) Error() string { return e.text }
+
+func (e noSessionError) Is(target error) bool { return target == ErrNotFound }
+
 // Interest is a session's persisted Envoy topic subscriptions.
 type Interest struct {
 	SessionID string   `json:"session_id"`
@@ -262,7 +284,8 @@ func (c *Client) Unsubscribe(ctx context.Context, sessionID string, topics []str
 	return decoded.Removed, nil
 }
 
-// Role resolves a live role holder and returns its current session metadata.
+// Role resolves a live role holder and returns its current session metadata. A role with no live
+// holder is an error carrying the listener's text that matches ErrNoHolder.
 func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/roles/"+url.PathEscape(role), nil)
 	if err != nil {
@@ -275,7 +298,11 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return Session{}, listenerResponseError(response)
+		err := listenerResponseError(response)
+		if response.StatusCode == http.StatusNotFound && !errors.Is(err, ErrUnavailable) {
+			return Session{}, noHolderError{text: err.Error()}
+		}
+		return Session{}, err
 	}
 	var responseBody struct {
 		Holder string `json:"holder"`
@@ -355,7 +382,115 @@ func (c *Client) Session(ctx context.Context, sessionID string) (Session, error)
 	return session, nil
 }
 
-// Send delivers a Dispatch frame to an already-resolved live session.
+// LegionAgent is one entry of the listener's Legion agent registry (internal/legionagents), with
+// what the listener derives at the read: whether the session is live in its session registry now,
+// and, within the entry's role token ordered by started_at, the session that replaced it and that
+// session's start, both nil for the role's newest session.
+type LegionAgent struct {
+	SessionID     string  `json:"session_id"`
+	LegionProject string  `json:"legion_project"`
+	Issue         string  `json:"issue"`
+	Role          string  `json:"role"`
+	RoleToken     string  `json:"role_token"`
+	Title         string  `json:"title"`
+	Harness       string  `json:"harness"`
+	StartedAt     string  `json:"started_at"`
+	RecordedAt    string  `json:"recorded_at"`
+	Live          bool    `json:"live"`
+	ReplacedBy    *string `json:"replaced_by"`
+	ReplacedAt    *string `json:"replaced_at"`
+}
+
+// Agent returns the Legion agent registry's entry for one session, or ErrNotFound when the
+// registry holds none: a 404, or an id the listener refuses (a 400 or 413), under which no entry
+// can be recorded. Every other status, a body that does not decode and a transport failure are
+// ErrUnavailable carrying the listener's reason: a read the registry did not answer says nothing
+// about whether the session was recorded.
+func (c *Client) Agent(ctx context.Context, sessionID string) (LegionAgent, error) {
+	path := "/v1/legion/agents/sessions/" + url.PathEscape(sessionID)
+	response, err := c.get(ctx, path)
+	if err != nil {
+		return LegionAgent{}, err
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusBadRequest, http.StatusRequestEntityTooLarge:
+		return LegionAgent{}, ErrNotFound
+	default:
+		return LegionAgent{}, unavailableStatus(response, path)
+	}
+	var agent LegionAgent
+	if err := json.NewDecoder(response.Body).Decode(&agent); err != nil {
+		return LegionAgent{}, fmt.Errorf("%w: decode GET %s response: %v", ErrUnavailable, path, err)
+	}
+	return agent, nil
+}
+
+// RoleAgents returns every session the Legion agent registry holds for a role token, newest
+// first, the first being the role's current holder; none when it holds none. Any answer but a 200
+// is ErrUnavailable.
+func (c *Client) RoleAgents(ctx context.Context, roleToken string) ([]LegionAgent, error) {
+	return c.legionAgents(ctx, "/v1/legion/agents/roles/"+url.PathEscape(roleToken))
+}
+
+// IssueAgents returns every session the Legion agent registry holds for an issue, by role in
+// workflow order (architect, planner, implementer, tester, reviewer, merger), then newest first;
+// none when it holds none. Any answer but a 200 is ErrUnavailable.
+func (c *Client) IssueAgents(ctx context.Context, issueKey string) ([]LegionAgent, error) {
+	return c.legionAgents(ctx, "/v1/legion/agents?issue="+url.QueryEscape(issueKey))
+}
+
+func (c *Client) legionAgents(ctx context.Context, path string) ([]LegionAgent, error) {
+	response, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, unavailableStatus(response, path)
+	}
+	var body struct {
+		Entries []LegionAgent `json:"entries"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("%w: decode GET %s response: %v", ErrUnavailable, path, err)
+	}
+	if body.Entries == nil {
+		body.Entries = []LegionAgent{}
+	}
+	return body.Entries, nil
+}
+
+// get makes one authorized GET of path, a transport failure being ErrUnavailable.
+func (c *Client) get(ctx context.Context, path string) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: build GET %s request: %v", ErrUnavailable, path, err)
+	}
+	c.authorize(request)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: GET %s: %v", ErrUnavailable, path, err)
+	}
+	return response, nil
+}
+
+// unavailableStatus is ErrUnavailable for a GET of path the listener answered with a status the
+// caller does not take, carrying the listener's own reason when its body names one.
+func unavailableStatus(response *http.Response, path string) error {
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&failure); err == nil && failure.Error != "" {
+		return fmt.Errorf("%w: GET %s returned %d: %s", ErrUnavailable, path, response.StatusCode, failure.Error)
+	}
+	return fmt.Errorf("%w: GET %s returned %d", ErrUnavailable, path, response.StatusCode)
+}
+
+// Send delivers a Dispatch frame to an already-resolved live session. A send the listener refuses
+// because it holds no live session under the target and handed it off to no daemon is an error
+// carrying the listener's text that matches ErrNotFound.
 func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) {
 	body, err := json.Marshal(struct {
 		TargetSession  string `json:"target_session"`
@@ -398,7 +533,11 @@ func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) 
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return SendResult{}, listenerResponseError(response)
+		err := listenerResponseError(response)
+		if response.StatusCode == http.StatusNotFound && !errors.Is(err, ErrUnavailable) {
+			return SendResult{}, noSessionError{text: err.Error()}
+		}
+		return SendResult{}, err
 	}
 	var result struct {
 		EnvelopeID string `json:"event_id"`

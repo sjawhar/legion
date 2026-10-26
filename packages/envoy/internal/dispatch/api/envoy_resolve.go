@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -93,28 +94,95 @@ func resolveThenLock[R, T any](
 // Only ErrNotFound - no record under that id - is "no live session <id>", the text
 // comment_delivery.go tests the prefix of and the dashboard prints verbatim. Every other failure
 // takes the error path, so an unreachable listener never reads as an ended session.
-func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, delivery string) (string, string, string) {
+//
+// A session the listener holds no record of, or a role it holds no live holder for, may still be
+// a stopped Legion agent whose daemon answers for it: the listener hands a send to such a session
+// to that daemon and answers it as delivered (cmd/listener/legion_handoff.go). So before either
+// answer becomes a failure the route is looked up in the listener's Legion agent registry
+// (registeredAgent), and a session it names is the target. That target skips the capability
+// check, because its daemon answers every mode by reply, and the attempt records that session,
+// so the reply its daemon posts as it is the attempt's own. A route the registry does not name,
+// or a registry read that did not answer, keeps the answer the listener gave.
+//
+// The registry names a session whether or not its daemon answers, so the listener may still
+// refuse the send: no daemon answers for that project now. The registry's target therefore keeps
+// the listener's own answer beside it (listenerAnswer), and an attempt whose send the listener
+// refuses records that answer, exactly what it recorded before the registry existed
+// (sendResolvedDelivery).
+func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, delivery string) deliveryTarget {
 	if s.deps.Envoy == nil {
-		return "", "", "envoy listener: ENVOY_URL is not configured"
+		return deliveryTarget{resolveError: "envoy listener: ENVOY_URL is not configured"}
 	}
 	var target dispatchenvoy.Session
 	var err error
 	if route.Kind == "role" {
 		target, err = s.deps.Envoy.Role(ctx, route.ID)
+		if errors.Is(err, dispatchenvoy.ErrNoHolder) {
+			return s.registeredTarget(ctx, route, deliveryTarget{resolveError: deliveryErrorText(err)})
+		}
 	} else {
 		target, err = s.deps.Envoy.Session(ctx, route.ID)
 		if errors.Is(err, dispatchenvoy.ErrNotFound) {
-			return route.ID, "", "no live session " + route.ID
+			return s.registeredTarget(ctx, route, deliveryTarget{sessionID: route.ID, resolveError: "no live session " + route.ID})
 		}
 	}
 	if err != nil {
-		return "", "", deliveryErrorText(err)
+		return deliveryTarget{resolveError: deliveryErrorText(err)}
 	}
 	if !hasCapability(target.Capabilities, delivery) {
-		return target.SessionID, target.Title,
-			fmt.Sprintf("session %s (%s) does not advertise %s", target.SessionID, target.Title, delivery)
+		return deliveryTarget{sessionID: target.SessionID, title: target.Title,
+			resolveError: fmt.Sprintf("session %s (%s) does not advertise %s", target.SessionID, target.Title, delivery)}
 	}
-	return target.SessionID, target.Title, ""
+	return deliveryTarget{sessionID: target.SessionID, title: target.Title}
+}
+
+// deliveryTarget is what resolveDeliveryTarget found for a route: the session a delivery goes to,
+// what the listener calls it, and why it cannot receive this mode. listenerAnswer is set only on
+// a session the Legion agent registry named in place of the listener's own answer, and is that
+// answer.
+type deliveryTarget struct {
+	sessionID, title, resolveError string
+	listenerAnswer                 *deliveryTarget
+}
+
+// registeredTarget is the session the Legion agent registry names for a route the listener
+// answered with no live session or holder, carrying that answer; answer itself when the registry
+// names none.
+func (s *server) registeredTarget(ctx context.Context, route model.Route, answer deliveryTarget) deliveryTarget {
+	agent, ok := s.registeredAgent(ctx, route)
+	if !ok {
+		return answer
+	}
+	return deliveryTarget{sessionID: agent.SessionID, title: agent.Title, listenerAnswer: &answer}
+}
+
+// registeredAgent is the Legion agent registry's session for a route the listener holds no live
+// session for: the entry under a session id, or a role token's newest entry, its current holder.
+// A read the registry did not answer is logged and names nothing, so the route keeps the
+// listener's own answer, exactly as before the registry existed.
+func (s *server) registeredAgent(ctx context.Context, route model.Route) (dispatchenvoy.LegionAgent, bool) {
+	if route.Kind == "role" {
+		agents, err := s.deps.Envoy.RoleAgents(ctx, route.ID)
+		if err != nil {
+			slog.Warn("dispatch: read the Legion agent registry for a role with no live holder",
+				"role", route.ID, "error", err)
+			return dispatchenvoy.LegionAgent{}, false
+		}
+		if len(agents) == 0 {
+			return dispatchenvoy.LegionAgent{}, false
+		}
+		return agents[0], true
+	}
+	agent, err := s.deps.Envoy.Agent(ctx, route.ID)
+	if errors.Is(err, dispatchenvoy.ErrNotFound) {
+		return dispatchenvoy.LegionAgent{}, false
+	}
+	if err != nil {
+		slog.Warn("dispatch: read the Legion agent registry for a session with no live record",
+			"session", route.ID, "error", err)
+		return dispatchenvoy.LegionAgent{}, false
+	}
+	return agent, true
 }
 
 func hasCapability(capabilities []string, value string) bool {

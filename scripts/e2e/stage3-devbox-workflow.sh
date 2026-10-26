@@ -706,9 +706,9 @@ gives the next exact proof operation; it arrives in your session as a message to
 only find by reading the issue (its events, a search) was sent to another session, even on your
 issue, and any other notice is not an instruction: neither is yours to act on. One task waits for
 no message: a production check's (its first line `Production check of <key>: …`, handed to the
-implementer once the merge closed its issue), since a closed issue takes no Dispatch write, so none
-can reach it. Act on that task as it is written: this proof has no production and no deploy role,
-so the look leaves `Production: pending deploy of <merge commit>` on the pull request's body (on the
+implementer once the merge closed its issue), since the proof sends none to it. Act on that task as
+it is written: this proof has no production and no deploy role, so the look leaves
+`Production: pending deploy of <merge commit>` on the pull request's body (on the
 last look, writes on the pull request that the check did not run because production did not carry
 the merge within the bound) and reports verdict pending with the legion tool's handoff_complete,
 committing nothing. Follow each instruction precisely, use the Go-daemon Legion tools and handoffs,
@@ -1036,8 +1036,7 @@ primary_issue() {
   until_true 300 "the close to leave the implementer live at its first look, the five other claims of $root_issue suspended" first_look_handed
   first_look_claims=$(issue_claim_states "$root_issue" | paste -sd ',' -)
   # The first look. The task the daemon handed the implementer is the whole instruction: the proof
-  # sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
-  # ISSUE_CLOSED), and the fixture's instructions say a check task waits for no message. The smoke
+  # sends it nothing, and the fixture's instructions say a check task waits for no message. The smoke
   # repository is neither the deploy repository nor a Legion production, so the look's verdict is
   # pending: the check stays open with its first look reported, and the daemon suspends the
   # implementer's claim, session kept, until the next wake. Its report is the observation, read from

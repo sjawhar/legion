@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
+	"github.com/sjawhar/envoy/internal/legionagents"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -37,6 +38,12 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	// legionAgents is the Legion agent registry the /v1/legion/agents routes serve. It keeps no
+	// cache, so it is in no list of caches.
+	legionAgents *legionagents.Store
+	// handoff hands a send or role publish no live session takes to a stopped Legion agent's
+	// daemon (handOffToLegion); nil hands nothing off.
+	handoff *legionHandoff
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// live is the live topics lane's own client (openLiveTopics), nil when ENVOY_SUBSCRIBE_ALL_TOPICS
@@ -726,6 +733,16 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
+	// The Legion agent registry (internal/legionagents) keeps no cache: every read is a read of its
+	// bucket, so it joins no warm-up, self-health or drain. Its reconnect hook moves its bucket
+	// handle onto a connection the bus dialled to replace a closed one. A listener whose NATS grant
+	// lacks the bucket stops here, so the grant ships before an image that opens it.
+	legionAgents, err := legionagents.Open(client.Conn, legionagents.WithReplicas(cfg.NATSReplicas))
+	if err != nil {
+		log.Fatal(err)
+	}
+	client.AddReconnectHook(legionAgents.Reopen)
+
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection, and end them in the drain before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
@@ -759,6 +776,9 @@ func main() {
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
 	// Phase 6: Open the role lane and /v1 onto the stores, then bind the durable consumer.
+	// One hand-off serves the three paths that find no session to deliver to: a send's, a role
+	// publish's (both on /v1) and an agent subject's on the bus.
+	handoff := &legionHandoff{client: client, registry: registry, sessions: sessions, agents: legionAgents, logger: logger}
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
 		forwardRole:       client.RequestCoreTo,
@@ -773,6 +793,7 @@ func main() {
 		messagesDelivered: messagesDelivered,
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
+		handoff:           handoff,
 	}
 
 	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling
@@ -817,14 +838,16 @@ func main() {
 	defer stop()
 
 	ready := &listenerDeps{
-		client:     client,
-		live:       live,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		consumer:   consumer,
-		streamName: bus.Stream,
+		client:       client,
+		live:         live,
+		registry:     registry,
+		sessions:     sessions,
+		legionAgents: legionAgents,
+		handoff:      handoff,
+		ciStore:      ciStore,
+		caches:       caches,
+		consumer:     consumer,
+		streamName:   bus.Stream,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

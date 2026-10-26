@@ -1,7 +1,11 @@
 package bus
 
 import (
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -74,5 +78,48 @@ func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
 		if duplicate {
 			t.Fatalf("an agent-sourced publish carries no MsgId and cannot be a duplicate")
 		}
+	}
+}
+
+// PublishRetained stores a payload that is not an envelope on a subject the stream captures, keeps
+// one copy of every publish under one MsgId, and refuses a subject the stream does not capture
+// rather than waiting out an acknowledgement JetStream never sends.
+func TestPublishRetainedKeepsOneCopyPerMsgID(t *testing.T) {
+	client, err := ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	const subject = "notifications.legion.infra.agents.ses_handoff"
+
+	for i, want := range []bool{false, true} {
+		duplicate, err := client.PublishRetained(subject, []byte(`{"copy":`+strconv.Itoa(i)+`}`), "handoff.key-1")
+		if err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+		if duplicate != want {
+			t.Fatalf("publish %d duplicate = %t, want %t", i, duplicate, want)
+		}
+	}
+	if duplicate, err := client.PublishRetained(subject, []byte(`{"copy":2}`), "handoff.key-2"); err != nil || duplicate {
+		t.Fatalf("another MsgId = %t, %v; want stored", duplicate, err)
+	}
+	info, err := client.JS().StreamInfo(Stream, &nats.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	if got := info.State.Subjects[subject]; got != 2 {
+		t.Fatalf("the stream holds %d messages on %s, want 2", got, subject)
+	}
+	stored, err := client.JS().GetMsg(Stream, info.State.FirstSeq)
+	if err != nil {
+		t.Fatalf("read the first stored copy: %v", err)
+	}
+	if string(stored.Data) != `{"copy":0}` {
+		t.Fatalf("stored %s, want the first copy", stored.Data)
+	}
+
+	if _, err := client.PublishRetained("notifications.team.deploy-squad", []byte(`{}`), ""); err == nil || !strings.Contains(err.Error(), "does not capture") {
+		t.Fatalf("a subject the stream does not capture = %v, want refused", err)
 	}
 }
