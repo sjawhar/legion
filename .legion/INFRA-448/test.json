@@ -2,52 +2,68 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T17:59:46Z",
-  "round": 3,
-  "testedCodeHead": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
+  "completed": "2026-10-26T19:56:15Z",
+  "round": 4,
+  "testedCodeHead": "7912696a2f26f91538f631c13f95fe07b3e84059",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Full round (659a3263 and a main merge changed the diff). Re-ran the implementer's browser command in the tester's own lane at 27a6de48: round 2's red tests :278 and :321 (unchanged since dac91dce) pass in chromium and iphone. Independently drove the reopen reconnect with browser probes, C1 live with curl, the registry and collaborators route, and C3."
+    "how": "Full round (review round 2's fixes in c8b202a6 and two main merges changed the diff), after the workspace and scratch volume were recreated: the tester's lane rebuilt on the issue's Postgres 17 with its own databases and ports. Drove each claim of the implementer's review-round-2 proof independently: the registry open recovering without a reconnect (grant applied by nats-server config reload), saved edits restored on reopen without a reload, and Get after an ended claim (simulated with a raw session-key put); re-ran its browser specs (closed-issue-posting, offline-edits, margin-composer-hold) in the tester's lane."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "C2: on a closed issue, a comment, a message, Reply, Retry and a margin comment on its document post from the browser (incl. a spec whose issue closed while open, and a spec that takes edits again once reopened from its page)",
-      "surface": "Dispatch browser suite (packages/dispatch/e2e), chromium and iphone, real Dispatch server and web build with the fake listener, the tester's own lane",
-      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/mention-composer.e2e.ts e2e/keyboard-agents-picker.e2e.ts e2e/phone-conversation.e2e.ts e2e/margin-composer-hold.e2e.ts e2e/phone.e2e.ts; then playwright --project=chromium margin, margin-thread-reply, margin-kind-switch, doc, document, overlapping-marks, keyboard-document, anchors, spec-suggestion-decoration, failed-room, editor-paste, collab-cursor, offline-edits, issue",
-      "observed": "149 passed, 7 skipped (10.3m), :278 and :321 green in both projects; 203 passed, 3 skipped (16.0m). Throwaway probes (both projects): a reopen through the API by another person makes the open page editable and its edit saves; two pages edit, close, reopen and edit again and the markdown holds each of three edits once with both pages converged; six rapid close/reopen toggles settle editable, then close/reopen/close settles read-only with Comment alone. Tap outside after a selection hides the bar on iphone and keeps it on chromium identically on open and closed specs (2 runs per target per project).",
-      "headSha": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
-      "negativeControl": "at adb397f9 :278 failed on iphone (selection bar empty) and :321 failed on both projects (contenteditable stayed false); round 1: closed-issue-posting 10 failed at main bc307fb5"
+      "criterion": "Review round 2: a failed registry open recovers without a reconnect, worded as a failed open",
+      "surface": "the real envoy-listener on a real nkey-authorized nats-server v2.10.29 whose one user holds core.ListenerPermissions(grant-host) minus legion_agents, then the full grant by config reload",
+      "command": "nats-server -c drop config; listener with NATS_NKEY_SEED_FILE; curl the registry and /v1/sessions; wait 40 s; copy the full-grant config over and kill -s HUP the nats-server; poll GET /v1/legion/agents?issue=TST-1; PUT and the three reads",
+      "observed": "listener healthy, /v1/sessions 200, registry 503 'could not open the legion_agents bucket (a missing grant is the usual cause): ...', one ERROR line after 40 s more; after 'Reloaded server configuration' the same listener process answers 200 after 8 s with 0 reconnect or disconnect lines and 0 violations, PUT and issue/role/session reads 200, log 'legion agent registry opened'",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
+      "negativeControl": "the registry routes answer 503 on the grant without legion_agents (before the reload)"
+    },
+    {
+      "criterion": "Review round 2: a readmitted document restores the edits saved while its issue was closed, with no reload, once",
+      "surface": "Dispatch browser suite harness, chromium and iphone, real Dispatch server and web build, the tester's own lane",
+      "command": "throwaway probe: documentTransport sever, type a paragraph, close the issue, reload, release; then Reopen issue from the page (or PATCH backlog through the API); poll getArtifactText; type again; reload",
+      "observed": "4/4 passed: the read-only status shows and the server lacks the paragraph while closed; after the reopen the paragraph reaches the server, the status goes, the editor is editable and a new edit saves; after a reload each edit appears exactly once in the markdown",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
+      "negativeControl": "while the issue is closed the page shows 'can't be sent: this document is read-only' and the server's markdown does not contain the paragraph"
+    },
+    {
+      "criterion": "Review round 2: a registry Get after a write that ended between its claim and its index keys answers the session key's entry and its replacement",
+      "surface": "the real listener on nats-server, with the ended write simulated by a raw KV put of session.<id> only (throwaway nats.go program)",
+      "command": "PUT a (01:00) and c (03:00) for legion-tstleg-tst-31-tester; raw put session.half-a with a new title and session.half-b (02:00); GET sessions/half-a, half-b, half-c; PUT half-b to TST-32; retry the batch; GET the role and issue listings",
+      "observed": "half-a answers its new title with replaced_by half-c; half-b answers with replaced_by half-c; the retry completes both writes and the role listing reads c <- b <- a with a's new title",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
+      "negativeControl": "moving the half-written half-b to TST-32 is 409: its claim stands"
     },
     {
       "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening still works",
-      "surface": "real Dispatch server, Envoy listener and nats-server v2.10.29 built at the head, Postgres 17 + pgvector, driven with curl",
+      "surface": "real Dispatch server, Envoy listener and nats-server built at the head, Postgres 17 + pgvector, driven with curl",
       "command": "/legion/scratch/tmp/infra448-tester/c1.sh against :25777/:25020/:25222, database infra448_tester_live",
-      "observed": "201: person and agent comment and message, thread reply, reply to a resolved root (root reopened), human reply on an open ask, reply on an anchored root, quote-anchored comment with occurrence, anchored mention (attempt 1 sent), both retries, both agent replies. 409 ISSUE_CLOSED: suggestion with and without a mention, new ask, comment edit, resolve, reopen route, claim, document edit, named version, approval request; spec unchanged. Reopen 200 then ask 201",
-      "headSha": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
+      "observed": "201: person and agent comment and message, thread reply, reply to a resolved root (root reopened), reply on an open ask, reply on an anchored root, quote-anchored comment with occurrence, anchored mention (attempt 1 sent), both retries, both agent replies. 409 ISSUE_CLOSED: suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit, named version; spec unchanged. Reopen 200 then ask 201",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "round 1: Dispatch at main bc307fb5 answered the same person and agent comment, message and anchored comment 409 ISSUE_CLOSED"
     },
     {
-      "criterion": "Collaborators route and the Legion agent registry",
-      "surface": "the real envoy-listener on nats-server and the real Dispatch server reading it",
-      "command": "PUT /v1/legion/agents (7 entries); GET /api/v1/issues/TST-1/collaborators; unauthenticated GET and bearer-less PUT",
-      "observed": "PUT 200; collaborators legion_registry ok, people carol and dave, registry rows with replaced_by (old planner, reviewer a), posting agents without registry rows",
-      "headSha": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
-      "negativeControl": "collaborators unauthenticated 401; registry PUT without a bearer 401. Round 2 at adb397f9 covered the grant-less listener (503, recovers on reconnect) and the claim races (one winner, no orphans); neither code changed since"
+      "criterion": "C2: on a closed issue, a comment, a message, Reply, Retry and a margin comment post from the browser, including a spec whose issue closed while open and a spec reopened from its page",
+      "surface": "Dispatch browser suite (packages/dispatch/e2e), chromium and iphone, the tester's own lane",
+      "command": "bun run e2e -- --project=chromium --project=iphone closed-issue-posting, mention-composer, keyboard-agents-picker, phone-conversation, margin-composer-hold, phone, offline-edits; playwright --project=chromium margin, margin-thread-reply, margin-kind-switch, doc, document, overlapping-marks, keyboard-document, anchors, failed-room, collab-cursor, issue, paste-recovery",
+      "observed": "159 passed, 7 skipped (8.7m), all 14 closed-issue-posting rows and 10 offline-edits rows green; 85 passed, 3 skipped (8.1m)",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
+      "negativeControl": "closed-issue-posting failed 10/10 at main bc307fb5 (round 1); :278 and :321 failed at adb397f9 (round 2)"
     },
     {
       "criterion": "C3: no remaining statement that a closed issue refuses comments or messages",
       "surface": "the repository at the head",
       "command": "bash /legion/scratch/tmp/infra448/c3.sh",
       "observed": "only the five kept lines (repo field and document rebuild, the closed document room)",
-      "headSha": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
+      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "30 hits at base 135d22e0 (implementer's run)"
     }
   ],
-  "ci": "At 27a6de48: Tests 40365625866, Docs 40365625779, Worker Image 40365625763 and PR Title 40366923411 success; Legion Envoy and Contracts 40365625894 queued. Not re-run by the tester.",
+  "ci": "At 7912696a: PR Title 40387909076 success; Docs 40387176890 in progress; Tests 40387176786, Legion Envoy and Contracts 40387177104 and Worker Image 40387176721 queued. Not re-run by the tester.",
   "observations": [
-    "Two early iphone probe readings showed the closed spec's bar still visible after a tap outside; 18 later iphone runs on closed specs (three tap targets, repeated) hid it as on an open spec, so no failure is recorded.",
-    "The Comment chord ($mod+Alt+m) runs only on an editable view; the implementer kept the bar's Comment button as the closed document's path (implement.json deviations)."
+    "Until an ended write's retry, another session's derived replaced_by can name the wrong successor: with b's session key written and its role key not, a's Get answered replaced_by half-c rather than half-b; the retry corrects it. Display-only, transient.",
+    "The Comment chord ($mod+Alt+m) runs only on an editable view; the bar's Comment button is the closed document's path (implement.json deviations)."
   ]
 }
