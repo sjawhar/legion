@@ -423,7 +423,7 @@ func initContainerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 // changes its verdict, so the read is bounded whole (call), in time and in bytes off the API
 // (readLog).
 func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
-	text, _, bounded, err := r.readLog(ctx, pod, container, logTailLines, logTailBytes, logTailReadBytes)
+	text, _, _, bounded, err := r.readLog(ctx, pod, container, logTailLines, logTailBytes, logTailReadBytes)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}
@@ -439,9 +439,9 @@ func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
 // container's own tail. A line is bounded at 64 KiB where the launcher writes it
 // (launcher.maxLogLine) and nowhere else, so 2000 lines are up to 128 MiB on the wire, read once
 // per role of a terminal pod: the read bound holds that to sharedLogReadBytes, enough for 2000
-// lines of 4 KiB, past what any quote keeps. A read the bound cut keeps the oldest of the tail,
-// since a stream is read from its start, so the quote says so (logBoundNote) rather than passing
-// off older lines as the container's last.
+// lines of 4 KiB, past what any quote keeps. A read the bound cut is read again for fewer lines
+// (readLog); one cut even so keeps the oldest of its tail, since a stream is read from its start,
+// so the quote says so (logBoundNote) rather than passing off older lines as the container's last.
 const (
 	sharedLogLines     = 2000
 	sharedLogBytes     = 1 << 20
@@ -478,7 +478,7 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 	if container != runtime.IssuePodContainer {
 		return r.logTail(ctx, pod, container)
 	}
-	text, whole, bounded, err := r.readLog(ctx, pod, container, sharedLogLines, sharedLogBytes, sharedLogReadBytes)
+	text, tail, whole, bounded, err := r.readLog(ctx, pod, container, sharedLogLines, sharedLogBytes, sharedLogReadBytes)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}
@@ -487,7 +487,7 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 	}
 	quote := roleLines(text, role, logTailLines)
 	if quote == "" {
-		quote = fmt.Sprintf("(none of the container's last %d lines is %s's)", sharedLogLines, role)
+		quote = fmt.Sprintf("(none of the container's last %d lines is %s's)", tail, role)
 	}
 	if own := containerLines(text, logTailLines); own != "" {
 		quote += "\n" + containerLinesHeader + "\n" + own
@@ -505,42 +505,61 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 // holds, and a quote never ends before the lines nearest the container's end. The read bound is
 // what a log's size cannot make the daemon pull: a line is bounded only where the launcher writes
 // it (64 KiB), so lines alone leave the stream in the hundreds of megabytes. A read the bound cut
-// ends before the container's newest lines, since a stream is read from its start, and bounded
-// says so, for the caller to say so in its quote. When the byte bound dropped older
-// bytes, the read starts from the first whole line it kept, and whole says so: the text then starts
-// just after a newline of the log. Otherwise it starts where the kubelet's line count did, which
-// may be inside a line.
-func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit, read int) (text string, whole, bounded bool, err error) {
+// ends before the container's newest lines, since a stream is read from its start, so readLog
+// reads once more, asking for half the whole lines the cut read held: the newest lines are then
+// what it reads, unless they are longer still, when that read is cut too and bounded says so, for
+// the caller to say so in its quote. tail is the TailLines of the read text came from. When the
+// byte bound dropped older bytes, the read starts from the first whole line it kept, and whole
+// says so: the text then starts just after a newline of the log. Otherwise it starts where the
+// kubelet's line count did, which may be inside a line.
+func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit, read int) (text string, tail int64, whole, bounded bool, err error) {
 	reading, cancel := call(ctx)
 	defer cancel()
-	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(reading)
+	text, whole, seen, bounded, err := r.readLogOnce(reading, pod, container, lines, limit, read)
+	if err != nil || !bounded {
+		return text, lines, whole, bounded, err
+	}
+	fewer := max(1, seen/2)
+	if fewer >= lines {
+		return text, lines, whole, bounded, nil
+	}
+	text, whole, _, bounded, err = r.readLogOnce(reading, pod, container, fewer, limit, read)
+	return text, fewer, whole, bounded, err
+}
+
+// readLogOnce is one read of readLog's: the text, whether it starts on a whole line, how many
+// newlines the read took off the API, and whether it stopped at read bytes.
+func (r *Runtime) readLogOnce(ctx context.Context, pod, container string, lines int64, limit, read int) (text string, whole bool, seen int64, bounded bool, err error) {
+	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(ctx)
 	if err != nil {
-		return "", false, false, err
+		return "", false, 0, false, err
 	}
 	defer stream.Close()
 	counted := &logByteCounter{r: io.LimitReader(stream, int64(read)+1)}
 	kept, cut, err := tailBytes(counted, limit)
 	if err != nil {
-		return "", false, false, err
+		return "", false, 0, false, err
 	}
 	if cut {
 		if newline := bytes.IndexByte(kept, '\n'); newline >= 0 {
 			kept, whole = kept[newline+1:], true
 		}
 	}
-	return strings.TrimRight(string(kept), "\n"), whole, counted.n > int64(read), nil
+	return strings.TrimRight(string(kept), "\n"), whole, counted.newlines, counted.n > int64(read), nil
 }
 
-// logByteCounter counts the bytes read through it, so a read that stopped at an io.LimitReader's
-// bound is told from one that reached the stream's end.
+// logByteCounter counts the bytes and newlines read through it, so a read that stopped at an
+// io.LimitReader's bound is told from one that reached the stream's end, and how many lines it got.
 type logByteCounter struct {
-	r io.Reader
-	n int64
+	r        io.Reader
+	n        int64
+	newlines int64
 }
 
 func (c *logByteCounter) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
+	c.newlines += int64(bytes.Count(p[:n], []byte{'\n'}))
 	return n, err
 }
 

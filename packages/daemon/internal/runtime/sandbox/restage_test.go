@@ -123,11 +123,11 @@ func startEnv(start shimwire.LauncherStart) map[string]string {
 	return env
 }
 
-// An issue pod whose launchers dial the stream the daemon moved from is reported StaleAddress for
+// An issue pod whose launcher dials the stream the daemon moved from is reported StaleAddress for
 // each of its roles the moment the runtime at the new address is told of their claims
 // (re-adoption, ReconcileOrphans): a launcher never redials elsewhere, so it would otherwise read as
 // disconnected for ever. The first role the supervisor relaunches — a Resume over its recorded
-// locator — replaces the issue pod, whose launchers dial the corrected stream, and resumes the
+// locator — replaces the issue pod, whose launcher dials the corrected stream, and resumes the
 // role's saved session there; a sibling relaunched after it resumes into that same new pod
 // (LEGION-592).
 func TestAnIssuePodDialingAStaleStreamIsReplacedAndEveryRoleResumesIntoTheNewPod(t *testing.T) {
@@ -471,7 +471,7 @@ func heldInPod(r *Runtime, pod *corev1.Pod, roles []claim.Role) []movedAddress {
 // One rule decides both whether evaluate reads a role's pod as stale and whether relaunch replaces
 // that pod (movedInPod): for each kind of moved address, a role that holds one is reported
 // StaleAddress naming it, and the role's relaunch replaces its pod exactly when what moved is fixed
-// for the pod's life — the stream its launchers dial, or the secrets broker's enrollment (its
+// for the pod's life — the stream its launcher dials, or the secrets broker's enrollment (its
 // projection's audience or expiry, or enrollment configured only now). An address carried in the
 // generation's environment alone (the daemon's API, the broker's URL with its enrollment unchanged)
 // is stale too, but its relaunch starts a new generation in the same pod; a role holding nothing

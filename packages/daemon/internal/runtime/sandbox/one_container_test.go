@@ -480,10 +480,22 @@ func TestARolesQuoteIsItsNewestLinesOfALogPastTheBound(t *testing.T) {
 	}
 }
 
+// servedTail answers a pod log read as the kubelet does: the last TailLines lines of log.
+func servedTail(t *testing.T, action k8stesting.Action, log []string) []byte {
+	t.Helper()
+	options, ok := action.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
+	if !ok || options.TailLines == nil {
+		t.Fatalf("a log read with no TailLines: %#v", action)
+	}
+	tail := log[max(0, len(log)-int(*options.TailLines)):]
+	return []byte(strings.Join(tail, "\n") + "\n")
+}
+
 // A line is bounded only where the launcher writes it (64 KiB), so the shared log's 2000-line tail
 // can be hundreds of megabytes, read once per role of a terminal pod. The read is bounded in bytes
-// too: a log past sharedLogReadBytes is read to that bound and no further, so the quote carries
-// what the read reached and says the container's newest lines are not in it.
+// too: a log past sharedLogReadBytes is read to that bound and no further, and since a stream is
+// read from its start, that read holds the tail's oldest lines; it is read once more for half the
+// lines it held, which here fit the bound, so the quote is the newest lines and carries no note.
 func TestTheSharedLogsReadIsBoundedInBytes(t *testing.T) {
 	labels := claimLabels(claim.RoleTester)
 	name := SandboxName(workerToken)
@@ -493,12 +505,54 @@ func TestTheSharedLogsReadIsBoundedInBytes(t *testing.T) {
 	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), podObject(name, recorded, sandboxUID, labels, status)}, withoutController())
 	// 2000 lines of 64 KiB, the most the launcher's line bound lets a role write into the tail.
 	padding := strings.Repeat("x", 64<<10)
-	var log strings.Builder
+	log := make([]string, 0, sharedLogLines)
 	for i := range sharedLogLines {
-		fmt.Fprintf(&log, "tester: line %d %s\n", i, padding)
+		log = append(log, fmt.Sprintf("tester: line %d %s", i, padding))
 	}
-	if log.Len() <= 8*sharedLogReadBytes {
-		t.Fatalf("the log is %d bytes, not far past the %d-byte read bound", log.Len(), sharedLogReadBytes)
+	var tails []int64
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		tails = append(tails, *action.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions).TailLines)
+		return true, &k8sruntime.Unknown{Raw: servedTail(t, action, log)}, nil
+	})
+	obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	// The first read reaches the bound inside the tail's 128th line, so it held 127 whole ones and
+	// the second asks for half of them.
+	if len(tails) != 2 || tails[0] != sharedLogLines || tails[1] != 63 {
+		t.Fatalf("the log was read with TailLines %v, want [%d 63]", tails, sharedLogLines)
+	}
+	if strings.Contains(obs.Detail, logBoundNote(sharedLogReadBytes)) {
+		t.Fatalf("the quote says it was cut at the bound, though its second read fit: %.200q", obs.Detail[max(0, len(obs.Detail)-200):])
+	}
+	if !strings.HasSuffix(obs.Detail, fmt.Sprintf("line %d %s", sharedLogLines-1, padding)) {
+		t.Fatalf("the quote ends %.200q, want the container's newest line", obs.Detail[max(0, len(obs.Detail)-200):])
+	}
+}
+
+// A second read whose newest lines are longer still is cut too: the quote carries what that read
+// reached, says the container's newest lines are not in it, and the log is read no third time.
+func TestASharedLogStillPastTheBoundOnItsSecondReadSaysSo(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	status := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "roles", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+	}}}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), podObject(name, recorded, sandboxUID, labels, status)}, withoutController())
+	// 1000 short lines, then 1000 of 64 KiB: the first read holds the short ones and about 127
+	// long ones, and half that many lines, all long, are past the bound again.
+	padding := strings.Repeat("x", 64<<10)
+	log := make([]string, 0, sharedLogLines)
+	for i := range sharedLogLines {
+		if i < sharedLogLines/2 {
+			log = append(log, fmt.Sprintf("tester: short %d", i))
+		} else {
+			log = append(log, fmt.Sprintf("tester: line %d %s", i, padding))
+		}
 	}
 	served := 0
 	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
@@ -506,7 +560,7 @@ func TestTheSharedLogsReadIsBoundedInBytes(t *testing.T) {
 			return false, nil, nil
 		}
 		served++
-		return true, &k8sruntime.Unknown{Raw: []byte(log.String())}, nil
+		return true, &k8sruntime.Unknown{Raw: servedTail(t, action, log)}, nil
 	})
 	obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
 	if err != nil {
@@ -515,13 +569,14 @@ func TestTheSharedLogsReadIsBoundedInBytes(t *testing.T) {
 	if !strings.HasSuffix(obs.Detail, logBoundNote(sharedLogReadBytes)) {
 		t.Fatalf("the quote is %.300q…%.200q, want it ending with %q", obs.Detail, obs.Detail[max(0, len(obs.Detail)-200):], logBoundNote(sharedLogReadBytes))
 	}
-	// The read stopped at its bound, so the tail it kept ends inside the log rather than at its
-	// last line: the container's newest line is not in the quote.
 	if last := fmt.Sprintf("line %d ", sharedLogLines-1); strings.Contains(obs.Detail, last) {
-		t.Fatalf("the quote carries %q, so the whole %d-byte log was read", last, log.Len())
+		t.Fatalf("the quote carries %q, though its second read stopped at the bound", last)
 	}
-	if served != 1 {
-		t.Fatalf("the log was read %d times for one role, want once", served)
+	if strings.Contains(obs.Detail, "short ") {
+		t.Fatalf("the quote carries a line of the first read's, not the second's: %.200q", obs.Detail)
+	}
+	if served != 2 {
+		t.Fatalf("the log was read %d times for one role, want twice", served)
 	}
 }
 

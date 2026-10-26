@@ -249,7 +249,7 @@ func flagValue(command []string, flag string) (string, bool) {
 // with the shim's agent-secrets flags (launcherCommand), which name its key directory and the
 // broker's token file, and the shim refuses to start without its token file; a pod's volumes are
 // fixed when it is created. So a pod made before the runtime enrolled, or under another audience or
-// expiry, cannot run a role that enrolls now, and must be replaced, as a pod whose launchers dial a
+// expiry, cannot run a role that enrolls now, and must be replaced, as a pod whose launcher dials a
 // moved stream must. The role's key directory is compared by name, and the token's projection by
 // the three fields the shim's token file depends on: its audience, expiry and path. Nothing else of
 // a stored volume is compared: a field the API server's defaulting or an admission webhook adds, or

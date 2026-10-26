@@ -591,21 +591,27 @@ func (r *liveRig) checkRoleIsolation() error {
 		}
 	}
 	note("operator", "inside %s: %s lists %v; %s is empty (the container's lists %v)", second.role, GHConfigDir, strings.Fields(own), RolesDir, strings.Fields(inContainer))
-	const processes = `for d in /proc/[0-9]*; do printf '%s %s\n' "${d#/proc/}" "$(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)"; done`
+	// One line a process: its pid, argv[1] and argv[2] (each alone, as the shim and role-init are
+	// told apart by position, never by a word anywhere in an argv), then its whole argv.
+	const processes = `for d in /proc/[0-9]*; do printf '%s\t%s\t%s\t%s\n' "${d#/proc/}" "$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed -n 2p)" "$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed -n 3p)" "$(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)"; done`
 	listing, err := r.exec(second, "sh", "-c", processes)
 	if err != nil {
 		return err
 	}
 	var sawInit, sawShim, sawAgent bool
 	for _, line := range strings.Split(listing, "\n") {
-		pid, args, _ := strings.Cut(line, " ")
+		fields := strings.SplitN(line, "\t", 4)
+		if len(fields) != 4 {
+			continue
+		}
+		pid, argv1, argv2, args := fields[0], fields[1], fields[2], fields[3]
 		switch {
-		case strings.Contains(args, "role-init"):
+		case argv1 == "launcher" && argv2 == "role-init":
 			if pid != "1" || !strings.Contains(args, "--role "+string(second.role)+" ") {
 				return fmt.Errorf("the second role's /proc shows role-init %q at pid %s, want its own alone, at pid 1", args, pid)
 			}
 			sawInit = true
-		case strings.Contains(args, "worker-shim"):
+		case argv1 == "worker-shim":
 			sawShim = true
 		case args == "sleep infinity ":
 			if sawAgent {
