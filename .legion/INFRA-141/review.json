@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-141",
+  "completed": "2026-10-26T01:18:30Z",
+  "generation": 3,
+  "decision": "changes_requested",
+  "reviewedCode": "0e17c46b01a9642ae948311584d681dd5d75aac5 (code above the approval at bc2283ee8f1d: one test function in packages/envoy/cmd/listener/unplaceable_delivery_acceptance_test.go, commit 5a496a63a7a3, and retro's two docs/solutions notes)",
+  "ci": "At 0e17c46b01a9 (the newest pull_request runs): required lint, typecheck, test, pr-title all completed/success (Tests run 40248676196, PR Title 40248676221); Legion Envoy and Contracts run 40248676193 success, including envoy-go, envoy-go-race, envoy-e2e-local and envoy-smoke. The PR body's CI line still names 8be80926 and is stale.",
+  "testerTest": "TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt: no finding. Re-ran -count=3 -v: both subtests PASS. Negative control re-run with go test -overlay replacing delivery.go's 'metadata.NumDelivered < unplaceableMaxDeliveries' clause by 'true': the new test fails at unplaceable_delivery_acceptance_test.go:832 'delivery 18 of a 10m0s window was deferred (attempt 18 of 120 window deferrals)', while TestUnplaceableRetryWindowFitsTheBoundsItDependsOn and TestUnplaceableAgentDeliveryRetriesThenGivesUp still pass, as the tester said; workspace unchanged after.",
+  "thermonuclear": "Not run: no runtime code changed since the approval at bc2283ee (a _test.go function, docs/solutions and .legion/ only).",
+  "basis": "The human's ruling at dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830 (answer text: agents keep deferring fixes to other issues instead of fixing them while there), relayed by the architect (Envoy 52f48fa81b4626acd4241e58c438c517): a defect with a clear fix in code this tree touches is fixed in this pull request. Each finding below is a Not proven / risk entry or the Fast-follow line that has such a fix, verified in the code at this head.",
+  "critical": 0,
+  "important": 6,
+  "minor": 3,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/listener/api.go", "description": "roleGetHandler answers errRoleHolderChanged from resolveLiveRoleHolder with writeNATSError(..., 500, ...): the role-claim race this PR named and answers 503 + Retry-After on the publish route is still a 500 on GET /v1/roles/<role>. Answer it as the publish route does (503, Retry-After: 1, a body naming the race), with a test."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/api.go", "description": "roleHolderSession reads under context.Background() and resolveLiveRoleHolder takes no context, so a role-lane publish (and GET /v1/roles) can spend roleHolderReadTimeout x roleHolderResolutionAttempts plus ReleaseExpiredRoleClaim before the sendRequestBudget-bounded publish starts. Thread the request's context (bounded by sendRequestBudget) through resolveLiveRoleHolder into liveSessionEntry, which already takes one, and stop between attempts once it ends; test that the publish answers inside the budget when the read stalls."},
+    {"severity": "important", "file": "packages/envoy/internal/bus/nats.go", "description": "ensureConnWithContext returns nil at the top of its loop on a connected connection without consulting ctx, and publishConfirmed checks only the deadline, so a cancellation that lands during the reconnect wait and coincides with the reconnect completing still publishes. Check ctx.Err() before returning a connection after a wait (or before every publish), and pin it."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go", "description": "unplaceableDeferrals: an entry whose message never reaches this listener again (dropped by the stream, purged, or redelivered elsewhere) is held for the life of the process, and unplaceableDeferralCap of them turn the retry off. Give each slot an expiry derived from the constants (longest a deferred message can legitimately stay pending), swept in take(), with a test."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go", "description": "deliveryOutcome.exceptionFailureRetries is unreachable: its only setter (the fanout delivery-failed outcome in the fanout loop) sets no fanoutRefusal, and applyDeliveryOutcome reads it only under isControlTopic || fanoutRefusal. Delete the field, its reader and its setter."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/api.go", "description": "Fast-follow / dispatch://INFRA-410: lift the inbound request records (requestOutcome, requestRecord and the refuse* answers) and the unplaceable-delivery policy inside agentSubjectDelivery into their own files, as review 5642071288 named; the third unit is the role-race answer above. Remove the Fast-follow line once shipped."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "outcomeCapabilityRefused and outcomeRoleLapsed are written by no asserted test (grep across cmd/listener tests: no hit). Add the two record assertions."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/main.go", "description": "The one-deferral-set wiring (deliveryConfig built inline in startup, shared by the role lane, the durable and the self-health rebind) is reached by no test. Extract its construction so a test asserts the three handlers share one set."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/publish_cancel_reconnect_test.go", "description": "The cancellation test sleeps 300 ms before release() instead of waiting on a handshake at the reconnect wait's entry; replace the sleep with a signal so the test proves the interleaving it names."}
+  ],
+  "notACodeFix": [
+    "The retired WARN 'listener agent session not found anywhere' and delivery_status=\"skipped\" label: no consumer in this repository (metricfilters.go), and an outside dashboard is an operator notice already in packages/envoy/CHANGELOG.md, not code this PR can fix.",
+    "The handoff-supersession entry in Not proven / risk is a note about records, not code."
+  ],
+  "threads": "All 25 review threads resolved on GitHub (gh api graphql at this round); no new bot threads since the approval at bc2283ee."
+}
