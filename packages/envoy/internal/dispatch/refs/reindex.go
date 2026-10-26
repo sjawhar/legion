@@ -12,7 +12,7 @@ import (
 
 // Source is the stored text of one reference source as its live write indexes it, read again so
 // the index can be rebuilt from what is stored (RebuildAll) or re-indexed when it is owed
-// (refs_owed, migration 0117; docs.Service.RunReferenceReindex).
+// (refs_owed, migration 0118; docs.Service.RunReferenceReindex).
 type Source struct {
 	Kind, ID string
 	// Exists is false for a source that is gone, or that no write indexes (an issue-less message,

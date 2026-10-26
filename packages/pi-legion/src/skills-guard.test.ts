@@ -83,9 +83,18 @@ test("no skill or prompt says Legion never merges", () => {
 
 // The controller's `gh` acts as the review App (LEGION-668): the skill must say how it checks a
 // pull request's state, and nothing anywhere in the sweep's roots may still claim the controller
-// (or any role) cannot read GitHub.
+// (or any role) cannot read GitHub. The commands live in the two references SKILL.md sends the
+// controller to (its session and its triage), so SKILL.md must link both, and the strings are
+// read from those three files only.
 test("the controller skill reads pull requests as the review App, and nothing says the controller holds no GitHub credential", () => {
-  const controllerSkill = readFileSync(path.join(staged, "legion-controller/SKILL.md"), "utf8");
+  const controllerDir = path.join(staged, "legion-controller");
+  const entry = readFileSync(path.join(controllerDir, "SKILL.md"), "utf8");
+  for (const reference of ["session.md", "triage.md"]) {
+    expect(entry).toContain(`skill://legion-controller/references/${reference}`);
+  }
+  const controllerSkill = ["SKILL.md", "references/session.md", "references/triage.md"]
+    .map((file) => readFileSync(path.join(controllerDir, file), "utf8"))
+    .join("\n");
   expect(controllerSkill).toContain(
     "gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state"
   );
@@ -126,12 +135,15 @@ test("the controller skill reads pull requests as the review App, and nothing sa
 });
 
 // GitHub honours the `skip-checks: true` trailer only as the last line after two empty lines; the
-// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker skill
-// and the daemon's worker part carry the recipe with two, and no skill or prompt carries one with
-// fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends with exactly three `\n`.
+// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker
+// skill's trailer reference and the daemon's worker part carry the recipe with two, and no skill
+// or prompt carries one with fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends
+// with exactly three `\n`.
 test("the skip-checks recipe writes two empty lines before the trailer, everywhere it is written", () => {
   const recipe = "$'\\n\\n\\nskip-checks: true'";
-  expect(readFileSync(path.join(staged, "legion-worker/SKILL.md"), "utf8")).toContain(recipe);
+  expect(
+    readFileSync(path.join(staged, "legion-worker/references/skip-checks-trailer.md"), "utf8")
+  ).toContain(recipe);
   expect(readFileSync(path.join(promptsRoot, "go/worker-common.md"), "utf8")).toContain(recipe);
   const short = [staged, promptsRoot]
     .flatMap(files)
@@ -144,17 +156,86 @@ test("the skip-checks recipe writes two empty lines before the trailer, everywhe
   expect(short).toEqual([]);
 });
 
+// INFRA-83 took the `CI:` line out of the pull request body, and the forward merge of main put the
+// paragraph that defined it back into skills/legion-worker/references/pr-body.md with no conflict
+// for anyone to read: a merge keeps both sides by design, so a deletion is undone in silence. The
+// body carries no such line, and that reference is the file every worker reads before it touches a
+// body, so no staged skill and no daemon prompt may say what the line holds or tell anyone to
+// write one.
+//
+// What it pins is three shapes the regression took, not a class. First, the reference (`CI` line,
+// `CI:` line, `**CI**` line, `"CI"` line or bare CI line) as the subject of one of seven verbs
+// that say what it contains: `names`, `holds`, `carries`, `lists`, `records`, `shows`, `gives`.
+// Second, the reference as the object of one of ten spellings of seven verbs that say to write it
+// — `writes`/`written`, `fills`/`filled`, `updates`, `cites`/`cited`, `defines`, `quotes`,
+// `records`, each optionally `re-` prefixed — behind a definite determiner (`the`, `a`, `its`,
+// `this`, `each`) up to two words after the verb, with a lookbehind that drops `never`, `no
+// longer` and `not`. Third, the template's own `**CI:**` field line. The determiner and the
+// lookbehind are what let a sentence naming the line while saying it is gone pass: "has no `CI:`
+// line", "no `CI:` line to fill", "never writes the `CI` line".
+//
+// Four shapes it does not catch. The copular: "The body's CI line is the runs GitHub started for
+// the code head" uses no verb from either list. The nominalisation: "that reference is the sole
+// definition of the CI line", which is the sentence this branch deletes from
+// packages/daemon/internal/prompts/roles/implementer.md. A writing verb outside the list: "must
+// populate the CI line from one `gh run list`", "Keep the body's CI line current after every
+// push". And the anaphora: a sentence saying only "the implementer writes it" passes, which is
+// why the anchor is the defining sentence such a paragraph opens with, not its later pronouns.
+//
+// So this test pins those three shapes and closes no class: a reader who needs a new shape caught
+// adds it here rather than assuming it is covered.
+test("no staged skill or daemon prompt says what a pull request body `CI` line holds, or tells anyone to write one", () => {
+  // `CI` line, `CI:` line, **CI** line, "CI" line, or bare CI line, wrapped across lines or not.
+  const reference = String.raw`(?:\*\*|\`|")?CI:?(?:\*\*|\`|")?\s+line`;
+  const instructions = [
+    // The line as the subject of a verb that says what it contains.
+    new RegExp(
+      String.raw`${reference}\s+(?:names|holds|carries|lists|records|shows|gives)\b`,
+      "gi"
+    ),
+    // The line as the object of a verb that says to write one, behind a definite determiner so
+    // that `no …` and `any …` cannot fill that slot, and not itself negated.
+    new RegExp(
+      String.raw`(?<!\b(?:never|no longer|not)\s)\b(?:re-)?(?:writes?|written|fills?|filled|updates?|cites?|cited|defines?|quotes?|records?)\s+(?:\w+\s+){0,2}(?:the|a|its|this|each)\s+${reference}`,
+      "gi"
+    ),
+    // The template's own field line, which is an instruction to fill it in.
+    /^\*\*CI:?\*\*/gm,
+  ];
+  const instructing = [staged, promptsRoot]
+    .flatMap(files)
+    .filter((file) => file.endsWith(".md"))
+    .flatMap((file) => {
+      const text = readFileSync(file, "utf8");
+      // A hit in the staged partition reads as its own layout has it
+      // (`legion-worker/references/pr-body.md`); a hit in the prompts, which live in the
+      // repository, reads from the repository root.
+      const name = file.startsWith(staged)
+        ? path.relative(staged, file)
+        : path.relative(REPO_ROOT, file);
+      return instructions
+        .flatMap((instruction) => [...text.matchAll(instruction)])
+        .map(({ index }) => `${name}:${text.slice(0, index).split("\n").length}`);
+    });
+  expect(instructing).toEqual([]);
+});
+
 // Whether retro's push carries that trailer was once stated three ways that disagreed: a rule keyed
 // to the paths a push touched, an exception list that named retro's removal commit, and a reason
 // that held only while retro also wrote a learning (INFRA-149). A retro with nothing to write took
 // the path rule, so the commit that merges arrived with no check runs, which a base branch that
 // requires a check blocks while Legion carries the earlier code head's verdict and reads the head as
-// green. One sentence now replaces all three, and an edit that un-states it in any of the four texts
+// green. One sentence now replaces all three, and an edit that un-states it in any of the five texts
 // must fail a lane here rather than pass with every required check green. Counted per file and never
 // against a composed prompt: the composed implementer prompt carries the sentence twice, from
 // `roles/implementer.md` and from `go/worker-common.md`. The whole sentence is counted literally, so
 // a reworded half cannot satisfy it. The `packages/claude-envoy/legion/` mirror needs no pin of its
 // own; `packages/claude-envoy/tests/legion-plugin-fresh.test.ts` fails when it drifts from these.
+//
+// INFRA-83 adds the fifth text. It moved the trailer's contract out of `legion-worker/SKILL.md`
+// into `legion-worker/references/skip-checks-trailer.md`, which is now the file a worker reads
+// before it writes the line, so a copy of the sentence that lived there unpinned would be the
+// drift this test exists to stop. The four INFRA-149 pinned are pinned unchanged.
 test("one sentence states that retro's push never carries the trailer, in each text that states it", () => {
   const rule =
     "Retro's push never carries the line, whatever paths it touches, because it is the last " +
@@ -162,6 +243,7 @@ test("one sentence states that retro's push never carries the trailer, in each t
     "never ran.";
   const texts = [
     path.join(staged, "legion-worker/SKILL.md"),
+    path.join(staged, "legion-worker/references/skip-checks-trailer.md"),
     path.join(staged, "legion-retro/SKILL.md"),
     path.join(promptsRoot, "go/worker-common.md"),
     path.join(promptsRoot, "roles/implementer.md"),

@@ -34,13 +34,13 @@ broker allows it when you are the grant's approver or its session's operator, an
 else `NOT_APPROVER`.
 
 ```console
-$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
+$ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
 {"state":"revoked"}
 ```
 
-(That is the call Dispatch's server makes with the broker's UI token, the credential only
-Dispatch's server holds; on the [local stack](/legion/broker/guides/run-locally/) you can make it
-yourself.)
+(That is the call Dispatch's server makes as its own ServiceAccount, the caller the broker lists
+in `BROKER_API_ACCOUNTS`; on the [local stack](/legion/broker/guides/run-locally/) you can make it
+yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.)
 
 ## Revoke a grant from your shell
 
@@ -96,7 +96,11 @@ Deleting the secret (`agent-secrets secret delete NAME`), or moving it out of
 once after a write through `agent-secrets secret` and, after one made any other way, within about ten
 minutes on AWS Secrets Manager (on Google Secret Manager usually as soon, but Google bounds its
 listing's lag only at a few hours, so ask for a reread after a `gcloud` write), it refuses each read of a grant given automatically under the old tags with
-`GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. The
+`GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. One
+reread ends it everywhere: the broker process that answers the call tells every other process
+serving the same database to reread the same name, so the retag is in force across the deployment
+within seconds, except on a process whose database connection has dropped, which catches up at its
+own next five-minute read of the namespace. The
 change applies to every session that got the secret automatically, where revoking a grant of your
 own session in Dispatch withholds it from that session alone.
 
@@ -191,9 +195,9 @@ daemon's token login is listed the same way with `approved_by` empty and `subjec
 ServiceAccount:
 
 ```console
-$ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
+$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
 {"credentials":[{"credential_id":"d4187389-953c-4156-90c1-1dd937e9bf0b","host":"example-host-devbox","service":null,"subject":null,"approved_by":"ada@example.com","issued_at":"2026-10-10T14:56:01.121955Z","expires_at":"2026-10-17T14:56:01.122701Z","expired":false},{"credential_id":"8f4c8ae4-b73e-4a60-a591-725667480f1a","host":"example-host-cluster","service":"legion-daemon","subject":null,"approved_by":"bob@example.com","issued_at":"2026-10-10T14:55:59.906427Z","expires_at":"2026-10-17T14:55:59.9071Z","expired":false}]}
-$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/8f4c8ae4-b73e-4a60-a591-725667480f1a/revoke-by-approver"
+$ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/8f4c8ae4-b73e-4a60-a591-725667480f1a/revoke-by-approver"
 {"state":"revoked"}
 ```
 

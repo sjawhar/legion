@@ -1,6 +1,7 @@
 // handlers_ui_pending.go: GET /v1/pending — lists every still-pending credential-request record
-// naming an approver, newest first. Part of the UI routes (uiAuth) Dispatch's server relays to on
-// behalf of the browser; see handlers_ui_records.go for the shared trust-model note.
+// naming an approver, newest first. Part of the routes a listed service calls with its own
+// ServiceAccount token (accountAuth), relaying a person's own page; see handlers_ui_records.go
+// for the shared trust-model note.
 package api
 
 import (
@@ -28,7 +29,7 @@ type pendingResponse struct {
 	Pending []pendingEntry `json:"pending"`
 }
 
-func (s *server) listPending(w http.ResponseWriter, r *http.Request) {
+func (s *server) listPending(w http.ResponseWriter, r *http.Request, _ string) {
 	approver := r.URL.Query().Get("approver")
 	if !requireApprover(w, approver) {
 		return

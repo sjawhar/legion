@@ -283,6 +283,45 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
+  test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
+    const schema = schemaFor("dispatch_architecture_sync");
+
+    for (const repo of [
+      undefined,
+      "acme/infra",
+      "sjawhar/legion",
+      "Owner-1/repo.name_2",
+      "a/..b",
+    ]) {
+      expect(schema.safeParse({ project: "CORE", repo }).success, String(repo)).toBe(true);
+    }
+    for (const repo of [
+      "",
+      "acme",
+      "acme/",
+      "/infra",
+      "acme/infra/extra",
+      "acme/.",
+      "acme/..",
+      " acme/infra",
+      "acme/in fra",
+      "acme/infra\n",
+    ]) {
+      const refused = schema.safeParse({ project: "CORE", repo });
+      expect(
+        refused.error?.issues.map((issue) => issue.message),
+        JSON.stringify(repo)
+      ).toEqual(["repo is not a repository: give it as owner/name, such as acme/infra."]);
+    }
+  });
+
+  test("dispatch_architecture_sync says a project may have several sources and how one is saved", () => {
+    const { description } = specFor("dispatch_architecture_sync");
+
+    expect(description).toContain("A project may have several sources, one per repository");
+    expect(description).toContain("PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}");
+  });
+
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
     const schema = schemaFor("dispatch_open_asks");
 

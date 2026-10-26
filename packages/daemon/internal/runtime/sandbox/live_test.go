@@ -52,6 +52,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
@@ -364,7 +365,7 @@ func readLiveEnv(t *testing.T) liveEnv {
 		platform:              get("LEGION_E2E_PLATFORM"),
 		runtimeIdentityKind:   get("LEGION_E2E_RUNTIME_IDENTITY_KIND"),
 		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
-		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY"),
+		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY_NAME"),
 		record:                get("LEGION_E2E_RECORD"),
 		work:                  get("LEGION_E2E_WORK"),
 		from:                  os.Getenv("LEGION_E2E_FROM"),
@@ -766,9 +767,10 @@ type liveRig struct {
 	enrollments        map[claim.Token]liveEnrollment
 	grants             map[claim.Token]string
 	requests           map[claim.Token]string
-	// sessionStore is the providers Secret's key every runtime started from now on keeps sessions
-	// in (Options.SessionDSNKey, session_store postgres): set by postgres-resume, "" before it.
-	sessionStore string
+	// sessionStore is where every runtime started from now on keeps its sessions
+	// (Options.SessionStore): the providers Secret key of session_store postgres, set by
+	// postgres-resume, and the volume store before it.
+	sessionStore ompsessions.Store
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
@@ -970,7 +972,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		GitHubCredential:      r.tokens.Credential,
 		Conns:                 ln,
 		Log:                   r.log,
-		SessionDSNKey:         r.sessionStore,
+		SessionStore:          r.sessionStore,
 		RepositoryCache:       liveRepositoryCache(),
 		Mapped:                r.mappedRepositories,
 	}

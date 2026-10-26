@@ -58,7 +58,7 @@ type Target struct {
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
 // that source appends has to name. Every write that indexes a body goes through it, so no
 // producer can reconcile the graph without holding what moved: replace itself is unexported. It
-// ends by deleting the source's refs_owed row (migration 0117), which the write's own trigger made
+// ends by deleting the source's refs_owed row (migration 0118), which the write's own trigger made
 // in the same transaction, so a write this build indexes is not re-indexed by the drain
 // (docs.Service.RunReferenceReindex); a build before it never deletes one, so its writes stay
 // owed. A row the drain or a rebuild has claimed is skipped rather than waited for: the claimer
@@ -331,7 +331,8 @@ func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.Refere
 	return references, nil
 }
 
-// Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets.
+// Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets. A target
+// of a node kind this build does not know is skipped; any other unresolved target is listed.
 func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.OutgoingReference, error) {
 	rows, err := q.Query(ctx, `
 		select e.to_kind, e.to_id,
@@ -341,9 +342,9 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 		from graph_edges e
 		left join artifacts a on e.to_kind = 'artifact' and a.ref_key = e.to_id
 		left join artifact_versions v on v.artifact_id = a.id
-		where e.from_kind = 'artifact' and e.from_id = $1 and e.kind = 'mentions'
+		where e.from_kind = 'artifact' and e.from_id = $1 and e.kind = 'mentions' and e.to_kind = any($2)
 		order by e.to_kind, e.to_id, v.number
-	`, artifactID)
+	`, artifactID, nodeKinds)
 	if err != nil {
 		return nil, err
 	}

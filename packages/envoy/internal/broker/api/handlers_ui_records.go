@@ -1,15 +1,18 @@
 // handlers_ui_records.go: GET /v1/credential-requests/{record}, POST .../approve, .../deny — a
-// record's own read, approve and deny routes. Part of the UI routes (uiAuth) Dispatch's server
-// relays to on behalf of the browser: the UI bearer proves Dispatch's server is the caller, and
-// Dispatch names the deciding human in the body's approver field from its own session, so a
-// decision is authorized by the record's rule admitting that login (record.MayDecide): its
-// approver, or anyone signed in for a shared secret's request or a service's machine login. A
-// service's machine login, which only a broker before token logins opened, may only be denied:
-// approving it is 400 SERVICE_LOGS_IN_WITH_TOKEN.
+// record's own read, approve and deny routes. Part of the routes a listed service calls with its
+// own Kubernetes ServiceAccount token (accountAuth): that token proves which service is calling,
+// and the service names the deciding human in the body's approver field from its own session. The
+// broker takes that name on the caller's word — a decision is authorized by the record's rule
+// admitting that login (record.MayDecide): its approver, or anyone signed in for a shared
+// secret's request or a service's machine login — and dispatch://INFRA-314 is what replaces the
+// name with a signed assertion the broker verifies. Each decision is logged with the caller that
+// made it and the approver it named. A service's machine login, which only a broker before token
+// logins opened, may only be denied: approving it is 400 SERVICE_LOGS_IN_WITH_TOKEN.
 package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -128,7 +131,7 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	return resp
 }
 
-func (s *server) readRecord(w http.ResponseWriter, r *http.Request) {
+func (s *server) readRecord(w http.ResponseWriter, r *http.Request, _ string) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
 	if !ok {
 		return
@@ -168,14 +171,21 @@ type decisionResponse struct {
 	State string `json:"state"`
 }
 
-func (s *server) approveRecord(w http.ResponseWriter, r *http.Request) { s.decideRecord(w, r, true) }
-func (s *server) denyRecord(w http.ResponseWriter, r *http.Request)    { s.decideRecord(w, r, false) }
+func (s *server) approveRecord(w http.ResponseWriter, r *http.Request, callerName string) {
+	s.decideRecord(w, r, callerName, true)
+}
+
+func (s *server) denyRecord(w http.ResponseWriter, r *http.Request, callerName string) {
+	s.decideRecord(w, r, callerName, false)
+}
 
 // decideRecord dispatches by the record's own kind — agent_secret to requests.Machine.
 // ApplyDecision, launcher_credential to machine.Service.ApplyDecision — since the two are decided
 // by different services with different state (a request row vs. a poll row) behind one shared
-// record id.
-func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bool) {
+// record id. It logs the caller that relayed the decision and the approver that caller named,
+// which is the record of who acted while the approver's name is still the caller's to state
+// (dispatch://INFRA-314).
+func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, callerName string, approve bool) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
 	if !ok {
 		return
@@ -187,6 +197,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bo
 	if !requireApprover(w, body.Approver) {
 		return
 	}
+	slog.Info("decision relayed", "caller", callerName, "approver", body.Approver, "record", recordID, "approve", approve)
 	kind, err := s.deps.Machine.RecordKind(r.Context(), recordID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

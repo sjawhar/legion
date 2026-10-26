@@ -28,7 +28,7 @@ const (
 // both would read the same batch and fight over its rows: one process drains the queue.
 const referenceReindexLease = "reference-reindex"
 
-// RunReferenceReindex re-indexes every reference source owed one (refs_owed, migration 0117): each
+// RunReferenceReindex re-indexes every reference source owed one (refs_owed, migration 0118): each
 // one stored before the release that reads bare issue keys and `#id`s, each one a server of an
 // earlier release writes while a rolling update runs (its writes fire the triggers, and it never
 // clears the row a write of this build clears, refs.ReplaceCounted), and every source in the scope

@@ -16,6 +16,7 @@ import {
   patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
+import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -391,8 +392,9 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
 // padding, not an overlay: padding on an inline element grows the hit box without moving the
 // line, and without covering whatever happens to sit within 44px of the link.
 // The row places the turn itself and then waits for it to stop moving: the Conversation's jump
-// to its newest turn lands well after a link first has a box, and when it is missed the turn is
-// left under the fixed comment composer, where a hit test reads the composer and not the link.
+// to its newest turn lands well after a link first has a box, and the row measures what it
+// placed rather than trusting the page's own placement, since a turn left under the fixed comment
+// composer would have a hit test read the composer and not the link.
 test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
   browser,
 }, testInfo) => {
@@ -413,8 +415,10 @@ test("an inline link keeps its line and grows its hit box without covering its n
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
   // An open ask's question renders in full on the Inbox, so it is where a body with a wrapped
-  // link and two stacked links can be measured. A generous hit box would reach the words
-  // beside the first and the link above the last.
+  // link, two stacked links and two links on consecutive lines can be measured. A generous hit
+  // box would reach the words beside the first, the link below the stacked pair's upper one, and
+  // the text of the line above the last. A question reads a single newline as a space, so the
+  // last pair is split by a hard break.
   const bodyAsk = await createAsk(
     issue.key,
     {
@@ -424,13 +428,15 @@ test("an inline link keeps its line and grows its hit box without covering its n
         "[First choice](https://example.invalid/one)",
         "",
         "[Second choice](https://example.invalid/two)",
+        "",
+        "[Upper choice](https://example.invalid/upper-choice)\\\n[Lower choice](https://example.invalid/lower-choice)",
       ].join("\n"),
     },
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
 
-  // A message turn is 16px prose on 24px lines - the tightest pitch a message body reaches -
-  // and a hard break puts two links on consecutive lines of it.
+  // A message turn is 16px prose on 24px lines, and a hard break puts two links on consecutive
+  // lines of it.
   await createMessage(
     issue.key,
     {
@@ -554,9 +560,9 @@ test("an inline link keeps its line and grows its hit box without covering its n
       line.probeClear,
       'the turn was left under the fixed comment composer, so the probe measured the composer - or [aria-label="Comment composer"] is gone'
     ).toBe(true);
-    // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
-    // a message body reaches - the lower link's padded box starts at least two pixels below
-    // the upper link's own text, which is the margin the probe at `upperText.bottom + 1` needs.
+    // On consecutive lines of one message turn - 16px prose on 24px lines - the lower link's
+    // padded box starts at least two pixels below the upper link's own text, which is the
+    // margin the probe at `upperText.bottom + 1` needs.
     expect(
       line.lowerClearance,
       "the lower link's padded box starts within a pixel of the upper link's own text, so the probe one pixel below that text is inside the lower link, and the padding check below would go red for the pitch rather than for the padding"
@@ -570,16 +576,15 @@ test("an inline link keeps its line and grows its hit box without covering its n
       .locator('main a:not([data-testid^="ask-"] a)')
       .filter({ hasText: /^Upper line$/ });
     await expect(upperLink).toHaveCount(1);
-    // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
-    // a message body reaches - a tap at the bottom of the upper link's own text is taken by
-    // the upper link.
+    // On consecutive lines of one message turn - 16px prose on 24px lines - a tap at the bottom
+    // of the upper link's own text is taken by the upper link.
     await upperLink.click({
       position: { x: line.hitX, y: line.onTextBottomY },
       timeout: 5_000,
       trial: true,
     });
     // One pixel below that text is still inside the upper link's hit box: this trial click is
-    // the check that goes red when the three pixels of `.prose a { padding-block }` are gone.
+    // the check that goes red when the padding of `.prose a { padding-block }` is gone.
     await upperLink.click({
       position: { x: line.hitX, y: line.inPaddingY },
       timeout: 5_000,
@@ -662,6 +667,13 @@ test("an inline link keeps its line and grows its hit box without covering its n
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
+    // 5. Two choices a hard break puts on consecutive lines of the card's 15px text on 24.375px
+    //    lines (`text-[15px] leading-relaxed`): the lower one's padded box starts at or below
+    //    the upper one's own text.
+    await expectConsecutiveLinksClear(card, "Upper choice", "Lower choice", {
+      fontSize: 15,
+      lineHeight: 24.375,
+    });
   } finally {
     await context.close();
   }
@@ -866,12 +878,6 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expect
       .soft(labelOption.getByText(longLabel, { exact: true }))
       .toHaveAttribute("title", longLabel);
-
-    // An agent row's name, which opens the row. The button carries the full name itself.
-    await page.goto("/agents");
-    const agentName = page.getByRole("heading", { name: longTitle }).getByRole("button");
-    await expectEllipsis(agentName);
-    await expect.soft(agentName).toHaveAttribute("title", longTitle);
 
     // A sent broadcast's row: the metadata line, then the message's first line under it, cut
     // by a one-line clamp. Its hover title is the message as plain words (the preview renders

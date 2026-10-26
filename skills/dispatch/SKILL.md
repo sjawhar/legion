@@ -136,7 +136,7 @@ EOF
 
 - Attach every architectural issue to the components it changes. Attach the root before you decompose it: children inherit.
 - `--components-json '{"mode":"explicit","ids":["web"]}'`, `'{"mode":"none","reason":"hiring, not code"}'` (only for non-architectural work, with a concrete reason), or `'{"mode":"inherit"}'`.
-- Component ids: each non-external `components[].id` from `GET /api/v1/projects/{key}/architecture`, or the file names under `.dispatch/architecture/` in its source repository. Others are refused `COMPONENTS_INPUT`. A closed issue can be classified without reopening.
+- Component ids: each non-external `components[].id` from `GET /api/v1/projects/{key}/architecture`, or the file names under `.dispatch/architecture/` in any of the project's source repositories. A project may import from several; ids are project-wide, so one issue can name components of different sources. Others are refused `COMPONENTS_INPUT`. A closed issue can be classified without reopening.
 - Change code and `.dispatch/architecture/<id>.md` in the same review. A stale model: `dispatch architecture-sync` ([issues.md](skill://dispatch/references/issues.md#syncing-a-projects-architecture-model)).
 
 ## Close what you opened

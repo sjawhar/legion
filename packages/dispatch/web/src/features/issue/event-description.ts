@@ -10,12 +10,24 @@ export function eventDescription(event: Event): string {
       return `Project updated: ${event.payload.name}`;
     case "settings.repo_project.updated":
       return `${event.payload.deleted ? "Repository mapping removed" : "Repository mapping updated"}: ${event.payload.mapping.repo}`;
+    case "settings.project_default_assignee.updated":
+      return event.payload.assignee === null
+        ? `Default assignee cleared: ${event.payload.project}`
+        : `Default assignee updated: ${event.payload.project} → ${event.payload.assignee}`;
     case "settings.architecture_source.updated":
       return `${event.payload.deleted ? "Architecture source removed" : "Architecture source updated"}: ${event.payload.source.repo}`;
-    case "architecture.synced":
-      return `Architecture synced: ${event.payload.components} component${event.payload.components === 1 ? "" : "s"} at ${event.payload.commit.slice(0, 12)}`;
+    // An event retained from before a project had several sources names no repository and
+    // keeps its original wording.
+    case "architecture.synced": {
+      const count = `${event.payload.components} component${event.payload.components === 1 ? "" : "s"} at ${event.payload.commit.slice(0, 12)}`;
+      return event.payload.repo === undefined
+        ? `Architecture synced: ${count}`
+        : `Architecture synced from ${event.payload.repo}: ${count}`;
+    }
     case "architecture.sync_failed":
-      return `Architecture sync failed: ${event.payload.error}`;
+      return event.payload.repo === undefined
+        ? `Architecture sync failed: ${event.payload.error}`
+        : `Architecture sync from ${event.payload.repo} failed: ${event.payload.error}`;
     case "user_state.updated":
       return "User state updated";
     case "user_agent_state.updated":

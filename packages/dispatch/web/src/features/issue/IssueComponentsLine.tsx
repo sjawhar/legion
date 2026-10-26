@@ -3,6 +3,7 @@ import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { projectArchitectureSourcesQuery } from "../../api/queries";
 import type { Issue } from "../../api/types";
 import {
   badgeHigh,
@@ -23,11 +24,12 @@ import { useIssueComponents } from "./useIssueComponents";
  * re-import retired; `none` shows the reason; an issue no ancestor chain attached reads
  * `Not attached`. When the attachment is an ancestor's, that ancestor is named and linked.
  * The line is editable only when the project has an architecture source — the small
- * `["architecture-source", project]` lookup the project page shares, whose `null` means
- * read-only — through the same `ComponentPicker` the Architecture pane uses: a picked
- * set saves `explicit`, clearing every pick saves `inherit` (back to the ancestors'). The
- * component list itself (the whole tree, refetched on every issue event in the project) is
- * fetched only while the picker is open.
+ * `["architecture-sources", project]` list the project page shares, whose `[]` means
+ * read-only — through the same `ComponentPicker` the Architecture pane uses, offering every
+ * source's components: a picked set saves `explicit`, clearing every pick saves `inherit`
+ * (back to the ancestors'). Ids are project-wide, so a chip is the bare id whichever source
+ * supplies it. The component list itself (the whole tree, refetched on every issue event in
+ * the project) is fetched only while the picker is open.
  */
 export function IssueComponentsLine({
   issue,
@@ -35,10 +37,7 @@ export function IssueComponentsLine({
   issue: Pick<Issue, "components" | "key" | "project" | "status" | "title">;
 }): ReactNode {
   const { components } = issue;
-  const source = useQuery({
-    queryKey: ["architecture-source", issue.project],
-    queryFn: () => api.getArchitectureSource(issue.project),
-  });
+  const sources = useQuery(projectArchitectureSourcesQuery(issue.project));
   const [pickerOpen, setPickerOpen] = useState(false);
   const tree = useQuery({
     queryKey: ["architecture", issue.project],
@@ -90,7 +89,7 @@ export function IssueComponentsLine({
         </>
       )}
       {inheritedFrom}
-      {source.data == null ? null : (
+      {(sources.data?.length ?? 0) === 0 ? null : (
         <ComponentPicker
           components={tree.data?.components ?? []}
           error={tree.error === null ? null : tree.error.message}

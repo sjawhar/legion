@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Advised,
+  ArchitectureSource,
   Artifact,
   ArtifactBlock,
   ArtifactUploadResponse,
@@ -74,6 +75,7 @@ import {
   DispatchGatewayError,
   DispatchServiceError,
   type GraphReferencesQuery,
+  type IssueReadOptions,
 } from "./dispatch-http";
 import {
   dispatchChildRef,
@@ -539,13 +541,32 @@ async function architectureGuidance(
   if (components.mode === "none" || components.ids.length > 0) return undefined;
 
   try {
-    if ((await client.getArchitectureSource(project)) === null) {
-      return undefined;
-    }
+    if ((await client.listArchitectureSources(project)).length === 0) return undefined;
     return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
   } catch (error) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error)}. ${architectureComponentsAction}`;
   }
+}
+
+/** One source's answer to `dispatch architecture-sync`: its imported commit, or the recorded
+ *  failure and what of that source's model stays up. A source re-saved on another branch has no
+ *  recorded commit yet but keeps its earlier components until an import replaces them. */
+function architectureSyncLines(project: string, source: ArchitectureSource): string {
+  if (source.last_error === null) {
+    return `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${source.last_sync_at ?? "unknown time"}).`;
+  }
+  let kept: string;
+  if (source.last_commit !== null) {
+    kept = `The previous model of ${source.repo} stays up (commit ${source.last_commit}).`;
+  } else if (source.components > 0) {
+    kept = `The previous model of ${source.repo} stays up (${source.components} ${source.components === 1 ? "component" : "components"}).`;
+  } else {
+    kept = `No model has ever imported from ${source.repo}.`;
+  }
+  return [
+    `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
+    kept,
+  ].join("\n");
 }
 
 interface DuplicateCandidateShape {
@@ -907,6 +928,20 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
           "message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
         );
       }
+      const events = optionalNumber(args, "events");
+      const allEvents = optionalBoolean(args, "all_events") === true;
+      if (events !== undefined && allEvents) {
+        problems.push(
+          "--events and --all-events both say how many events the read lists: name one, --events N for the last N or --all-events for every one"
+        );
+      }
+      const count = events !== undefined ? "--events" : allEvents ? "--all-events" : undefined;
+      const eventless = count === undefined ? undefined : readWithoutEvents(args);
+      if (eventless !== undefined) {
+        problems.push(
+          `${count} lists an issue's events, which dispatch read prints only for an issue or its dispatch://KEY/log, not for ${eventless}: drop ${count}`
+        );
+      }
       break;
     }
     case "dispatch_doc_read": {
@@ -920,8 +955,52 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       }
       break;
     }
+    case "dispatch_issues": {
+      if (optionalBoolean(args, "all") === true) {
+        const paging = [
+          ...(optionalNumber(args, "limit") === undefined ? [] : ["--limit"]),
+          ...(optionalNumber(args, "offset") === undefined ? [] : ["--offset"]),
+        ];
+        if (paging.length > 0) {
+          problems.push(
+            `--all takes every matching issue in one unpaged read, so it cannot be combined with ${paging.join(" or ")}: name --all on its own, or page with --limit and --offset`
+          );
+        }
+      }
+      break;
+    }
   }
   return problems;
+}
+
+/** What a `dispatch_read` of the owner-resolved `args` prints in place of an issue's events, or
+ *  undefined for an issue read or its `dispatch://KEY/log`, the two reads that list them. The
+ *  ref's kind comes before `artifact` and `project`: a project document's ask or comment ref
+ *  fills both, and the read prints the ask or comment. */
+function readWithoutEvents(args: ToolArguments): string | undefined {
+  if (optionalString(args, "message") !== undefined) return "a message's conversation";
+  const ref = optionalString(args, "ref");
+  switch (ref === undefined ? undefined : parseDispatchRef(ref)?.kind) {
+    case "ask":
+      return "an ask";
+    case "comment":
+      return "a comment";
+    case "message":
+      return "a message's conversation";
+    case "children":
+      return "the issue's children";
+    // An artifact beside a log ref is refused by `ownerConflictProblems`, which says to drop the
+    // artifact; the log lists events, so the count stays.
+    case "log":
+      return undefined;
+  }
+  if (
+    optionalString(args, "artifact") !== undefined ||
+    optionalString(args, "project") !== undefined
+  ) {
+    return "a document summary";
+  }
+  return undefined;
 }
 
 /**
@@ -2675,7 +2754,7 @@ export async function executeDispatchTool(
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
     const unowned =
-      "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
+      "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
     return {
       text:
         owner !== null
@@ -2802,7 +2881,8 @@ export async function executeDispatchTool(
         ];
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         // Dispatch picks the assignee when the call names none (the creating person, the personal
-        // token's owner, or the parent's), so the line says whom it answered.
+        // token's owner, the parent's, or the project's default), so the line says whom it
+        // answered.
         const assigned =
           created.assignee === undefined
             ? ""
@@ -3076,23 +3156,31 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const page = await client.listIssuePage(
-        {
-          project,
-          ...(status === undefined ? {} : { status }),
-          ...(parent === undefined ? {} : { parent }),
-          ...(label === undefined ? {} : { label }),
-          ...(priority === undefined ? {} : { priority }),
-          ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
-          ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
-        },
-        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
-        // negative or fractional offset.
-        {
-          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
-          offset: optionalNumber(args, "offset") ?? 0,
-        }
-      );
+      const filters = {
+        project,
+        ...(status === undefined ? {} : { status }),
+        ...(parent === undefined ? {} : { parent }),
+        ...(label === undefined ? {} : { label }),
+        ...(priority === undefined ? {} : { priority }),
+        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
+      };
+      // --all reads the whole filtered listing in one request, which Dispatch answers as a bare
+      // array; argumentProblems has already refused it beside --limit or --offset. Everything
+      // else pages exactly as before, the tool's schema having refused a limit outside
+      // 1..MAX_ISSUE_PAGE_LIMIT and a negative or fractional offset.
+      const page =
+        optionalBoolean(args, "all") === true
+          ? await client.listAllIssues(filters).then((issues) => ({
+              issues,
+              total: issues.length,
+              limit: issues.length,
+              offset: 0,
+            }))
+          : await client.listIssuePage(filters, {
+              limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+              offset: optionalNumber(args, "offset") ?? 0,
+            });
       const { total, limit, offset } = page;
       const rows = page.issues.map((row) => ({
         key: row.key,
@@ -3177,24 +3265,21 @@ export async function executeDispatchTool(
     }
     case "dispatch_architecture_sync": {
       const project = stringArg(args, "project");
-      const source = await client.syncArchitectureSource(project);
-      const at = source.last_sync_at ?? "unknown time";
+      const repo = optionalString(args, "repo");
+      const sources =
+        repo === undefined
+          ? await client.syncArchitectureSources(project)
+          : [await client.syncArchitectureSource(project, repo)];
       return {
-        text:
-          source.last_error === null
-            ? `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${at}).`
-            : [
-                `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
-                source.last_commit === null
-                  ? "No model has ever imported for this project."
-                  : `The previous model stays up (commit ${source.last_commit}).`,
-              ].join("\n"),
+        text: sources.map((source) => architectureSyncLines(project, source)).join("\n"),
         details: {
           project,
-          repo: source.repo,
-          branch: source.branch,
-          commit: source.last_commit,
-          error: source.last_error,
+          sources: sources.map((source) => ({
+            repo: source.repo,
+            branch: source.branch,
+            commit: source.last_commit,
+            error: source.last_error,
+          })),
         },
       };
     }
@@ -3964,8 +4049,14 @@ export async function executeDispatchTool(
         };
       }
       const issueKey = issue();
+      // Which of the issue's events the issue read and its log list; `argumentProblems` refused a
+      // count beside any other read.
+      const readEvents: IssueReadOptions = {
+        events:
+          optionalBoolean(args, "all_events") === true ? "all" : optionalNumber(args, "events"),
+      };
       if (ownerArguments.ref?.kind === "log") {
-        const read = await client.read(issueKey);
+        const read = await client.read(issueKey, readEvents);
         const pictures = await picturesOf(read.events.flatMap(eventTexts));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
@@ -3974,13 +4065,14 @@ export async function executeDispatchTool(
         };
       }
       if (ownerArguments.ref?.kind === "children") {
-        const read = await client.read(issueKey);
+        // The children list prints no events, so only the issue is read.
+        const parent = await client.getIssue(issueKey);
         return {
-          text: childrenSummary(read.issue),
-          details: { issue: read.issue.key },
+          text: childrenSummary(parent),
+          details: { issue: parent.key },
         };
       }
-      const readPromise = client.read(issueKey);
+      const readPromise = client.read(issueKey, readEvents);
       // Start the independent, non-fatal closure lookup with the issue read. `read` retains
       // its internal issue-then-events order because event pagination starts at issue.last_seq.
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);

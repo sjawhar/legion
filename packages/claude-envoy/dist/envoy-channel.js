@@ -36257,6 +36257,7 @@ var DispatchServerStartedPayloadSchema = exports_external.strictObject({
   commit: exports_external.string().min(1),
   started_at: exports_external.iso.datetime()
 });
+var DEFAULT_ISSUE_READ_EVENTS = 10;
 var DispatchEventSchema = exports_external.object({
   issue_key: exports_external.string().nullable(),
   artifact_id: exports_external.string().nullish(),
@@ -36706,6 +36707,7 @@ var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passag
 var SEARCH_KIND_DEPTH = 100;
 var PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 var PROJECT_KEY_RULE = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE";
+var ARCHITECTURE_SOURCE_REPO_PATTERN = /^[A-Za-z0-9-]+\/(?!\.\.?$)[A-Za-z0-9._-]+$/;
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -36742,7 +36744,7 @@ var dispatchToolSpecs = [
       spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Optional initial labels, at most 20 labels of up to 40 characters.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).describe("Optional coarse priority, a number from 0 to 3: 0 is highest and 3 is lowest.").optional(),
-      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
+      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else the project's default assignee when it still names a person who has signed in, else unassigned.").optional(),
       components: componentsArgument(z2).optional(),
       repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; a child inherits its parent's when unset, and an issue with none on its parent chain takes the project's default.").optional()
     })
@@ -37034,13 +37036,15 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Document artifact id, slug, or filename: one of the issue's, or a project document.").optional(),
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
-      message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional()
+      message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional(),
+      events: z2.number({ int: true, min: 1 }).describe(`How many of the issue's newest events an issue read or its dispatch://KEY/log lists, oldest first; default ${DEFAULT_ISSUE_READ_EVENTS}. Name no --all-events with it.`).optional(),
+      all_events: z2.boolean().describe(`List every one of the issue's events, oldest first, on an issue read or its dispatch://KEY/log, in place of the last ${DEFAULT_ISSUE_READ_EVENTS}. Name no --events with it.`).optional()
     }),
     validation: readValidation
   },
@@ -37069,7 +37073,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never. " + "all takes the whole filtered list in one read instead, for a caller that must not miss or " + "repeat a row while other writers change the list, and especially for one whose own writes " + "move issues out of what it filtered on.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -37079,7 +37083,8 @@ var dispatchToolSpecs = [
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
       limit: z2.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
-      offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional()
+      offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional(),
+      all: z2.boolean().describe("Take every matching issue in one unpaged read, so no row is missed or repeated while " + "the list changes. Refused with limit or offset.").optional()
     })
   },
   {
@@ -37101,11 +37106,19 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_architecture_sync",
-    example: { project: "CORE" },
-    description: "Import a project's architecture model from its configured source repository now, instead of " + "waiting for the server's five-minute schedule. Returns the imported commit and component " + "count, or the recorded error when the model was rejected (the previous model stays up). " + "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",
+    example: { project: "CORE", repo: "acme/infra" },
+    description: "Import a project's architecture model from its source repositories now, instead of waiting " + "for the server's five-minute schedule. A project may have several sources, one per " + "repository, and its model is every source's components together. Without repo every " + "source imports and each answers on its own line; with repo only that source does. Each " + "line names the imported commit, or the recorded error when that source's model was " + "rejected (its previous components stay up, and every other source is untouched). Sources " + "are saved in Settings or with PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}; " + "404 SOURCE_NOT_FOUND when the project has none, or none for that repository.",
     arguments: (z2) => ({
-      project: z2.string().describe("Project key whose architecture source to sync, such as CORE.")
+      project: z2.string().describe("Project key whose architecture sources to sync, such as CORE."),
+      repo: z2.string().describe("One source repository of the project to sync alone, owner/name; omit it to sync every source.").optional()
     }),
+    validation: {
+      check: (value) => {
+        const { repo } = value;
+        return typeof repo !== "string" || ARCHITECTURE_SOURCE_REPO_PATTERN.test(repo);
+      },
+      message: "repo is not a repository: give it as owner/name, such as acme/infra."
+    },
     strict: true
   },
   {
@@ -37120,7 +37133,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
+    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
     strict: true
   }
@@ -39200,6 +39213,10 @@ function asErrorShape(value) {
 function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
+function isNoRoute(error48) {
+  return error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "NOT_FOUND" && error48.message.startsWith("no route for ");
+}
+var ISSUE_EVENTS_PAGE_MAX = 200;
 var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
@@ -39225,6 +39242,18 @@ function whyNotAPage(answer) {
     what = `an object without ${lacking.join(" or ")}`;
   }
   return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+function whyNotAnArray(answer) {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null)
+    return "null";
+  if (typeof answer !== "object")
+    return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
 }
 var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
 function gatewayAdvice(method, status) {
@@ -39301,6 +39330,14 @@ class DispatchClient {
       return answer;
     throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
   }
+  async listAllIssues(options) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer))
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
+  }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
   }
@@ -39341,13 +39378,28 @@ class DispatchClient {
   async releaseIssueClaim(issue2, input = {}) {
     return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
   }
-  async getIssueEvents(issue2, after = 0, limit = 200) {
+  async getIssueEvents(issue2, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "events"], undefined, { after, limit });
   }
-  async read(issueReference) {
+  async read(issueReference, options = {}) {
     const issueKey = await this.#resolveIssue(issueReference);
     const issue2 = await this.getIssue(issueKey);
-    const events = await this.getIssueEvents(issueKey, Math.max(0, issue2.last_seq - 10), 10);
+    const requested = options.events;
+    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue2.last_seq : Math.min(requested, issue2.last_seq);
+    const events = [];
+    let after = Math.max(0, issue2.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      if (page.length < limit || last === undefined || events.length >= count)
+        break;
+      if (last.seq <= after) {
+        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
+      }
+      after = last.seq;
+    }
     return { issue: issue2, events };
   }
   async ask(issue2, input) {
@@ -39374,18 +39426,68 @@ class DispatchClient {
   async listProjects() {
     return this.#json("GET", ["api", "v1", "projects"]);
   }
-  async syncArchitectureSource(project) {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
-  }
-  async getArchitectureSource(project) {
+  async listArchitectureSources(project) {
     try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    } catch (error48) {
+      if (!isNoRoute(error48))
+        throw error48;
+    }
+    try {
+      const source = await this.#json("GET", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-source"
+      ]);
+      return source === null ? [] : [source];
     } catch (error48) {
       if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
-        return null;
+        return [];
       }
       throw error48;
     }
+  }
+  async syncArchitectureSources(project) {
+    try {
+      return await this.#json("POST", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-sources",
+        "sync"
+      ]);
+    } catch (error48) {
+      if (!isNoRoute(error48))
+        throw error48;
+    }
+    const source = await this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-source",
+      "sync"
+    ]);
+    return [source];
+  }
+  async syncArchitectureSource(project, repo2) {
+    const [owner, name, ...rest] = repo2.split("/");
+    if (!owner || !name || rest.length > 0) {
+      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo2)}`);
+    }
+    return this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-sources",
+      owner,
+      name,
+      "sync"
+    ]);
   }
   async resolveAsk(id, input) {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
@@ -40359,13 +40461,30 @@ async function architectureGuidance(client, project, components) {
   if (components.mode === "none" || components.ids.length > 0)
     return;
   try {
-    if (await client.getArchitectureSource(project) === null) {
+    if ((await client.listArchitectureSources(project)).length === 0)
       return;
-    }
     return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
   } catch (error48) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error48)}. ${architectureComponentsAction}`;
   }
+}
+function architectureSyncLines(project, source) {
+  if (source.last_error === null) {
+    return `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${source.last_sync_at ?? "unknown time"}).`;
+  }
+  let kept;
+  if (source.last_commit !== null) {
+    kept = `The previous model of ${source.repo} stays up (commit ${source.last_commit}).`;
+  } else if (source.components > 0) {
+    kept = `The previous model of ${source.repo} stays up (${source.components} ${source.components === 1 ? "component" : "components"}).`;
+  } else {
+    kept = `No model has ever imported from ${source.repo}.`;
+  }
+  return [
+    `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
+    kept
+  ].join(`
+`);
 }
 function isDuplicateCandidate(value) {
   if (typeof value !== "object" || value === null)
@@ -40592,6 +40711,16 @@ function argumentProblems(tool, args) {
       if (message !== undefined && messageIdOf(message) === undefined) {
         problems.push("message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference");
       }
+      const events = optionalNumber(args, "events");
+      const allEvents = optionalBoolean(args, "all_events") === true;
+      if (events !== undefined && allEvents) {
+        problems.push("--events and --all-events both say how many events the read lists: name one, --events N for the last N or --all-events for every one");
+      }
+      const count = events !== undefined ? "--events" : allEvents ? "--all-events" : undefined;
+      const eventless = count === undefined ? undefined : readWithoutEvents(args);
+      if (eventless !== undefined) {
+        problems.push(`${count} lists an issue's events, which dispatch read prints only for an issue or its dispatch://KEY/log, not for ${eventless}: drop ${count}`);
+      }
       break;
     }
     case "dispatch_doc_read": {
@@ -40600,8 +40729,41 @@ function argumentProblems(tool, args) {
       }
       break;
     }
+    case "dispatch_issues": {
+      if (optionalBoolean(args, "all") === true) {
+        const paging = [
+          ...optionalNumber(args, "limit") === undefined ? [] : ["--limit"],
+          ...optionalNumber(args, "offset") === undefined ? [] : ["--offset"]
+        ];
+        if (paging.length > 0) {
+          problems.push(`--all takes every matching issue in one unpaged read, so it cannot be combined with ${paging.join(" or ")}: name --all on its own, or page with --limit and --offset`);
+        }
+      }
+      break;
+    }
   }
   return problems;
+}
+function readWithoutEvents(args) {
+  if (optionalString(args, "message") !== undefined)
+    return "a message's conversation";
+  const ref = optionalString(args, "ref");
+  switch (ref === undefined ? undefined : parseDispatchRef(ref)?.kind) {
+    case "ask":
+      return "an ask";
+    case "comment":
+      return "a comment";
+    case "message":
+      return "a message's conversation";
+    case "children":
+      return "the issue's children";
+    case "log":
+      return;
+  }
+  if (optionalString(args, "artifact") !== undefined || optionalString(args, "project") !== undefined) {
+    return "a document summary";
+  }
+  return;
 }
 function dispatchRefFromUrl(value, serverUrl) {
   let url2;
@@ -41618,7 +41780,7 @@ async function executeDispatchTool(input) {
     const identity = await client2.whoami();
     const owner2 = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     const service = identity.kind === "agent" ? identity.service ?? null : null;
-    const unowned = "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
+    const unowned = "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
     return {
       text: owner2 !== null ? `Session ${sessionId} acts for ${owner2}: issues you create without an assignee are assigned to ${owner2}.` : service !== null ? `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${sessionId} runs under the shared token: ${unowned}`,
       details: { session: sessionId, owner: owner2, service }
@@ -41896,7 +42058,7 @@ async function executeDispatchTool(input) {
       const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const routeStatus = optionalString(args, "route_status");
-      const page = await client.listIssuePage({
+      const filters = {
         project,
         ...status === undefined ? {} : { status },
         ...parent === undefined ? {} : { parent },
@@ -41904,7 +42066,13 @@ async function executeDispatchTool(input) {
         ...priority === undefined ? {} : { priority },
         ...updatedSince === undefined ? {} : { updated_since: updatedSince },
         ...routeStatus === undefined ? {} : { route_status: routeStatus }
-      }, {
+      };
+      const page = optionalBoolean(args, "all") === true ? await client.listAllIssues(filters).then((issues) => ({
+        issues,
+        total: issues.length,
+        limit: issues.length,
+        offset: 0
+      })) : await client.listIssuePage(filters, {
         limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
         offset: optionalNumber(args, "offset") ?? 0
       });
@@ -41966,20 +42134,19 @@ async function executeDispatchTool(input) {
     }
     case "dispatch_architecture_sync": {
       const project = stringArg(args, "project");
-      const source = await client.syncArchitectureSource(project);
-      const at = source.last_sync_at ?? "unknown time";
+      const repo2 = optionalString(args, "repo");
+      const sources = repo2 === undefined ? await client.syncArchitectureSources(project) : [await client.syncArchitectureSource(project, repo2)];
       return {
-        text: source.last_error === null ? `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${at}).` : [
-          `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
-          source.last_commit === null ? "No model has ever imported for this project." : `The previous model stays up (commit ${source.last_commit}).`
-        ].join(`
+        text: sources.map((source) => architectureSyncLines(project, source)).join(`
 `),
         details: {
           project,
-          repo: source.repo,
-          branch: source.branch,
-          commit: source.last_commit,
-          error: source.last_error
+          sources: sources.map((source) => ({
+            repo: source.repo,
+            branch: source.branch,
+            commit: source.last_commit,
+            error: source.last_error
+          }))
         }
       };
     }
@@ -42514,8 +42681,11 @@ ${trailer.join(`
         };
       }
       const issueKey = issue2();
+      const readEvents = {
+        events: optionalBoolean(args, "all_events") === true ? "all" : optionalNumber(args, "events")
+      };
       if (ownerArguments.ref?.kind === "log") {
-        const read2 = await client.read(issueKey);
+        const read2 = await client.read(issueKey, readEvents);
         const pictures3 = await picturesOf(read2.events.flatMap(eventTexts));
         return {
           text: [logSummary(read2.issue, read2.events), ...pictures3.lines].join(`
@@ -42525,13 +42695,13 @@ ${trailer.join(`
         };
       }
       if (ownerArguments.ref?.kind === "children") {
-        const read2 = await client.read(issueKey);
+        const parent = await client.getIssue(issueKey);
         return {
-          text: childrenSummary(read2.issue),
-          details: { issue: read2.issue.key }
+          text: childrenSummary(parent),
+          details: { issue: parent.key }
         };
       }
-      const readPromise = client.read(issueKey);
+      const readPromise = client.read(issueKey, readEvents);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
       const [references, graph, titles, pictures2] = await Promise.all([
@@ -42640,6 +42810,10 @@ function writeMemory(dir, sessionId, follows) {
   };
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
 `);
+}
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
@@ -43281,8 +43455,14 @@ function dispatchSettings(env, config2) {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 120000;
-var MIN_HEARTBEAT_MS = 25;
+var DEFAULT_HEARTBEAT_MS = 90000;
+var MIN_PASS_DEADLINE_MS = 30000;
+var MIN_INTERVAL_MS = 25;
+var MAX_INTERVAL_MS = 2147483647;
+function namedInterval(raw) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 function natsSeedFromEnvironment(env) {
   const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
   if (file2 !== undefined) {
@@ -43369,13 +43549,17 @@ function envoySettings(env, config2, options = {}) {
       inbound = { off: messageFor(error48) };
     }
   }
-  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
     token,
     inbound,
-    heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+    heartbeatMs,
+    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
+    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
   };
 }
 function normalizeEnvoyUrl(value) {
@@ -43428,6 +43612,9 @@ function startNotice(config2, dispatch, envoy, nats) {
   if (envoy.enabled && nats && "off" in envoy.inbound) {
     parts.push(`Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`);
   }
+  if (envoy.enabled && envoy.passDeadlineRaisedFrom !== undefined) {
+    parts.push(`Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${envoy.passDeadlineRaisedFrom} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`);
+  }
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
@@ -43438,7 +43625,11 @@ function sessionSettings(file2, env, options) {
   const config2 = readEnvoyConfig(file2.path, env, options);
   const dispatch = dispatchSettings(env, config2);
   const envoy = envoySettings(env, config2, { nats: options.nats });
-  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy, options.nats !== false) };
+  return {
+    dispatch,
+    envoy,
+    notice: startNotice(config2, dispatch, envoy, options.nats !== false)
+  };
 }
 function sessionDispatchSettings(file2, env, options) {
   if (file2.path === null)
@@ -43821,7 +44012,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every subscribed session that holds its own NATS connection, yours included, and is not retained. A session the listener delivers to over a serve port, such as an OpenCode agent, receives nothing on such a topic and is told nothing (dispatch://INFRA-122). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -44197,6 +44388,7 @@ var legionPullRequestView = exports_external.strictObject({
   repo: nonEmptyString,
   number: exports_external.number().int().positive(),
   head: nonEmptyString,
+  state: exports_external.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: exports_external.number().int().nonnegative()
@@ -47092,7 +47284,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 35
+  daemonApiVersion: 36
 };
 
 // src/channel-forwarder.ts
@@ -47681,8 +47873,77 @@ function claudeProjectDirectory(environment, fallback) {
 }
 
 // src/session-identity.ts
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
+import { basename as basename3, join as join5 } from "path";
+
+// src/session-state.ts
+import { readFileSync as readFileSync5 } from "fs";
+import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join4 } from "path";
+async function writeAtomicStateFile(file2, contents) {
+  await mkdir(dirname2(file2), { recursive: true, mode: 448 });
+  const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  await writeFile(temporary, contents, { mode: 384 });
+  await rename(temporary, file2);
+}
+async function touchStateFile(file2) {
+  const now = new Date;
+  await utimes(file2, now, now);
+}
+async function pruneStateDirectory(directory, isStale) {
+  const entries = await readdir(directory).catch((error48) => {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return [];
+    throw error48;
+  });
+  for (const entry of entries) {
+    const file2 = join4(directory, entry);
+    if (!await isStale(file2))
+      continue;
+    await rm(file2, { recursive: true, force: true });
+  }
+}
+var STATE_FILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+async function writtenLongAgo(file2) {
+  const modified = await stat(file2).then((stats) => stats.mtimeMs, () => {
+    return;
+  });
+  return modified !== undefined && Date.now() - modified > STATE_FILE_MAX_AGE_MS;
+}
+var TITLES_DIRECTORY = "titles";
+function sessionTitleFile(stateDirectory, sessionId) {
+  return join4(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+}
+async function writeChosenTitle(file2, title) {
+  await writeAtomicStateFile(file2, `${title}
+`);
+}
+async function removeChosenTitle(file2) {
+  await rm(file2, { force: true });
+}
+function readChosenTitleSync(file2) {
+  try {
+    return readFileSync5(file2, "utf8");
+  } catch {
+    return;
+  }
+}
+async function recordChosenTitle(sessionId, title) {
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
+  if (pluginData === undefined)
+    return;
+  const file2 = sessionTitleFile(pluginData, sessionId);
+  const chosen = configuredValue(title);
+  if (chosen === undefined)
+    await removeChosenTitle(file2);
+  else
+    await writeChosenTitle(file2, chosen);
+}
+async function pruneStaleSessionTitles(stateDirectory) {
+  await pruneStateDirectory(join4(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+}
+
+// src/session-identity.ts
 var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
 
 class SessionIdentity {
@@ -47700,32 +47961,40 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join4(stateDirectory, "sessions", String(claudePid));
+  return join5(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join4(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join5(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
+var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join4(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+  return join5(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+}
+
+class UnparseableRoleRecordError extends Error {
+  name = "UnparseableRoleRecordError";
+  constructor(roleFile, cause) {
+    super(`the role record ${roleFile} cannot be parsed (${messageFor(cause)})`, { cause });
+  }
 }
 async function readPersistedRole(roleFile) {
+  let bytes;
   try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")));
+    bytes = await readFile(roleFile, "utf8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT"))
       return;
     throw error48;
   }
+  try {
+    return PersistedRole.parse(JSON.parse(bytes));
+  } catch (error48) {
+    throw new UnparseableRoleRecordError(roleFile, error48);
+  }
 }
 async function writePersistedRole(roleFile, state) {
   await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}
 `);
-}
-async function writeAtomicStateFile(file2, contents) {
-  await mkdir(dirname2(file2), { recursive: true, mode: 448 });
-  const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await writeFile(temporary, contents, { mode: 384 });
-  await rename(temporary, file2);
 }
 async function writeSessionHandoff(file2, sessionId) {
   await writeAtomicStateFile(file2, `${sessionId.trim()}
@@ -47750,17 +48019,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  const sessions = join4(stateDirectory, "sessions");
-  const entries = await readdir(sessions).catch((error48) => {
-    if (hasErrnoCode(error48, "ENOENT"))
-      return [];
-    throw error48;
+  await pruneStateDirectory(join5(stateDirectory, "sessions"), (file2) => {
+    const pid = basename3(file2);
+    return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || processExists(Number(entry)))
-      continue;
-    await rm(join4(sessions, entry), { recursive: true, force: true });
-  }
+}
+async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
+  const own = roleStateFile(stateDirectory, currentSessionId);
+  await pruneStateDirectory(join5(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
 }
 
 // src/envoy-off.ts
@@ -47809,8 +48075,8 @@ async function serveEnvoyOff(serverInfo, refusal) {
 }
 
 // src/legion-claim.ts
-import { readdir as readdir2, stat } from "fs/promises";
-import { join as join5 } from "path";
+import { readdir as readdir2, stat as stat2 } from "fs/promises";
+import { join as join6 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -47899,13 +48165,13 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join5(configDir, "projects");
+  const projects = join6(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file2 = join5(projects, directory, name);
-      if (await stat(file2).then((info) => info.isFile(), () => false))
+      const file2 = join6(projects, directory, name);
+      if (await stat2(file2).then((info) => info.isFile(), () => false))
         return file2;
     }
     await delay(pollMs, undefined, { signal });
@@ -48185,8 +48451,8 @@ async function executeLegionTool(runtime, input) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync5 } from "fs";
-import { basename as basename3 } from "path";
+import { readFileSync as readFileSync6 } from "fs";
+import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
   "#{window_name}",
@@ -48208,8 +48474,8 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat2 = readFileSync5(`/proc/${pid}/stat`, "utf8");
-      const parent2 = Number(stat2.slice(stat2.lastIndexOf(")") + 2).split(" ")[1]);
+      const stat3 = readFileSync6(`/proc/${pid}/stat`, "utf8");
+      const parent2 = Number(stat3.slice(stat3.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent2) ? parent2 : undefined;
     }
     const parent = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
@@ -48259,7 +48525,14 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, query = queryTmux, ownPane = (panePid) => isAncestor(panePid)) {
+function sessionTitle(environment, directory, sources = {}) {
+  const {
+    query = queryTmux,
+    ownPane = (panePid) => isAncestor(panePid),
+    chosen = () => {
+      return;
+    }
+  } = sources;
   const explicit = oneLine(configuredValue(environment.ENVOY_SESSION_TITLE) ?? "");
   if (visible(explicit))
     return () => explicit;
@@ -48267,9 +48540,12 @@ function sessionTitle(environment, directory, query = queryTmux, ownPane = (pane
   const socket = parts.slice(0, -2).join(",");
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
-  const directoryName = oneLine(basename3(directory) || directory);
+  const directoryName = oneLine(basename4(directory) || directory);
   const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
-  return (sessionId) => `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  return (sessionId) => {
+    const own = oneLine(chosen(sessionId) ?? "");
+    return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  };
 }
 
 // src/envoy-channel-server.ts
@@ -48531,12 +48807,27 @@ async function startChannelSession(options) {
 `);
     });
   };
+  let roleRefreshFailureReported = false;
+  const refreshRoleRecord = async () => {
+    const roleFile = roleStateFile(options.stateDirectory, identity.id);
+    try {
+      await touchStateFile(roleFile);
+      roleRefreshFailureReported = false;
+    } catch (error48) {
+      if (!roleRefreshFailureReported) {
+        roleRefreshFailureReported = true;
+        process.stderr.write(`envoy-channel: could not refresh the role record ${roleFile} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
+  };
   const reassertRole = async (afterOutage) => {
     if (heldRole === undefined)
       return;
     const role = heldRole;
     const holder = await options.client.getRole(role).then((info) => info.holder, undefinedOnNotFound);
     if (holder === identity.id) {
+      await refreshRoleRecord();
       if (afterOutage)
         fireRegained(role, "reregistered");
       return;
@@ -48554,11 +48845,22 @@ async function startChannelSession(options) {
     fireRegained(role, "reclaimed");
   };
   let roleTransferFrom;
+  let roleTransferFailureReported = false;
   const transferRole = async () => {
-    if (roleTransferFrom === undefined)
+    const from = roleTransferFrom;
+    if (from === undefined)
       return;
-    await restoreRole(roleTransferFrom);
-    roleTransferFrom = undefined;
+    try {
+      await restoreRole(from);
+      roleTransferFrom = undefined;
+      roleTransferFailureReported = false;
+    } catch (error48) {
+      if (!roleTransferFailureReported) {
+        roleTransferFailureReported = true;
+        process.stderr.write(`envoy-channel: could not take back the role held by ${from} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
   };
   const adoptHandoff = async () => {
     if (handoffFile === undefined)
@@ -48663,9 +48965,28 @@ async function startChannelSession(options) {
   await options.connection.flush();
   await serialized(async () => {
     await register();
-    await restoreRole();
+    await restoreRole().catch((error48) => {
+      if (error48 instanceof UnparseableRoleRecordError) {
+        process.stderr.write(`envoy-channel: ${messageFor(error48)}; the session starts without a role
+`);
+        return;
+      }
+      roleTransferFrom = identity.id;
+      roleTransferFailureReported = true;
+      process.stderr.write(`envoy-channel: could not restore the role (${messageFor(error48)}); the next heartbeat retries
+`);
+    });
   });
-  await pruneStaleSessionHandoffs(options.stateDirectory);
+  for (const prune of [
+    () => pruneStaleSessionHandoffs(options.stateDirectory),
+    () => pruneStaleSessionTitles(options.stateDirectory),
+    () => pruneStaleSessionRoles(options.stateDirectory, identity.id)
+  ]) {
+    await prune().catch((error48) => {
+      process.stderr.write(`envoy-channel: could not prune stale session state (${messageFor(error48)})
+`);
+    });
+  }
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
@@ -48830,11 +49151,14 @@ async function runEnvoyChannelServer() {
     process.stderr.write(`envoy-channel: ${notice}
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
   const title = sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
-  }, directory);
+  }, directory, {
+    chosen: (sessionId) => pluginData === undefined ? undefined : readChosenTitleSync(sessionTitleFile(pluginData, sessionId))
+  });
   const stampTitle = (sessionId, value) => {
     writeSessionTitle(sessionDirectory(process.env, sessionId), value);
   };

@@ -20,13 +20,28 @@ A project page has up to three tabs:
 - **Documents**: the project's documents that belong to no single issue. Pick or drop a file here to
   upload it.
 - **Architecture**: the project's components and how much tracked work each has. This tab appears
-  only when the project has an architecture source, which you set in **Settings → Architecture
+  only when the project has an architecture source, which you add in **Settings → Architecture
   sources**.
 
 Opening a project from the sidebar takes you to Architecture when the project has a source, and to
 Issues otherwise. When an ask in the project is waiting on you — its next move a person's, on an
 issue assigned to you — the header shows a **Blocked on you · N** pill that links to the Inbox.
 It counts no credential request: a request belongs to no project.
+
+A project's components can come from more than one repository. Each architecture source is one
+repository and the branch whose `.dispatch/architecture/` folder describes components, and the
+project's model is every source's components together. In **Settings → Architecture sources**,
+**Add source** takes the project, the repository and the branch; saving a repository the project
+already has changes its branch, and each source's row has its own **Refresh** and **Delete**.
+Deleting a source removes its components and no other source's. A component id must not repeat
+across a project's sources: an import that brings an id another source already has fails for that
+source, naming the id and the repository that holds it.
+
+The Architecture tab's header has a line for each source: its repository and branch, the commit
+it shows, when it was last checked, and its own **Refresh**. When a source's import fails, its line
+shows the error and the commit it is still showing; its components keep their last good version
+and wear a hatched outline, as a stale source's do, and every other source is untouched. A
+component's details name the repository it comes from.
 
 ## Statuses
 
@@ -88,6 +103,10 @@ Inbox row. Choose it and pick a value. Closed issues cannot change priority.
 
 The assignee is the person who answers the issue's asks, and whose Inbox lists them by default.
 Change it from the issue header. The choices are **Unassigned** and every login allowed to sign in.
+An agent that creates an issue without naming one gets the person its token acts for, else the
+parent's assignee, else the project's default assignee: the person you name in the projects table
+in **Settings → Projects**, who takes every issue the chain leaves without an owner. Only a person
+sets a project's default; no agent command does.
 
 ### Labels
 
@@ -144,7 +163,8 @@ still clamps a title shows the whole of it on hover.
   delivery to one and tells it so.
 - **Referenced by (N)** lists every issue, document, ask, comment, and message that links here.
 - **Components** appears when the project has an architecture source. It shows which parts of the
-  architecture the issue belongs to, and lets you change them.
+  architecture the issue belongs to, and lets you change them, picking from the components of
+  every source of the project.
 
 ### The tabs
 

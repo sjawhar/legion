@@ -70,6 +70,8 @@ dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
   LEGION:
     slack_channels: [C0123ABCD, C0123ABCE]
+    deploys:
+      - {repo: sjawhar/legion, workflow: .github/workflows/release.yaml, step: Apply}
   WIDGETS:
     merge_queue_role: merge-queue
     merge:
@@ -261,6 +263,7 @@ func populatedState(t *testing.T) State {
 					Repo:           "acme/widgets",
 					Number:         1247,
 					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
+					State:          "open",
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
 					FixAttempts:    1,
@@ -303,6 +306,7 @@ func populatedState(t *testing.T) State {
 					Repo:           "acme/widgets",
 					Number:         1239,
 					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+					State:          "merged",
 					ReviewDecision: "approved",
 				},
 				Check: &CheckView{
@@ -658,7 +662,7 @@ func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "grant.json", GrantResponse{
 		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
 	})
-	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: `no check is required on "main" of acme/widgets, so READY was published without reading the head's checks`})
+	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: "pull request #312 is already merged, so READY was published without reading its head's handoffs"})
 	golden(t, "issue-status.json", IssueStatusResponse{})
 	golden(t, "gate-register.json", GateRegisterResponse{})
 	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})
