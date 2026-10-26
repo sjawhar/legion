@@ -39,13 +39,43 @@ create index artifact_reviews_by_artifact_event_seq on artifact_reviews (artifac
 -- it appends the review's event (docs.WriteReview), so the event exists only by then. At the commit
 -- the transaction still holds its event owner's row lock, taken by its first append to that owner
 -- and kept to the commit, so the transaction's own events on that owner are the newest ones: the
--- function reads the owner's events newest first while they carry this transaction's now() (the
--- events.created_at default, which no writer sets) and takes the oldest one of the review's type,
--- document and version that no review of the document holds yet, so two reviews written in one
--- transaction take their events in the order they appended them. created_at, not xmin, ties a row
--- to this transaction: a write in a savepoint stamps a subtransaction's xid, which is not the
--- transaction's own. A row this release's docs.WriteReview has already given its sequence is left
--- as it is, and a row whose transaction appended no such event (a test's bare insert) stays null.
+-- function reads the owner's events newest first while they are this transaction's own and takes
+-- the oldest one of the review's type, document and version that no review of the document holds
+-- yet, so two reviews written in one transaction take their events in the order they appended them.
+--
+-- An event is this transaction's own when it carries this transaction's now() (the
+-- events.created_at default, which no writer sets) and its row was written by this transaction or
+-- one of its subtransactions, which artifact_reviews_own_row reads from the row's xmin. now() alone
+-- is the transaction's start, which another transaction that started in the same microsecond
+-- shares: its committed event of the same type, document and version, one no review holds (a
+-- review committed before this migration, which no trigger sequenced), would otherwise be taken as
+-- the oldest match. xmin alone is not enough either, read as pg_current_xact_id(): a write in a
+-- savepoint stamps the subtransaction's xid, which is not the transaction's own. So the row's xmin
+-- is read through pg_xact_status, which answers `in progress` for this transaction and each of its
+-- subtransactions and `committed` for every other transaction whose row this snapshot can see,
+-- since a row of a transaction still in progress elsewhere is not visible to it. A row a savepoint
+-- rolled back is not visible either, so its event is no one's. The time check comes first, so the
+-- xid is read only for a row written within the same microsecond, never for an old or frozen one.
+-- A row this release's docs.WriteReview has already given its sequence is left as it is, and a row
+-- whose transaction appended no such event (a test's bare insert) stays null.
+create function artifact_reviews_own_row(row_xmin xid) returns boolean language plpgsql as $$
+declare
+  -- The xid8 of row_xmin: its epoch is the current transaction's, or the one either side of it
+  -- when the two xids sit across a wraparound; a row of this transaction is within 2^31 of it.
+  here bigint := pg_current_xact_id()::text::bigint;
+  widened bigint := ((here >> 32) << 32) + row_xmin::text::bigint;
+begin
+  if widened > here + 2147483648 then
+    widened := widened - 4294967296;
+  elsif widened < here - 2147483648 then
+    widened := widened + 4294967296;
+  end if;
+  if widened < 0 then
+    return false;
+  end if;
+  return pg_xact_status(widened::text::xid8) is not distinct from 'in progress';
+end $$;
+
 -- The trigger is on artifact_reviews, the one table this migration already locks, so the migration
 -- holds no second table's lock: a trigger on events would also wait for SHARE ROW EXCLUSIVE on
 -- events while holding artifact_reviews, behind a transaction that appended an event and then waits
@@ -64,9 +94,10 @@ begin
   select issue_key into owner_issue from artifacts where id = new.artifact_id;
   if owner_issue is not null then
     for candidate in
-      select e.seq, e.type, e.payload, e.created_at from events e where e.issue_key = owner_issue order by e.seq desc
+      select e.seq, e.type, e.payload, e.created_at, e.xmin from events e where e.issue_key = owner_issue order by e.seq desc
     loop
       exit when candidate.created_at <> now();
+      exit when not artifact_reviews_own_row(candidate.xmin);
       if candidate.type = wanted
         and candidate.payload->>'artifact_id' = new.artifact_id::text
         and candidate.payload->'version' = to_jsonb(new.version)
@@ -77,9 +108,10 @@ begin
     end loop;
   else
     for candidate in
-      select e.seq, e.type, e.payload, e.created_at from events e where e.artifact_id = new.artifact_id order by e.seq desc
+      select e.seq, e.type, e.payload, e.created_at, e.xmin from events e where e.artifact_id = new.artifact_id order by e.seq desc
     loop
       exit when candidate.created_at <> now();
+      exit when not artifact_reviews_own_row(candidate.xmin);
       if candidate.type = wanted
         and candidate.payload->>'artifact_id' = new.artifact_id::text
         and candidate.payload->'version' = to_jsonb(new.version)

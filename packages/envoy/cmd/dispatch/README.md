@@ -695,8 +695,12 @@ before it. So `0117` also adds a trigger, which the rule below allows a migratio
 `artifact_reviews_event_seq`, a constraint trigger on `artifact_reviews` deferred to the commit, gives
 every review inserted without a sequence, by either release, the sequence of the `artifact.*` event
 its own transaction appended for it (its type, document and version, among the events on the
-owner that carry the transaction's `now()`, which the owner's row lock keeps the newest there until
-the commit). It is deferred because every release inserts a review before it appends the event.
+owner that its transaction wrote, which the owner's row lock keeps the newest there until the
+commit). An event is the transaction's own when it carries the transaction's `now()` and its row's
+`xmin` is the transaction or one of its subtransactions (`artifact_reviews_own_row`, which reads it
+through `pg_xact_status`, so a savepoint's event counts and another transaction's does not, even
+one that started in the same microsecond and so shares `now()`). It is deferred because every
+release inserts a review before it appends the event.
 Every row that carries no sequence was therefore committed before `0117`, whose `ACCESS EXCLUSIVE`
 lock waits out every transaction that has inserted a review, and every sequenced row is newer.
 The trigger is on `artifact_reviews`, the table `0117` already locks, so the migration holds no

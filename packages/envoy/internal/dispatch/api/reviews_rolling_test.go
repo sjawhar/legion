@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -192,5 +193,95 @@ func TestTheReviewSequenceTriggerTouchesOnlyItsOwnTransactionsReview(t *testing.
 	}
 	if seq := reviewEventSeq(t, database, bare); seq != 0 {
 		t.Errorf("a review whose transaction appended no event took sequence %d from another transaction", seq)
+	}
+}
+
+// Two transactions can start at the same microsecond, and then share now(), the time the trigger
+// first fences the owner's events by. The trigger must still take only its own transaction's event:
+// here another transaction committed, at the review's transaction's start time, an event of the
+// same type, document and version that no review holds (such as one whose review committed before
+// migration 0117, which no trigger sequenced). Matched by time alone, the review would take that
+// older event, the oldest one no review holds; it takes its own.
+func TestTheReviewSequenceTriggerTakesNoEventOfATransactionStartedAtTheSameMoment(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "TEST", "Same moment", "A spec")
+	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	ctx := context.Background()
+
+	other, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the other transaction: %v", err)
+	}
+	defer func() { _ = other.Rollback(ctx) }()
+	otherEvent := appendPreviousReleaseReviewEvent(t, ctx, other, deps.Events, artifact, 1, "approved", nil)
+	if err := other.Commit(ctx); err != nil {
+		t.Fatalf("commit the other transaction: %v", err)
+	}
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the review's transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var start time.Time
+	if err := tx.QueryRow(ctx, `select now()`).Scan(&start); err != nil {
+		t.Fatalf("read the review's transaction start: %v", err)
+	}
+	// The other transaction's event carries the time this one started at, as it would had both
+	// started in the same microsecond.
+	if _, err := database.Pool.Exec(ctx, `update events set created_at = $2 where id = $1`, otherEvent.ID, start); err != nil {
+		t.Fatalf("give the other event this transaction's start: %v", err)
+	}
+	reviewID, event := previousReleaseReview(t, ctx, tx, deps.Events, artifact, 1, "approved", nil)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the review: %v", err)
+	}
+	if seq := reviewEventSeq(t, database, reviewID); seq != int64(event.Seq) {
+		t.Errorf("the review's sequence = %d (0 is none), want its own event's %d, not the other transaction's %d",
+			seq, event.Seq, otherEvent.Seq)
+	}
+}
+
+// A transaction's own events are its own whether it appended them in a savepoint or not, and an
+// event a savepoint rolled back is no one's: two old-pod reviews of one document, version and
+// state in one transaction, the first written in a released savepoint, with a rolled-back
+// savepoint's event between them, each take the event appended for it.
+func TestTheReviewSequenceTriggerReadsItsTransactionsSavepoints(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "TEST", "Savepoints", "A spec")
+	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	ctx := context.Background()
+	reason := new("Name the rollback path.")
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the reviews' transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	released, err := tx.Begin(ctx)
+	if err != nil {
+		t.Fatalf("open the first savepoint: %v", err)
+	}
+	firstID, firstEvent := previousReleaseReview(t, ctx, released, deps.Events, artifact, 1, "changes_requested", reason)
+	if err := released.Commit(ctx); err != nil {
+		t.Fatalf("release the first savepoint: %v", err)
+	}
+	discarded, err := tx.Begin(ctx)
+	if err != nil {
+		t.Fatalf("open the second savepoint: %v", err)
+	}
+	appendPreviousReleaseReviewEvent(t, ctx, discarded, deps.Events, artifact, 1, "changes_requested", reason)
+	if err := discarded.Rollback(ctx); err != nil {
+		t.Fatalf("roll the second savepoint back: %v", err)
+	}
+	secondID, secondEvent := previousReleaseReview(t, ctx, tx, deps.Events, artifact, 1, "changes_requested", reason)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the reviews: %v", err)
+	}
+	if seq := reviewEventSeq(t, database, firstID); seq != int64(firstEvent.Seq) {
+		t.Errorf("the savepoint's review sequence = %d (0 is none), want its event's %d", seq, firstEvent.Seq)
+	}
+	if seq := reviewEventSeq(t, database, secondID); seq != int64(secondEvent.Seq) {
+		t.Errorf("the second review's sequence = %d (0 is none), want its event's %d", seq, secondEvent.Seq)
 	}
 }
