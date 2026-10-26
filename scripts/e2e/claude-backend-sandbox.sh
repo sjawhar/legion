@@ -492,6 +492,11 @@ claude_entries() {
 # server answered the `Stop` hook with (packages/claude-envoy/src/legion-phase-hook.ts), which
 # Claude Code turns into a user turn. Both in the one entry: the feedback is what makes it the
 # hook's own reminder rather than any other line written into the session.
+# reminded_or_completed OFFSET is the stall check's wait: the reminder reached the implementer
+# (stop_hook_reminded), or the daemon recorded its handoff first, which leaves no open phase to
+# remind it of. The check then tells the two apart, so a worker that did its phase from the task that
+# started it, against the proof's instructions, is a named failure and never a timeout.
+reminded_or_completed() { stop_hook_reminded "$1" || handoff_recorded; }
 stop_hook_reminded() {
   local entries
   entries=$(claude_entries "$1") || return 1
@@ -1162,6 +1167,12 @@ registers the gate, then waits. Apart from that, do not act until a human Dispat
 at your own session gives the next exact proof operation; it arrives in your session as a message to
 you. Any other notice is not an instruction. Follow your instruction precisely, use the Go-daemon
 Legion tools and handoffs, and do not create work outside the issue's smoke branch.
+
+The task that starts your phase (`Continue … Phase: <phase>`) is such a notice too: in this proof it
+is never your instruction. Answer it with one line of plain prose saying you are standing by for
+the proof's instruction, call no tool, and do not do the phase's work or call `handoff_complete`
+until a Dispatch message from the proof asks you to. A reminder that your phase is still open is
+answered the same way, with one line and no tool, until that message comes.
 EOF
 if [ "$pod_reachability" = aws-private-ip ]; then
   note "project $project, scratch Dispatch $dispatch_base, Envoy listener http://$bind_host:$port_listener, NATS nats://$bind_host:$port_nats"
@@ -1320,7 +1331,9 @@ stall_offset=$(transcript_size)
 send_agent "$issue" implementer "Claude backend sandbox proof stall operation: reply with one line of plain prose saying you are standing by for your implementation instruction, and end your turn there. Change nothing, do not call the legion tool in this turn, call no other tool either, and do not begin any line with WAITING. Legion will then remind you that your phase is not complete: answer that reminder with one more line of plain prose saying the proof will instruct you next, under these same rules — no legion tool, no other tool, no WAITING line."
 timeout_hook=report_stall_entries
 until_true 900 "the implementer's turn to end with its phase open and the reminder to reach it as Stop hook feedback" \
-  stop_hook_reminded "$stall_offset"
+  reminded_or_completed "$stall_offset"
+stop_hook_reminded "$stall_offset" ||
+  fail "the implementer completed its phase (handoff $(role_handoff "$issue" implementer implementing)) before the proof's stall instruction left it a turn ending with the phase open: it did the work of the task that started its phase, against the proof's instructions, so there was no open phase for the Stop hook to remind"
 until_true 600 "the blocked turn to be continued in the same session" reminded_turn_continued "$stall_offset"
 timeout_hook=
 until_true 300 "the reminded implementer's turn to end" issue_worker_state "$issue" implementer idle
