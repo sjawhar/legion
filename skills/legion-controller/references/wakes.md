@@ -16,8 +16,9 @@ the issue header. Triage it as `skill://legion-controller/references/triage.md` 
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 
-The daemon released `<KEY>`'s slot, because its tree finished or left the workflow, and no waiting
-root took it. Name the free slots; take nothing.
+The daemon released `<KEY>`'s slot and no waiting root took it: its tree finished or left the
+workflow, or the root returned the slot to wait on a person (`awaiting_person`, which also sends
+its own `awaiting-person` wake). Name the free slots; take nothing.
 
 ## `todo on <KEY>` (`{kind: "todo"}`)
 
@@ -43,11 +44,14 @@ fixes a live row's session.
 
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
 
-A root that waited for a slot was moved from `todo` to the status `reason` names, by a person or by
-another session, so the daemon took it out of the workflow (`phase: done`) and starts nothing for
-it. Re-admit nothing, because the move was someone else's; `dispatch read` shows who claims it now.
-Tell the person in your summary: "<KEY> left Legion's waiting line: it was set to <status> while it
-waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again". Other
+Either a root that waited for a slot was moved from `todo` to the status `reason` names, by a
+person or by another session, so the daemon took it out of the workflow (`phase: done`); or a root
+waiting on a person could not be resumed — its `legion` label is gone, or a person or an outside
+session took its Dispatch claim — and the daemon took it out the same way, with its Dispatch
+status still `in_progress`. `reason` says which. Re-admit nothing, because the move was someone
+else's; `dispatch read` shows who claims it now.
+Tell the person in your summary: "<KEY> left Legion's workflow: <reason as the wake gives it>;
+`todo` with the `legion` label queues it again". Other
 admission states: `skill://legion-controller/references/admission.md`.
 
 ## `awaiting-person on <KEY>` (`{kind: "awaiting-person", reason}`)

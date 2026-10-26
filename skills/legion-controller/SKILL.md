@@ -42,7 +42,9 @@ because Envoy keeps no copy of a wake sent while no controller ran.
 1. Read `read_state`. Handle each issue whose `phase` is `held` with `holdReason: escalated`, and
    each root whose `architect.state` is `failed` and whose `phase` is not `done`, as its wake says.
    Name in your summary each root at `phase: done` whose `status` is `in_progress`, `testing`,
-   `needs_review` or `retro`: someone else works it, as the `unslotted` wake reports.
+   `needs_review` or `retro`: Legion runs it no longer, as the `unslotted` wake reports — someone
+   else moved it there while it waited, or it waited on a person and lost its label or its
+   Dispatch claim, which leaves the `in_progress` it ran with.
 2. Triage the roots handed to Legion while you were away, as
    `skill://legion-controller/references/triage.md` "At every start" says.
 3. Catch up on the report issue
