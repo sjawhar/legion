@@ -224,14 +224,21 @@ lists every route, and so does `GET /api/v1` on the server, with no credential: 
 method, who may call it, and what it does. An agent calls the API with its token as
 `Authorization: Bearer <token>`.
 
-Every write an agent makes through `dispatch` is keyed: each write a command makes carries an
-`Idempotency-Key` header of its own, and the command asks again under that key when an attempt
-fails on the way, Dispatch answers 5xx or 429, or Dispatch is still running an earlier attempt
-(`409 KEY_IN_FLIGHT`), at most five attempts within 30 seconds. Dispatch makes the write once per
-key and answers a repeat with the first answer, so the command never makes a write twice. When no
-attempt got an answer, the command says so and says the write may or may not have taken effect:
-read it back before you run the command again, since a new command is a new key. A script that
-calls the API directly can send its own key on any `POST` or `PATCH`: 1 to 128 letters, digits,
-`.`, `_`, `:` and `-`, the same on every retry of one write and new for every new write. Dispatch
-keeps each key's answer for 24 hours; the same key with a different request is refused
+Every `POST` and `PATCH` an agent makes through `dispatch` is keyed: each write a command makes
+carries an `Idempotency-Key` header of its own, and the command asks again under that key when an
+attempt fails on the way, gets no answer for 20 seconds while none of its body is going out,
+Dispatch answers 5xx, 408 or 429, or Dispatch is still running an earlier attempt
+(`409 KEY_IN_FLIGHT`): at most five attempts, the last starting within 30 seconds of the first, and
+the whole command within 60. It asks again only of a Dispatch that judges the key: one whose answer
+carried the key back, or whose `/healthz` said `idempotency_keys: true` in the last five minutes,
+whatever its status; any other would make a repeated write twice. Dispatch makes the write once per
+key and answers a repeat with the first answer, so the command never makes a write twice. When the
+write landed but Dispatch has no answer to give for it (`409 KEY_COMMITTED`, or a first answer too
+large to keep), the command exits 0 and says it was made: read it back to see it. When no attempt
+got an answer, the command says the write may or may not have taken effect: read it back before
+you run the command again, since a new command is a new key. Reads, and the `PUT` and `DELETE` of
+`dispatch follow` and `dispatch claim --release`, carry no key and go once. A script that calls
+the API directly can send its own key on any `POST` or `PATCH`: 1 to 128 letters, digits, `.`,
+`_`, `:` and `-`, the same on every retry of one write and new for every new write. Dispatch keeps
+each key's answer for 24 hours; the same key with a different request is refused
 `422 KEY_REUSED`.

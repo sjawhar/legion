@@ -82,14 +82,16 @@ Specs: dispatch://INFRA-258 and dispatch://INFRA-292.
 - **One keyed path for every write** (dispatch://INFRA-258/ask/4cb71926-38d5-467b-bc7e-6ca1b3305399).
   A request that times out or loses its answer says nothing about whether it ran, so a retry is
   only safe when the server can tell it from a new write. The page and the `dispatch` CLI mint an
-  `Idempotency-Key` per intent (a press, a command's write) and retry a transport failure, a
-  timeout, a 5xx, a 429 and a `409 KEY_IN_FLIGHT` under it. One server layer
+  `Idempotency-Key` per intent (a press, a command's write) and retry under it by one rule,
+  `retriesUnderKey` in `@legion/contracts`: a transport failure, an attempt silent too long, a
+  5xx, a 408, a 429 and a `409 KEY_IN_FLIGHT`. One server layer
   (`packages/envoy/internal/dispatch/api/request_keys.go`, a `request_keys` row per key) runs a
   key's request once, replays its stored answer to a repeat with `Idempotency-Replayed: ?1`,
   refuses the key reused for another request (`422 KEY_REUSED`), keeps no 5xx, and keeps each key
   24 hours. Every transaction a keyed request commits marks its key in that same transaction, so a
   write that landed but lost its answer is never run again: its repeat is `409 KEY_COMMITTED`,
-  which every client treats as a landing and re-reads. A write that also reaches outside the
+  which the page treats as a landing and reads again, and the `dispatch` command reports as made,
+  telling the session to read it back. A write that also reaches outside the
   database (the single-session send, the broadcast, the issue message and a comment, each of which
   delivers to agents) commits a recovery point with what it made, so a repeat resumes what its
   delivery still owes and answers what it made as it stands, even across a crash between its commit
