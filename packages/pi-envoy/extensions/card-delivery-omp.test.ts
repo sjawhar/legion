@@ -197,19 +197,18 @@ async function until<T>(
 
 /**
  * Starts the real Oh My Pi in RPC mode with only envoy.ts loaded, against one stand-in that is the
- * model gateway, the Envoy listener and Dispatch, and the NATS server at `nats`. `config` lines go
- * into the profile's config.yml. Resolves once the session has registered its id with the
+ * model gateway, the Envoy listener and Dispatch, and the NATS server `setup` names. `config` lines
+ * go into the profile's config.yml. Resolves once the session has registered its id with the
  * listener and the test holds a NATS connection. With `holdStartup` the stand-in holds its answer
  * to that first registration until `releaseStartup`: envoy.ts's `session_start` awaits it
  * (`reconcileNow` registers once the agent subject is open), so the host is still inside its
  * startup, before it starts any extension send or reads any RPC command.
  */
 async function startSession(
-  binary: string,
-  nats: string,
-  config: readonly string[] = [],
-  holdStartup = false
+  options: { readonly config?: readonly string[]; readonly holdStartup?: boolean } = {}
 ): Promise<CardSession> {
+  const { config = [], holdStartup = false } = options;
+  const { binary, nats } = setup();
   const { root, home, workspace, sessions } = await ompRoot(binary, "card-delivery-omp-", cleanup);
 
   let startupHold = holdStartup ? Promise.withResolvers<void>() : undefined;
@@ -440,8 +439,7 @@ async function within<T>(what: string, ms: number, promise: Promise<T>): Promise
 test.skipIf(skip)(
   "a person's Send sent after five cards reaches the model at the next step, ahead of all five",
   async () => {
-    const { binary, nats } = setup();
-    const session = await startSession(binary, nats);
+    const session = await startSession();
     await session.command({ type: "prompt", message: "Start case a." });
     const held = await session.nextTurn("the first model request");
 
@@ -486,8 +484,7 @@ async function interruptKeepsCards(
   abort: "abort" | "abort_and_restore_queue",
   hold: Hold
 ): Promise<void> {
-  const { binary, nats } = setup();
-  const session = await startSession(binary, nats);
+  const session = await startSession();
   await session.command({ type: "prompt", message: `Start case b, ${abort} during a ${hold}.` });
   const first = await session.nextTurn("the first model request");
   if (hold === "tool call") {
@@ -537,16 +534,17 @@ for (const abort of ["abort", "abort_and_restore_queue"] as const) {
 test.skipIf(skip)(
   "a card that lands during a run's automatic compaction, in a session interrupted earlier, gets a turn",
   async () => {
-    const { binary, nats } = setup();
-    const session = await startSession(binary, nats, [
-      "compaction:",
-      "  thresholdTokens: 100000",
-      "  asyncEnabled: false",
-      "  autoContinue: false",
-      "  keepRecentTokens: 1",
-      "  methodOrder: [soft]",
-      "  midTurnEnabled: false",
-    ]);
+    const session = await startSession({
+      config: [
+        "compaction:",
+        "  thresholdTokens: 100000",
+        "  asyncEnabled: false",
+        "  autoContinue: false",
+        "  keepRecentTokens: 1",
+        "  methodOrder: [soft]",
+        "  midTurnEnabled: false",
+      ],
+    });
     await session.command({ type: "prompt", message: "Start case c." });
     await session.nextTurn("the first model request");
     // The interrupt the host keeps in effect until the next user prompt.
@@ -579,30 +577,15 @@ test.skipIf(skip)(
     expect(conversation(woken.request)).toContain(late);
     expect(lastMessage(woken.request)).toMatch(WAKE_TEXT);
     // The card-started run ended with a continuation still owed: the late aside.
-    expect(
-      session.frames
-        .slice(framesBefore)
-        .some(
-          (frame) =>
-            "type" in frame &&
-            frame.type === "agent_end" &&
-            "isTerminal" in frame &&
-            frame.isTerminal === false
-        )
-    ).toBe(true);
+    const agentEndsSince = (from: number): object[] =>
+      session.frames.slice(from).filter((frame) => "type" in frame && frame.type === "agent_end");
+    const continuing = (frame: object): boolean =>
+      "isTerminal" in frame && frame.isTerminal === false;
+    expect(agentEndsSince(framesBefore).some(continuing)).toBe(true);
     const framesAtWake = session.frames.length;
     woken.reply([text("Read the late card.")]);
     await session.settled();
-    expect(
-      session.frames
-        .slice(framesAtWake)
-        .some(
-          (frame) =>
-            "type" in frame &&
-            frame.type === "agent_end" &&
-            !("isTerminal" in frame && frame.isTerminal === false)
-        )
-    ).toBe(true);
+    expect(agentEndsSince(framesAtWake).some((frame) => !continuing(frame))).toBe(true);
     expect(session.turns.length).toBe(woken.index + 1);
   },
   120_000
@@ -614,8 +597,7 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   "a card that reaches an idle session starts a turn",
   async () => {
-    const { binary, nats } = setup();
-    const session = await startSession(binary, nats);
+    const session = await startSession();
     const first = await session.card("d1");
     const woken = await session.nextTurn("the turn the first idle card's wake started");
     expect(conversation(woken.request)).toContain(first);
@@ -642,8 +624,7 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   "a card that arrives while the session starts holds no RPC input",
   async () => {
-    const { binary, nats } = setup();
-    const session = await startSession(binary, nats, [], true);
+    const session = await startSession({ holdStartup: true });
     const early = session.command({ type: "get_state" });
     let answeredEarly = false;
     void early.then(
@@ -678,8 +659,7 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   "an RPC prompt of /plan reaches the model as a prompt, entering no plan mode",
   async () => {
-    const { binary, nats } = setup();
-    const session = await startSession(binary, nats);
+    const session = await startSession();
     await session.command({ type: "prompt", message: "/plan" });
     const turn = await session.nextTurn("the model request /plan started");
     expect(lastMessage(turn.request)).toContain("/plan");

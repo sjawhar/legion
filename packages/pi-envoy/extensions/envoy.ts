@@ -1235,26 +1235,12 @@ export default function envoyExtension(pi: PiApi): void {
               true,
               shown
             );
-            // While a turn runs a card goes as an aside rather than into the host's steering
-            // queue: the host drains that queue one message per turn, first in, first out, so a
-            // card there held a person's Send back a turn. The host folds an aside in at the next
-            // step, after any steer, without cutting the running tool batch short (`agent-loop.ts`'s
-            // step boundary), and folds one still queued at an interrupt into the context with no
-            // run, where an Esc dropped a queued steer and an RPC `abort` resumed the run on it. An
-            // idle session has no queue to wait in, and there a card stays a steer with
-            // `triggerTurn`, which starts a turn after an interrupt (an Esc, or the RPC `abort` a
-            // Legion daemon sends) and in plan mode, where an idle aside starts none. A host
-            // context with no `isIdle` cannot say whether a turn runs, and its cards stay steers
-            // too: the wake for a card the host folds (`foldedCards`) needs `isIdle`. A targeted
-            // Aside stays an aside in every case but one: in the startup phase (`startupPhase`) a
-            // card that finds the host idle, a targeted Aside included, goes as a `followUp` with
-            // no `triggerTurn`, since an idle card with `triggerTurn` started its turn inside the
-            // host's startup drain (`runtime-init.ts` `initializeExtensions`, ~535-548), which
-            // waits for that whole run and so held every RPC command back until it ended. A host
-            // with no `isIdle` keeps the steer, as no check could ever release a startup card on
-            // it; a busy one keeps the aside, which waits in no drain. Each card carries a marker
-            // (`EnvoyCardMarker`) the wake finds it by in the branch. The limit is in `AGENTS.md`
-            // ("Overview").
+            // In the startup phase a card that finds the host idle, a targeted Aside included, goes
+            // as a `followUp` with no `triggerTurn`. Otherwise a targeted Aside, or a card that
+            // finds a turn running, goes as an aside, since a card in the host's steering queue
+            // held a person's Send back a step; a card that finds the host idle, or a host with no
+            // `isIdle`, goes as a steer with `triggerTurn`. Why each case is so: `foldedCards`,
+            // `startupPhase`, and `AGENTS.md` ("Overview").
             const targetedAside = rendered.delivery?.mode === "aside";
             const idle = activeSessionContext?.isIdle?.();
             const startup = startupPhase && idle === true;
@@ -1719,27 +1705,25 @@ export default function envoyExtension(pi: PiApi): void {
   const unseenStartupCards = new Map<string, number>();
   const seenStartupCards = new Set<string>();
 
-  let foldCheckArmed = false;
-  // When the armed check runs: a sooner one replaces it, a later one waits for it.
-  let foldCheckDue = 0;
+  // When the armed check runs, if one is armed: a sooner one replaces it, a later one waits for it.
+  let foldCheckDue: number | undefined;
   // Bumped to drop an armed check, since the host's managed timer has no cancel handle.
   let foldCheckGeneration = 0;
   const armFoldCheck = (context: SessionContext, delayMs = 0): void => {
     const due = Date.now() + delayMs;
-    if (foldCheckArmed && foldCheckDue <= due) return;
+    if (foldCheckDue !== undefined && foldCheckDue <= due) return;
     foldCheckGeneration += 1;
-    foldCheckArmed = true;
     foldCheckDue = due;
     const generation = foldCheckGeneration;
     context.setTimeout(() => {
       if (generation !== foldCheckGeneration) return;
-      foldCheckArmed = false;
+      foldCheckDue = undefined;
       checkFoldedCards(context);
     }, delayMs);
   };
   const cancelFoldCheck = (): void => {
     foldCheckGeneration += 1;
-    foldCheckArmed = false;
+    foldCheckDue = undefined;
     foldedCards = [];
     unseenStartupCards.clear();
     seenStartupCards.clear();
@@ -1805,36 +1789,46 @@ export default function envoyExtension(pi: PiApi): void {
     );
   };
 
+  // The fold bookkeeping a `message_end` drives: an interrupt latches `foldInterrupted`, and a card
+  // the host appended arms the check that wakes for it.
+  const noteFoldEvent = (message: unknown, context: SessionContext): void => {
+    if (typeof message !== "object" || message === null || !("role" in message)) return;
+    if (message.role === "assistant") {
+      if (
+        "stopReason" in message &&
+        message.stopReason === "aborted" &&
+        "errorMessage" in message &&
+        message.errorMessage === USER_INTERRUPT_LABEL
+      ) {
+        foldInterrupted = true;
+      }
+      return;
+    }
+    if (
+      shuttingDown ||
+      message.role !== "custom" ||
+      !("customType" in message) ||
+      message.customType !== "envoy-message" ||
+      !("details" in message)
+    ) {
+      return;
+    }
+    const marker = envoyCardMarker(message.details);
+    if (marker === undefined) return;
+    if (marker.startup === true) {
+      unseenStartupCards.delete(marker.envoyCard);
+      seenStartupCards.add(marker.envoyCard);
+    } else if (marker.targetedAside) {
+      return;
+    } else {
+      foldedCards.push({ id: marker.envoyCard, run: runSeq });
+    }
+    armFoldCheck(context);
+  };
+
   pi.on("message_end", async (event, context) => {
     const { message } = event;
-    if (typeof message === "object" && message !== null && "role" in message) {
-      if (message.role === "assistant") {
-        if (
-          "stopReason" in message &&
-          message.stopReason === "aborted" &&
-          "errorMessage" in message &&
-          message.errorMessage === USER_INTERRUPT_LABEL
-        ) {
-          foldInterrupted = true;
-        }
-      } else if (
-        !shuttingDown &&
-        message.role === "custom" &&
-        "customType" in message &&
-        message.customType === "envoy-message" &&
-        "details" in message
-      ) {
-        const marker = envoyCardMarker(message.details);
-        if (marker?.startup === true) {
-          unseenStartupCards.delete(marker.envoyCard);
-          seenStartupCards.add(marker.envoyCard);
-          armFoldCheck(context);
-        } else if (marker !== undefined && !marker.targetedAside) {
-          foldedCards.push({ id: marker.envoyCard, run: runSeq });
-          armFoldCheck(context);
-        }
-      }
-    }
+    noteFoldEvent(message, context);
     recordAgentStreamMessage(message, false);
   });
   pi.on("auto_compaction_end", async (event) => {

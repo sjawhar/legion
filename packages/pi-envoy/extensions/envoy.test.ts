@@ -451,20 +451,26 @@ afterEach(async () => {
   hostBuiltins.length = 0;
 });
 
+/** A message the extension sent through `pi.sendMessage`, as `createPi()` records it. */
+type Delivery = {
+  readonly content: string;
+  readonly customType?: string;
+  readonly details?: unknown;
+  readonly display?: boolean;
+  readonly options: unknown;
+};
+
+/** An event handler the extension registered through `pi.on`. */
+type EventHandler = (event: unknown, context: SessionContext) => Promise<unknown>;
+
 function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
   clipboardState.error = options.clipboardError;
   const commands: RegisteredCommand[] = [];
   const tools: RegisteredTool[] = [];
-  const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
+  const handlers = new Map<string, EventHandler>();
   const renderers = new Map<string, MessageRenderer>();
   const messages: string[] = [];
-  const deliveries: {
-    readonly content: string;
-    readonly customType?: string;
-    readonly details?: unknown;
-    readonly display?: boolean;
-    readonly options: unknown;
-  }[] = [];
+  const deliveries: Delivery[] = [];
   // User turns the extension started, in the order it sent them.
   const userMessages: { readonly content: string; readonly options: unknown }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` or `getEntries()` returns them.
@@ -922,17 +928,8 @@ async function bootDirectSession(
 
 /** What `endStartupPhase` reads of a `createPi()` fixture. */
 type CardFixture = {
-  readonly deliveries: readonly {
-    readonly content: string;
-    readonly customType?: string;
-    readonly details?: unknown;
-    readonly display?: boolean;
-    readonly options: unknown;
-  }[];
-  readonly handlers: ReadonlyMap<
-    string,
-    (event: unknown, context: SessionContext) => Promise<unknown>
-  >;
+  readonly deliveries: readonly Delivery[];
+  readonly handlers: ReadonlyMap<string, EventHandler>;
 };
 
 /**
@@ -9511,30 +9508,10 @@ describe("envoy OMP extension", () => {
   });
 
   test("delivers a targeted Steer card as an aside while a turn runs and an Aside always as one", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-modes");
-    const fixture = createPi();
-    const waiting: { readonly count: number; readonly resolve: () => void }[] = [];
-    const delivered = (count: number): Promise<void> => {
-      const waiter = Promise.withResolvers<void>();
-      if (fixture.deliveries.length >= count) waiter.resolve();
-      else waiting.push({ count, resolve: waiter.resolve });
-      return waiter.promise;
-    };
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        fixture.pi.sendMessage(message, options);
-        for (const waiter of waiting) {
-          if (fixture.deliveries.length >= waiter.count) waiter.resolve();
-        }
-      },
-    });
     let idle = false;
-    const context = { ...sessionContext("ses_delivery"), isIdle: () => idle };
-    await fixture.handlers.get("session_start")?.({}, context);
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    const { agent, context, delivered, fixture } = await bootDirectSession("targeted-modes", {
+      idle: () => idle,
+    });
 
     agent.push(targetedDispatchEnvelope("aside", "targeted-aside-running"));
     agent.push(targetedDispatchEnvelope("steer", "targeted-steer-running"));
@@ -13587,13 +13564,11 @@ describe("envoy OMP extension", () => {
       };
       return {
         branch,
-        context,
         delays,
         handle,
         card,
         message,
         session,
-        timers,
         setIdle: (value: boolean) => {
           idle = value;
         },
