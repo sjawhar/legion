@@ -641,8 +641,10 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ## claude-backend-tmux.sh
 
 ```sh
-LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
+  bash scripts/e2e/claude-backend-tmux.sh     # the same, for a devbox with no Hawk gateway
 ```
 
 **Devbox only; CI does not run this script.** It proves `worker_backends` on the tmux runtime: a
@@ -689,17 +691,29 @@ pane. The checks:
 
 Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
-the variable, before anything else, and refuses a key Anthropic's `GET /v1/models` does not accept
-(the key goes by a 0600 header file, never an argv). The run copies the key once into its work
-directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
-the daemon creates only when missing) before the claim exists: a `settings.json` whose
+the variable, right after the route below and before any other tool, and refuses a key Anthropic's
+`GET /v1/models` does not accept (the key goes by a 0600 header file, never an argv). The run copies
+the key once into its work directory, 0600, and writes the implementer's claim directory
+(`<state>/claude/<claim token>`, which the daemon creates only when missing) before the claim
+exists: a `settings.json` whose
 `apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
 pane's environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
 `ANTHROPIC_FOUNDRY_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, which the watcher checks for every agent
-process, and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is
-the Oh My Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
-([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
-the evidence directory; by default it is a fresh one under `/tmp`.
+process, and the key is in no argv and no transcript. `LEGION_E2E_MODEL_ROUTE` (required, `gateway`
+or `key-file`) is the Oh My Pi agents' route, Stage 3's
+([`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)), refused by name when it is neither:
+- `gateway`: `LEGION_E2E_MODEL_GATEWAY_URL` naming the gateway's Anthropic endpoint (required in
+  this mode) and `hawk-token` on `PATH`, which `prerequisites` requires under this route alone,
+  through the operator's `hawk login`
+  ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+- `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode, refused by name when unset), a
+  0600 file holding a plaintext Anthropic key, for a devbox with no Hawk gateway at all
+  ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)). Its key command
+  lives under its own key directory in the run's work directory, which the `EXIT` trap removes on
+  every exit, the run's outcome aside. An operator may name the same file for
+  `LEGION_E2E_CLAUDE_KEY_FILE` and `LEGION_E2E_ANTHROPIC_KEY_FILE`.
+
+`CLAUDE_E2E_EVIDENCE_DIR` names the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
@@ -731,12 +745,28 @@ LEGION_E2E_STORAGE_CLASS=gp2 \
 LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
 LEGION_E2E_CLAUDE_MODEL=<model id> \
 [LEGION_E2E_CLAUDE_BASE_URL=<gateway>/anthropic] \
+LEGION_E2E_POD_REACHABILITY=aws-private-ip \
 LEGION_E2E_MODEL_ROUTE=gateway \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
 LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 LEGION_E2E_DAEMON_PORT=<port> LEGION_E2E_WORKER_STREAM_PORT=<port> \
 LEGION_E2E_DISPATCH_PORT=<port> LEGION_E2E_ENVOY_PORT=<port> LEGION_E2E_NATS_PORT=<port> \
   bash scripts/e2e/claude-backend-sandbox.sh     # → "claude backend sandbox e2e: PASS", exit 0
+
+# A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway; the five
+# ports are free ports on the devbox, and the runtime kubeconfig is built as below:
+LEGION_E2E_OPERATOR_CONTEXT=<operator context> \
+LEGION_E2E_RUNTIME_KUBECONFIG=<file> \
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
+LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest of the branch's image> \
+LEGION_E2E_STORAGE_CLASS=standard-rwo \
+LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> \
+LEGION_E2E_CLAUDE_MODEL=<model id> \
+LEGION_E2E_POD_REACHABILITY=bridge \
+LEGION_E2E_MODEL_ROUTE=key-file \
+LEGION_E2E_DAEMON_PORT=<port> LEGION_E2E_WORKER_STREAM_PORT=<port> \
+LEGION_E2E_DISPATCH_PORT=<port> LEGION_E2E_ENVOY_PORT=<port> LEGION_E2E_NATS_PORT=<port> \
+  bash scripts/e2e/claude-backend-sandbox.sh     # the same, through the bridge; needs passwordless sudo
 ```
 
 **Devbox only; CI does not run this script.** It proves `worker_backends` under the Kubernetes
@@ -811,9 +841,12 @@ cluster.
 
 Inputs, every one of them refused by name when unset, before the run reads a tool, a key or the
 cluster. `LEGION_E2E_RUNTIME_CONTEXT` (required) and `LEGION_E2E_RUNTIME_KUBECONFIG` (default
-`~/.kube/legion-daemon-production`) name the restricted identity the runtime runs as, and
+`~/.kube/legion-daemon-production`) name the restricted identity the runtime runs as, which the
+operator supplies and the run never builds or stands in for (the operator context is never it;
+[The runtime identity on GKE](#the-runtime-identity-on-gke) builds one), and
 `LEGION_E2E_OPERATOR_CONTEXT` (default `production`) the admin context this script's own reads of
-the pods and its teardown use. `LEGION_E2E_IMAGE` (required, by digest) and
+the namespace, the pods and its teardown use. `prerequisites` holds the runtime identity to listing
+the namespace's Sandboxes. `LEGION_E2E_IMAGE` (required, by digest) and
 `LEGION_E2E_STORAGE_CLASS` (required: the cluster has no default, and the resume is a read of the
 issue's volume) are the pod's. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the
 Anthropic API key the Claude Code implementer reaches its model with; the run copies it once (0600),
@@ -829,20 +862,25 @@ devbox whose route to Anthropic is a gateway. `LEGION_E2E_MODEL_ROUTE` (required
 it: under `gateway`, `{pod,models}.yml` with `LEGION_E2E_MODEL_GATEWAY_URL` and
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` (both required then); under `key-file`,
 `{pod,models}-key-file.yml`, which carry no projected token and read the same Secret's
-`ANTHROPIC_API_KEY`. `CLAUDE_SANDBOX_E2E_EVIDENCE_DIR` names the evidence directory; by default it
+`ANTHROPIC_API_KEY`. `LEGION_E2E_POD_REACHABILITY` (required, `aws-private-ip` or `bridge`) is how
+the pods reach the run's services on the devbox ([Pod reachability](#pod-reachability), below).
+`CLAUDE_SANDBOX_E2E_EVIDENCE_DIR` names the evidence directory; by default it
 is a fresh one under `/tmp`, kept and printed, holding the transcript of the run, the daemon's log,
 the `legion.yaml` and pod fixture the run wrote, the implementer's Claude Code transcript and the
 namespace snapshots.
 
-The five ports are required and have no default: `LEGION_E2E_DAEMON_PORT`,
-`LEGION_E2E_WORKER_STREAM_PORT`, `LEGION_E2E_DISPATCH_PORT`, `LEGION_E2E_ENVOY_PORT` and
-`LEGION_E2E_NATS_PORT`. The rig is the tmux proof's — scratch Postgres, NATS, Envoy listener and
+The five ports are required in both modes, have no default and must differ:
+`LEGION_E2E_DAEMON_PORT`, `LEGION_E2E_WORKER_STREAM_PORT`, `LEGION_E2E_DISPATCH_PORT`,
+`LEGION_E2E_ENVOY_PORT` and `LEGION_E2E_NATS_PORT`; `prerequisites` refuses one that is unset, not a
+number, or taken. The rig is the tmux proof's — scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
 [`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, the design gate off, and the smoke
 repository `sjawhar/legion-smoke`, where the implementer pushes a branch and opens no pull request —
-but its services are dialled from inside a pod, so every one of them binds the devbox's private
-address (read from instance metadata) on a port the devbox's security group admits from the Legion
-nodes ([Port admission](#port-admission)). Postgres is the daemon's and Dispatch's alone and stays
+but its services are dialled from inside a pod, so every one of them binds the address
+[Pod reachability](#pod-reachability) picks: the devbox's private address under `aws-private-ip`,
+on a port the devbox's security group admits from the Legion nodes
+([Port admission](#port-admission)), or its loopback under `bridge`, on a port that need only be
+free on the devbox. Postgres is the daemon's and Dispatch's alone and stays
 on loopback. Legion's role Apps resolve as the tmux proof's do, through each App's
 `private_key_command` and never this shell, and the proof human is the devbox's ordinary `gh`
 acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts from the
@@ -855,7 +893,79 @@ namespace holds anything under that label, `snapshot` records the run's own obje
 the `EXIT` trap copies the implementer's transcript out of its pod, stops the daemon and the scratch
 services, removes the containers, deletes everything under that label, closes any pull request of
 the run's project and deletes the issue's branch, and then compares the namespace with its snapshot.
-Nothing outside `legion` is touched.
+Under `bridge`, the bridge's own pod, Service and auth Secret carry the same label, and
+`bridge_stop` deletes them by their one exact name before that comparison runs. Nothing outside
+`legion` is touched.
+
+### Pod reachability
+
+`LEGION_E2E_POD_REACHABILITY` picks how the pods reach the run's five services on the devbox, as
+Stage 4a's does ([The bridge](#the-bridge-legion_e2e_pod_reachabilitybridge)):
+
+- **`aws-private-ip`**: the pods reach the devbox at its private address, which `prerequisites`
+  reads from instance metadata, refusing the run when it is unreachable or holds no `local-ipv4`.
+  The five services bind that address, each on a port the devbox's security group admits from the
+  Legion nodes ([Port admission](#port-admission)). This mode needs no bridge, no sudo and no
+  private mount namespace.
+- **`bridge`**: for a cluster whose pods cannot reach the devbox at all (no tailnet, no routable
+  private address — GKE's shape). The five services bind the devbox's loopback, each on a port
+  that need only be free on the devbox, and `begin bridge`, right after `begin snapshot`, stands up
+  [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh) over all five: one pod and one ClusterIP Service of
+  the run's own, both named `bridge-` and the run's project label, whose Service carries one port
+  per service, named `p<port>`, and whose reverse tunnel forwards each back to `127.0.0.1:<port>`
+  on the devbox. The pods dial the Service's cluster-DNS name,
+  `bridge-<label>.legion.svc.cluster.local`.
+
+The daemon and the pods read one `legion.yaml`, so under `bridge` its URLs name that Service, which
+the devbox cannot resolve. The daemon alone runs in a private mount namespace whose `/etc/hosts` is
+the devbox's own plus `127.0.0.1 <that name>`. The devbox refuses unprivileged user namespaces, so
+root makes it: `sudo -n unshare --mount --propagation private` runs a root `bash` that bind-mounts
+that file over `/etc/hosts`, and `setpriv --reuid --regid --init-groups` drops back to the devbox
+user and that user's groups before the daemon runs. sudo resets the environment, so the daemon's
+own — the one it has under `aws-private-ip`, the caller's less the NATS seeds, the App keys, the
+public-repository token and `ANTHROPIC_API_KEY` — travels NUL-separated in an owner-only file the
+root `bash` reads and removes, never an argument. Every link after sudo execs rather than forks, so
+the pid the wrapper records is the daemon's own. This mode needs passwordless sudo (`sudo -n true`,
+refused by name when it asks for a password), and `sudo`, `setpriv`, `unshare`, `getent` and
+`sha256sum` beside the tools both modes need.
+
+`prerequisites` proves that namespace before the run creates anything. A probe runs in it exactly as
+the daemon will and must print the pid the wrapper recorded, the devbox user's own uid and gid, and
+`127.0.0.1` from `getent hosts <that name>`; outside it, `getent hosts` of the same name must
+resolve nothing; and the devbox's `/etc/hosts` must hold the same sha256 after the probe as before
+it. Nothing outside the daemon's process changes.
+
+### The runtime identity on GKE
+
+The runtime runs as the Legion daemon's restricted identity, never the operator's, and that
+identity stays the operator's input: on GKE it is the ServiceAccount `legion-daemon` in namespace
+`legion`, which the run reads from a kubeconfig the operator builds outside the repository, owner
+only (0600). Its cluster server and certificate authority are the operator context's, and its user
+is a token for `legion-daemon` that outlives the run:
+
+```sh
+kubeconfig=<file>     # owner-only, outside the repository; not ~/.kube/legion-daemon-production
+operator='<operator context>'
+(umask 077 && : >"$kubeconfig")
+server=$(kubectl config view --raw --minify --context "$operator" -o jsonpath='{.clusters[0].cluster.server}')
+ca=$(kubectl config view --raw --minify --context "$operator" -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+kubectl config set-cluster legion-runtime --kubeconfig "$kubeconfig" --server "$server"
+kubectl config set clusters.legion-runtime.certificate-authority-data "$ca" --kubeconfig "$kubeconfig"
+token=$(kubectl --context "$operator" -n legion create token legion-daemon --duration=<longer than the run, e.g. 8h>)
+kubectl config set-credentials legion-daemon --kubeconfig "$kubeconfig" --token "$token"
+unset token
+kubectl config set-context '<restricted context>' --kubeconfig "$kubeconfig" \
+  --cluster legion-runtime --user legion-daemon --namespace legion
+chmod 0600 "$kubeconfig"
+kubectl --kubeconfig "$kubeconfig" --context '<restricted context>' -n legion auth can-i --list
+```
+
+The last line is the identity check: its list holds `sandboxes.agents.x-k8s.io` with `create`,
+`get`, `list`, `watch`, `patch` and `delete`, and none of the operator context's own rights. Name
+the file as `LEGION_E2E_RUNTIME_KUBECONFIG` and the context as `LEGION_E2E_RUNTIME_CONTEXT`, and
+name the cluster's admin context as `LEGION_E2E_OPERATOR_CONTEXT` (default `production`) when it
+has another name. A token that expires mid-run takes the runtime's access with it, so its duration
+must outlast the whole run.
 
 ## Port admission
 
@@ -866,6 +976,11 @@ the cluster; nothing on the devbox holds them today. That makes all six ports av
 lane's own identity, not five beside a fixed occupant — confirm with `ss` before relying on it,
 since the harness's own `ports_free` and taken-port checks are the authority at run time and this
 note only the architecture behind them.
+
+The admitted range matters under `LEGION_E2E_POD_REACHABILITY=aws-private-ip` alone, where pods
+dial the devbox's private address. Under `bridge` (Stage 4a's and the Claude Code sandbox proof's)
+the pods dial the run's own bridge Service and never the devbox, so no security-group admission is
+needed: each port need only be free on the devbox, and a bridge run takes none of the six.
 
 Each cluster stage needs two of the six, and the Claude Code sandbox proof five, since the scratch
 services its pods dial are the devbox's own:
@@ -878,15 +993,16 @@ services its pods dial are the devbox's own:
 - **[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh)**: `LEGION_E2E_DAEMON_PORT`,
   `LEGION_E2E_WORKER_STREAM_PORT`, `LEGION_E2E_DISPATCH_PORT`, `LEGION_E2E_ENVOY_PORT` and
   `LEGION_E2E_NATS_PORT`, all required with no default, all distinct: its daemon's API and worker
-  stream, and the scratch Dispatch, Envoy listener and NATS its pods dial. Five of the six leaves
-  room for no other lane, so it runs alone.
+  stream, and the scratch Dispatch, Envoy listener and NATS its pods dial. Under `aws-private-ip`,
+  five of the six leave room for no other lane, so it runs alone; under `bridge` the five need only
+  be free on the devbox.
 
 Both stage scripts default `LEGION_E2E_WORKER_STREAM_PORT` to `13373`, so two lanes at their
 defaults — two Stage 4b's, two Stage 4a's, or one of each — collide there; set at least one
 override to run two lanes together. With six admitted ports and two per stage lane, the ceiling is
 three stage lanes at once, each on its own pair with nothing shared; a fourth needs the admitted
-range widened. A Claude Code sandbox run takes five of the six and names every one of them itself,
-so it runs while no stage lane does.
+range widened. A Claude Code sandbox run under `aws-private-ip` takes five of the six and names
+every one of them itself, so it runs while no stage lane does.
 
 ## stage4a-sandbox-runtime.sh
 
@@ -997,7 +1113,11 @@ owner-only file the harness and the providers Secret read; neither is printed.
 GKE's pods have no route to the devbox at all: no tailnet bridge, no routable private address
 (measured live, 2026-10-17: the devbox's tailnet address timed out from a `legion` pod, which
 could reach only in-cluster Services). [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh) stands in for
-that reachability with a reverse tunnel, entirely of the run's own:
+that reachability with a reverse tunnel, entirely of the run's own. It serves two callers: this
+stage, over two ports (the worker stream's and the session database's), and
+[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), over five (its daemon's API and worker
+stream, the scratch Dispatch, Envoy listener and NATS; [Pod reachability](#pod-reachability)).
+Here:
 
 1. **`begin bridge`**, right after `begin snapshot` (so a leaked bridge object shows up in
    `namespace-clean`'s before/after diff even if its own teardown fails) and before
@@ -1008,23 +1128,26 @@ that reachability with a reverse tunnel, entirely of the run's own:
    without requiring it, and carrying the same eviction-protection annotation pair every Legion
    issue pod does (`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`,
    `karpenter.sh/do-not-disrupt: "true"`) — without them the bridge pod, alone on its own node, is
-   fair game for GKE's node consolidation mid-run. Only the chisel server's two *data* ports (the
-   worker stream's and the session database's) are on the Service; its control port is never
-   exposed by the Service or the cluster network, reachable only through `kubectl port-forward`
-   under the operator context.
+   fair game for GKE's node consolidation mid-run. Only the chisel server's *data* ports, the
+   ones the caller names, are on the Service, each a Service port named `p<port>` (here the worker
+   stream's and the session database's); its control port is never exposed by the Service or the
+   cluster network, reachable only through `kubectl port-forward` under the operator context.
 2. The devbox holds a `kubectl port-forward` to the bridge pod's control port, and a `chisel`
    client — built from pinned source (`go install github.com/jpillora/chisel@v1.11.8`) into the
    run's scratch directory, never installed system-wide — asks the server, over that port-forward,
-   to open the two reverse listeners that proxy back to 127.0.0.1 on the devbox, where the worker
-   stream listener and the scratch Postgres already bind. The harness waits for both listeners'
-   `tun: proxy#R:<port>=>` lines in the bridge pod's log before any pod under test is started.
+   to open one reverse listener per named port, each proxying back to 127.0.0.1 on the devbox,
+   where the caller's services already bind (here the worker stream listener and the scratch
+   Postgres). The harness waits for every listener's `tun: proxy#R:<port>=>` line in the bridge
+   pod's log before any pod under test is started.
 3. **A dropped `kubectl port-forward` is recovered, not fatal**: the watchdog that polls both
    processes every 5s restarts a dead port-forward itself, on the same local port, so the chisel
    client's own bounded reconnect (`--max-retry-count 30 --max-retry-interval 2s`, finite rather
    than chisel's default of forever) can pick the tunnel back up without reconfiguring anything.
    Only two things still send the script itself `SIGTERM`, failing the run loudly: a port-forward
    that cannot be restarted within 60s of dropping, or the chisel client exiting because its own
-   retry budget is exhausted.
+   retry budget is exhausted. On either, the watchdog first calls the caller's `kill_harness`,
+   which stops what the run drives (here the Go test process; in the Claude Code sandbox proof, its
+   daemon).
 4. Pods dial `tcp://bridge-<project>.legion.svc.cluster.local:<port>` for the worker stream and the
    same host at the session-database port — the advertised host
    (`LEGION_E2E_STREAM_ADVERTISE_HOST`, internal to the harness) the Go runtime hands every launch,
@@ -1032,9 +1155,9 @@ that reachability with a reverse tunnel, entirely of the run's own:
 5. **Teardown** (`bridge_stop`, the first step of `teardown_sequence`, the one function both a
    passing run's own flow and `cleanup`'s fallback call, so it always runs before `namespace_clean`
    takes its snapshot): stops the watchdog, the chisel client and the port-forward, then deletes
-   the bridge's pod and Service by their one exact name — never by broader selection, the same
-   discipline [`lib/namespace-rig.sh`](#libnamespace-rigsh) holds every other object the run
-   creates to.
+   the bridge's auth Secret, pod and Service by their one exact name — never by broader
+   selection, the same discipline [`lib/namespace-rig.sh`](#libnamespace-rigsh) holds every other
+   object the run creates to.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
@@ -2924,8 +3047,8 @@ changed` line for a move (`sign_off`, `pull_request_merged`).
 
 ## lib/namespace-rig.sh
 
-The namespace rig of a stage proof that runs pods in a shared cluster namespace. Stage 4a sources
-it.
+The namespace rig of a stage proof that runs pods in a shared cluster namespace. Stage 4a, Stage 4b
+and [`claude-backend-sandbox.sh`](#claude-backend-sandboxsh) source it.
 
 ```sh
 . "$root/scripts/e2e/lib/namespace-rig.sh"     # sourced, never run
@@ -2949,19 +3072,28 @@ key), and either `label_prefix` (the prefix every run label of the proof carries
 ## lib/bridge-tunnel.sh
 
 The reverse-tunnel bridge a stage proof uses when its pods cannot reach the devbox at all
-(`LEGION_E2E_POD_REACHABILITY=bridge`, GKE's shape). Stage 4a sources it.
+(`LEGION_E2E_POD_REACHABILITY=bridge`, GKE's shape). Two callers source it, each after
+[`lib/namespace-rig.sh`](#libnamespace-rigsh): Stage 4a, which bridges two ports (the worker stream
+and the session database), and [`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), which
+bridges five (its daemon's API and worker stream, the scratch Dispatch, Envoy listener and NATS).
 
 ```sh
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"     # sourced, never run
 ```
 
-The caller sets `op`, `note`, `fail` (from `lib/namespace-rig.sh`, sourced first), `bridge_name`
-(the run's deterministic bridge pod/Service name), `namespace` and `run_label`; it defines
+The caller sets `root` (the checkout, for the pinned chisel client's `go install`), `operator` (the
+admin kubectl context, the only one this file uses), `work` (the run's scratch directory),
+`bridge_name` (the run's deterministic bridge pod/Service name, set before `bridge_start` runs, so
+the cluster-DNS name pods dial is known from it alone) and `run_label`, beside `lib/namespace-rig.sh`'s
+own (`namespace`, and `op`, which every read and write here goes through) and `begin`, `note`,
+`fail` and `pass`. It defines `kill_harness`, which stops whatever the run drives: the watchdog
+calls it before it sends the script `SIGTERM`, and runs under the caller's `errexit`, so an
+undefined `kill_harness` would end the watchdog before it signals. This file defines
 `bridge_start` and `bridge_stop`.
 
 | function | does |
 | :--- | :--- |
-| `bridge_start PORT SESSION_DB_PORT` | creates a run-labelled Secret (`$bridge_name-auth`, a random `AUTH` value), then a chisel server Pod (`--host 127.0.0.1`, reading `AUTH` from the Secret through `secretKeyRef`, never argv) and a ClusterIP Service naming it, both `create`d so no `last-applied-configuration` annotation ever carries the auth; forwards the devbox's `kubectl port-forward` to the pod's control port, starts a chisel client with `AUTH` in its own environment opening the two reverse listeners pods dial (the worker stream and the session database), and starts the watchdog that restarts a dropped port-forward (up to 60 s) and fails the run if the client's own bounded reconnect budget is exhausted |
+| `bridge_start PORT…` | for one or more ports (a call naming none fails), creates a run-labelled Secret (`$bridge_name-auth`, a random `AUTH` value), then a chisel server Pod (`--host 127.0.0.1`, reading `AUTH` from the Secret through `secretKeyRef`, never argv) and a ClusterIP Service naming it, with one Service port per named port, named `p<port>`, both `create`d so no `last-applied-configuration` annotation ever carries the auth; forwards the devbox's `kubectl port-forward` to the pod's control port, starts a chisel client with `AUTH` in its own environment opening one reverse listener per named port, each to `127.0.0.1:<port>` on the devbox, waits for every one in the bridge pod's log, and starts the watchdog that restarts a dropped port-forward (up to 60 s) and, when it cannot or the client's own bounded reconnect budget is exhausted, calls `kill_harness` and fails the run |
 | `bridge_stop` | runs once and never fails: stops the watchdog and the chisel client, kills the port-forward (both the one it is tracking and the current global one, so a restart in flight is never orphaned), and deletes the Secret, the Pod and the Service by their one exact name |
 
 ## lib/kind-sandbox.sh
