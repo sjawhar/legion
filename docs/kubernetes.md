@@ -169,8 +169,9 @@ and needs zig as `CC`
 (`docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md`).
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
-alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
-`~/.omp/profiles/legion`). Mount writable volumes below the profile directory, never at `/home/legion`
+alone) with `HOME=/home/legion`, which must be writable (OMP writes logs and `models.db` under
+`~/.omp/profiles/legion`; every session is a row in the session database). Mount writable volumes
+below the profile directory, never at `/home/legion`
 itself: everything the image-time probe proved lives under `HOME` — the CodeGraph plugin's link and the
 lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
