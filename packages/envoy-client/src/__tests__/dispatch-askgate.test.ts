@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
@@ -55,6 +55,7 @@ beforeEach(() => {
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-askgate-"));
   resetAdviceMemory();
 });
+afterEach(() => rmSync(stateDir, { recursive: true, force: true }));
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
