@@ -431,13 +431,11 @@ by() {
     "$4" > "$4.next"
   mv "$4.next" "$4"
 }
-# as_event pull_request_review: rewrites the fixture's pull_request payload as a
-# pull_request_review one, which carries the pull request whole beside the review.
-as_event() {
-  case $1 in
-    pull_request_review)
-      jq '. + {action: "submitted", review: {id: 201, body: "Approved."}}' "$work/event.json" ;;
-  esac > "$work/event.next"
+# as_review_event: rewrites the fixture's pull_request payload as a pull_request_review one,
+# which carries the pull request whole beside the review.
+as_review_event() {
+  jq '. + {action: "submitted", review: {id: 201, body: "Approved."}}' "$work/event.json" \
+    > "$work/event.next"
   mv "$work/event.next" "$work/event.json"
 }
 
@@ -621,7 +619,7 @@ check "names the cause" "$(contains "$out" 'whose id is not a whole number')"
 
 echo "case: the review event pr-title.yaml runs on"
 clean_pr
-as_event pull_request_review
+as_review_event
 items 202 "Blocking: see $key-7." > "$work/reviews.1"
 run_pr_text
 check "a pull_request_review payload is checked like a pull_request one" "$(is "$status" 1)"
@@ -683,7 +681,7 @@ for author in "dev-app[bot] Bot CONTRIBUTOR" "new-app[bot] Bot NONE" "owner User
 done
 
 clean_pr
-as_event pull_request_review
+as_review_event
 items 405 "As $company_proper Labs found." 406 "All clear now." > "$work/comments.1"
 by drive-by User NONE "$work/comments.1" 1
 run_pr_text
