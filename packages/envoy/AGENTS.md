@@ -3386,8 +3386,12 @@ person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQU
 before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
 token signature makes the verifier fetch the issuer's keys again; a verified account then spends
 an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
-pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
-bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+pair the device-code route spends. A token login the broker could not complete (5xx, such as the
+database being away) gives back what it spent of both buckets, since the daemon retries it every
+few seconds through an outage and the broker decided nothing about the token; a refused
+credential (any 4xx) keeps them spent. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the
+address bucket on the caller's own address. Read `routes()` for the current, authoritative route
+list.
 
 The RFC 8693 token exchange is the token endpoint's other grant (`POST /v1/oauth/token`,
 `oauth.Provider.exchangeGrant`): a caller presents the platform identity it already holds and

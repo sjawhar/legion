@@ -42,6 +42,11 @@ type tokenLoginResponse struct {
 // the token is verified (refuseAddress), so no flood of tokens, forged or real, costs the broker a
 // verification (and a fetch of the issuer's keys) past that bucket; a verified account then spends a
 // bucket of its own too (refuseAccount). The pair is the device-code route's, address then login.
+// A login the broker could not complete (5xx, such as one the database was away for) gives back
+// what it spent of both: the Legion daemon retries such a login every few seconds through a
+// database outage, and the broker decided nothing about its token, so there is nothing to slow,
+// and spent, those retries would leave the daemon's first login after the outage refused 429. A
+// refused credential (any 4xx) keeps what it spent, since the limits exist to slow guessing.
 // A token that has expired is 401 TOKEN_EXPIRED, one that does not verify 401 TOKEN_INVALID, one
 // that lives longer than an hour from its issue 401 TOKEN_TOO_LONG_LIVED, one whose account
 // BROKER_SERVICE_LOGINS does not name
@@ -54,28 +59,38 @@ func (s *server) tokenLogin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body, "INVALID_REQUEST") {
 		return
 	}
-	if s.launcherLimiter.refuseAddress(w, r) {
+	giveBackAddress, refused := s.launcherLimiter.refuseAddress(w, r)
+	if refused {
 		return
 	}
 	login := s.deps.MachineLogin
 	account, err := login.VerifyServiceToken(r.Context(), body.Token)
 	if err != nil {
-		writeTokenLoginRefusal(w, err)
+		if writeTokenLoginRefusal(w, err) {
+			giveBackAddress()
+		}
 		return
 	}
-	if s.launcherLimiter.refuseAccount(w, account.Subject) {
+	giveBackAccount, refused := s.launcherLimiter.refuseAccount(w, account.Subject)
+	if refused {
 		return
 	}
 	cred, err := login.TokenLogin(r.Context(), account, body.Request)
 	if err != nil {
-		writeTokenLoginRefusal(w, err)
+		if writeTokenLoginRefusal(w, err) {
+			giveBackAccount()
+			giveBackAddress()
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, tokenLoginResponse{CredentialID: cred.ID, ExpiresAt: cred.ExpiresAt})
 }
 
-// writeTokenLoginRefusal answers a token login's refusal with the code tokenLogin documents.
-func writeTokenLoginRefusal(w http.ResponseWriter, err error) {
+// writeTokenLoginRefusal answers a token login's refusal with the code tokenLogin documents, and
+// reports couldNotComplete when it answered 500: a refusal that is none of the documented ones,
+// such as the database being away, which decided nothing about the token, so tokenLogin gives back
+// what the login spent of its buckets.
+func writeTokenLoginRefusal(w http.ResponseWriter, err error) (couldNotComplete bool) {
 	switch {
 	case errors.Is(err, machine.ErrTokenLoginsOff):
 		writeError(w, http.StatusNotFound, "TOKEN_LOGIN_OFF", err.Error())
@@ -93,5 +108,7 @@ func writeTokenLoginRefusal(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "KEY_HOLDS_LIVE_CREDENTIAL", err.Error())
 	default:
 		writeInternal(w, "token login", err)
+		return true
 	}
+	return false
 }

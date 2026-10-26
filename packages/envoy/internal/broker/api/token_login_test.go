@@ -196,6 +196,52 @@ func TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket(t *testing.T)
 	}
 }
 
+// TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket: a verified token login the
+// broker could not complete, with the database away, gives back its source address's request as
+// well as its account's, so the daemon retrying through an outage does not drain its address's
+// bucket either, and its first login once the database is back is not refused 429 by it.
+func TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 2},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 100},
+		}
+	})
+	ts.Store.Close()
+	for i := range 4 {
+		status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t)))
+		if status < 500 || status > 599 {
+			t.Fatalf("the daemon's login %d with the database away = %d %s, want a 5xx: a login the broker could not complete spends none of its address's bucket of 2", i, status, body)
+		}
+	}
+}
+
+// TestARefusedTokenLoginStillSpendsItsAccountBucket: a verified token login whose request the
+// broker refuses, here one naming a service the account does not log in as (403
+// ACCOUNT_NOT_LISTED), keeps its account's login spent, since the limit exists to slow guessing:
+// the account's sixth such login inside its bucket of five is refused 429.
+func TestARefusedTokenLoginStillSpendsItsAccountBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 5},
+		}
+	})
+	for i := range 5 {
+		request := signMachineLoginRequest(t, newSigningKey(t), ts.URL, "", "legion-daemon-test-7d9f", "other-service")
+		status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), request)
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "ACCOUNT_NOT_LISTED" {
+			t.Fatalf("the daemon's login %d naming another service = %d %s, want 403 ACCOUNT_NOT_LISTED", i, status, body)
+		}
+	}
+	request := signMachineLoginRequest(t, newSigningKey(t), ts.URL, "", "legion-daemon-test-7d9f", "other-service")
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), request)
+	if refusal := decode[wireError](t, body); status != http.StatusTooManyRequests || refusal.Code != "RATE_LIMITED" ||
+		!strings.Contains(refusal.Error, "too many token logins for this ServiceAccount") {
+		t.Fatalf("the daemon's sixth refused login = %d %s, want 429 RATE_LIMITED: too many token logins for this ServiceAccount", status, body)
+	}
+}
+
 // TestARestartLogsInAgainAndKeepsItsOneCredential is a daemon's restart: a second token login for
 // the same account, with a new key and a fresh token, answers the same credential, moved to the new
 // key, so no person is asked and the pods the first boot enrolled stay the daemon's own. The old

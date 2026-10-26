@@ -89,3 +89,41 @@ func TestASharedRefusalSpendsNothingOfTheKeys(t *testing.T) {
 		t.Fatal("caller was refused once the shared bucket refilled: the shared refusals spent its own bucket")
 	}
 }
+
+// TestAGivenBackRequestCanBeTakenAgain pins TakeAt's give-back: a request given back is in its
+// bucket again, even when the give-back comes after another caller's take, and the other caller's
+// request stays taken.
+func TestAGivenBackRequestCanBeTakenAgain(t *testing.T) {
+	k := NewKeyed(Limit{Every: time.Minute, Burst: 2})
+	giveBack, ok := k.TakeAt("a", t0)
+	if !ok {
+		t.Fatal("a's first take was refused")
+	}
+	if _, ok := k.TakeAt("a", t0.Add(time.Second)); !ok {
+		t.Fatal("a's second take inside the burst was refused")
+	}
+	giveBack()
+	if _, ok := k.TakeAt("a", t0.Add(2*time.Second)); !ok {
+		t.Fatal("the request given back was not in a's bucket again")
+	}
+	if k.AllowAt("a", t0.Add(3*time.Second)) {
+		t.Fatal("a fourth request was allowed: the give-back returned more than the one request it took")
+	}
+}
+
+// TestARefusedTakeSpendsNothing pins TakeAt's refusal: a take its bucket refuses answers no
+// give-back and spends nothing, so the bucket refills on its own schedule as AllowAt's does.
+func TestARefusedTakeSpendsNothing(t *testing.T) {
+	k := NewKeyed(Limit{Every: time.Minute, Burst: 1})
+	if _, ok := k.TakeAt("a", t0); !ok {
+		t.Fatal("a's first take was refused")
+	}
+	for i := range 3 {
+		if giveBack, ok := k.TakeAt("a", t0.Add(time.Duration(i)*time.Second)); ok || giveBack != nil {
+			t.Fatalf("a's take %d inside its empty bucket = %v, want refused with no give-back", i+2, ok)
+		}
+	}
+	if _, ok := k.TakeAt("a", t0.Add(time.Minute)); !ok {
+		t.Fatal("a's bucket did not refill once Every passed: the refused takes spent it")
+	}
+}

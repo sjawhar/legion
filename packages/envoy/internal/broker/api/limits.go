@@ -20,11 +20,15 @@ import (
 // verifies its request object locally to read the person its bucket is keyed on and spends that.
 // So a flood from one address cannot keep the broker verifying tokens or writing machine logins, a
 // flood naming one operator cannot bury that operator's pending machine logins, and one account
-// cannot log in faster than its bucket allows. A daemon behind an address others share is held to
-// that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the caller's own
-// address behind a proxy, and the daemon renews its credential halfway through its life, which
-// carries it through brief contention for that bucket, not through a caller that keeps it drained
-// until the credential expires.
+// cannot log in faster than its bucket allows. A token login the broker could not complete (5xx,
+// such as one the database was away for) spends neither bucket: the Legion daemon retries such a
+// login every few seconds through a database outage, and the broker decided nothing about its
+// token, so there is nothing to slow, while a refused credential (any 4xx) still spends every
+// bucket it reached, since the limit exists to slow guessing. A daemon behind an address others
+// share is held to that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the
+// caller's own address behind a proxy, and the daemon renews its credential halfway through its
+// life, which carries it through brief contention for that bucket, not through a caller that keeps
+// it drained until the credential expires.
 //
 // The per-login bucket, keyed on the request object's own claims rather than the caller's
 // address, is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's
@@ -276,26 +280,34 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 	return address
 }
 
-// refuseAddress writes 429 RATE_LIMITED and reports true when r's source address has no request
+// refuseAddress writes 429 RATE_LIMITED and reports refused when r's source address has no request
 // left in its bucket: POST /v1/launcher-credentials/token's first limit, spent before the token is
-// verified.
-func (l *launcherLimiter) refuseAddress(w http.ResponseWriter, r *http.Request) bool {
-	if l.addressAllows(r) {
-		return false
+// verified. Otherwise it answers giveBack, which returns the request to the bucket: tokenLogin
+// calls it only for a login the broker could not complete (5xx).
+func (l *launcherLimiter) refuseAddress(w http.ResponseWriter, r *http.Request) (giveBack func(), refused bool) {
+	giveBack, ok := l.perAddress.TakeAt(clientAddress(r, l.trustedProxyHeader), time.Now())
+	if ok {
+		return giveBack, false
 	}
 	refuseWithRetryAfter(w, l.perAddress.Every(), "too many launcher credential requests; try again later")
-	return true
+	return nil, true
 }
 
-// refuseAccount writes 429 RATE_LIMITED and reports true when subject, an account a token login
+// refuseAccount writes 429 RATE_LIMITED and reports refused when subject, an account a token login
 // has just verified, has no login left in its account:<subject> bucket. Only a verified token
-// spends it, after its address's bucket.
-func (l *launcherLimiter) refuseAccount(w http.ResponseWriter, subject string) bool {
-	if l.perLogin.AllowAt("account:"+subject, time.Now()) {
-		return false
+// spends it, after its address's bucket. Otherwise it answers giveBack, which returns the login to
+// the bucket: tokenLogin calls it only for a login the broker could not complete (5xx), such as
+// one the database was away for. The Legion daemon retries such a login every few seconds through
+// a database outage, and the broker decided nothing about its token, so there is no guessing to
+// slow; spent, those retries would empty the bucket and refuse the daemon's first login after the
+// outage 429. A refused credential (any 4xx) keeps its login spent.
+func (l *launcherLimiter) refuseAccount(w http.ResponseWriter, subject string) (giveBack func(), refused bool) {
+	giveBack, ok := l.perLogin.TakeAt("account:"+subject, time.Now())
+	if ok {
+		return giveBack, false
 	}
 	refuseWithRetryAfter(w, l.perLogin.Every(), "too many token logins for this ServiceAccount; try again later")
-	return true
+	return nil, true
 }
 
 // addressAllows spends one request of r's source address's bucket, reporting whether it had one.

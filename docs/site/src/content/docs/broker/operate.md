@@ -131,7 +131,9 @@ get one. Deleting the daemon's ServiceAccount stops new tokens, but a token alre
 verifying until it expires, at most an hour after it was minted, because the broker checks tokens
 against the cluster's published keys rather than asking the API server. A token login spends its
 source address's rate-limit bucket before its token is verified and its account's own after, so a
-daemon behind an address other callers share is held to that address's bucket. Set
+daemon behind an address other callers share is held to that address's bucket. A login the broker
+could not complete (a 5xx, such as while its database is away) spends neither bucket, so the
+daemon's retries through a database outage leave it free to log in once the database is back. Set
 `BROKER_TRUSTED_PROXY_HEADER` behind a proxy, so each caller is keyed on its own address, and
 keep the daemon's and its pods' traffic to the broker on their own pod addresses rather than
 translated to a node's or a gateway's. The daemon renews halfway through its credential's life,

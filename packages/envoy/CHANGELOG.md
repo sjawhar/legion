@@ -1407,7 +1407,10 @@
   relaunched. `config.Load` now refuses to start unless `BROKER_LEASE_SECONDS` is more than four and
   a half times `BROKER_SWEEP_SECONDS` (`2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS` is
   refused), so a live session's lease cannot run out inside a gap the broker still counts as
-  serving. The defaults, 900 and 5, pass.
+  serving. The defaults, 900 and 5, pass. A token login (`POST /v1/launcher-credentials/token`)
+  the broker could not complete (5xx, such as while the database is away) now spends neither its
+  source address's nor its account's rate-limit bucket, so the Legion daemon, which retries such a
+  login every few seconds through the outage, is not refused 429 on its first login after it.
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.

@@ -164,7 +164,8 @@ without secrets until it is replaced. To stop it logging in, remove its account 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
 source address and per named person, and how often anyone can try a token login: per source
-address before the token is verified, and per account once it is.
+address before the token is verified, and per account once it is. A token login the broker could
+not complete (a 5xx, such as while its database is away) spends neither.
 
 ## Owner and tier: who may have which secret
 
