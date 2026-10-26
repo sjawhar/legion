@@ -903,22 +903,50 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	msgID := ""
+	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+		msgID = item.DedupeKey + ":" + item.Topic
+	}
+	return c.publishToStream(item.Topic, data, msgID)
+}
+
+// PublishRetained publishes data, which need not be an envelope, to subject on the notification
+// stream and waits for the stream's acknowledgement. subject must be one the stream captures
+// (StreamCaptures): JetStream answers a publish to any other only with "no responders", or not at
+// all. A msgID that is not empty is the publish's MsgId, so the stream keeps one copy of every
+// publish under it within its duplicate window, and the call reports whether it already held one.
+// The listener hands a stopped Legion agent's message to its daemon this way, under a MsgId every
+// listener derives alike, so the copies two listeners publish for one message collapse.
+func (c *Client) PublishRetained(subject string, data []byte, msgID string) (bool, error) {
+	if err := checkSubject(subject); err != nil {
+		return false, err
+	}
+	if !StreamCaptures(subject) {
+		return false, fmt.Errorf("the notification stream does not capture %q", subject)
+	}
+	return c.publishToStream(subject, data, msgID)
+}
+
+// publishToStream publishes data to subject, which checkSubject has passed, under msgID when it is
+// not empty, and reports the stream's duplicate verdict. A publish the closed connection refused is
+// sent once more on its replacement.
+func (c *Client) publishToStream(subject string, data []byte, msgID string) (bool, error) {
 	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
 	}
 	options := []nats.PubOpt{nats.Context(ctx)}
-	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
-		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
+	if msgID != "" {
+		options = append(options, nats.MsgId(msgID))
 	}
 	js := c.JS()
-	ack, err := js.Publish(item.Topic, data, options...)
+	ack, err := js.Publish(subject, data, options...)
 	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
 		if err := c.ensureConnWithContext(ctx); err != nil {
 			return false, err
 		}
-		ack, err = c.JS().Publish(item.Topic, data, options...)
+		ack, err = c.JS().Publish(subject, data, options...)
 	}
 	if err != nil {
 		return false, c.refused(err, len(data))

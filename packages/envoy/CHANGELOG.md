@@ -4,6 +4,20 @@
 
 ### Added
 
+- The listener hands a message for a stopped Legion agent to the agent's daemon instead of
+  refusing it (INFRA-204). A send to a session with no live registration, a role publish with no
+  live holder, and an agent-subject message on the bus that no session takes are published to
+  `notifications.legion.<legion_project>.agents.<session>` as
+  `{original_topic, target_session, role_token, project, envelope}` when the Legion agent
+  registry names the session (for a role, the role token's newest session), the project's
+  answering record says it answers and is under 3 minutes old, the session has no entry in the
+  session registry, the source is not `envoy`, and the body does not carry `"handoff": false`.
+  The caller gets the 200 a delivered message gets, with `recipient` set to the session; the
+  hand-off's JetStream MsgId comes from the envelope's dedupe key, so the copies two listeners
+  hand off for one bus message are stored once, and a bus message is acknowledged only once its
+  hand-off is stored. Otherwise every path answers exactly as before. The daemon writes the
+  answering record through the new `PUT /v1/legion/projects/{legion_project}`
+  `{answering, updated_at}`, stored as `project.<legion_project>` in the `legion_agents` bucket.
 - A Dispatch project imports its component model from any number of architecture sources, one
   per repository, each on its own branch, and its model is every source's components together
   (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`

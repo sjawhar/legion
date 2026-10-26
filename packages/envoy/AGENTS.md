@@ -31,7 +31,8 @@ events to the right session.
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start; the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`) |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
-| Legion agent registry  | `internal/legionagents/`                  | the `legion_agents` bucket: one entry per Legion session the daemon ran, never deleted, read and written only through the listener's `/v1/legion/agents` routes; its validation (`Validate`, shared by both writes), its reads (every one a session key or a filtered listing of an issue's or role token's keys, no cache), and the replacement each read derives within a role token; key layout under "Legion agent registry" below |
+| Legion agent registry  | `internal/legionagents/`                  | the `legion_agents` bucket: one entry per Legion session the daemon ran, never deleted, read and written only through the listener's `/v1/legion/agents` routes; its validation (`Validate`, shared by both writes), its reads (every one a session key or a filtered listing of an issue's or role token's keys, no cache), and the replacement each read derives within a role token; and each project's answering record (`project.go`, `PUT /v1/legion/projects/<project>`); key layout under "Legion agent registry" below |
+| Legion hand-off        | `cmd/listener/legion_handoff.go` (`handOffToLegion`) | a send, role publish or agent-subject message no live session takes, for a stopped Legion agent whose daemon answers, is published to the daemon on `notifications.legion.<project>.agents.<session>` in place of the 404 or `no_holder`; the rules under "Legion hand-off" below |
 | KV cache watchers      | `internal/kvwatch/kvwatch.go`, `internal/kvwatch/scan.go` | the interest, session and CI caches' one watch lifecycle: first start, readiness, rewatch, recreated buckets, stop; and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`); `kvwatchtest` fakes nats.go's scan idle timeout |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
@@ -2013,12 +2014,16 @@ served. `/healthz`, `/metrics` and the webhook routes are served to any `Host`.
 | `/v1/legion/agents/sessions/<session_id>` | GET, PUT | The Legion agent registry's entry for one session (see "Legion agent registry" below). GET answers the entry with `live` (the session is in this listener's session registry now) and, within its role token ordered by `started_at`, `replaced_by` and `replaced_at` (the next session's id and start, `null` for the newest), or `404 {"error":"unknown legion agent <id>"}` when the bucket holds no entry for it. PUT records the one entry its body holds, whose `session_id` must be the path's, and answers it as stored with the `recorded_at` of its first write. |
 | `/v1/legion/agents/roles/<role_token>` | GET | `{"entries":[…]}`: every session of the role token, newest first, the first being its current holder; `[]` when none. Each entry carries `live`, `replaced_by` and `replaced_at`. |
 | `/v1/legion/agents` | GET, PUT | GET `?issue=<KEY>` answers `{"entries":[…]}`, every session of the issue by role in workflow order (architect, planner, implementer, tester, reviewer, merger), then newest first; `[]` when none. PUT records a batch, `{"entries":[…]}` of at most 256 entries in a body of at most 1 MiB (413 past either), every entry validated and checked against what is stored before the first write, so one bad entry refuses the batch with a 400 (or a 409) naming its index (`entries[3]: …`) and nothing written. A write that fails partway is `503 {"error":"envoy: wrote <n> of <m> legion agents …","written":<n>}`; every write is idempotent, so the caller sends the batch again. |
+| `/v1/legion/projects/<legion_project>` | PUT | The project's answering record, `{"answering":<bool>,"updated_at":"<RFC 3339 UTC>"}`, which the Legion daemon writes every minute while it answers for the project's stopped agents (see "Legion hand-off" below); answers the record as stored. A path that is not a Legion project token, a body without `answering`, or an `updated_at` that is not RFC 3339 UTC (ending `Z`) is a 400 naming the rule, and writes nothing. |
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`,
 `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional
 fields are omitted. `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is
-`none`, `optional`, or `required`. A session id or role that becomes a KV key NATS would refuse
-(`bus.EnsureKeyValue`) is a 413 naming its size when too long and a 400 naming the key when it
+`none`, `optional`, or `required`. Both accept `handoff`, a boolean that is not part of the
+envelope: `false` keeps a message no live session takes from being handed to a stopped Legion
+agent's daemon ("Legion hand-off" below), and absent or `true` changes nothing. A session id or
+role that becomes a KV key NATS would refuse (`bus.EnsureKeyValue`) is a 413 naming its size
+when too long and a 400 naming the key when it
 holds an empty token or whitespace, or a character outside nats.go's key alphabet (`ses:bad`,
 `bus.ErrInvalidKey`), on every route that reads or writes one. Every `/v1` 4xx/5xx response,
 including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
@@ -2036,8 +2041,9 @@ routes above with the listener's `/v1` credential; Dispatch reads it through
 - **Keys.** `session.<session_id>` holds the entry. `issue.<ISSUE>.<session_id>` and
   `role.<role_token>.<session_id>` hold the same entry JSON. A write puts the role key, the issue
   key, then the session key, so a session a read finds is in both its listings.
-  `project.<legion_project>` is reserved for the daemon's own record (INFRA-204), and no read here
-  reaches it.
+  `project.<legion_project>` is the project's answering record `{answering, updated_at}`
+  (`legionagents.Project`), written through `PUT /v1/legion/projects/<legion_project>`; no agent
+  read reaches it.
 - **Entry.** `session_id` (letters, digits, `-`, `_`, at most 128 bytes), `legion_project` (the
   Legion project token, `claim.ProjectToken`: lower-case letters and digits; not the Dispatch
   project), `issue` (a Dispatch issue key, upper case), `role` (one of the six workflow roles),
@@ -2063,6 +2069,43 @@ routes above with the listener's `/v1` credential; Dispatch reads it through
   `packages/envoy/infra/core/permissions.go`). A listener opens it at start, after the session
   registry, and stops when it cannot; the reconnect hook moves its handle onto a connection the
   bus replaced (`Store.Reopen`).
+
+### Legion hand-off
+
+A message for a stopped Legion agent goes to the agent's daemon, which answers it, rather than
+being refused. `handOffToLegion` (`cmd/listener/legion_handoff.go`) runs on the three paths that
+find no session to deliver to: `/v1/messages/send` before its `404 no live session`,
+`/v1/messages/publish` to a role topic before its `unclaimed` or `holder_lapsed` 404, and an
+agent subject's bus delivery in place of its `no_holder` exception. It hands off only when all
+hold:
+
+- the source is not `envoy` (the broker's wake sends and the listener's own exceptions), and the
+  send or publish body does not carry `"handoff": false`, which every publish the daemon makes
+  carries (`notify.HTTPPublisher`), so a notice to a stopped agent is refused and held as before;
+- the registry names the target: the session addressed, or for a role publish the role token's
+  newest session (a role that is not a Legion workflow role's token never is);
+- the session's project's answering record (`project.<legion_project>`) has `answering: true` and
+  an `updated_at` less than 3 minutes from now, behind or ahead, so a daemon that dies, loses its
+  configuration or is decommissioned stops its hand-offs within minutes;
+- the session has no entry in `envoy_sessions`, read through this listener's cache to the bucket,
+  so a session live on another listener, or one this listener's cache has not seen yet, is never
+  handed off.
+
+It publishes `{original_topic, target_session, role_token, project, envelope}`
+(`LegionAgentHandoffSchema` in `packages/contracts`, `intake.Handoff` in `packages/daemon`) to
+`notifications.legion.<legion_project>.agents.<session>`, which the stream retains, under the
+MsgId `legion.handoff.<dedupe_key>:<subject>` (`bus.Client.PublishRetained`), so the copies every
+listener's durable hands off for one bus message, and a send repeated under one idempotency key,
+are stored once. `envelope` is the envelope as it would have been delivered: an HTTP send or
+publish's carries its sender stamp. The HTTP caller gets the 200 a delivered message gets, the
+envelope with `recipient` set to the target session (a publish's answer carries `recipient` in
+place of `holder`), so no client changes; a hand-off whose publish fails is a 500 as a failed
+publish is. A bus message is acknowledged once its hand-off is stored and retried (NAK) when it is
+not, logged `listener agent handed off to its legion daemon` with `delivery_status`
+`handed_off`. When any condition does not hold, or the registry cannot be read (logged), every
+path answers exactly as before. A listener's durable reads the retained hand-offs too and
+acknowledges them unread (`isLegionHandoffSubject`). The listener's grant already publishes
+`notifications.>`, which covers the subject.
 
 ## Targeted Dispatch messages
 

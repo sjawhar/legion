@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,9 @@ type listenerDeliveryHandlerConfig struct {
 	messagesDelivered *metrics.Counter
 	messagesNAKed     *metrics.Counter
 	deliveryDuration  *metrics.Histogram
+	// handoff hands an agent-subject message no session took to the stopped Legion agent's daemon
+	// in place of its no_holder exception (agentSubjectDelivery); nil hands nothing off.
+	handoff *legionHandoff
 }
 
 type deliveryMode uint8
@@ -90,9 +94,15 @@ func (message deliveryMessage) finalize(retry bool) {
 	_ = message.msg.Ack()
 }
 
+// jetStreamDeliveryHandler is the durable's handler. A hand-off (notifications.legion.<project>.
+// agents.<session>) is the daemon's to read, and holds no envelope, so it is acknowledged unread.
 func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
+		if isLegionHandoffSubject(msg.Subject) {
+			_ = msg.Ack()
+			return
+		}
 		handler(deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg})
 	}
 }
@@ -529,7 +539,9 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 // (notifications.agent.<session>), pushing over HTTP/WebSocket when the
 // session is live and falling back to whatever session.HandleAgentMessage
 // decides (e.g. queuing) otherwise. A session another listener owns is that
-// listener's to deliver, so this one acknowledges the message silently.
+// listener's to deliver, so this one acknowledges the message silently. A
+// session found nowhere is handed to its Legion daemon when handOffToLegion
+// takes it, and otherwise reported with a no_holder exception.
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
@@ -599,6 +611,38 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			recordDedupe: true,
 		})
 	} else if result.Err == nil {
+		// No session took it anywhere. A stopped Legion agent's daemon takes it in place of the
+		// no_holder exception; every listener's durable reaches here for the same message, and the
+		// hand-off's MsgId stores their copies once. The message is acknowledged only once the
+		// hand-off is stored, and retried when it could not be.
+		handed, err := cfg.handoff.handOffToLegion(context.Background(), legionHandoffTarget{envelope: item, session: sessionID})
+		if err != nil {
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    sessionID,
+				metricStatus: "failed",
+				duration:     &deliveryTimer,
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelError, "listener legion hand-off failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+				},
+				clearAttempt: true,
+			})
+			cfg.messagesNAKed.Inc()
+			message.finalize(true)
+			return
+		}
+		if handed != nil {
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    sessionID,
+				metricStatus: "handed_off",
+				duration:     &deliveryTimer,
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelInfo, "listener agent handed off to its legion daemon", sessionID, item.Topic, item.EventID, "handed_off", slog.String("project", handed.Project))
+				},
+				recordDedupe: true,
+			})
+			message.finalize(false)
+			return
+		}
 		if !publishNoHolderExceptionOrNak(cfg, message, item, sessionID) {
 			return
 		}

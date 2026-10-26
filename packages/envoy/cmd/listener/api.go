@@ -78,6 +78,15 @@ type messageBody struct {
 	Urgency        *string `json:"urgency"`
 	ExpectsReply   *string `json:"expects_reply"`
 	ExpiresAt      *int64  `json:"expires_at"`
+	// Handoff false keeps the message from being handed to a stopped Legion agent's daemon
+	// (handOffToLegion): the daemon's own publishes carry it, so a notice to a stopped agent is
+	// refused as before. Absent and true are alike.
+	Handoff *bool `json:"handoff"`
+}
+
+// optedOutOfHandoff reports whether the body carried "handoff": false.
+func (body messageBody) optedOutOfHandoff() bool {
+	return body.Handoff != nil && !*body.Handoff
 }
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
@@ -93,9 +102,12 @@ type sendResponse struct {
 	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
+// publishResponse is the answer to a publish. Holder is a role publish's live holder; Recipient is
+// the stopped Legion agent a role publish with no live holder was handed to (handOffToLegion).
 type publishResponse struct {
 	contracts.Envelope
-	Holder string `json:"holder,omitempty"`
+	Holder    string `json:"holder,omitempty"`
+	Recipient string `json:"recipient,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -512,7 +524,17 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		target, err := d.sessions.Get(targetSession)
 		if err != nil {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
+			handed, handoffErr := d.handoff.handOffToLegion(r.Context(), legionHandoffTarget{
+				envelope: item, session: targetSession, stampSender: true, optedOut: body.optedOutOfHandoff(),
+			})
+			switch {
+			case handoffErr != nil:
+				writeNATSError(w, handoffErr, http.StatusInternalServerError, handoffErr.Error())
+			case handed != nil:
+				writeJSON(w, http.StatusOK, sendResponse{Envelope: handed.Envelope, Recipient: handed.TargetSession})
+			default:
+				writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
+			}
 			return
 		}
 		var itemPayload *string
@@ -642,7 +664,17 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 				return
 			}
 			if result.state != roleHolderLive {
-				writeRoleHolderError(w, role, result)
+				handed, err := d.handoff.handOffToLegion(r.Context(), legionHandoffTarget{
+					envelope: item, roleToken: role, stampSender: true, optedOut: request.optedOutOfHandoff(),
+				})
+				switch {
+				case err != nil:
+					writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+				case handed != nil:
+					writeJSON(w, http.StatusOK, publishResponse{Envelope: handed.Envelope, Recipient: handed.TargetSession})
+				default:
+					writeRoleHolderError(w, role, result)
+				}
 				return
 			}
 		}
@@ -1334,6 +1366,46 @@ func legionAgentsHandler(d *listenerDeps) http.HandlerFunc {
 	}
 }
 
+// legionProjectHandler serves PUT /v1/legion/projects/<legion_project>: the project's answering
+// record, `{"answering":<bool>,"updated_at":"<RFC 3339 UTC>"}`, which the Legion daemon writes every
+// minute while it answers for the project's stopped agents (legionagents.Project). It answers the
+// record as stored. A path that is not a Legion project token, a body without answering, or an
+// updated_at that is not an RFC 3339 UTC time is a 400 and writes nothing.
+func legionProjectHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		project := strings.TrimPrefix(r.URL.Path, "/v1/legion/projects/")
+		if project == "" {
+			writeJSONError(w, http.StatusBadRequest, "legion_project is required", "legion_project")
+			return
+		}
+		if err := legionagents.ValidateProject(project); err != nil {
+			writeLegionAgentError(w, err)
+			return
+		}
+		var body struct {
+			Answering *bool  `json:"answering"`
+			UpdatedAt string `json:"updated_at"`
+		}
+		if !decodeLegionAgentBody(w, r, &body) {
+			return
+		}
+		if body.Answering == nil {
+			writeJSONError(w, http.StatusBadRequest, "answering is required", "answering")
+			return
+		}
+		stored, err := d.legionAgents.PutProject(r.Context(), project, legionagents.Project{Answering: *body.Answering, UpdatedAt: body.UpdatedAt})
+		if err != nil {
+			writeLegionAgentError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, stored)
+	}
+}
+
 // registerV1Routes builds the /v1 routes over the listener's dependencies, which main hands over
 // only once every store is open, so no handler can see a store that is not.
 func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logger *logging.Logger) {
@@ -1373,6 +1445,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/legion/agents", legionAgentsHandler(d))
 	v1.HandleFunc("/v1/legion/agents/sessions/", legionAgentSessionHandler(d))
 	v1.HandleFunc("/v1/legion/agents/roles/", legionAgentRoleHandler(d))
+	v1.HandleFunc("/v1/legion/projects/", legionProjectHandler(d))
 
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
