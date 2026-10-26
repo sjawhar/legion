@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-303",
+  "completed": "2026-10-26T02:47:30Z",
+  "testedHead": "d6d382936fb184500c7ec903b878291f737333ab",
+  "ci": "At d6d382936fb1: Tests run 40255632250 success, Legion Envoy and Contracts run 40255632107 success, Docs run 40255632195 success, PR Title run 40255682093 success (run 40255632129 cancelled, superseded).",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its command in my own lane (tester ports 18800-18807, database dispatch_test_e2e) at d6d38293 with --repeat-each=3: `cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=3 --grep \"newest message in view whichever read answers last\"` → 6 passed (8.8m). Its negative control: the same row with ConversationTab.tsx:952 put back to the pre-fix `const newestShown = shown.at(0);` → 4/4 failed at 'forced open: the newest card shares a point with the composer: the newest card at {x:24,y:494,width:342,height:140}, the composer at {x:0,y:423,width:390,height:177}', the failure it quotes. Criterion 3 command (attention, conversation, phone-conversation, phone, doc, deep-links on chromium, iphone, firefox) at 9ed9ca36 (d6d38293 plus my failed-read row) → 161 passed, 16 skipped (14.3m)."
+  },
+  "failures": [
+    {
+      "criterion": "Fix: 'When a reader opens the Conversation without a link to a particular item, place them at the newest conversation once the list has rendered' (the architect ruled this path in scope on 2026-10-26, overriding plan.json decisions[2]; the real return-to-tab restore, for a reader who had scrolled the rendered list, must keep passing)",
+      "evidence": "Red test packages/dispatch/e2e/phone-conversation.e2e.ts 'on a phone, a reader who leaves the Conversation while it loads lands on its newest message when they come back', commit 33f66ffe0350b03bd7a257cdf7418c05dae6dd95. Steps: hold the asks read (?thread=1), open /issues/<KEY>/conversation at 390x664, see 'Loading conversation…', tap Activity, let the read answer (the list renders in the hidden panel), tap Conversation. Command: `cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=3 --grep \"leaves the Conversation while it loads\"` → 6 failed, every one at 'back on the Conversation: the newest card shares a point with the composer: the newest card at {x:24,y:494,width:342,height:140}, the composer at {x:0,y:423,width:390,height:177}, the 390x664 viewport at window.scrollY 0'. Cause read from the code: useFollowLatest's layout effect (child) places the newest card, then IssuePage.tsx:258-263's tab-scroll restore (a parent layout effect, run after the child's) restores the scrollY 0 recorded while the tab showed only the loading text. Same before and after d6d38293. The row is satisfiable: with IssuePage's restore skipped for the conversation tab (a probe only, not a fix: it would break the real restore), it passed 2/2."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "1. Forced order: newest conversation in view and clear of the composer once rendered, with no scroll or focus; red before the change, green at head",
+      "surface": "Real Chromium (chromium and iphone projects) at 390x664 against the production web build bun run e2e makes, the Go Dispatch server and Postgres 17 in the issue pod (tester lane)",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=3 --grep \"newest message in view whichever read answers last\"",
+      "observed": "6 passed (8.8m). Throwaway break rows also green at head on both projects: messages read held last with a comment newest; comments read held last with a message newest; in-app tap from Activity into the Conversation with the asks read held; deep link /issues/<KEY>/messages/<older id> with the asks read held (the older card marked aria-current and in view, not the newest)",
+      "headSha": "d6d382936fb184500c7ec903b878291f737333ab",
+      "negativeControl": "ConversationTab.tsx:952 put back to `const newestShown = shown.at(0);` → the row 4/4 red at the composer assertion; the throwaway rows for messages-held, comments-held and the tab tap also red there (scrollY 0, newest card y472 under the composer)"
+    },
+    {
+      "criterion": "PR Change bullet: a read that fails and later succeeds on a refetch also lands the reader on the newest card",
+      "surface": "Same harness; new permanent row 'on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list' (commit 9ed9ca36fb7b651e63ae9387a9b40f803f09fba4): the asks read answers 500 through the app's retries until 'Could not load the conversation.', then answers 200 on the refetch a visibilitychange starts",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=3 --grep \"whose read failed\"",
+      "observed": "6 passed (54.6s). No test before it caught the loss of the predicate's `failed` half: with ConversationTab.tsx:952 as `loading ? undefined : shown.at(0)`, the implementer's row (2 passed) and `bun test web/src/features/conversation` (161 pass) stayed green",
+      "headSha": "9ed9ca36fb7b651e63ae9387a9b40f803f09fba4",
+      "negativeControl": "ConversationTab.tsx:952 as `loading ? undefined : shown.at(0)` → 6/6 failed at 'after the refetch: the newest card shares a point with the composer ... window.scrollY 0'; as the pre-fix `shown.at(0)` → 4/4 failed the same way"
+    }
+  ]
+}
