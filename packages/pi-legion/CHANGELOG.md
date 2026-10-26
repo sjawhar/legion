@@ -20,6 +20,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   strict state reader refuses a 36 state, and a 36 plugin refuses this one. Install this release
   with a `legion` built from the same commit. Dispatch (migration 0117) deploys before that daemon
   (its migration 0051).
+- The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
+  agents write Dispatch specs:
+  - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
+    questions of the INFRA-140 labels, and prints the share of comments that complain about
+    writing. It reads production Dispatch with GET only.
+  - `fetch-spec-sources.ts` reads an issue's or a project document's input from Dispatch into a
+    work directory outside the checkout.
+  - `rig.sh batch spec-writing` and `spec-rewrite` seed a scratch issue with that input and let a
+    fresh agent design the change with a person stand-in that answers its asks and approves its
+    spec.
+  - `rig.sh judge` runs ten judge prompts over each run, and `rig.sh score` scores the spec's
+    outline, checks, refusals, plan, questions, quoting and self-naming.
+- `rig.sh profile` takes the key-file model route (`LEGION_E2E_MODEL_ROUTE=key-file` with
+  `LEGION_E2E_ANTHROPIC_KEY_FILE`). It refuses a work directory with a `.omp` in it or above it,
+  because Oh My Pi would load that directory's plugins and not the label's.
+- `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
+  directory. On the gateway route, the gateway's key command runs on the host once for each judge,
+  and the container gets only its token, which is removed when the judge ends.
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits
@@ -92,6 +110,22 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 
 ### Changed
+
+- The Legion skills this plugin ships are rewritten to the minimum text that carries their
+  instructions (INFRA-353): `legion-architect`, `legion-controller`, `legion-worker`,
+  `legion-retro`, `legion-oracle`, `thermonuclear-code-quality` and `thermonuclear-deep-review`,
+  from about 141,000 bytes of SKILL.md to 50,000. Every rule now carries its reason beside it,
+  detail that only some tasks need moved whole to `references/` files named at the step that
+  needs it, and each skill opens by saying the code and a command's `--help` win over its text.
+  `legion-controller` was 39,275 bytes and is now 7,975, so an agent that keeps only a skill's
+  first 8,000 bytes reads all of it. Each old instruction is kept, moved, or dropped with a
+  recorded reason (most drops repeat a rule the role prompt already gives); the per-skill counts
+  are in the pull request body. One rule is new in `legion-worker`: put back anything copied
+  into the workspace before completing a phase, checked with `jj status`.
+- The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
+  the licence file by hand: the worker image lists every Debian package it carries in
+  `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
+  Dockerfile's comments and its toolchain smoke step stay hand-kept.
 
 - The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
   refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the

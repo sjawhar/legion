@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,8 +45,8 @@ var (
 	// ErrNoPullRequestsRead is an installation whose Pull requests permission is
 	// missing or "none" (LEGION-567's reconcile needs it to read merged PRs).
 	ErrNoPullRequestsRead = errors.New("the installation lacks Pull requests: read")
-	// ErrNoBranch is GitHub's 404/422 for the configured branch: the branch does
-	// not exist (or the repository vanished under the installation token).
+	// ErrNoBranch is GitHub's 422 for a configured branch that does not exist,
+	// or its 404 for a repository it cannot find or the installation cannot see.
 	ErrNoBranch = errors.New("the branch does not exist")
 	// ErrTreeTruncated is GitHub's truncated=true on a tree read: the
 	// directory exceeds the tree API caps (100k entries / 7 MB), so the
@@ -67,6 +68,16 @@ const (
 	responseLimit     = 1 << 20
 	blobResponseLimit = 2 << 20
 )
+
+// The Accept values request sends: GitHub's JSON for every call but Ref, which asks for a
+// commit's SHA alone.
+const (
+	mediaTypeJSON = "application/vnd.github+json"
+	mediaTypeSHA  = "application/vnd.github.sha"
+)
+
+// commitSHA is the whole of Ref's answer: one full commit SHA, lowercase hex.
+var commitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // RequestTimeout bounds one API call -- the request and reading its body -- unless the caller's
 // own context ends sooner, which always wins. GitHub terminates a request it has spent about
@@ -360,7 +371,7 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 		var installations []Installation
 		for page := 1; ; page++ {
 			target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
-			body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, nil, responseLimit)
+			body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 			if err != nil {
 				return nil, fmt.Errorf("list installations (page %d): %w", page, err)
 			}
@@ -494,7 +505,7 @@ func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, htt
 	if c == nil {
 		return nil, 0, nil, ErrNoAppKey
 	}
-	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, nil, responseLimit)
+	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, mediaTypeJSON, nil, responseLimit)
 }
 
 // GraphQL posts query/variables to the API origin's /graphql endpoint with an installation token,
@@ -512,7 +523,7 @@ func (c *Client) GraphQL(ctx context.Context, token string, query string, variab
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("encode GraphQL request: %w", err)
 	}
-	return c.request(ctx, http.MethodPost, c.base+"/graphql", "Bearer "+token, bytes.NewReader(payload), responseLimit)
+	return c.request(ctx, http.MethodPost, c.base+"/graphql", "Bearer "+token, mediaTypeJSON, bytes.NewReader(payload), responseLimit)
 }
 
 // Token returns an installation access token, minting one only when the
@@ -587,13 +598,14 @@ func (c *Client) do(ctx context.Context, method, target, authorization string) (
 }
 
 func (c *Client) doLimited(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, error) {
-	body, status, _, err := c.request(ctx, method, target, authorization, nil, limit)
+	body, status, _, err := c.request(ctx, method, target, authorization, mediaTypeJSON, nil, limit)
 	return body, status, err
 }
 
-// request performs one API call and returns its complete body when it fits within limit, status
-// and headers. body is nil for every GET call; GraphQL is this package's only POST with a body.
-func (c *Client) request(ctx context.Context, method, target, authorization string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
+// request performs one API call asking for the accept media type and returns its complete body
+// when it fits within limit, status and headers. body is nil for every GET call; GraphQL is this
+// package's only POST with a body.
+func (c *Client) request(ctx context.Context, method, target, authorization, accept string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, method, target, body)
@@ -601,7 +613,7 @@ func (c *Client) request(ctx context.Context, method, target, authorization stri
 		return nil, 0, nil, fmt.Errorf("build %s %s: %w", method, target, err)
 	}
 	request.Header.Set("Authorization", authorization)
-	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Accept", accept)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -622,15 +634,21 @@ func (c *Client) request(ctx context.Context, method, target, authorization stri
 
 // Ref resolves branch to its commit SHA under an installation token
 // (`GET /repos/{owner}/{repo}/commits/{branch}`) — one call that also proves
-// the branch exists: GitHub's 404 (and its 422 for an empty repository or a
-// malformed ref) is ErrNoBranch.
+// the branch exists. GitHub answers a branch that does not exist with 422 and
+// a repository it cannot find or the installation cannot see with 404; both
+// are ErrNoBranch. An empty repository answers 409 per GitHub's docs, which
+// passes through as a read error.
+// It asks for the SHA alone (`Accept: application/vnd.github.sha`), so the
+// commit's file list, which GitHub's JSON answer carries, never counts
+// against responseLimit. An answer that is not one 40-hex SHA is an error,
+// never a SHA: a Dir read at it would answer an empty model.
 func (c *Client) Ref(ctx context.Context, token, owner, repo, branch string) (string, error) {
 	if c == nil {
 		return "", ErrNoAppKey
 	}
 	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
 		"/commits/" + url.PathEscape(branch)
-	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+token)
+	body, status, _, err := c.request(ctx, http.MethodGet, target, "Bearer "+token, mediaTypeSHA, nil, responseLimit)
 	if err != nil {
 		return "", err
 	}
@@ -640,16 +658,11 @@ func (c *Client) Ref(ctx context.Context, token, owner, repo, branch string) (st
 	if status != http.StatusOK {
 		return "", fmt.Errorf("GET %s: status %d: %s", target, status, body)
 	}
-	var payload struct {
-		SHA string `json:"sha"`
+	sha := strings.TrimSpace(string(body))
+	if !commitSHA.MatchString(sha) {
+		return "", fmt.Errorf("commit for %s/%s@%s: GitHub answered no commit SHA (%d bytes)", owner, repo, branch, len(body))
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("decode commit for %s/%s@%s: %w", owner, repo, branch, err)
-	}
-	if payload.SHA == "" {
-		return "", fmt.Errorf("commit for %s/%s@%s carries no sha", owner, repo, branch)
-	}
-	return payload.SHA, nil
+	return sha, nil
 }
 
 // Dir is one directory listing at a commit: the directory's own tree object

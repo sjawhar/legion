@@ -36304,6 +36304,7 @@ var askEventPayloadFields = {
     text: exports_external.string().nullish(),
     at: exports_external.string().optional()
   }).nullish(),
+  restored: exports_external.boolean().optional(),
   anchor: exports_external.object({
     quote: exports_external.string().optional(),
     mark_id: exports_external.string().optional(),
@@ -42693,6 +42694,10 @@ function writeMemory(dir, sessionId, follows) {
   };
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
 `);
+}
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
