@@ -2,18 +2,43 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-168",
-  "completed": "2026-10-25T12:10:00Z",
-  "decision": "approved",
+  "completed": "2026-10-26T09:53:00Z",
+  "decision": "changes_requested",
+  "round": "generation 3, the full round at code head a3fc16aad2523c535e232f23e097f30333677007 (handoff 4fb131c03020c59877d87a060d6593c011ba31c6); the fingerprint changed since the approval of 57db85e5, so not a confirmation",
   "critical": 0,
-  "important": 0,
+  "important": 5,
   "minor": 0,
-  "keyFindings": [],
-  "notes": [
-    "A confirmation after a conflict-forced merge, not a round: no thermonuclear pass and no thread pass, as skill://legion-worker/references/conflicts-and-rewrites.md states for an equal fingerprint over an approving review.",
-    "The unchanged-diff fingerprint, computed by the reviewer at the commit_id of its own last submitted review and at the new head, with the reference's command and fileset: 8674f047219cf487b985c5ea11b6850551617d3e gives ecad3d1a2a7e7897810630dc164d9f7db3239862d79bbf54802e6a87549dc03d, and ed71442efb596491a3b08fad9679fdd7b1ff2169 and the reviewed head 5088ee4b285c34a4e88d4a7ab6926529884871b2 each give the same hash. The implementer's own rebase comment records the same pair. Equal, and the last submitted review was the approval of 8674f047, so the approval carries to the new head.",
-    "The one conflicted path, packages/envoy/internal/dispatch/api/write_advice_test.go, keeps both sides: this change's decisionBlockInsert type and readDecisionBlockInserts helper, still called at :669 so the shared testdata table still binds the Go server test to new-asks.ts, and main's rawAdviceFields with its three call sites at :577, :600 and :641, with 14 TestWriteAdvice functions in the file. The merge commit touches that file and no other. An equal fingerprint covers both sides of the seam, since dropping either would show as a changed line against the new base; the reviewer also ran the file's own tests at this head, `go test ./internal/dispatch/api/ -run 'TestWriteAdvice|TestDocumentEditAdvice'`, which passes, and CI's envoy-go and envoy-go-race are success at the code head.",
-    "CI read on GitHub after waiting for the lanes to settle: main's rulesets require lint, typecheck, test and pr-title, branch protection names none, and all four are completed and success at the code head ed71442e, with only .legion/ paths above it. pi-envoy, which carries A1's pin, is success.",
-    "One red lane, named rather than hidden: dispatch, which main does not require. This change's diff touches 0 files under packages/dispatch/ (the reviewer counted them through the compare), and the reviewer ran the named suite itself at this head — bun test web/src/features/doc/VersionView.test.tsx gives 4 pass, 0 fail. The run's log is not readable while the run is still in progress, so the failing case is taken from the tester's read rather than from the log. A re-run with gh run rerun --failed is the remedy, never a push, since a push would move the head and void the approval; if it settles red twice it belongs to whatever introduced it, which is the architect's ruling and the reviewer's too.",
-    "Everything the round-4 approval recorded stands unchanged, since the diff is unchanged: the four findings of round 2, the two of round 3 and the three narrowed items of round 4 are closed, and the NUL identity encoding in askIdentity remains the one item on the Fast-follow line, with its one-line remedy and the regression it wants."
-  ]
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:3317-3324",
+      "description": "The breaker passes an upload whose new ask was never refused. When the rules check's judged list (an upload leaves out the asks the stored document holds) is shorter than the scan, every scanned ask counts as refused, the held ones included; two refused uploads that each add a different new ask beside a held #window block trip #window, and a third upload adding a never-judged ask is sent unreviewed by the breaker. Reproduced by the quality review (entries verdict/match, verdict/match, breaker). Present since the approved head; fix: count only the asks the rules check judged (parse once, have runRulesCheck return the judged asks)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:2622-2628",
+      "description": "The rebuttal's trailing shell comment makes Envoy's run-end check count a rebutted dispatch write as work: pi-shared dispatchCommandHead refuses an unquoted '#', so envoy.ts:3110-3125 sets check_due for a rebutted `dispatch comment`, re-arming the ask nudge's stop-time self-check and its reminder. Regression from round 6; reproduced by the deep review (dispatchCommandHead returns undefined on the rewritten command)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:3776-3795",
+      "description": "AskGate refuses, in block mode, the command it handed back: scopedCommand returns undefined for a head line ending in ` # --advisor-rebuttal '…'`, so resending the recorded call (after a Dispatch-side failure, or copying that form) gets the unreadable refusal, whose text never names the comment. Reproduced by the deep review."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:2582, rules-check.ts:216, askgate-core.ts:994-996",
+      "description": "The refusal texts and the Rebuttal doc still say the flag is removed before sending and that the call the agent reads back lacks it, contradicting the new acknowledgement and the command the agent reads back, the exact contradiction rounds 6-8 removed from the acknowledgement."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:3942-3961",
+      "description": "At session shutdown the Dispatch record (up to RECORD_TIMEOUT_MS, 5 s) runs before appendEntry, while session_shutdown waits SHUTDOWN_WAIT_MS 1.5 s before the host seals the session; a record slower than about 0.5 s loses the advisor-gate entry. Reproduced by the deep review (shutdown returned after 1501 ms with 0 entries; the entry arrived after). Present since the approved head; fix: when closing, append the entry first or bound the record by what remains of the shutdown wait."
+    }
+  ],
+  "invariants": "Plan rev 10's ten invariants each hold at a3fc16aa (read by both thermonuclear reviews and by the reviewer), except invariant 5 at shutdown (finding 5) and invariant 4 on uploads whose judged list differs from the scan (finding 1). G3 holds: askIdentity and breakerKey are JSON arrays with the tag mapping, and askgate-report refuses --sessions '' and any flag given twice by name.",
+  "a4Ruling": "Charter judgment working as designed, not a defect of code this change depends on: A4 binds this change's rules check, which answered none for the tried ask in every round and mode; the round-8 block refusal came from #2159's charter (Access 7, ask a peer who may hold the access), which the spec keeps beside the check, varies with the ask's wording (rounds 6 and 7 opened it in block), and is overridden by --advisor-rebuttal, as the spec says.",
+  "thermonuclear": "At 4fb131c0 (code head a3fc16aa): deep review APPROVE with three Minor-labelled findings (2, 3 and 5 above; the reviewer judges each Important under the no-deferral rule since each changes behaviour or loses a record); quality review CHANGES (finding 1 above, plus structure and test-quality items batched into the Fast-follow).",
+  "ci": "Read at 09:51Z: main's rulesets require lint, typecheck, test and pr-title, branch protection none; the newest pull_request runs are at a3fc16aa with lint, typecheck, test queued and pr-title queued (one cancelled), so nothing is green yet; a request for changes does not wait on it.",
+  "provider": "Not applicable to this round's own reading; the tester's round 8 names anthropic/claude-opus-5-5 for all 102 assistant turns and 12 rules calls, read from each session's turns.",
+  "fastFollow": "AskGate core structure: one charter-outcome mapping in decide (3331-3390), Breaker and its key helpers in their own module and the rules-check unit tests in rules-check.test.ts, DECISION_DOCUMENT_PREFIX, the rules failure outcomes and the shared types exported once, the record's timeout owned by decision-record.ts, the unreachable dry-run timeout branch removed, the read-back tests asserting result.input.command without the `?? command` fallback, and askgate-report.ts on node:util parseArgs."
 }
