@@ -2,6 +2,7 @@ package classify
 
 import (
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -53,6 +54,51 @@ func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
 	onGreen := AdvancePullRequestHead(unjudged, "h6")
 	if onGreen.FixAttempts != 3 || onGreen.HeadCounted != "" {
 		t.Fatalf("a push onto green h5 = %#v, want the count kept and the mark cleared", onGreen)
+	}
+}
+
+// A push onto a settled head whose base branch requires no check and no workflow leaves the
+// counted attempt, as a push onto green does, though that head has no verdict: both markers clear
+// and the count stays. A head without a verdict for any other reason - the required set unread, no
+// settlement standing for it, a required workflow still running - is the same attempt, so the push
+// keeps both markers.
+func TestAdvancePullRequestHeadLeavesTheAttemptOnAPushOntoABaseThatRequiresNothing(t *testing.T) {
+	marked := record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{}, Required: []string{},
+		FixAttempts: 3, HeadCounted: "h3", HeadCountedBefore: "h2"}
+	for _, tc := range []struct {
+		name    string
+		pr      func(record.PullRequest) record.PullRequest
+		cleared bool
+	}{
+		{"a settled head whose base requires nothing", func(pr record.PullRequest) record.PullRequest { return pr }, true},
+		{"a settled head whose required set was never read", func(pr record.PullRequest) record.PullRequest {
+			pr.Required = nil
+			return pr
+		}, false},
+		{"a head no settlement stands for, whose base requires nothing", func(pr record.PullRequest) record.PullRequest {
+			pr.CheckedHead = "h1"
+			return pr
+		}, false},
+		{"a settled head whose base requires only a workflow still running", func(pr record.PullRequest) record.PullRequest {
+			pr.Workflows, pr.WorkflowsHead = []record.RequiredWorkflow{{Path: "review.yml", Result: Pending}}, "h3"
+			return pr
+		}, false},
+		{"a settled head whose base requires only a workflow that succeeded", func(pr record.PullRequest) record.PullRequest {
+			pr.Workflows, pr.WorkflowsHead = []record.RequiredWorkflow{{Path: "review.yml", Result: Success}}, "h3"
+			return pr
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AdvancePullRequestHead(tc.pr(marked), "h4")
+			wantCounted, wantBefore := "h3", "h2"
+			if tc.cleared {
+				wantCounted, wantBefore = "", ""
+			}
+			if got.FixAttempts != 3 || got.HeadCounted != wantCounted || got.HeadCountedBefore != wantBefore {
+				t.Fatalf("fixAttempts=%d headCounted=%q headCountedBefore=%q, want 3, %q and %q",
+					got.FixAttempts, got.HeadCounted, got.HeadCountedBefore, wantCounted, wantBefore)
+			}
+		})
 	}
 }
 
@@ -202,15 +248,55 @@ func TestBlockFixAttemptPublishesOnlyOnARedSettlement(t *testing.T) {
 	}
 }
 
+// TestApplyDesignGateEventTracksCurrentVersionApproval: an approval of the latest version opens
+// the gate and keeps its mark, and a newer version closes it while keeping that approval, mark and
+// all, as the version a human approved below the latest (the shared fixtures replay the same rule).
 func TestApplyDesignGateEventTracksCurrentVersionApproval(t *testing.T) {
 	gate := record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 2}
-	opened := ApplyDesignGateEvent(gate, DesignGateApproved, 2)
-	if !DesignGateOpen(opened) {
-		t.Fatalf("approved gate = %#v, want open", opened)
+	approved := record.EventMark{Seq: 12}
+	opened := ApplyDesignGateEvent(gate, DesignGateApproved, 2, approved)
+	if !DesignGateOpen(opened) || opened.ApprovedMark != approved {
+		t.Fatalf("approved gate = %#v, want open with the approval's mark", opened)
 	}
-	closed := ApplyDesignGateEvent(opened, DesignGateVersion, 3)
-	if DesignGateOpen(closed) || closed.LatestVersion != 3 {
-		t.Fatalf("new version gate = %#v, want closed at v3", closed)
+	closed := ApplyDesignGateEvent(opened, DesignGateVersion, 3, record.EventMark{})
+	if DesignGateOpen(closed) || closed.LatestVersion != 3 || closed.ApprovedVersion == nil || *closed.ApprovedVersion != 2 || closed.ApprovedMark != approved {
+		t.Fatalf("new version gate = %#v, want closed at v3 still recording the approval of v2 with its mark", closed)
+	}
+}
+
+// A review at the version the gate last reviewed is stale when the gate's own review of it is
+// later: the person reviewed again after it. The recorded review itself, read again with only its
+// time or only its sequence, is not stale, and neither is a review no mark places.
+func TestStaleReviewIsAReviewTheGateAlreadyFollowedWithAnother(t *testing.T) {
+	at := time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
+	recorded := record.EventMark{Seq: 12, At: at}
+	approved := record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 4, ApprovedVersion: new(4), ApprovedMark: recorded}
+	told := RecordChangesTold(record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 4}, 4, "name the rollback path", recorded)
+	for _, tc := range []struct {
+		name  string
+		gate  record.DesignGate
+		mark  record.EventMark
+		stale bool
+	}{
+		{name: "an older review of an approved version", gate: approved, mark: record.EventMark{Seq: 11, At: at.Add(time.Minute)}, stale: true},
+		{name: "an older review of a told changes request", gate: told, mark: record.EventMark{Seq: 9}, stale: true},
+		{name: "a newer review", gate: approved, mark: record.EventMark{Seq: 13}},
+		{name: "the recorded review read with its time alone", gate: approved, mark: record.EventMark{At: at}},
+		{name: "a review no mark places", gate: approved},
+		{name: "a gate that holds no review", gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 4}, mark: record.EventMark{Seq: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StaleReview(tc.gate, 4, tc.mark); got != tc.stale {
+				t.Fatalf("StaleReview(%#v, 4, %#v) = %v, want %v", tc.gate, tc.mark, got, tc.stale)
+			}
+		})
+	}
+	completed := RecordChangesTold(RecordChangesTold(record.DesignGate{LatestVersion: 4}, 4, "why", record.EventMark{At: at}), 4, "why", record.EventMark{Seq: 12, At: at})
+	if completed.ToldChangesMark != recorded {
+		t.Fatalf("told record of one review read by time, then by sequence = %#v, want it completed to %#v", completed.ToldChangesMark, recorded)
+	}
+	if !ReviewAfter(told, 4, record.EventMark{Seq: 10}) || ReviewAfter(told, 4, record.EventMark{Seq: 12}) {
+		t.Fatalf("ReviewAfter of the review at sequence 12 = wrong, want it after a read at 10 and not after one at 12")
 	}
 }
 

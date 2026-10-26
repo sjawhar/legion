@@ -84,7 +84,7 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
  * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
- * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * pod: the Sandbox's name, the pod's uid, the container (`roles` for an issue pod) and the process generation; the
  * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [
@@ -278,12 +278,25 @@ const daemonInfo = z.strictObject({
   startedAt: timestamp,
 });
 
+/** `api.BlockedIssue` (`record.BlockedIssue`, and `api.HeldChild` on a wave release) — one issue
+ * Legion is waiting to start and the issues it waits on that are not done, in the order Dispatch
+ * lists them. A blocker the daemon has not yet observed as an issue of its own counts as
+ * unfinished, so `blockedBy` can name a key the state's `issues` does not. */
+const legionBlockedIssue = z.strictObject({
+  issue: issueKey,
+  blockedBy: z.array(issueKey),
+});
+
 /** `api.Admission` — the issue cap and the issues under it, in Dispatch rank order. Concurrency
- * is capped on issues, never on workers: there is no worker queue on this wire. */
+ * is capped on issues, never on workers: there is no worker queue on this wire. `blocked` is
+ * every root and every child Legion is waiting to start behind a Dispatch issue nobody has
+ * finished, by issue key; `waiting` stays the roots' waiting line, so a blocked root is in both.
+ * The controller names them in the day's report and takes nothing for them. */
 const legionAdmission = z.strictObject({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),
   waiting: z.array(nonEmptyString),
+  blocked: z.array(legionBlockedIssue),
   free: z.number().int().nonnegative().optional(),
 });
 
@@ -564,8 +577,15 @@ export const LegionEmptyResponse = z.strictObject({});
 export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });
+/** `api.WaveReleaseResponse`. A release is accepted whatever the children's links say, so
+ * `released` is every issue the request named, unchanged, and the architect is never asked to
+ * send the request again; `started` and `held` then say what the release did with each of them.
+ * A child neither started nor held — one the daemon does not record, or one still admitted that
+ * waits on nothing — is in neither list. */
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
+  started: z.array(issueKey),
+  held: z.array(legionBlockedIssue),
 });
 
 /** `api.GrantRequest`, the session form that mints one short-lived credential grant: it serves every

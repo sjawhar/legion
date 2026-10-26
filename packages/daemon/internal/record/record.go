@@ -68,6 +68,26 @@ type Issue struct {
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
+	// TakenBack is whether the issue's run has stood in a phase of its own — one that carries a run
+	// (CarriesRun's rule: neither phase.Admitted nor phase.Done) — as part of the tree it now roots or
+	// belongs to. It is a fact about the run, not about the issue's history. Promotion reads it
+	// because the spec exempts a tree Legion takes back after it finished and lingered: both that the
+	// issue ran and that the tree coming back is its own, since re-admission leaves such a root at
+	// phase.Admitted carrying no run, the same shape as a waiting root that only left the line and
+	// returned, or a child handed over from a finished tree as a root of its own, both of which are
+	// checked (blockers.Exempt).
+	//
+	// The workflow's transition writes the mark as the issue moves into such a phase
+	// (workflow.Engine.transition), the only way an issue first leaves phase.Admitted for one. It
+	// lasts through that phase's end and its root's leave into a linger, and re-admission keeps it
+	// when the root's own tree comes back, the work that earned it. Every other path that opens a run
+	// starts the run clean: a child's re-entry into its tree records its new generation without it
+	// (workflow.Engine.enterChild), and re-admission clears it when another tree's work reaches a root
+	// of its own without its run (admit.Admission.readmit), what that child ran being its old tree's.
+	// An orphan that carries its run keeps the mark with it, the run being its new tree's from then
+	// on. So no issue is exempt from the blocker check unless the run it is exempt for is the run it
+	// arrived with. Nothing else writes it.
+	TakenBack bool
 	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole
 	// issue, so only an event whose status differs from it writes a status.
@@ -115,6 +135,78 @@ type HoldReason string
 
 // HoldEscalated is a hold its architect sent to the controller.
 const HoldEscalated HoldReason = "escalated"
+
+// EventMark places a Dispatch event in its issue's event log: its sequence on the issue (Seq) and
+// Dispatch's time of it (At), each zero when unknown. Dispatch appends an issue's events under the
+// issue's row lock, so their sequence is the order they commit in. The time is the start of the
+// transaction that wrote the event, so an event can carry a time before that of an event that
+// committed ahead of it: only the sequence orders two events for certain.
+type EventMark struct {
+	Seq int64
+	At  time.Time
+}
+
+// After says whether m comes after start: by sequence when both carry one, otherwise by time when
+// both carry one, strictly, so an event at start's own time is not after it. An m with no sequence
+// against a start with one is ordered by their times when both carry a time: such an m comes from a
+// read of a Dispatch that does not give the sequence (one older than its migration 0118, which a
+// daemon deployed first, a rolling update or a Dispatch rollback can meet), even for a review whose
+// row has one, so the times are what orders the two, as before Dispatch kept the sequence. That
+// fallback is as blind as it was then: to two transactions that began at one instant, and to one
+// that began before the other and committed after it. A start with a sequence and no time is a
+// registration's read (its Since), which has no time of its own to compare with, so an m without a
+// sequence is never after it. When neither is known on both sides, which comes first cannot be
+// told, and m counts as after start, as it did before marks were recorded.
+func (m EventMark) After(start EventMark) bool {
+	switch {
+	case m.Seq > 0 && start.Seq > 0:
+		return m.Seq > start.Seq
+	case !m.At.IsZero() && !start.At.IsZero():
+		return m.At.After(start.At)
+	case start.Seq > 0:
+		return false
+	}
+	return true
+}
+
+// Same says whether m and other can mark the same event: equal sequences when both carry one,
+// otherwise equal times when both carry one, otherwise true. A review that a read of Dispatch shows
+// with no sequence (one Dispatch recorded before it kept the sequence, or a Dispatch that predates
+// it) is still recognised by its time as the one its live event carried.
+func (m EventMark) Same(other EventMark) bool {
+	switch {
+	case m.Seq > 0 && other.Seq > 0:
+		return m.Seq == other.Seq
+	case !m.At.IsZero() && !other.At.IsZero():
+		return m.At.Equal(other.At)
+	}
+	return true
+}
+
+// Merged is m with each part it lacks taken from other. Two reads of one review (Same), one of
+// which gave less of its mark, are kept as the fuller one, so a sequence the daemon once knew of a
+// review is never lost to a read that did not give it.
+func (m EventMark) Merged(other EventMark) EventMark {
+	if m.Seq == 0 {
+		m.Seq = other.Seq
+	}
+	if m.At.IsZero() {
+		m.At = other.At
+	}
+	return m
+}
+
+// ID is the mark as one number for a fact's event id: the sequence, else the time in Unix
+// nanoseconds, else 0.
+func (m EventMark) ID() int64 {
+	switch {
+	case m.Seq > 0:
+		return m.Seq
+	case !m.At.IsZero():
+		return m.At.UnixNano()
+	}
+	return 0
+}
 
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {
@@ -234,7 +326,8 @@ type PullRequest struct {
 	// have not arrived yet. A push that may change code is spent once its head arrives.
 	Pushes []ClassifiedPush
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
-	// across every head pushed on top of it until one is pushed onto a green verdict
+	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
+	// settled head whose base branch requires no check and no workflow
 	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
@@ -250,7 +343,8 @@ type PullRequest struct {
 	// checks and its branch protection's), as the daemon last read them from GitHub
 	// (intake.RequiredChecks). Only a required check or workflow decides the checks verdict
 	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set, with no
-	// required workflow, is a base that requires nothing, where nothing is red.
+	// required workflow, is a base that requires nothing, which gives the head no verdict and where
+	// nothing is red.
 	Required []string
 	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
 	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
@@ -393,12 +487,24 @@ const (
 	CheckNotRun CheckOutcome = "not_run"
 )
 
-// DesignGate records the current document version and the version a human approved, if any.
+// DesignGate records the current document version, the version a human approved, if any, with
+// where Dispatch recorded that approval (ApprovedMark, zero when the read that carried it gave
+// none), and the changes request the architect has been told of, if any: its document version, the
+// reviewer's reason and the review's place in the issue's Dispatch event log (ToldChangesMark,
+// zero the same way). A re-read of that same changes request, by a later registration or the gate
+// seed, tells the architect nothing new; another review does, even at that version with that
+// reason. An approval clears the told record and a changes request clears the approval, so the two
+// marks never stand together: the one that is set is the gate's newest applied review
+// (classify.LatestReview).
 type DesignGate struct {
-	Issue           string
-	ArtifactID      string
-	LatestVersion   int
-	ApprovedVersion *int
+	Issue              string
+	ArtifactID         string
+	LatestVersion      int
+	ApprovedVersion    *int
+	ApprovedMark       EventMark
+	ToldChangesVersion *int
+	ToldChangesReason  string
+	ToldChangesMark    EventMark
 }
 
 // Slot is an active admission slot.
@@ -451,6 +557,18 @@ type HandedOverRoot struct {
 	GateCarried bool
 }
 
+// DispatchIssueRow is one row of the daemon's mirror of Dispatch's issues: what Dispatch last
+// said about an issue of the project, whether or not the daemon records the issue itself. Seq is
+// the Dispatch sequence the observation came from, which fences the write (PutDispatchIssue), and
+// Blockers the keys the issue waits on, in Dispatch's own order.
+type DispatchIssueRow struct {
+	Key      string
+	Project  string
+	Status   string
+	Blockers []string
+	Seq      int64
+}
+
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
@@ -475,6 +593,14 @@ type Store interface {
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
 	PutRepoNote(ctx context.Context, tx pgx.Tx, note RepoNote) error
+	// PutDispatchIssue writes row into the mirror of Dispatch's issues, fenced on the Dispatch
+	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
+	// slower observation never overwrites a faster one. A row whose Seq is zero — a fact the
+	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
+	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
+	// DispatchIssues is every mirrored row of the Dispatch project key project, by key: both
+	// consumers read the whole project in one query and judge what is blocked in memory.
+	DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error)
 	Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error)
 	PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
@@ -686,6 +812,19 @@ func (i Issue) Lingers() bool { return i.LingerUntil != nil }
 func (i Issue) LingersAt(generation uint64) bool {
 	return i.Lingers() && i.Generation == generation
 }
+
+// CarriesRun says whether the issue carries a run: it started a phase, and its tree neither left
+// it admitted nor finished or parked it (phase done). It is one reading with two uses, and the
+// only definition of it.
+//
+// A child moving to a root of its own carries its run there when it has one: a child still
+// admitted never started under its old tree's gate, and a finished one (set back to todo during
+// its tree's linger, say) has no run to carry — carried at done, its new root would take a slot
+// and start an architect with nothing to run. Every path that moves a child to a tree of its own
+// asks it: a hand-over's event, the outbox's direct consumption, and a person's labelling of an
+// orphan. And work already under way is never stopped and never re-checked, so a candidate that
+// carries a run waits on nothing, whatever its links say (blockers.Exempt).
+func (i Issue) CarriesRun() bool { return i.Phase != phase.Admitted && i.Phase != phase.Done }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"
 // with an empty string, and the record says it with a nil pointer.

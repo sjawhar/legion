@@ -32,6 +32,15 @@ afterAll(() => {
   rmSync(path.dirname(staged), { recursive: true, force: true });
 });
 
+// A Legion architect reads leading-a-work-stream. Each edit of a root spec after approval is a new
+// version, which closes the design gate, so the record of accepted requests and waits lives in an
+// artifact of its own and never in the spec.
+test("leading-a-work-stream keeps open items in their own artifact, never the spec", () => {
+  const skill = readFileSync(path.join(staged, "leading-a-work-stream", "SKILL.md"), "utf8");
+  expect(skill).toContain("a line in that issue's `open-items.md` artifact, never its spec");
+  expect(skill).not.toContain("## Open items");
+});
+
 test("every staged file is under Oh My Pi's spill threshold, so a skill:// read arrives whole", () => {
   expect(oversizedFiles(staged)).toEqual([]);
 });
@@ -81,11 +90,40 @@ test("no skill or prompt says Legion never merges", () => {
   expect(saying).toEqual([]);
 });
 
+// An issue's disk dies with its pod (INFRA-80), so nothing writes the recovery marker
+// `.legion/<issue>/workspace-recovered.json` any more: `workspace-init` lost it with the lost-disk
+// verdict. The `Your workspace was recreated…` notice now reaches every resume in a new pod, so a
+// skill or prompt that still sends an agent to the marker sends every resumed agent after a file
+// that never exists.
+test("no skill or prompt sends an agent to the workspace recovery marker, which nothing writes", () => {
+  const sending = [staged, promptsRoot]
+    .flatMap(files)
+    .filter(
+      (file) =>
+        file.endsWith(".md") && readFileSync(file, "utf8").includes("workspace-recovered.json")
+    )
+    .map((file) =>
+      file.startsWith(staged)
+        ? path.join("skills", path.relative(staged, file))
+        : path.relative(REPO_ROOT, file)
+    );
+  expect(sending).toEqual([]);
+});
+
 // The controller's `gh` acts as the review App (LEGION-668): the skill must say how it checks a
 // pull request's state, and nothing anywhere in the sweep's roots may still claim the controller
-// (or any role) cannot read GitHub.
+// (or any role) cannot read GitHub. The commands live in the two references SKILL.md sends the
+// controller to (its session and its triage), so SKILL.md must link both, and the strings are
+// read from those three files only.
 test("the controller skill reads pull requests as the review App, and nothing says the controller holds no GitHub credential", () => {
-  const controllerSkill = readFileSync(path.join(staged, "legion-controller/SKILL.md"), "utf8");
+  const controllerDir = path.join(staged, "legion-controller");
+  const entry = readFileSync(path.join(controllerDir, "SKILL.md"), "utf8");
+  for (const reference of ["session.md", "triage.md"]) {
+    expect(entry).toContain(`skill://legion-controller/references/${reference}`);
+  }
+  const controllerSkill = ["SKILL.md", "references/session.md", "references/triage.md"]
+    .map((file) => readFileSync(path.join(controllerDir, file), "utf8"))
+    .join("\n");
   expect(controllerSkill).toContain(
     "gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state"
   );

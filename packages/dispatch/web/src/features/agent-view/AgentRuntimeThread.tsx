@@ -4,20 +4,26 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import type { AgentStreamCommand } from "@legion/contracts";
-import { type ReactNode, useMemo } from "react";
+import { type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
-import { actorName, isViewer } from "../refs/actor";
+import { isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
-import { type AgentConversation, dispatchTurns, isRunning, toThreadMessages } from "./conversation";
-import { dispatchMetadata, type KeyedMessage, turnKey } from "./dispatch-marks";
+import { type AgentConversation, dispatchTurns, toThreadMessages } from "./conversation";
+import {
+  type DispatchAuthor,
+  dispatchMetadata,
+  type KeyedMessage,
+  turnKey,
+} from "./dispatch-marks";
 
-/** Who wrote a stored message, when it was not the viewer: its author, and its issue if any. */
-function otherAuthor(message: Message, viewer: string | undefined): string | undefined {
+/** Who wrote a stored message, when it was not the viewer: its author as Dispatch recorded it
+ *  (a session's stamped title with it, for `AgentName` to name it by), and its issue if any. */
+function otherAuthor(message: Message, viewer: string | undefined): DispatchAuthor | undefined {
   return isViewer(message.author, viewer)
     ? undefined
-    : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
+    : { actor: message.author, issue: message.issue_key ?? undefined };
 }
 
 /** The id a stored Dispatch message is rendered under, which a streamed turn that took that
@@ -25,6 +31,9 @@ function otherAuthor(message: Message, viewer: string | undefined): string | und
 function dispatchId(messageId: string): string {
   return `dispatch:${messageId}`;
 }
+
+/** What became of a message the page was handed: Dispatch took it, or refused it. */
+export type SendOutcome = "refused" | "sent";
 
 /**
  * Everything that reads the conversation, in one component so a boundary can be put around it.
@@ -39,11 +48,12 @@ export function AgentRuntimeThread({
   commands,
   conversation,
   empty,
-  onNew,
+  onSend,
   ownSendCount,
   placeholder,
   replayCount,
   resetKey,
+  sendDisabled,
   sessionId,
   stored,
   viewer,
@@ -52,7 +62,9 @@ export function AgentRuntimeThread({
   commands: readonly AgentStreamCommand[] | undefined;
   conversation: AgentConversation;
   empty: string;
-  onNew: (message: { content: readonly { type: string; text?: string }[] }) => Promise<void>;
+  /** Sends `body` to `session` as the page's delivery mode stands, and says whether Dispatch took
+   *  it. Never rejects: a refusal is an outcome, which hands the text back to that session. */
+  onSend: (session: string, body: string) => Promise<SendOutcome>;
   /** Bumped once per message this viewer sent that the session accepted, so their own send takes
    *  them back to the live end (`AgentThread`'s `useLiveFollow`). */
   ownSendCount: number;
@@ -61,6 +73,9 @@ export function AgentRuntimeThread({
    *  (`useAgentStream`'s `replays`). */
   replayCount: number;
   resetKey: string;
+  /** Holds the composer's Send while true (a switch waiting for the session's answer); what the
+   *  person types stays theirs to edit. */
+  sendDisabled: boolean;
   sessionId: string;
   stored: readonly MessageRead[];
   /** The signed-in human's login: their own messages read as theirs, every other one names its
@@ -134,14 +149,77 @@ export function AgentRuntimeThread({
     );
   }, [conversation, sessionId, stored, viewer]);
 
+  // The sessions with a send of this viewer's out, each until Dispatch answers it. One at a time
+  // per session, and only per session: a send out to one never holds another's Send.
+  const [sendingTo, setSendingTo] = useState<ReadonlySet<string>>(() => new Set());
+  const sending = sendingTo.has(sessionId);
+  // The page, this component, and its one runtime and composer outlive a move to another session
+  // (the route has no key), so the composer's text is per session only by being swapped: the
+  // session whose text the box holds, and the drafts of every other one this view has held. They
+  // live as long as the view, so leaving it drops them.
+  const shown = useRef(sessionId);
+  const drafts = useRef(new Map<string, string>());
+
   const runtime = useExternalStoreRuntime({
     // The frames already arrive in assistant-ui's own message shape, so the store's converter
     // is the identity: `conversation.ts` is the one place the session's wire shape is read.
     convertMessage: (message: ThreadMessageLike) => message,
-    isRunning: isRunning(conversation),
+    // Never running, and said so: left out, assistant-ui reads a running trailing assistant
+    // message as a running thread, and while a thread runs without the `queue` capability it
+    // disables Send and swallows Enter. Dispatch's runtime starts no run - the session decides
+    // what a message does mid-turn by its delivery mode - and each streamed message carries its
+    // own running or complete status (`toThreadMessages`), which still renders. Claiming the
+    // `queue` capability instead would show a queue of messages nothing holds. Not running also
+    // keeps assistant-ui from planting an empty upcoming assistant turn after the viewer's
+    // newest message.
+    isRunning: false,
+    // The composer cannot send while this session's own send is out (Send reads "Sending…") or
+    // while a model or thinking switch is pending on it, and the box still takes the next
+    // message.
+    isSendDisabled: sending || sendDisabled,
     messages,
-    onNew,
+    // assistant-ui's composer has already emptied the box when this runs. The session is the
+    // one on screen now, taken before the await: the reader may have moved on by the answer.
+    // Nothing here rejects back into assistant-ui, whose own restore (`MessageNotSentError`)
+    // knows only the one shared composer and the newest send, not which session sent it.
+    onNew: async (message: { content: readonly { type: string; text?: string }[] }) => {
+      const session = sessionId;
+      const body = message.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text ?? "")
+        .join("\n")
+        .trim();
+      setSendingTo((previous) => new Set(previous).add(session));
+      const outcome = await onSend(session, body);
+      setSendingTo((previous) => {
+        const next = new Set(previous);
+        next.delete(session);
+        return next;
+      });
+      if (outcome === "sent") return;
+      // A refused message goes back to its own session's draft, ahead of whatever was typed
+      // there since, a blank line between: into the box while the reader is on that session,
+      // else into the draft kept for it, which the box shows when they return.
+      const composer = runtime.thread.composer;
+      const onScreen = session === shown.current;
+      const draft = onScreen ? composer.getState().text : (drafts.current.get(session) ?? "");
+      const restored = [body, draft].filter(Boolean).join("\n\n");
+      if (onScreen) composer.setText(restored);
+      else drafts.current.set(session, restored);
+    },
   });
+
+  // A move to another session keeps the box's text for the one left and puts the new one's kept
+  // draft in its place. Before paint, so the box never shows one session's draft under another.
+  useLayoutEffect(() => {
+    const left = shown.current;
+    if (left === sessionId) return;
+    const composer = runtime.thread.composer;
+    drafts.current.set(left, composer.getState().text);
+    composer.setText(drafts.current.get(sessionId) ?? "");
+    drafts.current.delete(sessionId);
+    shown.current = sessionId;
+  }, [runtime, sessionId]);
 
   // What `useLiveFollow` reads the transcript from, in render order; `AgentThread` renders the
   // same key into each turn's `data-message-id`, so the hook can find the turn a reader was on.
@@ -156,10 +234,12 @@ export function AgentRuntimeThread({
         commands={commands}
         contentIds={contentIds}
         empty={empty}
+        held={sendDisabled}
         ownSendCount={ownSendCount}
         placeholder={placeholder}
         replayCount={replayCount}
         resetKey={resetKey}
+        sending={sending}
         sessionId={sessionId}
       />
     </AssistantRuntimeProvider>

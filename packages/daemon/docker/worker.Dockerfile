@@ -19,16 +19,19 @@
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
 # /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
 # git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
-# loopback port inside the pod (the runtime stage says why); what the capability check
+# loopback port inside the pod (the runtime-base stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
-# toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
-# TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget,
-# jq, openssh-client (ssh-keygen), util-linux (flock), postgresql-client (psql), redis-tools
-# (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils (dig) and chromium (the browser Oh My Pi
-# finds on PATH); and a generic toolchain for the repositories the workers work, specific to none
-# of them: uv and uvx, Node LTS with npm and corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
+# toolchain at go.work's version (go and gofmt, /opt/go) with trixie's gcc and libc6-dev, the C
+# compiler and headers Go's cgo and race detector need (cgo stays off by default), gopls,
+# typescript-language-server with TypeScript's tsc and tsserver, pyright with its pyright-langserver,
+# and trixie's python3, curl, wget, jq, openssh-client (ssh-keygen), util-linux (flock),
+# postgresql-client (psql), redis-tools (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils
+# (dig) and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
+# repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and
+# corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
 # each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party piece of
-# all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage).
+# all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage; its Debian list comes from
+# the image's own dpkg database).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
 # the base, proves jj accepts the image's git with a network-free `jj git clone` of a scratch
 # repository, and links the CodeGraph plugin into the profile, which fetches Oh My Pi's natives; the second
@@ -258,7 +261,7 @@ RUN test -n "$LEGION_REVISION" \
 # ------------------------------------------------------------------------------------------------
 # toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
 # installs each project's own Python from its `.python-version` or `requires-python`; the image's own
-# python3 is trixie's, installed by the runtime stage for Oh My Pi's Python eval), Node with npm and
+# python3 is trixie's, installed by the runtime-base stage for Oh My Pi's Python eval), Node with npm and
 # corepack, the AWS CLI v2, kubectl, the Go toolchain at go.work's version (the release the go stage
 # builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and Python language
 # servers Oh My Pi's LSP tools start. All five downloads are checked against their pinned SHA-256
@@ -279,7 +282,15 @@ RUN test -n "$LEGION_REVISION" \
 # version that package.json pins unless the repository's own node_modules holds one, which the
 # server prefers. go finds its GOROOT, /opt/go, by resolving the /usr/local/bin/go
 # symlink (cmd/go's findGOROOT tries the executable's own path, then its symlink target), so the image
-# sets no GOROOT; the toolchain step below checks it.
+# sets no GOROOT; the toolchain step below checks it. Right after unpacking Go, the RUN appends
+# `CGO_ENABLED=0` to /opt/go/go.env, the file Go reads for a distributor's defaults: the runtime-base
+# stage installs gcc for the race detector, and stock Go turns cgo on whenever it finds a C compiler on PATH,
+# so without the line gcc's presence alone would flip the default of every build in a pod. The final
+# stage's `ENV CGO_ENABLED=0` sets the same value for every process that inherits the image's
+# environment; this line holds where that environment is scrubbed — Oh My Pi's Python eval kernel
+# starts with an allowlisted environment that drops CGO_ENABLED, and a test may build with go under an
+# environment it constructs. It is only a default: a role's `CGO_ENABLED=1` overrides it, as the final
+# stage's ENV comment says.
 FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
@@ -320,6 +331,7 @@ RUN set -eu; \
       ln -s "/opt/language-servers/node_modules/.bin/$tool" "/out/bin/$tool"; \
     done; \
     tar -xzf "$t/go.tar.gz" -C /opt --no-same-owner; \
+    printf 'CGO_ENABLED=0\n' >> /opt/go/go.env; \
     for tool in go gofmt; do ln -s "/opt/go/bin/$tool" "/out/bin/$tool"; done; \
     unzip -q "$t/awscli.zip" -d "$t"; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
@@ -328,9 +340,118 @@ RUN set -eu; \
     rm -rf "$t"
 
 # ------------------------------------------------------------------------------------------------
+# runtime-base: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm
+# and bookworm-backports stop at 2.39.5). The dynamically linked binaries copied in below were built
+# or fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
+# No later layer may install a package: the image's Debian packages are the base's own and those this
+# stage's one apt RUN adds, and the debian-packages stage lists them from this stage's dpkg database,
+# so a package installed in a later layer would be missing from the notices file. ENV, USER and
+# WORKDIR belong in the final stage, not here:
+# TestImageEnvIsWhatTheWorkerImageSets (packages/daemon/internal/runtime/sandbox/operatorpod_test.go)
+# reads the last stage's ENV only.
+FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
+# git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
+# chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen), util-linux (for flock),
+# postgresql-client (for psql), redis-tools (for redis-cli), sqlite3, netcat-openbsd (for nc) and
+# bind9-dnsutils (for dig): what the capability check's browser, eval-python and toolchain rows look for
+# (packages/daemon/internal/capabilities/image.go) — the last five join flock in the toolchain row —
+# trixie's since the suite is the apt pin (the note above the ARGs); chromium brings its library
+# closure as its Depends (a font with it: fontconfig-config requires one, fonts-dejavu-core first),
+# and its Recommends stay out with everyone else's — the setuid sandbox (chromium-sandbox) and
+# fonts-liberation among them; Oh My Pi never uses the sandbox, launching the browser with
+# --no-sandbox --disable-setuid-sandbox. jq and ssh-keygen are real binaries, not the harness's: the
+# harness bash's jq builtin reaches only the bash tool, while a worker's subprocesses (`bun test`, a
+# script, a subagent's shell) need /usr/bin/jq. openssh-client is the one apt route to ssh-keygen and
+# also brings ssh, scp, sftp, ssh-agent and ssh-add, which reach no host that curl, wget, git, python3
+# and socat on this line could not already reach (git's ssh transport is what they make runnable; a
+# pod's git speaks https with its role's App token through gh): what a pod may reach is Legion's
+# ruling, the capability table's withheld `network` row
+# (packages/daemon/internal/capabilities/capabilities.go, dispatch://LEGION-5: the pod is the
+# boundary, except a workload a role starts where its deployment's cluster admits it and the
+# Service fronting it, docs/kubernetes.md "Running a workload in the cluster from a role"), a
+# declaration the report renders, not a network control this repository ships. The
+# package's two set-id files lose their bits in the RUN below: /usr/lib/openssh/ssh-keysign, setuid
+# root for host-based authentication, which nothing here uses, and /usr/bin/ssh-agent, setgid _ssh by
+# its postinst. A pod would ignore both anyway (allowPrivilegeEscalation false and every capability
+# dropped, packages/daemon/internal/runtime/sandbox/manifest.go), and the final step refuses an image
+# where any file under /usr/lib/openssh or /usr/bin/ssh-agent carries one, so a rebuild of this layer
+# (a new trixie-slim digest, a package update) cannot bring a bit back unnoticed.
+# socat: a pipe that carries a connection over `kubectl exec` to a port the pod listens on at 127.0.0.1
+# (a dev server an agent runs), which under gVisor `kubectl port-forward` cannot reach. python3 or
+# bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
+# inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
+# util-linux (flock): the install Legion renders for an installing launch serialises on the issue's
+# shared bun install cache with /usr/bin/flock (installBlock,
+# packages/daemon/internal/runtime/sandbox/plugins.go), so a pod whose image lacks it
+# fails every installing launch. The entry buys nothing today — Debian's priority:required set
+# already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
+# failure the day a base drops it. Do not delete it as redundant.
+# postgresql-client (psql): `bun run e2e`, the Dispatch browser suite this deployment's
+# instructions require before a reader-facing Dispatch change merges, reaches psql through
+# packages/dispatch/e2e/psql.ts, which seed.ts calls for every spec's database reset; and the local
+# stack `bun run dispatch:local` (packages/dispatch/e2e/local-instance.ts) refuses to start without
+# psql on PATH — so a role whose image lacks psql cannot run the suite its own change owes. The
+# Debian psql is a Perl wrapper around the versioned client; perl-base is already in the image, so
+# the wrapper resolves.
+# redis-tools (redis-cli): no repository of the project speaks Redis today. It is carried anyway,
+# at about a megabyte, because a second image roll costs more than a megabyte.
+# sqlite3: a repository's own SQLite fixture or database has no other way to open from a shell, and
+# Oh My Pi's own profile databases under ~/.omp/profiles/legion are SQLite too. A role's session is
+# not one of them: it is results.jsonl, state.json and title under XDG_STATE_HOME, and the session
+# store these pods otherwise use is Postgres.
+# netcat-openbsd (nc): a reachability check otherwise has to be written as an inline Python loop.
+# `nc` is not a file of the package: it ships /usr/bin/nc.openbsd, and the `nc` name comes from the
+# alternatives system, whose script runs as root during this build — so the checks below ask for
+# `nc`, never `nc.openbsd`.
+# bind9-dnsutils (dig): a role whose connection to a service name fails cannot otherwise tell "the
+# name does not resolve" from "the packets are dropped". The package is named rather than the
+# virtual `dnsutils`, which trixie has no candidate for: apt resolves it to this single provider
+# today, and a second provider the day one appears would fail the build on a name that was never
+# the package.
+# gcc and libc6-dev: the C compiler and the libc headers and startup files Go's cgo builds with. Go
+# refuses -race without cgo, so these are what lets a role run the race detector — the
+# `go test -race …` of CI's envoy-go-race lane — as `CGO_ENABLED=1 go test -race …`, with no CC or
+# linker override; gcc joins go in the toolchain row. libc6-dev is named rather than left to gcc
+# because it is only a Recommends of gcc-14, and Recommends stay out here as everywhere. cgo stays off
+# by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
+# say how).
+# /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
+# creates a missing parent with its own --chown, so a runtime-user copy into /opt/legion would
+# otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
+# refuses an image where either is not root's.
+# /var/run/legion/{gh,private,state,agent-secrets} are the empty, root-owned mount points an issue
+# pod's role-init binds each role's own directories back at (packages/daemon/internal/launcher,
+# roleinit_linux.go): inside a role's namespaces the role is the runtime user, which can create
+# nothing under the root-owned /var/run, so the image makes them. The controller's pod mounts its
+# volumes over the same paths, as it always has. The final step refuses an image where any is not
+# root's or is not empty.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod u-s /usr/lib/openssh/ssh-keysign \
+    && chmod g-s /usr/bin/ssh-agent \
+    && groupadd --gid 1000 legion \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
+    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin \
+    && install -d -m 0755 -o root -g root /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets
+
+# ------------------------------------------------------------------------------------------------
+# debian-packages (build only): trixie's own dpkg-query over runtime-base's own database, one
+# installed package per line. ${Package}, not ${binary:Package}, which prints name:amd64 for a
+# Multi-Arch: same package, a name with no /usr/share/doc directory. dpkg-query writes to a file
+# first so its failure fails the RUN (dash has no pipefail); only `installed` rows are kept, and
+# LC_ALL=C sort -u makes the order locale-independent. An empty list fails the build in the
+# assemble script's own empty-file check.
+FROM runtime-base AS debian-packages
+RUN dpkg-query -W -f '${db:Status-Status} ${Package}\n' > /tmp/dpkg-packages \
+    && sed -n 's/^installed //p' /tmp/dpkg-packages | LC_ALL=C sort -u > /debian-packages
+
+# ------------------------------------------------------------------------------------------------
 # notices: /out/THIRD_PARTY_NOTICES, the image's /usr/share/doc/legion/THIRD_PARTY_NOTICES — the
-# license of every third-party piece the image ships beyond the Debian packages (whose terms are in
-# /usr/share/doc/<package>/copyright) and the npm packages installed unmodified with their own license
+# license of every third-party piece the image ships. Its first section names the Debian packages,
+# listed by the debian-packages stage from runtime-base's dpkg database, whose terms are in
+# /usr/share/doc/<package>/copyright; the npm packages installed unmodified have their own license
 # files beside them. What this checkout builds carries notices generated from what the build included
 # (the go stage's, the packed plugin's); a prebuilt tool carries the license files its distribution
 # ships (Node's LICENSE, the AWS CLI's THIRD_PARTY_LICENSES) and those its source repository holds at
@@ -402,6 +523,7 @@ RUN set -eu; \
     curl -fsSIo /dev/null "$(gh_raw_url kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod)"; \
     printf 'kubectl links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/kubernetes/kubernetes/blob/v%s/go.mod, the module file of the release this image installs.\nThe k8s.io modules that file replaces with ./staging/src (kubectl itself, client-go, apimachinery, cli-runtime\nand component-base among them) are source of the Kubernetes release itself, each with its license file under\nhttps://github.com/kubernetes/kubernetes/tree/v%s/staging/src/k8s.io; the license of every other module is in\nhttps://github.com/kubernetes/kubernetes/tree/v%s/LICENSES/vendor.\n' "$KUBECTL_VERSION" "$KUBECTL_VERSION" "$KUBECTL_VERSION" > /in/kubectl-modules
 COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
+COPY --from=debian-packages /debian-packages /in/debian-packages
 COPY --from=go /out/go-notices /in/go-notices
 COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices
 COPY --from=plugin /out/pi-legion/dist/THIRD_PARTY_NOTICES /in/pi-legion-notices
@@ -414,12 +536,13 @@ COPY --from=toolchain /opt/language-servers/node_modules/pyright/LICENSE.txt /in
 COPY --from=toolchain /opt/language-servers/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq, openssh-client, util-linux, postgresql-client, redis-tools, sqlite3, netcat-openbsd and bind9-dnsutils of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs, listed in the first section below, carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
+      "Debian packages installed in the image, one per line, each with its terms in /usr/share/doc/<package>/copyright" /in/debian-packages \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
-      "Oh My Pi, /opt/omp and the native modules it fetched into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
+      "Oh My Pi, /opt/omp and the native module it extracted into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
       "jj, /usr/local/bin/jj: LICENSE of github.com/${jj_repo} at ${jj_tag}" /in/jj-LICENSE \
       "jj: the Rust crates it links" /in/jj-crates \
@@ -444,91 +567,24 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "pyright: the LICENSE of the typeshed stubs it bundles, /opt/language-servers/node_modules/pyright/dist/typeshed-fallback" /in/pyright-typeshed-LICENSE
 
 # ------------------------------------------------------------------------------------------------
-# runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
-# bookworm-backports stop at 2.39.5). The dynamically linked binaries copied in below were built or
-# fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
-FROM mirror.gcr.io/library/debian:trixie-slim
+# runtime: the final stage, the image itself, on runtime-base.
+FROM runtime-base AS runtime
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 ARG PI_CODEGRAPH_VERSION
-# git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
-# chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen), util-linux (for flock),
-# postgresql-client (for psql), redis-tools (for redis-cli), sqlite3, netcat-openbsd (for nc) and
-# bind9-dnsutils (for dig): what the capability check's browser, eval-python and toolchain rows look for
-# (packages/daemon/internal/capabilities/image.go) — the last five join flock in the toolchain row —
-# trixie's since the suite is the apt pin (the note above the ARGs); chromium brings its library
-# closure as its Depends (a font with it: fontconfig-config requires one, fonts-dejavu-core first),
-# and its Recommends stay out with everyone else's — the setuid sandbox (chromium-sandbox) and
-# fonts-liberation among them; Oh My Pi never uses the sandbox, launching the browser with
-# --no-sandbox --disable-setuid-sandbox. jq and ssh-keygen are real binaries, not the harness's: the
-# harness bash's jq builtin reaches only the bash tool, while a worker's subprocesses (`bun test`, a
-# script, a subagent's shell) need /usr/bin/jq. openssh-client is the one apt route to ssh-keygen and
-# also brings ssh, scp, sftp, ssh-agent and ssh-add, which reach no host that curl, wget, git, python3
-# and socat on this line could not already reach (git's ssh transport is what they make runnable; a
-# pod's git speaks https with its role's App token through gh): what a pod may reach is Legion's
-# ruling, the capability table's withheld `network` row
-# (packages/daemon/internal/capabilities/capabilities.go, dispatch://LEGION-5: the pod is the
-# boundary, except a workload a role starts where its deployment's cluster admits it and the
-# Service fronting it, docs/kubernetes.md "Running a workload in the cluster from a role"), a
-# declaration the report renders, not a network control this repository ships. The
-# package's two set-id files lose their bits in the RUN below: /usr/lib/openssh/ssh-keysign, setuid
-# root for host-based authentication, which nothing here uses, and /usr/bin/ssh-agent, setgid _ssh by
-# its postinst. A pod would ignore both anyway (allowPrivilegeEscalation false and every capability
-# dropped, packages/daemon/internal/runtime/sandbox/manifest.go), and the final step refuses an image
-# where any file under /usr/lib/openssh or /usr/bin/ssh-agent carries one, so a rebuild of this layer
-# (a new trixie-slim digest, a package update) cannot bring a bit back unnoticed.
-# socat: a pipe that carries a connection over `kubectl exec` to a port the pod listens on at 127.0.0.1
-# (a dev server an agent runs), which under gVisor `kubectl port-forward` cannot reach. python3 or
-# bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
-# inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
-# util-linux (flock): the install Legion renders for an installing launch serialises on the issue's
-# shared bun install cache with /usr/bin/flock (installBlock,
-# packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
-# fails every installing launch. The entry buys nothing today — Debian's priority:required set
-# already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
-# failure the day a base drops it. Do not delete it as redundant.
-# postgresql-client (psql): `bun run e2e`, the Dispatch browser suite this deployment's
-# instructions require before a reader-facing Dispatch change merges, reaches psql through
-# packages/dispatch/e2e/psql.ts, which seed.ts calls for every spec's database reset; and the local
-# stack `bun run dispatch:local` (packages/dispatch/e2e/local-instance.ts) refuses to start without
-# psql on PATH — so a role whose image lacks psql cannot run the suite its own change owes. The
-# Debian psql is a Perl wrapper around the versioned client; perl-base is already in the image, so
-# the wrapper resolves.
-# redis-tools (redis-cli): no repository of the project speaks Redis today. It is carried anyway,
-# at about a megabyte, because a second image roll costs more than a megabyte.
-# sqlite3: a repository's own SQLite fixture or database has no other way to open from a shell, and
-# Oh My Pi's own profile databases under ~/.omp/profiles/legion are SQLite too. A role's session is
-# not one of them: it is results.jsonl, state.json and title under XDG_STATE_HOME, and the session
-# store these pods otherwise use is Postgres.
-# netcat-openbsd (nc): a reachability check otherwise has to be written as an inline Python loop.
-# `nc` is not a file of the package: it ships /usr/bin/nc.openbsd, and the `nc` name comes from the
-# alternatives system, whose script runs as root during this build — so the checks below ask for
-# `nc`, never `nc.openbsd`.
-# bind9-dnsutils (dig): a role whose connection to a service name fails cannot otherwise tell "the
-# name does not resolve" from "the packets are dropped". The package is named rather than the
-# virtual `dnsutils`, which trixie has no candidate for: apt resolves it to this single provider
-# today, and a second provider the day one appears would fail the build on a name that was never
-# the package — and the notices sentence above points at /usr/share/doc/<package>/copyright, which
-# this image has for bind9-dnsutils and not for dnsutils.
-# /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
-# creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
-# otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
-# refuses an image where either is not root's.
-# hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl git jq netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
-    && rm -rf /var/lib/apt/lists/* \
-    && chmod u-s /usr/lib/openssh/ssh-keysign \
-    && chmod g-s /usr/bin/ssh-agent \
-    && groupadd --gid 1000 legion \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
-    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
 # Pinned Bun: the binary the plugin stage packed with (oven/bun:${BUN_VERSION}-slim).
 COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-COPY --from=plugin --chown=legion:legion /out/pi-envoy /opt/legion/pi-envoy
-COPY --from=plugin --chown=legion:legion /out/pi-legion /opt/legion/pi-legion
+# The two plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
+# install the plugins loads them from here, one container's filesystem, so a role that could write
+# them could change the plugin code its siblings load. A launch that installs the plugins loads them
+# from the role's state home on the issue volume instead, which every role of the issue can write;
+# nothing here covers that copy. The final step refuses an image where anything under them is not
+# root's or is writable by anyone else.
+COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
+COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
@@ -575,9 +631,13 @@ WORKDIR /home/legion
 #    from the profile instead, as a pane does, would stop the image probe certifying the two roots by
 #    path (bootgate.go's pod lane reads the explicit root's manifest for the contract and holds
 #    pi-envoy to its root): explicit roots and an unlinked profile are one decision. This is OMP's
-#    first run in the image, so the CodeGraph install also downloads OMP's native modules (~345 MB)
-#    into /home/legion/.omp/natives/<version>/ — the build's success is the check; this layer ships
-#    them, a pod never fetches them, and the probes in the final step never wait on the download.
+#    first run in the image, so the CodeGraph install also extracts OMP's native module from the
+#    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
+#    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
+#    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
+#    variant extracts nothing, while a node that selects the other has each role write that one into
+#    its own home overlay's upper layer, on the pod's role-homes volume, at its first OMP run: up to
+#    six copies in an issue pod. The probes in the final step never wait on it.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
@@ -603,7 +663,17 @@ COPY --from=go /out/gopls /usr/local/bin/gopls
 # Corepack resolves a project with no `packageManager` to the pnpm and yarn it ships as defaults,
 # never to npm's newest release, so every place the image runs (a pod, `docker run`, the check below)
 # gets one version until the Node pin moves. It is image ENV, not a pod variable, for that reason.
-ENV COREPACK_DEFAULT_TO_LATEST=0
+# CGO_ENABLED=0 keeps cgo off by default now that gcc is on PATH (the apt line above says why gcc is
+# there), for every process that inherits the image's environment: the bash tool, subagents, and go
+# test's test binaries. The toolchain stage's go.env line alone would not reach two of them: a go/build
+# reader such as go/types' source importer (packages/daemon/internal/supervise/table_test.go) reads only
+# the process environment, never go.env, so this ENV is what makes its cgo setting match the go
+# command's; and a toolchain Go switches to for GOTOOLCHAIN or a go.mod `toolchain` line has its own
+# go.env, which lacks the line. A role opts in per command, `CGO_ENABLED=1 go test -race …`;
+# `go env -w CGO_ENABLED=1` does not override it, since Go ranks the environment above its go env file;
+# and as image ENV a deployment's runtime.kubernetes.pod.env may not set it (sandbox/operatorpod.go
+# imageEnv).
+ENV COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
 # The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
 # corepack shims fetching their shipped default pnpm and yarn, with TMPDIR, COREPACK_HOME and
 # XDG_CONFIG_HOME in a scratch directory the step removes, so the layer keeps nothing (go, gofmt and
@@ -611,7 +681,11 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # Go's default; XDG_CONFIG_HOME is where they look for it). The image's own Python is checked here,
 # python3 --version; uv still installs each project's own at run time. `go version` alone would pass
 # with a GOROOT go cannot find, and every `go build` would then fail, so the step requires GOROOT to
-# resolve to /opt/go through the /usr/local/bin/go symlink. gofmt takes no --version; formatting a
+# resolve to /opt/go through the /usr/local/bin/go symlink. gcc answers --version and is checked beside
+# go, whose cgo (and so whose race detector) needs it. The step then reads cgo's default with
+# CGO_ENABLED removed from the environment (XDG_CONFIG_HOME in scratch, so no `go env -w` file is
+# read), where only /opt/go/go.env's line holds it at 0, so the build fails if that line, the default
+# a scrubbed environment depends on, is ever lost. gofmt takes no --version; formatting a
 # line from stdin is its check. pyright-langserver takes none either (it opens its LSP connection
 # first and refuses without --stdio), so `pyright --version`, the same package's CLI, answers for it.
 # Being its own layer above `legion`, it reruns only when the toolchain or a layer before it changes,
@@ -636,7 +710,8 @@ RUN set -eu; \
     aws --version; kubectl version --client; \
     for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
-    go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; \
+    go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; gcc --version; \
+    test "$(env -u CGO_ENABLED go env CGO_ENABLED)" = 0; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
     python3 --version; curl --version; wget --version; jq --version; chromium --version; \
@@ -646,7 +721,8 @@ RUN set -eu; \
     psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
     rm -rf "$scratch"
 # The notices stage's file, after the toolchain step so a notices change never reruns it, and before
-# `legion`, which changes on every commit while the notices change only with a dependency or a pin.
+# `legion`, which changes on every commit while the notices change only with a dependency, a pin, or
+# runtime-base's package set.
 COPY --from=notices /out/THIRD_PARTY_NOTICES /usr/share/doc/legion/THIRD_PARTY_NOTICES
 # `legion` goes in after the probe layer and the toolchain: its binary differs on every commit (it
 # links the commit), so a new commit rebuilds only the layers from here down, never the probe layer and
@@ -664,7 +740,12 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # directory holds (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
+# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy and
+# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the image's copy
+# of the plugin code (a launch that installs the plugins loads them instead from the role's state
+# home on the issue volume, which every role of the issue can write); the role mount points under
+# /var/run/legion are root's, mode 0755 and empty;
+# and no file under /usr/lib/openssh or /usr/bin/ssh-agent
 # carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
 # ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
@@ -695,7 +776,7 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # brings. Then it checks every image-site row of the capability table against this image, as a
 # worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
 # PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
-# CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
+# CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, gcc, curl, wget, python3,
 # node, bun, uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with
 # `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
@@ -706,16 +787,22 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # probe naming every missing one. The daemon's probe Sandbox runs it again with its own contract, on
 # the pod baseline and under the operator's pod, resolving every agent's model, and refuses a skipped
 # result, before any claim runs on the image (packages/daemon/internal/runtime/sandbox/probe.go).
-# It needs the natives step 3 fetched, which the cached probe layer above carries. The step leaves no
+# It needs the natives step 3 extracted, which the cached probe layer above carries. The step leaves no
 # residue: Oh My Pi's logs, and the Go telemetry counters the capability check's `go version` writes
 # under HOME (the toolchain step's XDG_CONFIG_HOME does not reach a probe that runs as a pod would).
 ARG LEGION_REVISION
 ARG PI_LEGION_VERSION
 ARG PI_ENVOY_VERSION
 RUN set -eu; \
-    for dir in /opt/legion /opt/legion/bin; do \
+    for dir in /opt/legion /opt/legion/bin /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    for dir in /var/run/legion/gh /var/run/legion/private /var/run/legion/state /var/run/legion/agent-secrets; do \
+      test -z "$(ls -A "$dir")"; \
+    done; \
+    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
+    echo "plugin files not root's alone: ${plugins:-none}"; test -z "$plugins"; \
     stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \

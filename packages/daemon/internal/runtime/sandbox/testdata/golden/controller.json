@@ -83,11 +83,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-controller",
                 "readOnly": true
@@ -108,61 +103,17 @@
                 "mountPath": "/var/run/legion/gh",
                 "name": "gh-controller",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion"
           }
         ],
         "enableServiceLinks": false,
-        "initContainers": [
-          {
-            "command": [
-              "/opt/legion/bin/legion",
-              "workspace-init",
-              "controller",
-              "--root",
-              "/legion"
-            ],
-            "env": [
-              {
-                "name": "PATH",
-                "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
-              }
-            ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "workspace-init",
-            "resources": {
-              "limits": {
-                "cpu": "1",
-                "ephemeral-storage": "10Gi",
-                "memory": "4Gi"
-              },
-              "requests": {
-                "cpu": "1",
-                "ephemeral-storage": "1Gi",
-                "memory": "4Gi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "seccompProfile": {
-                "type": "RuntimeDefault"
-              }
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/legion",
-                "name": "issue"
-              }
-            ],
-            "workingDir": "/legion"
-          }
-        ],
         "nodeSelector": {
           "legion.dev/pool": "legion"
         },
@@ -171,6 +122,7 @@
         "runtimeClassName": "gvisor",
         "securityContext": {
           "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
           "runAsGroup": 1000,
           "runAsNonRoot": true,
           "runAsUser": 1000
@@ -245,6 +197,19 @@
                 }
               ],
               "secretName": "legion-legion-controller-controller-boot"
+            }
+          },
+          {
+            "name": "providers",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "SESSION_DSN",
+                  "path": "OMP_SESSION_SQL_DSN"
+                }
+              ],
+              "secretName": "legion-legion-providers"
             }
           }
         ]

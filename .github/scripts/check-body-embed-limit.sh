@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # A comment's, a comment edit's and a message's body is embedded whole, and the embedder cuts a
-# text it is handed to `maxInputChars` runes (embed.go, through `text.HeadRunes`) without an
+# text it is handed to `maxInputChars` runes (declared in embed.go; both clients, bedrock.go and
+# azure.go, cut through `text.HeadRunes`) without an
 # error. `DISPATCH_BODY_MAX` (dispatch-tools.ts) is the longest body the Dispatch server accepts,
 # counted in UTF-16 code units. A text's rune count is never greater than its UTF-16 length, so a
 # body of at most `DISPATCH_BODY_MAX` UTF-16 units is at most that many runes and reaches the
@@ -20,8 +21,9 @@
 # What makes equality safe is that a comment's and a message's embedded text is the body alone,
 # with nothing prepended: the triggers in
 # packages/envoy/internal/dispatch/store/migrations/0075_comments_embeddings_trigger.up.sql:6 and
-# .../0077_messages_embeddings_trigger.up.sql:10 enqueue `new.body`, and the backfill selects the
-# same column (packages/envoy/internal/dispatch/embedqueue/queue.go:724 and :732).
+# .../0077_messages_embeddings_trigger.up.sql:10 enqueue `new.body`, and the coverage pass, which
+# embeds what no trigger enqueued, selects the same column (the `comment` and `message` entries of
+# `coverageSources` in packages/envoy/internal/dispatch/embedqueue/coverage.go).
 #
 # What this check does not cover: a document's text and an ask's question joined to its answer are
 # embedded too, are cut at the same limit with the same silence, and are not capped by
@@ -142,7 +144,8 @@ if body.value > embed.value:
         f"longer than {embed.value} runes is cut before it is embedded, and its tail vanishes from "
         f"search by meaning with no error. Lower {BODY_CONST} back to at most {embed.value}, or "
         f"raise {EMBED_CONST} deliberately - it bounds every text Dispatch embeds and the spend "
-        f"tokenRateCeiling paces (packages/envoy/internal/dispatch/embedqueue/queue.go), and "
+        f"each embedder's BackgroundTokensPerMinute paces (packages/envoy/internal/dispatch/embed/"
+        f"bedrock.go and azure.go, Limits), and "
         f"moving it also moves packages/envoy/internal/dispatch/embedqueue/queue_test.go's "
         f"25 x 8,000 = 200,000 arithmetic and packages/envoy/cmd/dispatch/README.md",
     )

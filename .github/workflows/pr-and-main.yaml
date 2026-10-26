@@ -329,6 +329,17 @@ jobs:
             packages/daemon/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
 
+      # internal/launcher's role-namespace tests start each role generation in unprivileged user,
+      # mount, PID and IPC namespaces, as an issue pod's launcher does, and t.Fatal rather than
+      # skip under GITHUB_ACTIONS. Ubuntu 24.04 restricts unprivileged user namespaces with an
+      # AppArmor sysctl, so the job turns it off on its throwaway runner (`|| true`: a runner
+      # image without the key restricts nothing), and the unshare after it is the verdict that
+      # the restriction is gone.
+      - name: Allow unprivileged user namespaces (the launcher's role-namespace tests)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare --user --map-root-user true
+
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon

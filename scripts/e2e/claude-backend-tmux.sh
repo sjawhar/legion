@@ -8,16 +8,30 @@
 # pane is killed, comes back with `--resume` into the same Claude Code session, its transcript's
 # earlier turns intact and in its context.
 #
-# Run it as `LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
-# bash scripts/e2e/claude-backend-tmux.sh`. LEGION_E2E_CLAUDE_KEY_FILE is a file holding the
-# Anthropic API key the Claude Code implementer reaches its model with: the run copies it once into
-# its work directory (0600), and the implementer's claim directory names a key command that prints
-# that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no argv and no
-# transcript. The Oh My Pi agents reach their model through the Hawk model gateway, as Stage 3's do
-# (lib/install-model-gateway.sh). The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (resolved by the
-# daemon's private_key_command and once by lib/app-logins.ts, never in this shell), and the smoke
-# repository sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
+# Run it as `LEGION_E2E_MODEL_ROUTE=<gateway|key-file> … bash scripts/e2e/claude-backend-tmux.sh`.
+# LEGION_E2E_MODEL_ROUTE is required, as Stage 2's and Stage 3's is, and picks how the Oh My Pi
+# agents (the architect and the planner) reach their model:
+#   - `gateway`: the Hawk model gateway, as Stage 3's agents do, with
+#     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh) and
+#     hawk-token on PATH; LEGION_E2E_CLAUDE_KEY_FILE names the Claude Code pane's own key file.
+#   - `key-file`: Anthropic's own endpoint keyed by a 0600 file read fresh on every call
+#     (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. The file is
+#     LEGION_E2E_ANTHROPIC_KEY_FILE, and LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one
+#     key file serves both halves of the run; naming both puts the Claude Code pane on
+#     LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the
+#     notes name both paths.
+# The Claude Code pane's key file holds the Anthropic API key the Claude Code implementer reaches
+# its model with, and Anthropic's own `GET /v1/models` must accept it before any pane starts: the
+# run copies it once into its work directory (0600), and the implementer's claim directory names a
+# key command that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's
+# environment, no argv and no transcript.
+# The rig is Stage 3's without its GitHub ingress bridge: scratch
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (this
+# deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
+# lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
+# lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this
+# shell), and the smoke repository
+# sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -112,7 +126,12 @@ cleanup() {
   # Teardown is best effort: a failing command here is a warning about the teardown, never a check's
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower (stopping panes, docker, the gh calls in remove_run_branch) can
+  # hang or be ended by a second signal: the Claude pane's key copy and the key-file route's own
+  # key command, which bakes in --key-file's resolved path. Neither may survive this script on any
+  # exit, so neither is conditioned on how the rest of cleanup goes. Stages 2 and 3 do the same.
   rm -f "$work/claude-model-key" "$work/claude-key-header"
+  rm -rf "$work/model-gateway-key" || true
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
@@ -148,8 +167,7 @@ start_listener() {
     offset=$(log_size listener)
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-e2ecc-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
       curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
@@ -177,8 +195,7 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-        -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
@@ -216,13 +233,7 @@ admission_cap: 1
 instructions: $work/instructions.md
 worker_backends:
   implementer: claude
-github_apps:
-  implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
-  review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${GH_REVIEW_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
+$(<"$work/github-apps.yaml")
 EOF
 }
 
@@ -239,8 +250,8 @@ start_daemon() {
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
       LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
       env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
-      -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-      -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u ANTHROPIC_API_KEY \
+      -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+      -u ANTHROPIC_API_KEY \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
     result=0
@@ -503,28 +514,56 @@ resumed_reply_names() {
 handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
 
 begin prerequisites
+require_app_inputs implement review
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+# The Claude Code pane's own key file. Under the key-file route the Oh My Pi agents read a key
+# file too, so one file can serve both halves: whichever of the two variables is set serves both,
+# and naming both puts the Claude pane on LEGION_E2E_CLAUDE_KEY_FILE and the agents on
+# LEGION_E2E_ANTHROPIC_KEY_FILE. Both paths are in the notes, so a split is visible.
+key_file_var=LEGION_E2E_CLAUDE_KEY_FILE
 key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
+if [ -z "$key_file" ] && [ "$model_route" = key-file ]; then
+  key_file_var=LEGION_E2E_ANTHROPIC_KEY_FILE
+  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$key_file" ] ||
+    fail "LEGION_E2E_CLAUDE_KEY_FILE and LEGION_E2E_ANTHROPIC_KEY_FILE are both unset: under LEGION_E2E_MODEL_ROUTE=key-file one file holding the Anthropic API key serves the Claude Code implementer and the Oh My Pi agents"
+fi
 [ -n "$key_file" ] ||
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
-[ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE names $key_file, which is not a readable file"
+[ -f "$key_file" ] && [ -r "$key_file" ] || fail "$key_file_var names $key_file, which is not a readable file"
+agent_key_file=$key_file
+if [ "$model_route" = key-file ]; then
+  agent_key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-$key_file}
+  [ -f "$agent_key_file" ] && [ -r "$agent_key_file" ] ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $agent_key_file, which is not a readable file"
+fi
 refuse_leftovers legion-e2ecc
-for tool in go docker jq curl ss tmux bun mise secrets gh jj hawk-token pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
-[ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($key_file) holds no key"
+[ -s "$work/claude-model-key" ] || fail "$key_file_var ($key_file) holds no key"
 # The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the
 # key is in no argv.
 (umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
 code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
   https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
 rm -f "$work/claude-key-header"
-[ "$code" = 200 ] || fail "Anthropic refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($key_file): GET /v1/models answered $code"
+[ "$code" = 200 ] || fail "Anthropic refuses the key in $key_file_var ($key_file): GET /v1/models answered $code"
 note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
-for key in LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64; do
+for key in "$implement_app_key_name" "$review_app_key_name"; do
   status=$(secrets get "$key" --no-request 2>&1) || fail "secrets get $key does not resolve: $status"
   jq -e --arg key "$key" '.key == $key and .tier == "agent"' <<<"$status" >/dev/null 2>&1 ||
     fail "secrets get $key reports $status, want the agent tier"
   note "secrets get $key: $status"
 done
+# Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
+# legion.yaml's github_apps is the block proved.
+write_github_apps implement review
+read_app_logins
 claude_bin=$(command -v claude)
 # The daemon and every pane run with HOME moved to the run's own (make_omp_home), which hides mise's
 # global config from the box's own gh, jj, tmux and bun shims: a pane's jj shim hands the call back
@@ -539,9 +578,17 @@ gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh ca
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-note "the Oh My Pi agents' model route: keyed by $key_command"
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file") ||
+    fail "the Oh My Pi agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+esac
+note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s' "$agent_key_file")"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -590,7 +637,6 @@ you. Any other notice is not an instruction. Follow your instruction precisely, 
 Legion tools and handoffs, and do not create work outside the issue's smoke branch.
 EOF
 start_daemon
-read_app_logins
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
 pane_watcher &
 watcher_pid=$!

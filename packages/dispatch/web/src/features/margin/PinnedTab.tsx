@@ -4,7 +4,7 @@ import type { Event } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { borderDefault, textMutedOnSurface } from "../../theme/classes";
 import { EventBody, isAskEvent } from "../activity/EventBody";
-import { actorLabel } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import type { PinnedConversationCard } from "./useMarginItems";
@@ -35,7 +35,8 @@ export function PinnedTab({
             <div className="min-w-0 flex-1">
               <MarkdownBody markdown={conversation.body} />
               <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-                {actorLabel(conversation.author)} · <Timestamp at={conversation.at} />
+                <AgentName actor={conversation.author} inline /> ·{" "}
+                <Timestamp at={conversation.at} />
               </p>
             </div>
             <PinButton
@@ -53,7 +54,9 @@ export function PinnedTab({
             <div className="min-w-0 flex-1">
               <EventBody event={event} />
               {isAskEvent(event) ? null : (
-                <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(event.actor)}</p>
+                <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
+                  <AgentName actor={event.actor} inline />
+                </p>
               )}
             </div>
             <PinButton label="Unpin" onClick={() => onUnpin(event.id)} pinned quiet />

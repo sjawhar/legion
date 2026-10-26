@@ -140,9 +140,17 @@ type dispatchEvent struct {
 		Kind string `json:"kind"`
 		ID   string `json:"id"`
 	} `json:"actor"`
-	Notify  *bool           `json:"notify"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Notify *bool  `json:"notify"`
+	Type   string `json:"type"`
+	// CreatedAt is Dispatch's time of the event, zero when the event carries none. A review's
+	// event shares it with the review's own row, which Dispatch writes in the same transaction.
+	CreatedAt time.Time       `json:"created_at"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// mark is the event's place in its issue's event log.
+func (e dispatchEvent) mark() record.EventMark {
+	return record.EventMark{Seq: e.Seq, At: e.CreatedAt.UTC()}
 }
 
 // decodeDispatchFact decodes one Dispatch issue event of project. The stream carries every
@@ -177,6 +185,10 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			Rank         string          `json:"rank"`
 			Labels       []string        `json:"labels"`
 			ResolvedRepo json.RawMessage `json:"resolved_repo"`
+			// An event retained from a Dispatch that did not yet send blocked_by decodes to no
+			// blockers, as an issue waiting on nothing does: unlike a missing repository, which the
+			// consumer fills, nothing reads an absence here.
+			BlockedBy []string `json:"blocked_by"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
@@ -209,7 +221,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		}
 		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
 			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
-			ResolvedRepoMissing: missing}, nil
+			ResolvedRepoMissing: missing, Blockers: issue.BlockedBy}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -232,7 +244,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			kind = DispatchArtifactChangesRequested
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason, Mark: event.mark()}, nil
 	case "artifact.version":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -249,7 +261,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if artifact.Version.Number <= 0 {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number, Mark: event.mark()}, nil
 	case "issue.deployed":
 		var deployed struct {
 			Repo        string `json:"repo"`
@@ -439,9 +451,15 @@ func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) 
 		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body, BodyTruncated: bodyTruncated == "true"}, unread, nil
 }
 
+// decodePush decodes a push to an issue's branch (claim.BranchIssue). A push to any other branch is
+// no fact, so it is acknowledged without a transaction: the workflow applies a push only to the pull
+// request it records on the push's branch, and it records one only on an issue's branch. A mapped
+// repository that other automation pushes to many times a minute would otherwise cost the daemon one
+// transaction under the fact lock (ApplyFact) for every push, all of them changing nothing.
 func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
-	ref, ok := rawString(raw, "ref")
-	if !ok || !strings.HasPrefix(ref, "refs/heads/") {
+	ref, _ := rawString(raw, "ref")
+	branch, isHead := strings.CutPrefix(ref, "refs/heads/")
+	if _, isIssueBranch := claim.BranchIssue(branch); !isHead || !isIssueBranch {
 		return nil, nil
 	}
 	after, ok := rawString(raw, "after")
@@ -453,7 +471,7 @@ func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (F
 	pusher, _ := rawString(raw, "pusher")
 	before, _ := rawString(raw, "before")
 	forced := rawStringPointer(raw, "forced")
-	return Push{Repo: repository.String(), Branch: strings.TrimPrefix(ref, "refs/heads/"), Before: before, After: after, ChangedPaths: changedPaths,
+	return Push{Repo: repository.String(), Branch: branch, Before: before, After: after, ChangedPaths: changedPaths,
 		Truncated: truncated, Forced: forced, Pusher: pusher}, nil
 }
 

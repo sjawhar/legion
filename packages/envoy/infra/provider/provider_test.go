@@ -149,7 +149,28 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	for _, input := range []string{"appClientId", "appId", "appPrivateKeySecretName", "appPrivateKeySecretKey"} {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 	}
+	// The Azure embedder's inputs are references and identifiers, never the key: the key form
+	// takes a Secret Manager path, the keyless form a tenant and a client id.
+	for _, input := range []string{
+		"azureEmbedEndpoint", "azureEmbedDeployment", "azureEmbedTokensPerMinute", "azureEmbedKeySecret",
+		"azureTenantId", "azureClientId", "azureFederationAudience",
+	} {
+		require.Contains(t, dispatch.InputProperties, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
+	require.NotContains(t, dispatch.InputProperties, "azureEmbedKey")
+	// The app container's size is two optional plain strings, Kubernetes quantities.
+	for _, input := range []string{"appCpu", "appMemory"} {
+		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
 	require.True(t, dispatch.Properties["agentToken"].Secret)
+	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
+		require.Equal(t, "string", dispatch.Properties[output].Type, output)
+		require.False(t, dispatch.Properties[output].Secret, output)
+	}
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
@@ -182,10 +203,13 @@ func TestSchemaServesTheWebhookListenerComponentWithNoSecretInput(t *testing.T) 
 	for name, input := range listener.InputProperties {
 		require.False(t, input.Secret, "%s is not a secret input", name)
 	}
-	// Every input is required but the seed, each webhook's inputs and adopt.
+	// Every input is required but the seed, each webhook's inputs, the opt-in to every
+	// notification topic and adopt.
 	require.ElementsMatch(t, []string{
-		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger", "adopt",
+		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger",
+		"subscribeAllTopics", "adopt",
 	}, optionalInputs(listener.InputProperties, listener.RequiredInputs))
+	require.Equal(t, "boolean", listener.InputProperties["subscribeAllTopics"].Type)
 }
 
 // optionalInputs are the names in properties that required does not list.

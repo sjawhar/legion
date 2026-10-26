@@ -58,9 +58,6 @@ type ProvisionTokens interface {
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
 // fake.
 type Store interface {
-	// IssueHasSessions is whether any stored claim of issue, retired ones included, recorded a
-	// session: the issue's volume must then already hold the issue's clone and that session.
-	IssueHasSessions(ctx context.Context, project, issue string) (bool, error)
 	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
 	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
 	TreeLive(ctx context.Context, project, tree string) (bool, error)
@@ -71,8 +68,8 @@ type Store interface {
 	// IssueSandboxHome is the tree issue's Sandbox belongs to now, or "" when none: the issue's own
 	// key while a live hand-over of it is pending, else its record's tree while that tree's lifecycle
 	// is open or releasing, or, for a tree never opened, while the issue waits for admission or
-	// lingers after its own close. The tree cleanup hands a Sandbox whose home is another tree over
-	// to it (CleanupTree), and the orphan sweep keeps one whose home is its label's tree (sweep).
+	// lingers after its own close. The orphan sweep keeps a Sandbox whose home is the tree it is
+	// labelled with (sweep); the tree cleanup deletes every Sandbox of the tree it cleans.
 	IssueSandboxHome(ctx context.Context, project, issue string) (string, error)
 	// ClaimUnretired is whether the store holds token's claim in any state but retired: a claim the
 	// daemon's orphan sweep still knows, suspended and failed ones included. The sweep reads it under
@@ -95,16 +92,15 @@ type Options struct {
 	// default (runtime.kubernetes.issue_volume, config.defaultIssueVolume when the file sets none).
 	IssueVolume resource.Quantity
 	Scheduling  Scheduling
-	// Resources are each role's container requirements, the controller's included: the daemon
-	// hands one for every role (config.DefaultResources fills what its file leaves out), and every
-	// container of every pod the runtime builds takes its role's — an issue pod's init containers
-	// the launching role's. At the defaults each cpu and memory request equals its limit, so every
-	// pod is Guaranteed; a role the deployment gives a lower request makes every pod holding its
-	// container Burstable. The image probe carries its own (ImageProbe.Resources). New refuses a
-	// map that lacks a role of claim.Roles or the controller, or whose entry is not a reservation:
-	// cpu and memory each a positive request no greater than its positive limit, and no other
-	// resource named but ephemeral storage (checkReservation).
-	Resources map[claim.Role]corev1.ResourceRequirements
+	// Resources are the two pods' requirements: every issue pod's one container and its two init
+	// containers carry Issue, the controller's pod's one container Controller. The daemon hands
+	// both (config.DefaultResources fills what its file leaves out). At
+	// the defaults each cpu and memory request equals its limit, so every pod is Guaranteed; a pod
+	// the deployment gives a lower request is Burstable. The image probe carries its own
+	// (ImageProbe.Resources). New refuses either when it is not a reservation: cpu and memory each a
+	// positive request no greater than its positive limit, ephemeral storage bounded the same way,
+	// and no other resource named (checkRequirements).
+	Resources PodResources
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
 	// DaemonURL, EnvoyURL, and DispatchURL are the pane values LEGION_DAEMON_URL, ENVOY_URL, and
@@ -148,26 +144,28 @@ type Options struct {
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
 	// SessionStore is where every role's Oh My Pi keeps its session
-	// (runtime.kubernetes.session_store), settled. Under the volume store, which the zero value is,
-	// each session is a file in the issue's volume's sessions directory. Under either database
-	// store every generation is started with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE
-	// naming a URL file (mainEnvironment), a resume is held to the session table rather than the
-	// volume (the role launcher's check, internal/launcher), and no launch expects the issue's
-	// volume to hold a session. Under postgres that file is the providers Secret key the pod and
-	// the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim, seeing the
-	// pointer, never exports; under cloudsql-iam no pod mounts a session key at all — each role
-	// container's launcher is told the instance, database and login (sessionProxyFlags), proxies a
-	// socket of its own to Cloud SQL as the pod itself, and writes the URL file in the
+	// (runtime.kubernetes.session_store), settled. It is required to keep sessions in a database
+	// (InDatabase): an issue pod's disk is the pod's own ephemeral volume and is deleted with the
+	// pod, so a session kept as a file on it would not survive to be resumed, and configure refuses
+	// any other store as it refuses an unpinned image. Every generation is started with
+	// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming a URL file (mainEnvironment), a
+	// resume is held to the session table (the role launcher's check, internal/launcher), and no
+	// launch expects any disk to hold a session. Under postgres that file is the providers Secret
+	// key the pod and the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim,
+	// seeing the pointer, never exports; under cloudsql-iam no pod mounts a session key at all —
+	// each pod's launcher container (an issue pod's `roles`, the controller pod's `controller`)
+	// is told the instance, database and login once (sessionProxyFlags), proxies a socket of each
+	// generation's own to Cloud SQL as the pod itself, and writes the URL file in that
 	// generation's private directory.
 	SessionStore ompsessions.Store
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
-	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv every role's
-	// container runs before each start of its Oh My Pi — after a stale-plugin relaunch's install,
-	// in the container's working directory and with the environment Oh My Pi gets — through the
-	// start wrapper (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
+	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv each role runs
+	// before each start of its Oh My Pi — after a stale-plugin relaunch's install, in the role's
+	// working directory and with the environment Oh My Pi gets — through the start wrapper
+	// (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
 	Setup []string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
@@ -213,6 +211,12 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
 	Log *slog.Logger
+}
+
+// PodResources are the requirements of the two pods the runtime builds, each a whole pod's: an
+// issue pod's, whose one container runs every workflow role, and the project controller's.
+type PodResources struct {
+	Issue, Controller corev1.ResourceRequirements
 }
 
 // AgentSecrets is the secrets broker the runtime enrolls every pod with: the URL the

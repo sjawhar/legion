@@ -44,6 +44,10 @@ type DispatchIssue struct {
 	// own, else its nearest ancestor's, else its project's default; empty when it resolves to none.
 	// The workflow takes it when it first records the issue, and never after.
 	ResolvedRepo string
+	// Blockers is the keys of the issues the event says this issue waits on, in Dispatch's own
+	// order. An event retained from a Dispatch that did not yet send them carries none, as an issue
+	// waiting on nothing does: no reader needs to tell those two apart.
+	Blockers []string
 	// ResolvedRepoMissing is an event JetStream retained from before Dispatch resolved an issue's
 	// repository: its payload has no resolved_repo, so ResolvedRepo says nothing. The consumer's
 	// PrepareRepository fills ResolvedRepo from the issue's record, or from Dispatch for an issue
@@ -72,7 +76,7 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Observed: true}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy, Observed: true}
 }
 
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
@@ -83,7 +87,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -117,16 +121,36 @@ const (
 	DispatchArtifactVersion          DispatchArtifactKind = "version"
 )
 
-// DispatchArtifact records one review or version event for a registered design document.
+// DispatchArtifact records one review or version event for a registered design document, from a
+// live event or from the daemon's own read of Dispatch's approval (the gate seed). Every source
+// applies alike: a key per review, not the source, keeps the architect from hearing one changes
+// request twice (the workflow's tellChanges). Mark places the event in the issue's Dispatch event log: the event's
+// sequence and Dispatch's time of it, from the event itself, or, for a review, from the read's
+// latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A version the
+// gate seed read from Dispatch carries none.
 type DispatchArtifact struct {
 	Key        string
 	ArtifactID string
 	Kind       DispatchArtifactKind
 	Version    int
 	Reason     string
+	Mark       record.EventMark
 }
 
 func (DispatchArtifact) isFact() {}
+
+// GateAboveDispatch is the gate seed of a generation (Generation) finding the document at a version
+// below the one the seed was queued at (Above): Read is what the seed read of Dispatch, as the fact
+// it would otherwise apply, at Dispatch's latest version. Dispatch's versions only rise and the
+// seed reads after the daemon applied whatever moved the gate, so the gate stands above any version
+// Dispatch wrote, and is reset to Dispatch's.
+type GateAboveDispatch struct {
+	Generation uint64
+	Above      int
+	Read       DispatchArtifact
+}
+
+func (GateAboveDispatch) isFact() {}
 
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
@@ -153,11 +177,33 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 	return p.AckFloorStream >= target || p.Idle
 }
 
+// IssueStatus is one issue of the daemon's project as Dispatch shows it now: its key, its status,
+// the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
+// turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
+// same sequence-fenced write an event's own row takes, so a view older than an event already
+// applied changes nothing.
+type IssueStatus struct {
+	Key      string
+	Status   string
+	Blockers []string
+	Seq      int64
+}
+
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
 // synthetic fact every `controller_wake_interval_seconds` and never decoded from an event.
 // Admission is the only handler that acts on it; when it wakes the controller is admission's rule
 // (admit.Admission.wakeController and its callers).
-type ControllerTick struct{}
+type ControllerTick struct {
+	// Observed is what the turn's own re-read of Dispatch saw: the issues anything is currently
+	// waiting on, as Dispatch answers for them now (workflowRuntime.tickController reads them
+	// before the fact is applied, since no handler may perform I/O). The mirror handler writes
+	// them, ahead of the handlers that judge from the mirror in this same transaction, so a
+	// blocker whose closing event never arrived is caught here — at the cost of one wake interval
+	// rather than standing until the next boot's listing. Empty is the tick as it always was: an
+	// ordinary wake that writes nothing, which is almost every turn, and also what a failed read
+	// leaves.
+	Observed []IssueStatus
+}
 
 func (ControllerTick) isFact() {}
 
@@ -458,11 +504,29 @@ type SignOff struct{ Issue string }
 
 func (SignOff) isFact() {}
 
-// GateRegistered records a design document and its current version.
+// GateRegistered records a design document and its current version, with what register_gate read
+// of Dispatch's approval of it, so a person's review given before the architect registered is
+// applied at registration. ApprovedVersion is the version Dispatch showed approved, set only when
+// that approval is of Dispatch's latest version, and 0 otherwise: the gate opens at registration,
+// keeping that approval's place in the issue's Dispatch event log (ApprovedMark).
+// ChangesRequestedVersion is the version of a changes request Dispatch showed on its latest
+// version, with its reason and the review's place in the issue's Dispatch event log
+// (ChangesRequestedMark), and 0 otherwise: the gate closes with the architect told.
+// DispatchVersion is the document's latest version as that read found it: Version is the caller's,
+// and the gate is registered at the newer of the two. Since is the issue's event sequence read
+// before the approval, with no time, so every review the read did not show comes after it
+// (record.EventMark.After): a review the gate already applied after Since is newer than the read.
 type GateRegistered struct {
-	Issue      string
-	ArtifactID string
-	Version    int
+	Issue                   string
+	ArtifactID              string
+	Version                 int
+	ApprovedVersion         int
+	ApprovedMark            record.EventMark
+	ChangesRequestedVersion int
+	ChangesReason           string
+	ChangesRequestedMark    record.EventMark
+	DispatchVersion         int
+	Since                   record.EventMark
 }
 
 func (GateRegistered) isFact() {}

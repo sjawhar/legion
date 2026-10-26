@@ -16,12 +16,14 @@ import (
 // (SettlementFor). The pushes it keeps are keptPushes'.
 //
 // HeadCounted names the head the count last counted, and the attempt it marks runs on through every
-// head pushed on top of it until one is pushed onto a green verdict, which clears it: a push onto a
-// head CI has not judged yet, or onto a red that counts nothing, is the same attempt, not a new
-// one. Only a counted head is ever named, so ApplyPush's take-back never undoes a count it did not
-// make. A count keeps the mark it replaces (HeadCountedBefore), which the take-back restores: a
-// head whose push has not arrived is counted, and when that push proves handoff-only or the review
-// App's, the attempt is left as it would have been had the push arrived first.
+// head pushed on top of it until one is pushed onto a green verdict, or onto a settled head whose
+// base branch requires no check and no workflow (nothingRequired), which clears it: CI sent nothing
+// back from either, so the push is a fresh start. A push onto a head CI has not judged yet, or onto
+// a red that counts nothing, is the same attempt, not a new one. Only a counted head is ever named, so
+// ApplyPush's take-back never undoes a count it did not make. A count keeps the mark it replaces
+// (HeadCountedBefore), which the take-back restores: a head whose push has not arrived is counted,
+// and when that push proves handoff-only or the review App's, the attempt is left as it would have
+// been had the push arrived first.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Pushes = keptPushes(pr.Pushes, headSHA)
@@ -29,7 +31,7 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 	case verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)):
 		pr.FixAttempts++
 		pr.HeadCountedBefore, pr.HeadCounted = pr.HeadCounted, headSHA
-	case verdict == "green":
+	case verdict == "green" || nothingRequired(pr):
 		pr.HeadCounted, pr.HeadCountedBefore = "", ""
 	}
 	if pending != nil && !pending.HandoffOnly {
@@ -319,13 +321,14 @@ func ConflictWithdrawsReady(pr record.PullRequest) bool {
 // FixAttemptCapHolds says whether the red verdict standing for the head is one the fix-attempt cap
 // holds: the pull request's fix attempts are at cap, and the head belongs to the attempt the count
 // last counted (HeadCounted): the counted head itself, or a head pushed on top of it before any
-// push landed on a green verdict (AdvancePullRequestHead). That attempt is the loop the cap bounds,
-// so its red no longer sends the work back from testing, reviewing, retro or merging by itself,
-// however often it returns - a re-run failing again, a red after the head read green, a second push
-// before CI settled - and the architect decides what follows (workflow's standingRed). A head
-// pushed onto a green verdict is not that loop: it raised no count and left the attempt, so its red
-// is new. A head a handoff-only push left is in the attempt of the code head it replaced, as its
-// red is that head's (RedSendsBack). A green head is the fix that worked.
+// push landed on a green verdict or on a settled head whose base branch requires nothing
+// (AdvancePullRequestHead). That attempt is the loop the cap bounds, so its red no longer sends the
+// work back from testing, reviewing, retro or merging by itself, however often it returns - a
+// re-run failing again, a red after the head read green, a second push before CI settled - and the
+// architect decides what follows (workflow's standingRed). A head pushed onto a green verdict, or
+// onto a settled head whose base requires nothing, is not that loop: it raised no count and left
+// the attempt, so its red is new. A head a handoff-only push left is in the attempt of the code
+// head it replaced, as its red is that head's (RedSendsBack). A green head is the fix that worked.
 func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
 	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && HeadVerdict(pr) == "red"
 }
@@ -353,20 +356,112 @@ const (
 	DesignGateVersion          DesignGateEventKind = "version"
 )
 
-// ApplyDesignGateEvent updates a registered gate from one artifact observation. Approval opens
-// only when it names the latest known version; a newer document version and changes request close it.
-func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int) record.DesignGate {
+// ApplyDesignGateEvent updates a registered gate from one artifact observation, at mark: where
+// Dispatch recorded the review, zero for a version event and for a read that gave none. Approval
+// opens only when it names the latest known version, and the gate keeps that approval's mark; a
+// newer document version and a changes request close it. A newer version keeps the approval it
+// closes, with its mark, as the version a human approved below the latest; a changes request
+// clears both. An approval also clears the changes request the architect was told of, which
+// RecordChangesTold writes when it is told, so the approval and the told request never stand
+// together on the gate. A newer version keeps the told record, at the version it was told at, so a
+// late live event of that request is still recognised as told. An approval the gate already records
+// at that version, read again (record.EventMark.Same), keeps the fuller of the two marks
+// (record.EventMark.Merged), so a read that gave only its time never takes the sequence the live
+// event gave.
+func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int, mark record.EventMark) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
 	}
 	switch kind {
 	case DesignGateApproved:
+		if gate.ApprovedVersion != nil && *gate.ApprovedVersion == version && gate.ApprovedMark.Same(mark) {
+			mark = mark.Merged(gate.ApprovedMark)
+		}
 		approved := version
-		gate.ApprovedVersion = &approved
+		gate.ApprovedVersion, gate.ApprovedMark = &approved, mark
+		gate = clearChangesTold(gate)
 	case DesignGateChangesRequested:
-		gate.ApprovedVersion = nil
+		gate.ApprovedVersion, gate.ApprovedMark = nil, record.EventMark{}
 	}
 	return gate
+}
+
+func clearChangesTold(gate record.DesignGate) record.DesignGate {
+	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = nil, "", record.EventMark{}
+	return gate
+}
+
+// LatestReview is the review the gate has applied last and the document version it reviewed: the
+// approval it records, else the changes request it records as told. The two never stand together
+// (ApplyDesignGateEvent), so whichever is set is the gate's newest applied review. ok is false
+// when the gate records no review at all.
+func LatestReview(gate record.DesignGate) (record.EventMark, int, bool) {
+	switch {
+	case gate.ApprovedVersion != nil:
+		return gate.ApprovedMark, *gate.ApprovedVersion, true
+	case gate.ToldChangesVersion != nil:
+		return gate.ToldChangesMark, *gate.ToldChangesVersion, true
+	}
+	return record.EventMark{}, 0, false
+}
+
+// StaleReview reports whether a review of version at mark is older than the review the gate has
+// already applied at that version: the person reviewed again after it, so this one changes no gate
+// state. It covers an approval delivered after the changes request that superseded it, and a
+// changes request delivered after a newer approval. A review Dispatch placed neither by sequence
+// nor by time against the recorded one is not stale (record.EventMark.After), which keeps the
+// earlier behaviour for marks a Dispatch did not give, and neither is the recorded review itself
+// (record.EventMark.Same): a read that gave only its time and the live event that carries its
+// sequence are one review, and the sequenced one completes what the gate records of it.
+func StaleReview(gate record.DesignGate, version int, mark record.EventMark) bool {
+	recorded, reviewed, ok := LatestReview(gate)
+	return ok && reviewed == version && !mark.Same(recorded) && !mark.After(recorded)
+}
+
+// ReviewAfter reports whether the review the gate has applied at version was recorded after since.
+// A registration whose read of Dispatch began at since is then older than that review: the person
+// acted after the read, and the gate keeps what it already applied.
+func ReviewAfter(gate record.DesignGate, version int, since record.EventMark) bool {
+	recorded, reviewed, ok := LatestReview(gate)
+	return ok && reviewed == version && recorded.After(since)
+}
+
+// DesignGateChangesTold reports whether the gate already records this changes request as one the
+// architect was told of: the same document version, the same reason, and the same review in the
+// issue's Dispatch event log (mark, record.EventMark.Same: its event's sequence, else Dispatch's
+// time of it). A person who repeats a review's version and wording later has made a new review,
+// with an event of its own, and is not this one. A read that carries neither the sequence nor the
+// time is matched on version and reason alone.
+func DesignGateChangesTold(gate record.DesignGate, version int, reason string, mark record.EventMark) bool {
+	return gate.ToldChangesVersion != nil && *gate.ToldChangesVersion == version && gate.ToldChangesReason == reason &&
+		gate.ToldChangesMark.Same(mark)
+}
+
+// RecordChangesTold records on the gate the changes request the architect is being told of, or has
+// been, so a later read of the same review (a registration's or the gate seed's) tells it nothing
+// again. A review the gate already records keeps its record, completed with what this read adds of
+// its mark (record.EventMark.Merged), so the review's live event and a read that showed only its
+// time are one review, recorded with both.
+func RecordChangesTold(gate record.DesignGate, version int, reason string, mark record.EventMark) record.DesignGate {
+	if DesignGateChangesTold(gate, version, reason, mark) {
+		gate.ToldChangesMark = gate.ToldChangesMark.Merged(mark)
+		return gate
+	}
+	told := version
+	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = &told, reason, mark
+	return gate
+}
+
+// ApprovalFollows reports whether the gate records an approval given after a review of version at
+// mark: an approval of a later version, or one of that version the review does not come after
+// (record.EventMark.After). A changes request that such an approval followed was answered by the
+// person's own approval, so nothing of it is left to tell.
+func ApprovalFollows(gate record.DesignGate, version int, mark record.EventMark) bool {
+	if gate.ApprovedVersion == nil {
+		return false
+	}
+	approved := *gate.ApprovedVersion
+	return approved > version || approved == version && !mark.After(gate.ApprovedMark)
 }
 
 // DesignGateOpen reports whether a human approved the gate's current document version.

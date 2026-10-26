@@ -157,6 +157,7 @@ jobs:
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
+              - 'skills/dispatch-writing-specs/**'
               # The Go copies its tests hold the TypeScript to: src/dispatch-text-references.test.ts
               # and src/dispatch-href.test.ts read the Go reader's JSON tables, and
               # scripts/gen-go.test.ts checks the generated Go file is current.
@@ -175,11 +176,15 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - *bun_toolchain
+              # src/__tests__/dispatch-advice.test.ts holds every skill section a notice cites to a
+              # heading of that skill's SKILL.md.
+              - 'skills/**'
             envoy:
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
+              - 'skills/dispatch-writing-specs/**'
               - 'go.work'
               - 'go.work.sum'
               # The Go builds run in workspace mode, where the daemon module's requirements raise
@@ -293,7 +298,7 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
             # The private workspace package both Oh My Pi plugins import. Its tests stage each
             # plugin's skills through the prepack script and hold the two lists to a partition of
-            # skills/ (test/skills-partition.test.ts).
+            # skills/ and to the skill lists of release.yaml (test/skills-partition.test.ts).
             pi_shared:
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/**'
@@ -303,10 +308,11 @@ jobs:
               - *bun_toolchain
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
+              - '.github/workflows/release.yaml'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
             # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
             # installed through the mise install-jj leaves. Every skill and every daemon prompt:
-            # src/skills-guard.test.ts stages its four skills through the prepack script and resolves
+            # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
             # .md under skills/ and packages/daemon/internal/prompts, so a prompt that names a
             # Dispatch tool fails the pull request that writes it, not the next one to touch this
@@ -550,7 +556,7 @@ jobs:
       # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
-      # license cannot be determined) and stages this plugin's four skills. The listing shows the
+      # license cannot be determined) and stages this plugin's five skills. The listing shows the
       # tarball ships those and nothing of the Legion plugin's: no legion.js, no agents/, none of
       # its skills.
       - name: Pack pi-envoy
@@ -590,6 +596,8 @@ jobs:
       # is read from .omp-pin, the repository's one copy of it, installed through the mise
       # install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
+      # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
+      # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -611,7 +619,7 @@ jobs:
       # The release's pack (release.yaml's pi_legion_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # legion.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
-      # license cannot be determined) and stages this plugin's eight skills. The listing shows the
+      # license cannot be determined) and stages this plugin's nine skills. The listing shows the
       # tarball ships those, its agents/, and nothing of the Envoy plugin's: no envoy.js, none of
       # its skills.
       - name: Pack pi-legion
