@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-190",
+  "completed": "2026-10-26T23:12:30Z",
+  "round": 1,
+  "reviewedCodeHead": "d0cc087570fb47eebace29183275a446c4ba98d7",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 0,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head d0cc087570fb (newest pull_request run); all four completed success; compare d0cc0875...4b3d7eeb handoffsOnly true, 2 files. The non-required Legion Envoy and Contracts jobs (envoy-go and others) were still queued.",
+  "localChecks": "go test ./internal/dispatch/pmdoc/... at d0cc0875 on the reviewer pod: the 4 new linear tests pass; 3 timing tests that were on main before this PR (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail with '+Inf times the 0s', the gVisor clock granularity, on two runs; the PR body says they run in the envoy CI job.",
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at d0cc0875 (one Medium: the 4 KiB table-header cap; one Minor: the pending-sync notice). No security defect.",
+    "codeQuality": "Verdict: CHANGES at d0cc0875: structure findings only (opensLinkNext predicts the writer's mark choices; two readings of the linked image's anchor DOM; duplicate marker helpers in title_lines.go; render_test.go growth; small items). No behaviour change, so they go on the Fast-follow line."
+  },
+  "contractCensus": "Missing at the start of the round; the implementer added it to the PR body (body edit, head unchanged). The reviewer re-ran its /ws/doc, client, Admission* and editor_schema searches at d0cc0875: every hit is listed with a disposition (the one extra editor_schema hit, packages/envoy/dispatch-e2e, is an untracked build output). Rollout: immediate refusal, naming the link-stripping defect.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/title_lines.go",
+      "description": "makesTable (line 68) treats a header line longer than maxTableHeaderRead (4 KiB) as making a table, so a title line feed before a delimiter row is written &#10; where main writes it raw and both readers hold main's bytes (header and delimiter row of different widths). Reproduced at d0cc0875: 'p | q | ' + 5000 x + ' ![a](i \"a\\n|-|\\nb\")' renders 'a&#10;|-|&#10;b'; with 10 x it keeps the raw bytes. This is churn that acceptance (3) forbids, and the differential and the generated test do not see it because no corpus has a header line over 4 KiB. Fix in linear time without the byte cap, or the architect records it as an accepted exception to (3) and the PR body names it; add a corpus case either way."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/doc/pending-sync.ts",
+      "description": "After a row is refused as strips-link (line 430), the live document never gets its structs, so every later row from the same client has a clock gap, parks, and sets rebuiltAt; pendingNotice (connection.ts:23) checks rebuiltAt first, so the user is told 'the document was rebuilt since' and the link notice never shows whenever the old editor wrote more than one row after the strip. The pending-sync test covers one row only. Attribute later parks from a client whose row was refused as strips-link to strippedAt, and add a two-row test."
+    }
+  ],
+  "fastFollow": "pmdoc and picture-link structure: decide the '!' escape where the link's '[' is written rather than in opensLinkNext/refusesWWWAfter; one shared reading of the linked image's anchor for markdown-engine.ts and picture-view.ts; reuse escape.go's marker helpers in title_lines.go; split render_test.go; inline linkTail; remove the orphaned comment at render.go:140-148; route ':' and '|' outside markerLine; build the mdast image once in linked-image.ts toMarkdown.",
+  "threads": "0 review threads on the PR (gh api graphql)."
+}
