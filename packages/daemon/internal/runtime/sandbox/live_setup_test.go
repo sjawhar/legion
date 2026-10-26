@@ -218,15 +218,12 @@ func (r *liveRig) checkSetupNegative() error {
 	if _, err := r.kubectl("delete", "sandbox", name, "--wait=true", "--timeout=5m"); err != nil {
 		return err
 	}
-	if _, err := r.kubectl("delete", "pvc", IssueClaimName(c.token), "--ignore-not-found", "--wait=true", "--timeout=5m"); err != nil {
+	if err := r.awaitDiskGone(c); err != nil {
 		return err
-	}
-	if pvcs, err := r.issuePVCs(c.issue); err != nil || len(pvcs) != 0 {
-		return fmt.Errorf("setup-negative PVCs after Sandbox deletion: %v (%v)", pvcs, err)
 	}
 	cleaned = true
 	c.loc, c.last, c.state = nil, nil, stateReleased
-	note("operator", "deleted throwaway Sandbox %s and its PVC", name)
+	note("operator", "deleted throwaway Sandbox %s; its pod's own disk %s went with its pod", name, issueDiskName(c.token))
 	return nil
 }
 

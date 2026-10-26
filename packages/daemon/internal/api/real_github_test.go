@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -76,22 +77,79 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	t.Log("clone through gh auth git-credential: succeeded")
 }
 
-// realGitHubApps is Legion's real implement and review Apps, their private keys read from the
-// devbox's secrets store: the Apps the gated real-GitHub proofs drive.
+// This deployment's own App pair, which an unset input takes. Each value is also
+// scripts/e2e/lib/github-apps.sh's, and TestAppFallbacksMatchTheLiveProofLib reads these very
+// constants against that file, so the gated proofs here and every live proof run as one pair.
+const (
+	defaultImplementAppID      = "3202636"
+	defaultImplementAppKeyName = "LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"
+	defaultReviewAppID         = "3202653"
+	defaultReviewAppKeyName    = "GH_REVIEW_APP_PRIVATE_KEY_B64"
+)
+
+// realGitHubApps is Legion's implement and review Apps: this repository's own deployment by
+// default, another deployment's through the same four inputs the stage proofs read
+// (scripts/e2e/lib/github-apps.sh) — each App's id and the secrets-store key the devbox's
+// `secrets` CLI resolves to its private key. A malformed input fails the run naming it, never its
+// value.
 func realGitHubApps(t *testing.T) config.GitHubApps {
 	t.Helper()
+	input := func(name, fallback string, valid *regexp.Regexp) string {
+		// Only an unset input takes the default: an input set to an empty value is a command that
+		// printed nothing, which the live proofs' lib refuses too.
+		value, set := os.LookupEnv(name)
+		if !set {
+			return fallback
+		}
+		if !valid.MatchString(value) {
+			t.Fatalf("%s is malformed (want %s; the value is not printed): unset, it takes this deployment's own App", name, valid)
+		}
+		return value
+	}
+	// The bounds are lib/github-apps.sh's: a pasted base64 key is letters and digits too, so only
+	// its length tells it from a store key's name, and a refusal prints neither.
+	id := regexp.MustCompile(`^[1-9][0-9]{0,11}$`)
+	key := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	apps, err := config.ResolveGitHubApps(config.GitHubApps{
 		Implement: config.GitHubApp{
-			AppID: "3202636", PrivateKeyCommand: privateKeyCommand("LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"),
+			AppID: input("LEGION_E2E_IMPLEMENT_APP_ID", defaultImplementAppID, id),
+			PrivateKeyCommand: privateKeyCommand(
+				input("LEGION_E2E_IMPLEMENT_APP_KEY_NAME", defaultImplementAppKeyName, key),
+			),
 		},
 		Review: config.GitHubApp{
-			AppID: "3202653", PrivateKeyCommand: privateKeyCommand("GH_REVIEW_APP_PRIVATE_KEY_B64"),
+			AppID: input("LEGION_E2E_REVIEW_APP_ID", defaultReviewAppID, id),
+			PrivateKeyCommand: privateKeyCommand(
+				input("LEGION_E2E_REVIEW_APP_KEY_NAME", defaultReviewAppKeyName, key),
+			),
 		},
 	})
 	if err != nil {
 		t.Fatalf("resolve the GitHub App private-key commands: %v", err)
 	}
 	return apps
+}
+
+// TestAppFallbacksMatchTheLiveProofLib keeps the fallbacks above equal to the live proofs' own, in
+// scripts/e2e/lib/github-apps.sh, which is the one place this deployment's pair is written: the
+// two gated proofs above and every live proof must run as the same Apps. It is not gated, so a
+// change to either side fails the ordinary `go test`.
+func TestAppFallbacksMatchTheLiveProofLib(t *testing.T) {
+	lib, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "scripts", "e2e", "lib", "github-apps.sh"))
+	if err != nil {
+		t.Fatalf("read the live proofs' App lib: %v", err)
+	}
+	for _, want := range []struct{ variable, value string }{
+		{"default_implement_app_id", defaultImplementAppID},
+		{"default_implement_app_key_name", defaultImplementAppKeyName},
+		{"default_review_app_id", defaultReviewAppID},
+		{"default_review_app_key_name", defaultReviewAppKeyName},
+	} {
+		line := want.variable + "=" + want.value + "\n"
+		if !bytes.Contains(lib, []byte(line)) {
+			t.Errorf("scripts/e2e/lib/github-apps.sh does not set %s, which realGitHubApps falls back to: the two must name one App", line[:len(line)-1])
+		}
+	}
 }
 
 func privateKeyCommand(key string) string {

@@ -1882,12 +1882,12 @@ func TestAFetchThatFailsInTheDeltaLeavesTheCachesStreamInTheFeed(t *testing.T) {
 	}
 }
 
-// A feed kept on the issue's volume is fetched into with the narrowed refspecs, and holds GitHub's
-// branch names: an issue branch GitHub deleted leaves the feed, as provisioning relies on (a
-// bookmark with no row starts at the default branch), and so does a branch outside the two that
-// the cache's stream brought and GitHub has since deleted, while one GitHub still has stays as the
-// stream left it, and a branch outside the two pushed since is not taken.
-func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *testing.T) {
+// A feed a retried fetch finds on the pod's disk is fetched into with the narrowed refspecs, and
+// holds GitHub's branches as GitHub has them: an issue branch GitHub deleted leaves the feed, as
+// provisioning relies on (a bookmark with no row starts at the default branch), and so does a
+// branch outside the two that the cache's stream brought and GitHub has since deleted, while one
+// GitHub still has at the same tip stays, and a branch outside the two pushed since is not taken.
+func TestARetriedFetchTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *testing.T) {
 	run := newLocalRunner(t)
 	pushRemoteBranch(t, run.remote, "legion/ACME-1", "doomed.txt")
 	pushRemoteBranch(t, run.remote, "release/v7.1", "streamed.txt")
@@ -1911,7 +1911,7 @@ func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *tes
 		t.Fatalf("the second Fetch: %v", err)
 	}
 	if report.CacheBytes != 0 || served.tarAsked != 1 {
-		t.Fatalf("the second Fetch reported %+v after %d tars, want the delta alone into the feed on the volume", report, served.tarAsked)
+		t.Fatalf("the second Fetch reported %+v after %d tars, want the delta alone into the feed the first left", report, served.tarAsked)
 	}
 	var fetch Command
 	for _, call := range run.Calls()[before:] {
@@ -1920,7 +1920,7 @@ func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *tes
 		}
 	}
 	if want := []string{"--prune", "--quiet", "https://github.com/acme/widgets", "+refs/heads/main:refs/heads/main", "+refs/heads/legion/*:refs/heads/legion/*"}; fetch.Argv == nil || !slices.Equal(fetch.Argv[len(fetch.Argv)-5:], want) {
-		t.Fatalf("the feed on the volume was fetched with %q, want it ending in %q", fetch.Argv, want)
+		t.Fatalf("the feed the first fetch left was fetched with %q, want it ending in %q", fetch.Argv, want)
 	}
 	refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)")
 	for ref, want := range map[string]bool{"refs/heads/legion/ACME-1": false, "refs/heads/legion/ACME-2": true, "refs/heads/release/v7.1": true, "refs/heads/unread/big": false, "refs/heads/gone/soon": false} {
@@ -1936,14 +1936,14 @@ func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *tes
 	}
 }
 
-// When GitHub's default is switched from main to trunk and main then moves, a feed kept on the
-// volume keeps no stale tip of main. For an issue whose recorded default is main, the delta brings
+// When GitHub's default is switched from main to trunk and main then moves, a feed a retried
+// fetch finds keeps no stale tip of main. For an issue whose recorded default is main, the delta brings
 // main current beside trunk, so provisioning starts there as it did when every branch was fetched.
 // With no recorded default (a daemon from before the runtime told it), main is outside the delta
 // and is deleted, so provisioning finds it absent and refuses rather than starting from the tip
 // main had when the feed was first streamed. A branch outside the delta that GitHub has not moved
 // stays either way.
-func TestAFeedOnTheVolumeKeepsNoStaleBranchAfterTheDefaultIsSwitched(t *testing.T) {
+func TestARetriedFetchKeepsNoStaleBranchAfterTheDefaultIsSwitched(t *testing.T) {
 	for _, recorded := range []string{"main", ""} {
 		t.Run("recorded default "+cmp.Or(recorded, "none"), func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -1989,9 +1989,67 @@ func TestAFeedOnTheVolumeKeepsNoStaleBranchAfterTheDefaultIsSwitched(t *testing.
 	}
 }
 
-// A default branch GitHub renamed leaves a feed kept on the volume: the next fetch takes the new
+// A fresh feed — every pod's first fetch since an issue's disk dies with its pod — streamed from a
+// cache taken before GitHub's default moved off the issue's recorded default. When GitHub still
+// has the recorded default and it has moved since the cache's tar, the delta brings it current
+// beside the new default. When GitHub no longer has it (renamed away), the fetch still succeeds:
+// the delta does not name it, the feed's old copy is deleted, and that is logged, so provisioning
+// refuses an issue with no branch rather than starting it from the cache's old tip.
+func TestAFreshFeedHoldsTheRecordedDefaultAsGitHubHasIt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		move    func(t *testing.T, remote string) string
+		present bool
+	}{
+		{"moved and still on GitHub", func(t *testing.T, remote string) string {
+			pushRemoteBranch(t, remote, "trunk", "trunk.txt")
+			runSetup(t, t.TempDir(), "git", "--git-dir="+remote, "symbolic-ref", "HEAD", "refs/heads/trunk")
+			return pushRemoteBranch(t, remote, "main", "moved.txt")
+		}, true},
+		{"renamed away on GitHub", func(t *testing.T, remote string) string {
+			runSetup(t, t.TempDir(), "git", "--git-dir="+remote, "branch", "-m", "main", "trunk")
+			return ""
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
+			want := tc.move(t, run.remote)
+			req := fetchRequest(t)
+			var logged []string
+			req.CacheURL, req.CacheToken, req.RecordedDefault = served.serve(t), testCacheToken, "main"
+			req.Log = func(line string) { logged = append(logged, line) }
+			report, err := Fetch(context.Background(), run, req)
+			if err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			var fetch Command
+			for _, call := range run.Calls() {
+				if commandWith(call.Argv, "git", "--git-dir="+report.Feed, "fetch") {
+					fetch = call
+				}
+			}
+			if named := slices.Contains(fetch.Argv, "+refs/heads/main:refs/heads/main"); named != tc.present {
+				t.Errorf("the delta ran %q, naming main %t, want %t", fetch.Argv, named, tc.present)
+			}
+			refs := runSetup(t, report.Feed, "git", "--git-dir="+report.Feed, "for-each-ref", "--format=%(refname)")
+			if held := strings.Contains(refs, "refs/heads/main\n"); held != tc.present || !strings.Contains(refs, "refs/heads/trunk\n") {
+				t.Fatalf("the feed's refs are %q, want trunk, and main %t", refs, tc.present)
+			}
+			if tc.present {
+				if got := strings.TrimSpace(runSetup(t, report.Feed, "git", "--git-dir="+report.Feed, "rev-parse", "refs/heads/main")); got != want {
+					t.Errorf("the feed's main is %s, want GitHub's %s", got, want)
+				}
+			} else if !slices.Contains(logged, "removed main from the feed: GitHub no longer has it") {
+				t.Errorf("the removal of main was not logged: %q", logged)
+			}
+		})
+	}
+}
+
+// A default branch GitHub renamed leaves a feed a retried fetch finds: the next fetch takes the new
 // name, deletes the old one, and points HEAD at the new one.
-func TestAFeedOnTheVolumeFollowsARenamedDefaultBranch(t *testing.T) {
+func TestARetriedFetchFollowsARenamedDefaultBranch(t *testing.T) {
 	run := newLocalRunner(t)
 	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
 	req := fetchRequest(t)

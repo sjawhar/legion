@@ -140,10 +140,12 @@ func (r *liveRig) checkCacheSecondPod() error {
 // its run's own issue (cacheRunIssue), onto the repository as a commit of its own — a file only
 // that commit adds, on top of the default branch's head — and checks inside the cache's pod that
 // its clone lacks that commit (deleted when the harness ends).
-// cache-b's Sandbox and volume are then deleted while no runtime runs. Relaunched with the branch as
-// its recovery source, the new pod fills its new feed from the cache again, and, while the cache
-// still lacks the commit, GitHub's delta brings it (more than no bytes); the workspace is
-// provisioned on the branch: its @- is that commit, and the file that commit added is in it.
+// cache-b's Sandbox is then deleted while no runtime runs, which takes its pod and, with the pod,
+// the disk its workspace was on — what every stop of an issue now leaves (INFRA-80). Relaunched,
+// the new pod fills its new feed from the cache again, and, while the cache still lacks the
+// commit, GitHub's delta brings it (more than no bytes); the workspace is provisioned on the
+// branch the issue pushed, which is where its work survived: its @- is that commit, and the file
+// that commit added is in it.
 func (r *liveRig) checkCacheLostVolume() error {
 	status, err := r.awaitCacheReady()
 	if err != nil {
@@ -190,14 +192,11 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if _, err := r.kubectl("delete", "sandbox", name, "--wait=true", "--timeout=5m"); err != nil {
 		return err
 	}
-	if _, err := r.kubectl("delete", "pvc", IssueClaimName(c.token), "--ignore-not-found", "--wait=true", "--timeout=5m"); err != nil {
+	if err := r.awaitDiskGone(c); err != nil {
 		return err
 	}
-	if bound, err := r.issuePVCs(c.issue); err != nil || len(bound) != 0 {
-		return fmt.Errorf("cache-b's volume outlived its deletion: %v (%v)", bound, err)
-	}
 	c.loc, c.last, c.state = nil, nil, stateNone
-	note("operator", "deleted Sandbox %s and PVC %s while no runtime ran", name, IssueClaimName(c.token))
+	note("operator", "deleted Sandbox %s while no runtime ran; its pod's own disk %s went with it", name, issueDiskName(c.token))
 
 	if err := r.startRuntime(); err != nil {
 		return err
@@ -213,9 +212,10 @@ func (r *liveRig) checkCacheLostVolume() error {
 		return err
 	}
 	c.bootToken, c.gen = r.reg.mint(c.token, true)
-	spec := r.spec(c, "")
-	spec.WorkspaceRecoveredFrom = dir.Bookmark
-	loc, err := r.rt.Spawn(r.ctx, spec)
+	// A plain Spawn: nothing tells the launch that a disk was lost any more, since every launch of
+	// an issue starts on a disk of its own. workspace-init provisions on the issue's branch
+	// because origin holds one (internal/workspace's Provision), not because this names it.
+	loc, err := r.rt.Spawn(r.ctx, r.spec(c, ""))
 	if err != nil {
 		return err
 	}
@@ -255,7 +255,7 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if err != nil || held != strings.TrimSpace(content) {
 		return fmt.Errorf("the recovered workspace's %s holds %q (%v), want %q", marker, held, err, strings.TrimSpace(content))
 	}
-	note("runtime", "Spawn(%s) with WorkspaceRecoveredFrom %s into a new Sandbox and volume", c.token, dir.Bookmark)
+	note("runtime", "Spawn(%s) into a new Sandbox, a new pod and a disk of that pod's own; its workspace stands on %s", c.token, dir.Bookmark)
 	note("operator", "init log: %s; workspace @- %s = %s, not the default branch's %s; %s holds the pushed line", oneLine(log), parent, dir.Bookmark, base, marker)
 	return nil
 }

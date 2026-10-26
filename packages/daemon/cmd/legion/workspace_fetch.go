@@ -33,7 +33,8 @@ var fetchClock workspace.Clock = workspace.WallClock{}
 
 // workspaceFetch fills the feed, the container's own directory on the issue's volume: from the
 // repository cache when one is named, presenting the token LEGION_REPOSITORY_CACHE_TOKEN_FILE
-// holds, then from GitHub for what it lacks; or from GitHub alone. The provisioning token is read
+// holds, then from GitHub the default branch, the issue's recorded default and the Legion issue
+// branches; or from GitHub alone. The provisioning token is read
 // from LEGION_PROVISION_TOKEN_FILE again before every transfer from GitHub, as the file stands then
 // (the daemon keeps the Secret it is projected from fresh while the fetch runs), so a long wait on
 // the cache never leaves the delta an expired token. It reads --repo before anything else, resolves

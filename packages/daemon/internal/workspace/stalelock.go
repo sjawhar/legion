@@ -48,8 +48,8 @@ func RemoveStaleGitLocks(workspace Workspace, now time.Time, log func(string)) e
 // file, which blocks every later update of that file. It also removes the `tmp_pack_*` and
 // `tmp_idx_*` files a transfer killed mid-pack leaves under objects/pack: git writes a received
 // pack under such a name and renames it once whole, so one left there is a pack that never
-// arrived, which nothing reads and which a feed kept on the volume would otherwise carry, and
-// hard-link into the issue's clone, for good. No other object is touched. Each removal is
+// arrived, which nothing reads and which a feed a retried fetch finds would otherwise carry,
+// and hard-link into the issue's clone. No other object is touched. Each removal is
 // logged with the file's path and age, and one it cannot remove is an error naming it. A feed's
 // only writer is Fetch, called by one process at a time: a pod's workspace-fetch, its first init
 // container and the one container that mounts the feed writable, or the repository cache's process

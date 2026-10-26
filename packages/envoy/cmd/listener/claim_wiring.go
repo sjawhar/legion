@@ -19,8 +19,16 @@ type subscribeBody struct {
 	SelfSubscribed bool `json:"self_subscribed"`
 	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel
 	// hostname): where the session process actually runs, as opposed to machineID below,
-	// which is always the registering listener's own machine (unrelated to the caller).
-	// Empty for a session whose plugin predates this field.
+	// which is always the registering listener's own machine (unrelated to the caller). It is the
+	// address the session's owning listener reaches its serving port at, unless the session runs
+	// on that listener's machine (it registered through it, or Host is that listener's machine
+	// id) and the listener has a host bridge (ENVOY_HOST_BRIDGE), which then wins. The owner is
+	// the listener the session's stored subscription names (the one
+	// store.Registry.Match delivers on), else the one it registered through; only the owner
+	// delivers to the session, and any other listener leaves inbox messages to it silently
+	// (session.ErrWrongMachine). Empty for a session whose plugin predates
+	// this field; its owning listener then falls back to host.docker.internal when the session
+	// registered through it, else to the machine id of the listener it registered through.
 	Host string `json:"host"`
 }
 

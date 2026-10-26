@@ -99,11 +99,13 @@ type FetchReport struct {
 // then clones the shared clone from the feed with no credential.
 //
 // The feed moves into place before the delta so that a fetch killed in the delta leaves the
-// cache's stream on the volume: the pod the daemon makes in its place finds the repository, and
-// asks GitHub for the delta alone. Nine LINUX issue pods died in the delta on 2026-10-26, and each
-// replacement threw away a verified 2 GB stream and began again (sjawhar/legion#2235). The feed
-// it leaves is a whole repository, no further behind GitHub than the cache is, and provisioning
-// never sees it: `workspace-init provision` runs only after this container exits 0.
+// cache's stream on the pod's disk: the kubelet's retry of this init container, on the same pod and
+// so the same disk, finds the repository and asks GitHub for the delta alone. Nine LINUX issue pods
+// died in the delta on 2026-10-26, and each new attempt threw away a verified 2 GB stream and began
+// again (sjawhar/legion#2235); a pod created anew still starts on an empty disk and streams the
+// cache whole. The feed it leaves is a whole repository, no further behind GitHub than the cache
+// is, and provisioning never sees it: `workspace-init provision` runs only after this container
+// exits 0.
 //
 // Each size-following stage of a fetch gets FetchTimeout of its own, and none starts past the one
 // it is in: from the cache, the stream and its verification share one and the delta from GitHub
@@ -323,8 +325,8 @@ func deltaBranches(ctx context.Context, run Runner, request FetchRequest, gitDir
 // GitHub's (heads, read by deltaBranches). Each removal is logged with its reason. So every branch
 // a feed holds after the fetch is GitHub's as it stood at this fetch, on a fresh feed and a kept
 // one alike, and nothing stale is left to start from. The narrowed delta prunes only within its
-// own refspecs, and a feed kept on the volume is never streamed again, so without this such a feed
-// would keep, for good, a branch GitHub deleted, the old name of a default branch GitHub renamed,
+// own refspecs, and a feed a retried fetch finds on the pod's disk is not streamed again, so without
+// this such a feed would keep a branch GitHub deleted, the old name of a default branch GitHub renamed,
 // and the tip it was first streamed at of a branch GitHub moved. A branch created on GitHub after
 // the read is not in heads and is not in the feed either, since nothing the fetch takes is deleted
 // here: only branches the feed held before the delta are candidates.
@@ -875,8 +877,8 @@ type feedTransfer struct {
 // the recorded default branch and the issue's own bookmark by name and no other. Every other
 // branch the feed holds is GitHub's own tip or absent: before the delta, Fetch deletes each one
 // GitHub no longer lists or has moved (pruneToGitHub), on a fresh feed and a kept one alike, since
-// this fetch's prune reaches only its own refspecs and a feed kept on the volume is never streamed
-// again. An agent that wants one of those branches as GitHub has it now fetches it from GitHub
+// this fetch's prune reaches only its own refspecs and a feed a retried fetch finds on the pod's disk
+// is not streamed again. An agent that wants one of those branches as GitHub has it now fetches it from GitHub
 // through its clone's origin. A branch outside the delta is then never pulled into every issue pod
 // at once: the LINUX deployment's owners each fetched 1.27 GB of one upstream-sync branch pushed
 // five minutes before they launched, which with the cache's stream and verification left nine of
@@ -886,8 +888,9 @@ type feedTransfer struct {
 // prunes only the refs those refspecs write: an issue branch GitHub deleted leaves the feed, as
 // provisioning relies on (a bookmark with no row on the feed starts at the default branch, and the
 // refusals that tell an operator to delete a branch on GitHub promise the next provisioning drops
-// its row). A recorded default GitHub no longer has is deleted the same way, and provisioning then
-// refuses it (baseCommit) rather than starting from an old tip.
+// its row). A recorded default GitHub no longer has is not in exact, and pruneToGitHub deletes it
+// before the delta, so provisioning refuses an issue with no branch whose recorded default is gone
+// (baseCommit) rather than starting it from an old tip.
 //
 // The repository cache's own process (exact empty) takes every branch instead, pruned of those
 // GitHub deleted: what it holds is what every issue pod of its repository starts from.

@@ -168,7 +168,9 @@ func TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt(t *testing.T) {
 }
 
 // Every relaunch before an agent registers — the deadline, a death, a retry, boot finishing an
-// interrupted launch — is a Spawn over a Sandbox that already exists (B2).
+// interrupted launch — is a Spawn over a Sandbox that already exists (B2). Each of these owns no
+// volume claim template, the shape this runtime makes for an issue: one of the release before the
+// pod-owned disk is replaced instead of kept (TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape).
 func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
@@ -216,12 +218,21 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 }
 
 // A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name,
-// and finds the Sandbox its old tree left, still labelled with that tree. The Sandbox owns the
-// issue's volume, which holds its clone, workspace and its roles' sessions, so the orphan root's
-// launch keeps it, relabelled for its own tree, and its pod mounts the same claim. One its old tree
-// left Running, none of whose roles runs any more, is suspended in the relabel's patch and kept the
-// same way. One a claim of the old tree still runs in is refused and left as it is.
-func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
+// and may find the Sandbox its old tree left, still labelled with that tree: a close deletes the
+// issue's Sandbox, so one is left only where that close never ran on it — the issue had already
+// moved, or a later start superseded the close — and its old tree's cleanup has not reached it
+// either. The orphan root's launch keeps that Sandbox, relabelled for its own tree, rather than
+// deleting and remaking it, and patches its labels, mode and pod template alone, leaving the rest
+// of its spec as it found it: the Sandbox it finds owns no volume claim template, the shape this
+// runtime makes for an issue, and the relabel adds none. Its disk it does not keep: an issue
+// pod's disk is the pod's own ephemeral volume, so the old tree's pod took it, and the orphan's
+// pod brings one of its own and provisions its workspace afresh. One its old tree left Running,
+// none of whose roles runs any more, is suspended in the relabel's patch and kept the same way.
+// One a claim of the old tree still runs in is refused and left as it is. An orphan root whose
+// Sandbox still owned the `issue` claim template of the release before the pod-owned disk would
+// be relabelled here and then replaced by the same launch, Sandbox and claim together
+// (TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape).
+func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
 	oldTree := map[string]string{labelProject: testProject, labelTree: labelValue(testTree), labelIssue: labelValue("LEGION-209")}
@@ -230,7 +241,7 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 		spec.Tree = "LEGION-209"
 		return spec
 	}
-	t.Run("suspended by its old tree, owning its volume", func(t *testing.T) {
+	t.Run("suspended by its old tree", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)})
 		loc := g.spawn(orphanSpec(t))
 		if deleted := slices.ContainsFunc(g.writes(), func(a action) bool { return a.resource == "sandboxes" && a.verb == "delete" }); deleted {
@@ -240,8 +251,8 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.Labels[labelIssue] != labelValue("LEGION-209") {
 			t.Fatalf("orphan root's Sandbox = %+v, want the old tree's Sandbox kept and relabelled for tree LEGION-209", s)
 		}
-		if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
-			t.Fatalf("orphan root's Sandbox claims %+v, want the issue volume it owned kept", s.Spec.VolumeClaimTemplates)
+		if len(s.Spec.VolumeClaimTemplates) != 0 {
+			t.Fatalf("orphan root's Sandbox claims %+v, want none: the launch patches its labels, mode and pod template alone", s.Spec.VolumeClaimTemplates)
 		}
 		if got := s.Spec.PodTemplate.Metadata.Labels[labelTree]; got != labelValue("LEGION-209") {
 			t.Fatalf("the relabelled Sandbox's pod template carries tree %q, want LEGION-209", got)
@@ -253,10 +264,7 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 		if pod.Labels[labelTree] != labelValue("LEGION-209") {
 			t.Fatalf("the new pod carries tree %q, want LEGION-209", pod.Labels[labelTree])
 		}
-		mounted := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == issueVolume })
-		if mounted < 0 || pod.Spec.Volumes[mounted].PersistentVolumeClaim == nil || pod.Spec.Volumes[mounted].PersistentVolumeClaim.ClaimName != IssueClaimName(orphan) {
-			t.Fatalf("the new pod's volumes %+v, want the issue's own claim %s", pod.Spec.Volumes, IssueClaimName(orphan))
-		}
+		podDisk(t, pod.Spec)
 	})
 	t.Run("left running by its old tree, none of whose roles runs", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
@@ -286,10 +294,7 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 		if pod == nil || pod.UID == old || string(pod.UID) != loc.Sandbox.PodUID || pod.Labels[labelTree] != labelValue("LEGION-209") {
 			t.Fatalf("pod %+v, locator %+v; want a new pod of tree LEGION-209 in place of the old tree's %s", pod, loc, old)
 		}
-		mounted := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == issueVolume })
-		if mounted < 0 || pod.Spec.Volumes[mounted].PersistentVolumeClaim == nil || pod.Spec.Volumes[mounted].PersistentVolumeClaim.ClaimName != IssueClaimName(orphan) {
-			t.Fatalf("the new pod's volumes %+v, want the issue's own claim %s", pod.Spec.Volumes, IssueClaimName(orphan))
-		}
+		podDisk(t, pod.Spec)
 	})
 	t.Run("still running its old tree's roles", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
@@ -304,10 +309,350 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 	})
 }
 
+// An issue Sandbox the release before the pod-owned disk created still owns the `issue` volume
+// claim template, and spec.volumeClaimTemplates is immutable in the CRD, so the issue's next
+// launch is the migration: it suspends the Sandbox, waits its pod out, deletes it in the
+// foreground — the claim it owns reaped with it — and creates one of the shape this runtime makes
+// now, which owns no template and whose pod carries a disk of its own. The order is what this
+// proves. The delete comes before the create, and both before the Secrets this launch writes: the
+// provisioning Secret and every role Secret are the Sandbox's own, so ones written first would be
+// reaped with the old Sandbox and the new pod's launchers would come up on nothing.
+//
+// The pod it replaces is live, with the issue's five other roles running in it, as every pod of
+// this cutover is: the suspension names it on the Sandbox, and the Sandbox the replacement creates
+// must carry that name, or each of those roles reads as having died on its own and is charged a
+// death for the daemon's own replacement.
+func TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape(t *testing.T) {
+	name := SandboxName(workerToken)
+	g := supersededIssue(t)
+	loc := g.spawn(workerSpec(t))
+	expectSteps(t, steps(t, g.writes(), name), "suspend", "delete sandbox", "create sandbox", "create secret", "run", "record addresses")
+	s := g.sandbox(name)
+	if s == nil || s.UID == "uid-sandbox-superseded" || len(s.Spec.VolumeClaimTemplates) != 0 {
+		t.Fatalf("the issue's Sandbox = %+v, want one this launch created, owning no volume claim template", s)
+	}
+	writes := g.writes()
+	at := func(what string, match func(action) bool) int {
+		t.Helper()
+		i := slices.IndexFunc(writes, match)
+		if i < 0 {
+			t.Fatalf("writes %v hold no %s", writes, what)
+		}
+		return i
+	}
+	deleted := at("delete of the superseded Sandbox", func(a action) bool {
+		return a.resource == "sandboxes" && a.verb == "delete" && a.name == name
+	})
+	created := at("create of the replacement Sandbox", func(a action) bool {
+		return a.resource == "sandboxes" && a.verb == "create" && a.name == name
+	})
+	role := at("write of the tester's launcher Secret", func(a action) bool {
+		return a.resource == "secrets" && a.name == roleSecretName(name, claim.RoleTester)
+	})
+	if deleted > created || created > role {
+		t.Fatalf("writes %v: the delete is write %d, the create %d, the tester's Secret %d; want the delete, then the create, then the role Secrets",
+			writes, deleted, created, role)
+	}
+	secret := g.secret(roleSecretName(name, claim.RoleTester))
+	if owner := secret.OwnerReferences; len(owner) != 1 || owner[0].UID != s.UID {
+		t.Fatalf("the tester's launcher Secret is owned by %+v, want the Sandbox this launch created (%s): the foreground delete reaps every Secret the old one owned",
+			owner, s.UID)
+	}
+	pod := g.pod(name)
+	if pod == nil || pod.UID == "uid-pod-old" || string(pod.UID) != loc.Sandbox.PodUID {
+		t.Fatalf("pod %+v, locator %+v; want the pod of the Sandbox this launch created", pod, loc)
+	}
+	podDisk(t, pod.Spec)
+	if named := s.Annotations[displacedAnnotation]; named != "uid-pod-old" {
+		t.Fatalf("the Sandbox this launch created names %q as the pod the daemon replaced, want uid-pod-old, as the suspension named it on its predecessor", named)
+	}
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	obs, err := g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod: %s, Displaced %t (%s); want the end read as the daemon's own, which the supervisor resumes uncharged",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+}
+
+// supersededIssue is a rig holding an issue Sandbox of the release before the pod-owned disk,
+// Running, with its live pod uid-pod-old, in which the tester's launch and its five siblings run:
+// what every running issue is at the cutover.
+func supersededIssue(t *testing.T, options ...rigOption) *rig {
+	t.Helper()
+	name := SandboxName(workerToken)
+	labels := claimLabels(claim.RoleTester)
+	g := newRig(t, []k8sruntime.Object{
+		withSupersededDisk(t, sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels)),
+		podObject(name, "uid-pod-old", "uid-sandbox-superseded", labels, runningStatus()),
+	}, options...)
+	g.suspendDelay = 50 * time.Millisecond
+	return g
+}
+
+// A sibling role of the pod a migrating launch replaces may be evaluated while that launch is
+// between deleting the Sandbox of the superseded disk shape and creating its replacement, when
+// the API server holds no Sandbox of the issue's name at all: the observer takes no launch turn.
+// Its end is the daemon's own all the same, and is read so — Displaced, which the supervisor
+// resumes uncharged — not as a death the replacement's annotation would arrive too late to undo,
+// since a Gone delivered leaves the watch. The probe here is made from inside that gap, on the Get
+// that confirms the delete, once the Sandbox store has lost the old Sandbox too, so neither the
+// store's copy nor the confirming read has anything to name the pod with.
+func TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced(t *testing.T) {
+	name := SandboxName(workerToken)
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	var deleting, probed atomic.Bool
+	var g *rig
+	var inGap runtime.Observation
+	var gapErr error
+	storeHeldIt := true
+	hooks := &sandboxHooks{
+		beforeDelete: func(n string) {
+			if n == name {
+				deleting.Store(true)
+			}
+		},
+		afterGet: func(n string) {
+			if n != name || !deleting.Load() || probed.Load() {
+				return
+			}
+			if _, err := g.dyn.Tracker().Get(sandboxGVR, testNamespace, name); !apierrors.IsNotFound(err) {
+				return
+			}
+			// The launch has seen the delete through and has yet to send its create. The probe's own
+			// confirming read comes through this hook too, so it is marked first.
+			probed.Store(true)
+			for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+				if s, _ := g.r.storedSandbox(name); s == nil {
+					storeHeldIt = false
+					break
+				}
+			}
+			inGap, gapErr = g.r.Probe(g.ctx, sibling)
+		},
+	}
+	g = supersededIssue(t, withSandboxHooks(hooks))
+	g.spawn(workerSpec(t))
+	if !probed.Load() {
+		t.Fatal("the launch never reached the gap between deleting the superseded Sandbox and creating its replacement")
+	}
+	if storeHeldIt {
+		t.Fatal("the Sandbox store still held the deleted Sandbox when the sibling was probed, so the probe proves nothing about the gap")
+	}
+	if gapErr != nil {
+		t.Fatal(gapErr)
+	}
+	if inGap.Kind != runtime.Gone || !inGap.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, read while no Sandbox of the issue exists: %s, Displaced %t (%s); want Gone and Displaced, the daemon's own replacement, which the supervisor resumes uncharged",
+			inGap.Kind, inGap.Displaced, inGap.Detail)
+	}
+}
+
+// The name the runtime keeps for that gap names one pod by uid, so it answers for the roles of
+// that pod and no other. A role recorded in an earlier pod of the same issue — one an earlier
+// replacement ended, whose Sandbox is long gone — ends on its own, and a read of it inside the gap
+// must not take that end for the daemon's doing: a death read as a displacement is a death the
+// supervisor never counts and a failing role nothing ever stops. The invariant is the one
+// relaunch.go's strand states; without the uid comparison in evaluate the whole package stays
+// green, which is why this is here.
+func TestAGapReadOfARoleOfAnotherPodThanTheReplacementEndedIsNotDisplaced(t *testing.T) {
+	name := SandboxName(workerToken)
+	older := sandboxLocator(otherToken, "uid-pod-older")
+	var deleting, probed atomic.Bool
+	var g *rig
+	var inGap runtime.Observation
+	var gapErr error
+	storeHeldIt := true
+	hooks := &sandboxHooks{
+		beforeDelete: func(n string) {
+			if n == name {
+				deleting.Store(true)
+			}
+		},
+		afterGet: func(n string) {
+			if n != name || !deleting.Load() || probed.Load() {
+				return
+			}
+			if _, err := g.dyn.Tracker().Get(sandboxGVR, testNamespace, name); !apierrors.IsNotFound(err) {
+				return
+			}
+			probed.Store(true)
+			for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+				if s, _ := g.r.storedSandbox(name); s == nil {
+					storeHeldIt = false
+					break
+				}
+			}
+			inGap, gapErr = g.r.Probe(g.ctx, older)
+		},
+	}
+	g = supersededIssue(t, withSandboxHooks(hooks))
+	g.spawn(workerSpec(t))
+	if !probed.Load() {
+		t.Fatal("the launch never reached the gap between deleting the superseded Sandbox and creating its replacement")
+	}
+	if storeHeldIt {
+		t.Fatal("the Sandbox store still held the deleted Sandbox when the older pod's role was probed, so the probe proves nothing about the gap")
+	}
+	if gapErr != nil {
+		t.Fatal(gapErr)
+	}
+	if inGap.Kind != runtime.Gone || inGap.Displaced {
+		t.Fatalf("a role recorded in pod uid-pod-older, read in the gap the replacement of pod uid-pod-old opened: %s, Displaced %t (%s); want Gone and not Displaced — the kept name answers for the pod the suspension ended and for no other",
+			inGap.Kind, inGap.Displaced, inGap.Detail)
+	}
+}
+
+// The mirror of TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced, whose probe
+// begins inside the gap: here the confirming read is begun before the launch writes what it
+// keeps for the gap, and the API server answers it only once the launch has written that record
+// and seen its foreground delete through — a GET held up by load or a throttle spans the whole
+// delete. The Sandbox store has yet to hear of the suspension's patch naming the pod, since
+// nothing orders it after the pod store that shows the pod gone, so the probe asks the API server
+// with nothing held: the record it took is empty for the old reason and the absence the read
+// reports is true for the new one. Read as settled that is Gone and not Displaced, a final verdict
+// that takes the incarnation off the watch and charges the supervisor a death the daemon made. The
+// record moved while the read was out, so the observation is Uncertain, and the next one, with the
+// record settled, reads the displacement.
+func TestAConfirmingReadTheReplacementsDeleteOvertakesIsUncertain(t *testing.T) {
+	name := SandboxName(workerToken)
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	g := newRig(t, []k8sruntime.Object{
+		withSupersededDisk(t, sandboxObject(t, name, "uid-sandbox-superseded", modeSuspended, claimLabels(claim.RoleTester))),
+	}, withoutController())
+	var armed, overtaken atomic.Bool
+	g.dyn.PrependReactor("get", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() != name || !armed.CompareAndSwap(true, false) {
+			return false, nil, nil
+		}
+		// The probe has taken the record and sent its read. Before the answer comes back the launch
+		// keeps the replaced pod's name for the gap and its delete completes, as
+		// replaceSupersededSandbox does, so the answer is the absence that delete made.
+		g.r.strand(name, "uid-pod-old")
+		if err := g.dyn.Tracker().Delete(sandboxGVR, testNamespace, name); err != nil {
+			return true, nil, err
+		}
+		overtaken.Store(true)
+		return true, nil, apierrors.NewNotFound(sandboxGVR.GroupResource(), name)
+	})
+	armed.Store(true)
+	obs, err := g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !overtaken.Load() {
+		t.Fatalf("the probe never sent the read that confirms the Sandbox's absence (%s: %s), so it proves nothing about that read", obs.Kind, obs.Detail)
+	}
+	if obs.Kind != runtime.Uncertain {
+		t.Fatalf("the reviewer recorded in the replaced pod, read by a confirming GET the replacement's delete overtook: %s, Displaced %t (%s); want Uncertain — the record taken before the read is not the one its absence belongs to, and a final verdict would charge a death the daemon made",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+	g.eventually("the Sandbox store to lose the deleted Sandbox", func() bool {
+		s, _ := g.r.storedSandbox(name)
+		return s == nil
+	})
+	obs, err = g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Kind != runtime.Gone || !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, read again once the record settled: %s, Displaced %t (%s); want Gone and Displaced",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+}
+
+// A replacement whose Create fails leaves the issue's name with no Sandbox until the issue's next
+// launch: the roles of the pod it replaced are read Displaced throughout, not only for the moment
+// a successful Create would have taken, and the Sandbox that next launch creates carries the name,
+// so from then the durable record answers.
+func TestAReplacementWhoseCreateFailsKeepsTheReplacedPodsRolesDisplaced(t *testing.T) {
+	name := SandboxName(workerToken)
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	g := supersededIssue(t)
+	var refused atomic.Bool
+	g.dyn.PrependReactor("create", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if !refused.CompareAndSwap(false, true) {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewForbidden(sandboxGVR.GroupResource(), name, errors.New("exceeded quota"))
+	})
+	g.launcher(workerToken)
+	if err := failedLaunch(t, g, workerSpec(t)); err == nil || !strings.Contains(err.Error(), "create sandbox") {
+		t.Fatalf("a launch whose replacement's Create is refused = %v, want its create's refusal", err)
+	}
+	if g.sandbox(name) != nil {
+		t.Fatal("the issue holds a Sandbox after its replacement's Create was refused")
+	}
+	g.eventually("the Sandbox store to lose the deleted Sandbox", func() bool {
+		s, _ := g.r.storedSandbox(name)
+		return s == nil
+	})
+	obs, err := g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Kind != runtime.Gone || !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, read after the replacement's Create failed: %s, Displaced %t (%s); want Gone and Displaced",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+	g.spawn(workerSpec(t))
+	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != "uid-pod-old" {
+		t.Fatalf("the Sandbox the next launch created names %q as the pod the daemon replaced, want uid-pod-old, which the failed replacement left with no Sandbox to carry it", named)
+	}
+	if obs, err := g.r.Probe(g.ctx, sibling); err != nil || !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, once a Sandbox carries the name again: %+v, %v; want Displaced", obs, err)
+	}
+}
+
+// What the runtime keeps for the gap a replacement opens goes once the replacement carries it,
+// and is never read past that. A role of the replacement's own pod whose process then ends on its
+// own is a death, not the daemon's doing: the replacement's annotation names the pod the migration
+// replaced, never this one. And when the issue closes, deleting its Sandbox, and is later launched
+// again, the Sandbox made afresh names no pod at all: the one the migration replaced was never
+// that Sandbox's, and a name kept past the replacement's Create would be written onto it.
+func TestTheNameAReplacementKeptForItsGapGoesOnceTheReplacementCarriesIt(t *testing.T) {
+	name := SandboxName(workerToken)
+	g := supersededIssue(t)
+	loc := g.spawn(workerSpec(t))
+	if s := g.sandbox(name); s == nil || s.UID == "uid-sandbox-superseded" {
+		t.Fatal("the launch left the issue no Sandbox or kept uid-sandbox-superseded, want the replacement it created in its place")
+	}
+	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != "uid-pod-old" {
+		t.Fatalf("the replacement names %q as the pod the daemon replaced, want uid-pod-old", named)
+	}
+	g.update(g.pod(name), func(p *corev1.Pod) {
+		p.Status.Phase = corev1.PodFailed
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: string(claim.RoleTester), State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+		}}
+	})
+	g.eventually("the pod store to see the replacement's pod fail", func() bool { return phaseOf(g.r.storedPod(name)) == corev1.PodFailed })
+	obs, err := g.r.Probe(g.ctx, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Kind != runtime.Gone || obs.Displaced {
+		t.Fatalf("the tester, whose pod in the replacement failed on its own: %s, Displaced %t (%s); want Gone and not Displaced, a death the supervisor charges",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, func(context.Context) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if g.sandbox(name) != nil {
+		t.Fatal("the closed issue still holds a Sandbox")
+	}
+	g.spawn(workerSpec(t))
+	if named, ok := g.sandbox(name).Annotations[displacedAnnotation]; ok {
+		t.Fatalf("the Sandbox the re-admitted issue's launch made afresh names %q as a pod the daemon replaced, want none: that pod was never this Sandbox's", named)
+	}
+}
+
 // The death path's Resume over a Failed issue pod, which the controller keeps under Running:
 // suspend, wait the pod out, rewrite the Secrets, run (B1). The role's launcher in the new pod is
-// told the new generation's boot token and resumes the recorded session, and the init container is
-// told where that session is on the issue's volume.
+// told the new generation's boot token and resumes the recorded session, which the session database
+// kept: nothing of it was on the failed pod's disk.
 func TestResumeAfterAFailedPod(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
@@ -808,8 +1153,8 @@ func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
 	}
 }
 
-// A step of an issue pod's provisioning that fails — the retained-sessions read, the
-// provisioning-token mint (a GitHub outage), the provisioning Secret's write, a role's GitHub
+// A step of an issue pod's provisioning that fails — the provisioning-token mint (a GitHub
+// outage), the provisioning Secret's write, a role's GitHub
 // credential mint for its Secret — fails that launch with its error and nothing more: the launch
 // returns it, never panics, gives the pod's launch turn back, and the pod's next launch, once the
 // failure passes, launches.
@@ -820,13 +1165,6 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 		fail func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec)
 		want string
 	}{
-		"the retained-sessions read": {
-			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
-				store := &sessionsFailingStore{fakeStore: newFakeStore(), failed: failed, err: failure}
-				return withOptions(func(o *Options) { o.Store = store }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
-			},
-			want: "read its issue's retained sessions",
-		},
 		"the provisioning-token mint": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
 				tokens := &outageTokens{failed: failed}
@@ -896,20 +1234,6 @@ func failedLaunch(t *testing.T, g *rig, spec runtime.SpawnSpec) error {
 	defer cancel()
 	_, err := g.r.Spawn(launching, spec)
 	return err
-}
-
-// sessionsFailingStore is a fakeStore whose next retained-sessions read fails, once.
-type sessionsFailingStore struct {
-	*fakeStore
-	failed *atomic.Bool
-	err    error
-}
-
-func (s *sessionsFailingStore) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
-	if s.failed.CompareAndSwap(false, true) {
-		return false, s.err
-	}
-	return s.fakeStore.IssueHasSessions(ctx, project, issue)
 }
 
 // outageTokens refuses its next installation token, once, as a GitHub outage would.
@@ -1159,18 +1483,14 @@ func TestAnAPIServerThrottleOnTheAddressRecordSpendsNoLaunchBudget(t *testing.T)
 
 // A Resume whose next spec prepare rejects must stop the old role child too. Machine has already
 // let its locator go, so the malformed spec must not leave the child either watched or running as
-// the Machine retries to Failed. Each is a different prepare refusal that happens before relaunch
-// otherwise forgets the role: the recorded session path, a prompt file and one argv string.
+// the Machine retries to Failed. The refusal is one prepare makes before relaunch otherwise
+// forgets the role: a role prompt file that is not on disk.
 func TestAPrepareRefusalOnResumeNeverLeavesASupervisedRoleChildRunning(t *testing.T) {
 	for name, tc := range map[string]struct {
 		sessionFile string
 		mutate      func(*runtime.SpawnSpec)
 		want        string
 	}{
-		"an invalid stored session path": {
-			sessionFile: "/sessions/not-under-the-pod.jsonl",
-			want:        "is not under",
-		},
 		"a missing prompt file": {
 			sessionFile: resumeSession,
 			mutate: func(spec *runtime.SpawnSpec) {
@@ -1621,5 +1941,38 @@ func TestALaunchWhoseRunningPatchTimesOutAfterApplyingLeavesItsSandboxSuspended(
 	}
 	if mode := g.sandbox(SandboxName(workerToken)).mode(); mode != modeSuspended {
 		t.Fatalf("the launch left its sandbox %s after an ambiguous Running patch", mode)
+	}
+}
+
+// A launch that runs out of time on a pod still Pending reports that pod's events beside its
+// phase. A pod whose disk the kubelet cannot provision — one waiting behind the claim of a
+// predecessor the garbage collector has not reaped — reports nothing but Pending, and the event is
+// the whole of the reason (INFRA-80). A pod past Pending carries none: its phase is the answer.
+func TestALaunchThatWaitedOutAPendingPodReportsItsEvents(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	name := loc.Sandbox.Name
+	pod := g.pod(name)
+	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: name + ".1", Namespace: testNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: name, UID: pod.UID},
+		Type:           "Warning", Reason: "FailedBinding",
+		Message: "volume issue is still bound to the previous pod",
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if detail := g.r.waitedOut(g.ctx, g.sandbox(name)); strings.Contains(detail, "events:") {
+		t.Errorf("waitedOut over a running pod = %q, want no events: its phase is the answer", detail)
+	}
+	g.update(pod, func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending })
+	g.eventually("the informer to see the pending pod", func() bool {
+		p := g.r.storedPod(name)
+		return p != nil && p.Status.Phase == corev1.PodPending
+	})
+	detail := g.r.waitedOut(g.ctx, g.sandbox(name))
+	for _, want := range []string{"sandbox " + name + " is Running", "Pending", "events: Warning FailedBinding: volume issue is still bound to the previous pod"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("waitedOut over a pending pod = %q, want it to carry %q", detail, want)
+		}
 	}
 }

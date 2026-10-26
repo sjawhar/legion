@@ -587,9 +587,10 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	}
 	// The fetch takes no snapshot of the clone's working copy: a snapshot runs the working-copy
 	// filter, fsmonitor, and signing programs jj's configuration names, which a tree agent can set,
-	// and on the tmux runtime this fetch holds the one-shot credential. A failed fetch is diagnosed
-	// against the old alternate-clone failure before its own error is returned; a successful fetch
-	// pays no connectivity scan.
+	// and on the tmux runtime this fetch holds the one-shot credential. A failed fetch returns its
+	// own error: no clone this code makes borrows objects from the feed (clone.go makes a plain
+	// local clone), so the connectivity scan that once diagnosed a clone whose borrowed history had
+	// gone had no case left and was deleted with the disk that carried such a clone (INFRA-80).
 	fetch := []string{"git", "fetch"}
 	for _, branch := range source.branches {
 		fetch = append(fetch, "--branch", exactName(branch))
@@ -599,17 +600,8 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 		return err
 	}
 	result, runErr := runCommand(ctx, run, argv, source.env, "")
-	_, fetchErr := checkedResult(argv, result, runErr)
-	if fetchErr == nil {
-		return nil
-	}
-	if err := ensureCloneConnectivity(ctx, run, cloneDir); err != nil {
-		return err
-	}
-	if err := ensureJujutsuConnectivity(ctx, run, cloneDir); err != nil {
-		return err
-	}
-	return fetchErr
+	_, err = checkedResult(argv, result, runErr)
+	return err
 }
 
 // GitHubCredentialHelper is the `credential.helper` every shared clone gets: `legion
