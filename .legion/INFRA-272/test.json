@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-272",
+  "completed": "2026-10-26T02:55:30Z",
+  "headSha": "4e0bf68c654d67fa81cb961765e4dc8f2529e915",
+  "evidence": "https://github.com/sjawhar/legion/pull/2223#issuecomment-6407172561",
+  "ci": "Tests run 40259286382 (lint, typecheck, test) success; PR Title run 40259317604 success (40259286362 cancelled, superseded); Legion Envoy and Contracts 40259286354, Docs 40259286387, Worker Image 40259286381 success, all at 4e0bf68c. sjawhar/legion main requires lint, typecheck, test, pr-title.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its command on a fresh embedded Postgres 16 (own initdb -E UTF8, own port, not the implementer's instance) and the script's own nats-server v2.10.22: LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disable bash scripts/e2e/no-required-checks.sh -> 'no required checks e2e: PASS in 575s', exit 0; all four steps observed as the implementer recorded them (step 1 no checksVerdict key and no checks-red; step 2 red, implementing, 'CI is red at a1: ci'; step 3 green; step 4 held red at b1 with one pr-blocked, base -> nothing, push b1->b2 fixAttempts 1, base -> ci, red at b2 -> implementing, 'CI is red at b2: ci')."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Acceptance 1 and 3: a base branch that requires no check and no workflow gives no CI value (checksVerdict absent), never green, whether its checks failed or passed, and a later .legion/-only push leaves it absent and sends nothing back; a base that requires only workflows is judged by them",
+      "surface": "the whole daemon (run, via startDaemonWithin) over a fresh Postgres 16 and nats-server v2.10.22; facts only as GitHub envelopes on ENVOY_NOTIFICATIONS; a GitHub REST stand-in extended with a ruleset workflows rule and /actions/runs; assertions from raw GET /legion/v1/state (what read_record, read_state and legion state --json read) and the Envoy stand-in's notices",
+      "command": "throwaway -tags e2e driver TestTesterProbeLive in packages/daemon/internal/daemon (not committed), built with go test -c -tags e2e and run with LEGION_TEST_PG_DSN, LEGION_E2E_NATS_URL; transcript https://github.com/sjawhar/legion/pull/2223#issuecomment-6407172561",
+      "observed": "--- PASS: TestTesterProbeLive (241.43s). P1 nothing required, ci passed: pullRequest {\"fixAttempts\":0,\"head\":\"p1\",...} with no checksVerdict key, still reviewing, no checks-red over 3s. P2 only .github/workflows/gate.yaml required, its run failed: checksVerdict red, implementing, checks-red 'CI is red at w1: .github/workflows/gate.yaml'. P2b the workflow succeeded beside a failed unrequired ci: checksVerdict green, reviewing. P4 nothing required, ci failed at h1, then a .legion/-only push h1->h2 (settlement carried, checked h1): no checksVerdict, testing, no checks-red, fixAttempts 0.",
+      "headSha": "4e0bf68c654d67fa81cb961765e4dc8f2529e915",
+      "negativeControl": "HeadVerdict's guard set back to main's `if !ok {` (temporarily, reverted after): the probe fails at P1 in 0.93s, 'PROBE FAIL P1: TESTDCBC211381A9-1 carries checksVerdict \"green\": {\"checksVerdict\":\"green\",...}'"
+    },
+    {
+      "criterion": "Acceptance 2: a push onto a settled head whose base requires nothing starts a new fix attempt and the total stays, including when the empty required set was stored before a daemon restart and GitHub cannot be re-read at boot",
+      "surface": "the same whole-daemon probe, max_fix_attempts 1, with the daemon stopped and booted again on the same store and NATS stream, the stand-in answering 500 to the base's rules read after the restart",
+      "command": "the same TestTesterProbeLive run, step P3; daemon log line 'read the checks base-rs requires: GitHub answered GET /rules/branches/base-rs with 500' proves the boot pass kept the stored set",
+      "observed": "y1 red held in testing with one pr-blocked; base -> nothing, pass read []; restart: stored required []string{} (non-nil empty), headCounted y1, no checksVerdict key; push y1->y2 + synchronize: headCounted \"\", fixAttempts 1; base -> ci: red at y2 -> implementing, checksVerdict red, fixAttempts 1, checks-red 'CI is red at y2: ci'.",
+      "headSha": "4e0bf68c654d67fa81cb961765e4dc8f2529e915",
+      "negativeControl": "The implementer's mutation (only `|| nothingRequired(pr)` removed) fails the same flow's last settlement, left in testing; the restart-specific discrimination is that a nil set after reload would keep headCounted y1, which the store read after restart rules out (Required non-nil [])."
+    }
+  ],
+  "notes": [
+    "Workflow-level tests (checks_red_test T3) run through the real Postgres store, so a regression that stored [] as null would fail them; the restart probe found no such defect.",
+    "Docs (concepts.md, troubleshooting.md) read against the behaviour driven: both now say a base requiring nothing gives no verdict and still sends nothing back, and that a push onto such a settled head leaves the attempt."
+  ]
+}
