@@ -495,9 +495,29 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 
+// replayTerminal applies the ready or failure fact of every stored claim in either state that no
+// earlier daemon applied: a claim that reached it while no daemon ran, or whose live apply
+// (terminal) failed. Nearly all were applied when they happened, and each one replayed through
+// ApplyFact would still take the fact lock to find so, so the replay reads which are applied in one
+// query (intake.Applied) and applies only the rest. A boot over hundreds of ready and failed claims
+// pays one read for them, not a serial transaction each that waits behind every live fact on the
+// lock and on the database, inside the boot's budget (supervision.start runs it before any hello).
 func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim) error {
+	var terminal []supervise.Claim
+	var ids []string
 	for _, c := range claims {
 		if c.State != supervise.StateReady && c.State != supervise.StateFailed {
+			continue
+		}
+		terminal = append(terminal, c)
+		ids = append(ids, terminalEventID(c, c.State))
+	}
+	applied, err := intake.Applied(ctx, w.pool, terminalSource, ids)
+	if err != nil {
+		return fmt.Errorf("replay the stored claims' terminal facts: %w", err)
+	}
+	for i, c := range terminal {
+		if applied[ids[i]] {
 			continue
 		}
 		if err := w.applyTerminal(ctx, c, c.State); err != nil {
@@ -600,11 +620,20 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	default:
 		return fmt.Errorf("claim %s has non-terminal workflow state %s", c.Token, state)
 	}
-	_, err := intake.ApplyFact(ctx, w.pool, "supervise", fmt.Sprintf("supervise:%s:%d:%s", c.Token, c.Generation, state), fact, w.handlers...)
+	_, err := intake.ApplyFact(ctx, w.pool, terminalSource, terminalEventID(c, state), fact, w.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply %s for %s: %w", state, c.Token, err)
 	}
 	return nil
+}
+
+// terminalSource is the source a claim's ready or failure fact is applied under, and
+// terminalEventID its event: one per launch (the claim's generation) and state, so the live apply
+// and every boot's replay of the same terminal state are one fact.
+const terminalSource = "supervise"
+
+func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
+	return fmt.Sprintf("supervise:%s:%d:%s", c.Token, c.Generation, state)
 }
 
 // run drains intake and the outbox until ctx ends. Intake ending, or a terminal fact that could not

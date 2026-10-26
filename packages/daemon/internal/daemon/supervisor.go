@@ -33,10 +33,11 @@ type supervisor struct {
 	project  string
 	stateDir string
 	log      *slog.Logger
-	// restored closes once every stored claim has its machine: a hello waits for it, so a shim
-	// reconnecting across a restart is admitted by a claim already supervised. Nothing that waits for
-	// a worker to reach the daemon may run before it closes: the boot's relaunches run after it
-	// (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
+	// restored closes once every stored claim has its machine and the boot has replayed their
+	// terminal facts: a hello waits for it, so a shim reconnecting across a restart is admitted by a
+	// claim already supervised, and the boot settles with no hello's traffic beside it. Nothing that
+	// waits for a worker to reach the daemon may run before it closes: the boot's relaunches run after
+	// it (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
 	restored chan struct{}
 	terminal func(supervise.Claim, supervise.ClaimState)
 

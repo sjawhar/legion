@@ -411,11 +411,12 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	defer halting()
 	failed := make(chan error, 1)
 	lived := make(chan error, 1)
+	var settle func(context.Context, []supervise.Claim) error
+	if workflow != nil {
+		settle = workflow.replayTerminal
+	}
 	go func() {
-		err := s.start(starting)
-		if err == nil && workflow != nil {
-			err = workflow.replayTerminal(starting, s.claims)
-		}
+		err := s.start(starting, settle)
 		switch {
 		case ctx.Err() != nil:
 			// The signal came while the daemon booted, and cut its own steps short or would have: the
@@ -1020,10 +1021,16 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 
 // start supervises every claim the store holds. A claim with a live locator is re-adopted — its
 // process told to the runtime and observed from now on, never launched again. Once every claim has
-// its machine and the boot orphan reconciliation has run, hellos are resolved: a shim reconnecting
-// across the restart is admitted by a claim already supervised. An unrecorded launch is relaunched
-// only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
-// leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
+// its machine, the boot orphan reconciliation has run and settle (the workflow's terminal replay,
+// nil without a workflow) has applied the stored claims' ready and failure facts, hellos are
+// resolved: a shim reconnecting across the restart is admitted by a claim already supervised. The
+// boot settles before any hello is admitted because a restart brings every live shim back at once:
+// each admitted hello's second resolve, its machine's claim write and the facts that machine then
+// applies would compete with the replay for the database and the fact lock inside the boot's
+// budget, and a boot replaying a few hundred claims behind a few hundred hellos ran out of it and
+// exited, at every restart, for as long as the shims kept redialing. An unrecorded launch is
+// relaunched only after that reconciliation proves any pre-crash pane absent or reaped; a failed
+// listing leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
 // resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
 // any (relaunchUnfinished): every re-adopted claim on another plugin contract is posted its boot
 // stale-plugin relaunch first (refreshStalePlugins), over every one before any of them is
@@ -1037,7 +1044,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // is a second guard beside that check, so boot does not report the retired claim as an unrecorded
 // launch. The steps before the relaunches run on boot, and the relaunches on the machines' context;
 // the daemon's stop ends both (run).
-func (s *supervision) start(boot context.Context) error {
+func (s *supervision) start(boot context.Context, settle func(context.Context, []supervise.Claim) error) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
 		return err
@@ -1054,6 +1061,11 @@ func (s *supervision) start(boot context.Context) error {
 	if !reconciled {
 		for _, token := range unfinished {
 			s.log.Warn("supervise: unrecorded launch remains uncertain; not relaunching", "claim", token)
+		}
+	}
+	if settle != nil {
+		if err := settle(boot, s.claims); err != nil {
+			return err
 		}
 	}
 	close(s.supervisor.restored)
