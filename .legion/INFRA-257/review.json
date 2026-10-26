@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-257",
+  "completed": "2026-10-26T03:43:45Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "1e49b22397faf9a0ef280f046560901e0b9b1d39",
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 1e49b22397fa: every required check completed success; compare 1e49b223...04ebc968 touches only .legion/.",
+  "thermonuclear": "Deep review: approve, two minors (no build-time guard of the /opt/go/go.env line; LEGION-764's chroot recipe env -i lacks CGO_ENABLED=0). Code quality: changes, prose only (false failure claim at worker.Dockerfile:657-658, explanation duplicated, kubernetes.md placement, supersession marking, two overclaims).",
+  "critical": 0,
+  "important": 3,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "PR body (packages/daemon/internal/runtime/sandbox/operatorpod.go:28)",
+      "description": "Adds a refusal at a process boundary (runtime.kubernetes.pod.env CGO_ENABLED now fails config load) with no `## Contract change census`: searches, every hit with a disposition, and a rollout line naming what an immediate refusal closes."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/docker/worker.Dockerfile:657-658",
+      "description": "The ENV's stated reason is false on this image: with gcc present a go/build reader with cgo on succeeds (tester's env -i supervise run, test.json; docs/kubernetes.md:88-91 says so). The `go tool cgo: exit status 2` failure is main's gcc-less image. The LEGION-630 and LEGION-668 learning notes repeat the implication for the eval kernel."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/docker/worker.Dockerfile:697",
+      "description": "Nothing in the build checks the /opt/go/go.env line that holds acceptance 2 in scrubbed environments (the eval kernel); the PR's own risk line says so. Add `test \"$(env -u CGO_ENABLED go env CGO_ENABLED)\" = 0` to the toolchain step."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/testing/prove-a-published-worker-image-from-a-pod-by-unpacking-its-rootfs-and-chrooting-under-unshare-LEGION-764.md:39,101-103",
+      "description": "The recipe rebuilds the image ENV by hand with env -i and now lacks CGO_ENABLED=0 (and COREPACK_DEFAULT_TO_LATEST=0), so a go/build reader under it gets cgo on, unlike a pod."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/operatorpod.go:20",
+      "description": "'keeps cgo off by default in every process' overclaims: scrubbed environments do not inherit image ENV."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:75-93",
+      "description": "The 19-line cgo paragraph splits the pinned-downloads bullet from its closing sentence; gcc/libc6-dev belong with the trixie /usr/bin list; '(it only outranks go.env)' has an unclear 'it'."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/testing/ (seven learnings)",
+      "description": "Supersession is marked with inline bold notes under `status: active`; the repository's convention is frontmatter `status: superseded in part by …`."
+    }
+  ]
+}
