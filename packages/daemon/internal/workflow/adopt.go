@@ -84,11 +84,12 @@ func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (
 }
 
 // RecordedAncestor is the recorded ancestor issue's record takes when an observation's preparation
-// read ancestor above its unrecorded parent (record.Issue.RecordedAncestor): ancestor, or "" when
-// issue ran as a tree of its own (RanAsRoot). The waiting line holds a root under its recorded
-// ancestor's live tree until that tree's release adopts it, and a release refuses a root that ran,
-// so such a root keeps queueing as its own instead: held, nothing would ever bring it in. Every
-// write of an observation's recorded ancestor to a record goes through this.
+// read ancestor, the nearest recorded root up its unrecorded parent's Dispatch chain
+// (record.Issue.RecordedAncestor): ancestor, or "" when issue ran as a tree of its own (RanAsRoot).
+// The waiting line holds a root under that recorded root's live tree until that tree's release
+// adopts it, and a release refuses a root that ran, so such a root keeps queueing as its own
+// instead: held, nothing would ever bring it in. Every write of an observation's recorded ancestor
+// to a record goes through this.
 func (e *Engine) RecordedAncestor(ctx context.Context, tx pgx.Tx, issue record.Issue, ancestor string) (string, error) {
 	if ancestor == "" {
 		return "", nil

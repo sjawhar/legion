@@ -188,6 +188,48 @@ func TestPutIssueRefusesAMissingOrChangedRepository(t *testing.T) {
 	})
 }
 
+// ParentedQueuedRoots lists, by key, exactly the labelled todo roots whose recorded parent no record
+// names: not a root under a recorded parent, an unlabelled one, one in another status, a child in
+// a tree, nor a root with no parent.
+func TestParentedQueuedRootsListsTheLabelledTodoRootsUnderUnrecordedParents(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := func(key, tree, status, parent string, handed bool) Issue {
+		issue := issueFixture(key)
+		issue.Tree, issue.Status, issue.Parent, issue.HandedOver, issue.ReadyPendingVersion = tree, status, ParentOf(parent), handed, nil
+		return issue
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, recorded := range []Issue{
+			issue("LEGION-300", "LEGION-300", "in_progress", "", true),
+			issue("LEGION-302", "LEGION-302", "todo", "LEGION-401", true),
+			issue("LEGION-301", "LEGION-301", "todo", "LEGION-400", true),
+			issue("LEGION-303", "LEGION-303", "todo", "LEGION-300", true),
+			issue("LEGION-304", "LEGION-304", "todo", "LEGION-402", false),
+			issue("LEGION-305", "LEGION-305", "backlog", "LEGION-403", true),
+			issue("LEGION-306", "LEGION-300", "todo", "LEGION-404", true),
+			issue("LEGION-307", "LEGION-307", "todo", "", true),
+		} {
+			must(t, records.PutIssue(ctx, tx, recorded))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		roots, err := records.ParentedQueuedRoots(ctx, tx)
+		must(t, err)
+		var keys []string
+		for _, root := range roots {
+			keys = append(keys, root.Key)
+		}
+		if !reflect.DeepEqual(keys, []string{"LEGION-301", "LEGION-302"}) {
+			t.Fatalf("ParentedQueuedRoots = %v, want LEGION-301 and LEGION-302", keys)
+		}
+		if *roots[0].Parent != "LEGION-400" || roots[0].Status != "todo" {
+			t.Fatalf("ParentedQueuedRoots[0] = %#v, want the whole record of LEGION-301", roots[0])
+		}
+	})
+}
+
 // A record written before the schema carried the issue's repository has none, and the boot fills
 // it (daemon's backfillRepositories): UnfilledIssues lists one project's unfilled records, and
 // FillIssueRepository fills one, once, with GitHub's spelling beside the record's own.

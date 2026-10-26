@@ -240,10 +240,11 @@ func (a *Admission) settle(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return released, nil
 }
 
-// applyReread writes each recorded ancestor an unrecorded issue's preparation read again
-// (intake.DispatchIssue.Reread) to its root's record while that record is still a todo root, as the
-// engine's RecordedAncestor takes it, and says whether any record changed. The read was taken
-// outside the fact lock, so a root adopted or moved on meanwhile is left as it now stands.
+// applyReread writes each recorded ancestor the preparation of an unrecorded or re-parented
+// issue's event read again (intake.DispatchIssue.Reread) to its root's record while that record is
+// still a todo root, as the engine's RecordedAncestor takes it, and says whether any record changed.
+// The read was taken outside the fact lock, so a root adopted or moved on meanwhile is left as it
+// now stands.
 func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[string]string) (bool, error) {
 	changed := false
 	for _, key := range slices.Sorted(maps.Keys(reread)) {

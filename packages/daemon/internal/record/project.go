@@ -35,12 +35,13 @@ func OutOfWorkflow(status string) bool {
 // root without the label waits for nothing; a child's tree holds its place, so a child needs none.
 // A root that never ran, whose recorded parent is a live tree's member, is adopted into that tree
 // before admission reads the line (admit's adoptQueuedRoots), so it is not read as waiting there.
-// A root whose parent is not recorded, under an ancestor recorded in another live tree
-// (RecordedAncestor, whose current tree is read here, so a hold follows that ancestor's adoption
-// into a tree), waits for nothing either: it is that tree's unreleased work, which its architect's
-// release, or its parent's, brings into the tree. A tree is live here as everywhere (LiveRoots), so
-// a held root's tree is live too; once the tree it is held under lingers or leaves the workflow, the
-// root waits as its own again.
+// A root whose parent is not recorded, whose nearest recorded root up its Dispatch chain is in
+// another live tree (RecordedAncestor, whose current tree is read here, so a hold follows that
+// root's adoption into a tree), waits for nothing either: it is that tree's unreleased work, which
+// its architect's release, or its parent's, brings into the tree. A tree is live here as
+// everywhere (LiveRoots), so a held root's tree is live too; once the tree it is held under lingers
+// or leaves the workflow, or a person moves an ancestor out from under it, the root waits as its
+// own again.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	waiting := line(issues, slots)
 	if slices.ContainsFunc(waiting, func(issue Issue) bool { return issue.RecordedAncestor != "" }) {

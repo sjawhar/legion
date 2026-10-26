@@ -1509,10 +1509,11 @@ type source struct {
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
 // widening record.Store's fixed transaction interface; the workflow and the state route read the
-// store through it. Every read that starts from Issues is within this filtered set. Slots are not
-// filtered here: a slot's index is unique across every project's slots, so admission chooses the
-// next one over all of them and counts only its own against its cap (admit.ownSlots). The outbox's
-// claim is scoped in its SQL instead, because the lease it takes is itself the damage.
+// store through it. Every read that starts from Issues or ParentedQueuedRoots is within this
+// filtered set. Slots are not filtered here: a slot's index is unique across every project's
+// slots, so admission chooses the next one over all of them and counts only its own against its
+// cap (admit.ownSlots). The outbox's claim is scoped in its SQL instead, because the lease it
+// takes is itself the damage.
 //
 // It is also where the outbox learns of its rows: every write that makes a row due — Enqueue, and
 // ExpediteOutbox — wakes the row's lane (outbox.wake) once the transaction has committed, through
@@ -1532,13 +1533,26 @@ func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, 
 	if err != nil {
 		return nil, err
 	}
+	return s.own(all), nil
+}
+
+func (s projectRecords) ParentedQueuedRoots(ctx context.Context, tx pgx.Tx) ([]record.Issue, error) {
+	all, err := s.Store.ParentedQueuedRoots(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	return s.own(all), nil
+}
+
+// own is every issue of all in the daemon's project, in all's order.
+func (s projectRecords) own(all []record.Issue) []record.Issue {
 	issues := make([]record.Issue, 0, len(all))
 	for _, issue := range all {
 		if issue.Project == s.project {
 			issues = append(issues, issue)
 		}
 	}
-	return issues, nil
+	return issues
 }
 
 func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.OutboxRow) error {

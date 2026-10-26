@@ -428,13 +428,19 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
 	// The transaction performs no I/O: what admission reads of a todo issue's repository, and the
-	// recorded ancestor above its unrecorded parent (withAncestry), are read now; the summary carries
-	// that ancestor to admission.
+	// recorded ancestor above its unrecorded parent, are read now, up one walk over the whole
+	// listing (listingAncestry); the summary carries that ancestor to admission.
+	var walk *ancestry
 	for i, summary := range issues {
 		if summary.Status != "todo" {
 			continue
 		}
-		prepared, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false)
+		if walk == nil {
+			if walk, err = w.listingAncestry(ctx, issues); err != nil {
+				return err
+			}
+		}
+		prepared, err := w.prepareListed(ctx, walk, intake.ListedIssue(summary))
 		if err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}

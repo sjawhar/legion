@@ -53,23 +53,40 @@ func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, er
 }
 
 func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
-	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues order by key")
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+" from issues order by key")
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
+	}
+	return issues, nil
+}
+
+func (s *Postgres) ParentedQueuedRoots(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues root
+		where root.status = 'todo' and root.handed_over and root.key = root.tree and root.parent is not null
+			and not exists (select 1 from issues recorded where recorded.key = root.parent)
+		order by root.key`)
+	if err != nil {
+		return nil, fmt.Errorf("list the queued roots under unrecorded parents: %w", err)
+	}
+	return issues, nil
+}
+
+// queryIssues is every issue record query selects, in its order.
+func queryIssues(ctx context.Context, tx pgx.Tx, query string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, query)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	issues := []Issue{}
 	for rows.Next() {
 		issue, err := scanIssue(rows)
 		if err != nil {
-			return nil, fmt.Errorf("list issues: %w", err)
+			return nil, err
 		}
 		issues = append(issues, *issue)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
-	}
-	return issues, nil
+	return issues, rows.Err()
 }
 
 func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
