@@ -403,3 +403,79 @@ test("the live event probe authenticates with a bearer file and exits at its tim
   expect(result.stderr).toBe("");
   expect(result.stdout).toEqual([]);
 });
+
+// INFRA-292's production check: the probe starts its feed where a page does, at whoami's
+// event_head, and a write committed after whoami answered and before the socket opened reaches it.
+test("--from-whoami resumes the feed from whoami's event_head under the cookie it was given", async () => {
+  const directory = scratch();
+  const cookieFile = join(directory, "cookie");
+  writeFileSync(cookieFile, "dispatch_session=signed-cookie\n", { mode: 0o600 });
+  const cookies: (string | null)[] = [];
+  const subscriptions: unknown[] = [];
+  const server = Bun.serve({
+    fetch(request, srv) {
+      const path = new URL(request.url).pathname;
+      cookies.push(request.headers.get("cookie"));
+      if (path === "/auth/whoami") {
+        return Response.json({ event_head: "41", kind: "user", login: "alice@example.test" });
+      }
+      if (path !== "/ws/live") return new Response("not found", { status: 404 });
+      return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
+    },
+    hostname: "127.0.0.1",
+    port: 0,
+    websocket: {
+      message(socket, raw) {
+        subscriptions.push(JSON.parse(String(raw)));
+        socket.send(JSON.stringify({ since: "41", sub: "events", type: "events_start" }));
+        socket.send(
+          JSON.stringify({
+            event: { id: 42, note: "committed while loading", type: "comment.created" },
+            id: "42",
+            sub: "events",
+            type: "event",
+          })
+        );
+      },
+    },
+  });
+  servers.push(server);
+
+  const result = await run(
+    "--url",
+    `http://127.0.0.1:${server.port}`,
+    "--cookie-file",
+    cookieFile,
+    "--from-whoami",
+    "--subscribe-after",
+    "0.2",
+    "--until",
+    "committed while loading"
+  );
+
+  expect(result.code).toBe(0);
+  expect(cookies).toEqual(["dispatch_session=signed-cookie", "dispatch_session=signed-cookie"]);
+  expect(subscriptions).toEqual([
+    { resume: { since: "41" }, sub: "events", type: "subscribe", view: { kind: "events" } },
+  ]);
+  expect(result.stdout).toEqual([
+    { whoami: { event_head: "41", login: "alice@example.test" } },
+    { subscribing_in: 0.2 },
+    { event: { id: 42, note: "committed while loading", type: "comment.created" } },
+  ]);
+});
+
+test("--from-whoami signs in as a person and reads its own start", async () => {
+  const directory = scratch();
+  const bearerFile = join(directory, "bearer");
+  writeFileSync(bearerFile, "test-bearer\n", { mode: 0o600 });
+  for (const [args, refusal] of [
+    [["--bearer-file", bearerFile, "--from-whoami"], "give --cookie-file or --user"],
+    [["--user", "alice", "--from-whoami", "--since", "4"], "it takes no --since"],
+    [["--user", "alice", "--subscribe-after", "5"], "it needs --from-whoami"],
+  ] as const) {
+    const result = await run("--url", "http://127.0.0.1:1", ...args);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain(refusal);
+  }
+});

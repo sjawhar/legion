@@ -356,26 +356,54 @@ it after any change to the proxy.
 
 ## Checking a deploy
 
-After a deploy, check through the front proxy that the live socket and the two keyed sends work.
-Run the two commands from a checkout of this repository with `bun install` run, and the two sends
-from a browser signed in to the deployment:
+After a deploy, check through the front proxy that the live socket, the keyed write path and the
+two keyed sends work. Run the commands from a checkout of this repository with `bun install` run,
+each against `https://<dispatch>`, the deployment's dashboard origin, and the two sends from a
+browser signed in to it. `<token file>` holds an agent token (the shared one, or a personal `dsp_`
+token from Settings → Agent tokens), and `<scratch issue>` is the key of an issue the checks may
+leave comments on.
 
 1. `bun scripts/e2e/lib/h2-settings.ts https://<dispatch>/` exits 0: the proxy does not advertise
    extended CONNECT (the section above).
-2. `bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch> --bearer-file <file> --until <marker> --timeout 4200`
+2. `curl -s https://<dispatch>/healthz` prints a body with `"idempotency_keys":true`: this build
+   judges `Idempotency-Key` (Keyed writes, below). The field is a fact of the build, so a `503`
+   for a database or NATS that is down carries it too; a body without it is a Dispatch that would
+   make a retried write twice, and the `dispatch` command sends no write again to it.
+3. `bun scripts/e2e/lib/dispatch-keyed-comment.ts --url https://<dispatch> --bearer-file <token file> --issue <scratch issue>`
+   posts one comment twice under one `Idempotency-Key`, as a page whose first answer was lost asks
+   again. It passes when the repeat is Dispatch's stored answer and the issue holds the comment
+   once: it prints `{"post":2,…,"replayed":"?1","status":201}`, `{"comments_with_body":1}` and
+   `{"ok":true}`, and exits 0 (`scripts/e2e/README.md` lists every line and failure).
+4. The same command with `--cli` has this checkout's `dispatch comment` post it, through a proxy
+   on `127.0.0.1` that hands the command a gateway's `502` page in place of Dispatch's answer to
+   its first POST, so the command asks again under its own key. It passes when it prints two
+   `proxy` lines for that POST under one `key`, the first `"answered":502` and the second
+   `"replayed":"?1"`, then `{"cli":{"code":0,…,"stdout":"Posted comment <id>"}}`,
+   `{"comments_with_body":1}` and `{"ok":true}`, and exits 0.
+5. A page opened while a write commits shows it (INFRA-292). Save the `Cookie` request header a
+   browser signed in to the deployment sends (the developer tools' Network panel, any request to
+   `https://<dispatch>`) to `<cookie file>`, and run
+   `bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch> --cookie-file <cookie file> --from-whoami --subscribe-after 30 --until <marker> --timeout 120`.
+   It reads `GET /auth/whoami` as you, prints `{"whoami":{"event_head":"<id>","login":"<you>"}}`
+   and `{"subscribing_in":30}`, and only then opens `/ws/live` from that `event_head`, as a page
+   resumes its first subscription. Inside those 30 seconds, comment on `<scratch issue>` with
+   `<marker>` in the body: the comment commits after whoami answered and before the socket opens.
+   It passes when it prints the comment's `{"event": …}` line and exits 0; it exits 1 when the 120
+   seconds end first. Delete `<cookie file>` afterwards: it signs in as you.
+6. `bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch> --bearer-file <token file> --until <marker> --timeout 4200`
    holds one `events` subscription on `GET /ws/live` for up to 70 minutes, longer than the 30 to
-   60 minutes a socket lives, under the bearer the file holds (the shared agent token or a personal
-   token). It prints one JSON line per frame: `{"event": …}` for each event, `{"close": <code>,
-   "reason": "…"}` when the socket closes, `{"resubscribed": "<id>"}` when it opens the next socket
-   and resumes after the newest event it holds, and `{"duplicate": "<id>"}` for an event it already
-   printed. Once a `{"close":4001,"reason":"max age"}` line and the `resubscribed` line after it
-   have printed, comment on any issue with `<marker>` in the body: the probe exits 0 when that event
-   arrives on the new socket, and 1 when the 70 minutes end first (2 is a usage error).
-3. A send across a reload: on the Agents page, open a live agent's row, set the browser offline
+   60 minutes a socket lives, under the bearer the file holds. It prints one JSON line per frame:
+   `{"event": …}` for each event, `{"close": <code>, "reason": "…"}` when the socket closes,
+   `{"resubscribed": "<id>"}` when it opens the next socket and resumes after the newest event it
+   holds, and `{"duplicate": "<id>"}` for an event it already printed. Once a
+   `{"close":4001,"reason":"max age"}` line and the `resubscribed` line after it have printed,
+   comment on any issue with `<marker>` in the body: the probe exits 0 when that event arrives on
+   the new socket, and 1 when the 70 minutes end first (2 is a usage error).
+7. A send across a reload: on the Agents page, open a live agent's row, set the browser offline
    (the developer tools' Network panel), send a message, and reload the tab, confirming the
    browser's prompt to leave. Within five minutes set the browser online and open the Agents page
    again in the same tab. The message lands: the row shows it once and the agent receives it once.
-4. A broadcast across an outage: tick two live agents, set the browser offline and press Send.
+8. A broadcast across an outage: tick two live agents, set the browser offline and press Send.
    After 30 seconds the send's row reads `Still sending to 2 agents — Dispatch has not confirmed it
    yet. It keeps trying, and the broadcast is made once.` with **Stop trying**. Set the browser
    online: the page opens the broadcast, which lists each agent once with one delivery.
@@ -1065,7 +1093,7 @@ suggestion-outcome sweep deletes older rows).
 | The first answer, with `Idempotency-Replayed: ?1` | A repeat under a key whose first request finished, with the same method, route, path values, query, media type and body: the stored status, content type and body, and nothing runs again. |
 | The first status with `ANSWER_NOT_KEPT` | That repeat, when the first answer was larger than the 1 MiB a key keeps: the write ran, and the caller reads what it wrote again. |
 | `409 KEY_IN_FLIGHT`, `Retry-After: 1` | A repeat while the key's first request still runs, inside its 60 s lease; nothing ran, and the caller asks again under the same key. A repeat past the lease takes over a key whose holder died before it committed anything, and runs the request. |
-| `409 KEY_COMMITTED`, no `Retry-After` | A repeat whose first request committed a write but whose answer was lost: its lease lapsed in flight, or it ended in a 5xx or a panic after committing (every transaction a keyed request commits marks the key's `committed_at` in that same transaction). The write landed and is not run again; there is no answer to replay, so the caller reads what it wrote. Also every repeat of a keyed `POST /api/v1/me/agent-tokens`, answer lost or not: the mint's answer carries the plaintext token, so it is never kept under the key, never replayed, and no second token is minted. That is the one route whose answer is not stored. |
+| `409 KEY_COMMITTED`, no `Retry-After` | A repeat whose first request committed a write but whose answer was lost: its lease lapsed in flight, or it ended in a 5xx or a panic after committing (every transaction a keyed request commits marks the key's `committed_at` in that same transaction). The write landed and is not run again; there is no answer to replay, so the caller reads what it wrote. Also a repeat of a keyed `POST /api/v1/me/agent-tokens` that minted, once that first request has finished, answer lost or not: the mint's answer carries the plaintext token, so it is never kept under the key, never replayed, and no second token is minted (a mint refused with a 4xx commits nothing, so its key is released and a repeat runs it again). That is the one route whose answer is not stored. |
 | `422 KEY_REUSED` | The key was already used for a different request; the message names its method and path, and this request did not run. A changed request needs a new key. |
 | `400 IDEMPOTENCY_KEY_INVALID` | The header is not 1 to 128 of those characters, or was sent twice. |
 

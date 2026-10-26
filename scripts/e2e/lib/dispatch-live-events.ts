@@ -2,14 +2,17 @@ import { parseArgs } from "node:util";
 import { LIVE_SOCKET_MAX_AGE_CLOSE } from "../../../packages/contracts/src/dispatch-api";
 
 const USAGE =
-  "usage: bun scripts/e2e/lib/dispatch-live-events.ts --url <dispatch> [--bearer-file <file> | --user <email>] [--since <id>] [--until <substring>] [--timeout <s>]";
+  "usage: bun scripts/e2e/lib/dispatch-live-events.ts --url <dispatch> [--bearer-file <file> | --cookie-file <file> | --user <email>] [--since <id> | --from-whoami [--subscribe-after <s>]] [--until <substring>] [--timeout <s>]";
 const SERVICE_RESTART = 1012;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
 interface ArgumentValues {
   readonly "bearer-file"?: string;
+  readonly "cookie-file"?: string;
+  readonly "from-whoami"?: boolean;
   readonly since?: string;
+  readonly "subscribe-after"?: string;
   readonly timeout?: string;
   readonly until?: string;
   readonly url?: string;
@@ -18,7 +21,11 @@ interface ArgumentValues {
 
 interface Options {
   readonly authorization: Record<string, string>;
+  /** Read the feed's start from `GET /auth/whoami`'s `event_head`, as a page does (INFRA-292). */
+  readonly fromWhoami: boolean;
   readonly since: string | null;
+  /** How long to wait between whoami's answer and the socket, so a write can commit in between. */
+  readonly subscribeAfterMs: number;
   readonly timeoutMs: number;
   readonly until: string | undefined;
   readonly url: URL;
@@ -76,7 +83,10 @@ async function optionsFrom(argv: readonly string[]): Promise<Options> {
       allowPositionals: false,
       options: {
         "bearer-file": { type: "string" },
+        "cookie-file": { type: "string" },
+        "from-whoami": { type: "boolean" },
         since: { type: "string" },
+        "subscribe-after": { type: "string" },
         timeout: { type: "string" },
         until: { type: "string" },
         url: { type: "string" },
@@ -89,9 +99,21 @@ async function optionsFrom(argv: readonly string[]): Promise<Options> {
   }
 
   const bearerFile = values["bearer-file"];
+  const cookieFile = values["cookie-file"];
   const user = values.user;
-  if ((bearerFile === undefined) === (user === undefined)) {
-    throw new UsageError("exactly one of --bearer-file or --user is required");
+  if ([bearerFile, cookieFile, user].filter((value) => value !== undefined).length !== 1) {
+    throw new UsageError("exactly one of --bearer-file, --cookie-file or --user is required");
+  }
+  const fromWhoami = values["from-whoami"] === true;
+  if (fromWhoami && values.since !== undefined) {
+    throw new UsageError("--from-whoami reads where the feed starts; it takes no --since");
+  }
+  // whoami names a person: a bearer is an agent's, and Dispatch answers it no head.
+  if (fromWhoami && bearerFile !== undefined) {
+    throw new UsageError("--from-whoami signs in as a person: give --cookie-file or --user");
+  }
+  if (!fromWhoami && values["subscribe-after"] !== undefined) {
+    throw new UsageError("--subscribe-after waits after whoami's answer; it needs --from-whoami");
   }
 
   let url: URL;
@@ -110,30 +132,70 @@ async function optionsFrom(argv: readonly string[]): Promise<Options> {
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
     throw new UsageError(`--timeout is a number of seconds above 0, not ${rawTimeout}`);
   }
+  const rawSubscribeAfter = values["subscribe-after"] ?? "0";
+  const subscribeAfterSeconds = Number(rawSubscribeAfter);
+  if (!Number.isFinite(subscribeAfterSeconds) || subscribeAfterSeconds < 0) {
+    throw new UsageError(
+      `--subscribe-after is a number of seconds, 0 or more, not ${rawSubscribeAfter}`
+    );
+  }
 
   const authorization =
-    bearerFile === undefined
-      ? { "X-Dispatch-User": required(user, "--user") }
-      : { Authorization: `Bearer ${await bearerFrom(bearerFile)}` };
+    bearerFile !== undefined
+      ? { Authorization: `Bearer ${await secretFrom(bearerFile, "--bearer-file", "token")}` }
+      : cookieFile !== undefined
+        ? { Cookie: await secretFrom(cookieFile, "--cookie-file", "cookie") }
+        : { "X-Dispatch-User": required(user, "--user") };
   return {
     authorization,
+    fromWhoami,
     since: values.since === undefined ? null : eventID(values.since, "--since"),
+    subscribeAfterMs: subscribeAfterSeconds * 1_000,
     timeoutMs: timeoutSeconds * 1_000,
     until: values.until,
     url,
   };
 }
 
-async function bearerFrom(file: string): Promise<string> {
-  let bearer: string;
+/** The one credential `file` holds, trimmed: a bearer token, or the `Cookie` header a browser
+ *  signed in to Dispatch sends it. */
+async function secretFrom(file: string, flag: string, what: string): Promise<string> {
+  let secret: string;
   try {
-    bearer = (await Bun.file(file).text()).trim();
+    secret = (await Bun.file(file).text()).trim();
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    throw new UsageError(`cannot read --bearer-file ${file}: ${reason}`);
+    throw new UsageError(`cannot read ${flag} ${file}: ${reason}`);
   }
-  if (bearer === "") throw new UsageError(`--bearer-file ${file} holds no token`);
-  return bearer;
+  if (secret === "") throw new UsageError(`${flag} ${file} holds no ${what}`);
+  return secret;
+}
+
+/** The newest event id as of the sign-in check, `GET /auth/whoami`'s `event_head`: where a page's
+ *  first events subscription resumes from, so what commits after it reaches the page. */
+async function whoamiHead(options: Options): Promise<string> {
+  const response = await fetch(new URL("/auth/whoami", options.url), {
+    headers: options.authorization,
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (
+    !response.ok ||
+    typeof body !== "object" ||
+    body === null ||
+    !("event_head" in body) ||
+    typeof body.event_head !== "string"
+  ) {
+    throw new Error(
+      `GET /auth/whoami answered ${response.status} ${JSON.stringify(body)}, with no event_head`
+    );
+  }
+  write({
+    whoami: {
+      event_head: body.event_head,
+      login: "login" in body ? body.login : null,
+    },
+  });
+  return eventID(body.event_head, "whoami.event_head");
 }
 
 function asEventsStart(value: unknown): EventsStart | undefined {
@@ -326,7 +388,13 @@ async function watch(options: Options): Promise<boolean> {
 async function main(argv: readonly string[]): Promise<number> {
   try {
     const options = await optionsFrom(argv);
-    return (await watch(options)) ? 0 : 1;
+    if (!options.fromWhoami) return (await watch(options)) ? 0 : 1;
+    const since = await whoamiHead(options);
+    if (options.subscribeAfterMs > 0) {
+      write({ subscribing_in: options.subscribeAfterMs / 1_000 });
+      await Bun.sleep(options.subscribeAfterMs);
+    }
+    return (await watch({ ...options, since })) ? 0 : 1;
   } catch (error) {
     if (error instanceof UsageError) {
       process.stderr.write(`dispatch-live-events: ${error.message}\n${USAGE}\n`);

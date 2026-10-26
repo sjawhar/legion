@@ -3230,7 +3230,14 @@ bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch host> \
 ```
 
 `--user <email>` takes the place of `--bearer-file` against a server in header identity (the e2e
-harness). The lines are `{"event": …}` for each event, `{"close": <code>, "reason": …}` and
+harness), and `--cookie-file <file>` against one in cookie identity: the file holds the `Cookie`
+request header a browser signed in to the deployment sends it, copied from the developer tools'
+Network panel. `--from-whoami` starts the feed where a page starts its first one (INFRA-292): it
+reads `GET /auth/whoami` as that person, prints `{"whoami": {"event_head": <id>, "login": …}}`,
+waits `--subscribe-after <s>` seconds (`{"subscribing_in": <s>}`) and subscribes from that
+`event_head`, so a write committed in the wait - after whoami answered, before the socket opened -
+is replayed to it; whoami names a person, so it takes `--cookie-file` or `--user` and no `--since`.
+The lines are `{"event": …}` for each event, `{"close": <code>, "reason": …}` and
 `{"resubscribed": <cursor>}` around each reopen - a socket closed at its age (`4001`) or a restart
 (`1012`) reopens at once, anything else after a backoff - `{"ended": <reason>, "resubscribed":
 <cursor>}` where Dispatch drops the feed and leaves the socket open, and `{"duplicate": <id>}` for
@@ -3240,7 +3247,34 @@ was asked or below it, never above: a `--since` past its head, and a resume acro
 event log, both start lower, and the events after that start are new rather than duplicates. So an
 audit that counts the `event` lines counts each event once, however often the feed reopened.
 `dispatch-live-events.test.ts` (`bun test scripts/e2e/lib`) runs it against a Bun websocket server
-that rotates, ends the feed, repeats events and clamps a start.
+that rotates, ends the feed, repeats events, clamps a start and answers whoami a head under a
+cookie.
+
+## lib/dispatch-keyed-comment.ts
+
+The production check of Dispatch's keyed writes: a comment whose first answer is lost lands once.
+
+```sh
+bun scripts/e2e/lib/dispatch-keyed-comment.ts --url https://<dispatch host> \
+  --bearer-file <token file> --issue <scratch issue key> [--cli]
+```
+
+It reads `/healthz` and fails unless the body says `idempotency_keys: true` (a 503's body
+included: the field is a fact of the build), then posts one comment on the issue it names as the
+bearer's session (`--session <id>`, `deploy-check-<uuid>` by default). Without `--cli` it posts
+the comment twice under one `Idempotency-Key`, as a page whose first answer was lost asks again,
+and requires the repeat to be Dispatch's stored `201` with `Idempotency-Replayed: ?1`, the same
+comment id and the key echoed on both. With `--cli` this checkout's `dispatch comment`
+(`packages/envoy-client/bin/dispatch.ts`, under `DISPATCH_HOST=omp` and a scratch `HOME`) posts
+it through a proxy on `127.0.0.1` that forwards everything and hands the command a gateway's
+`502` page in place of Dispatch's answer to its first comment POST; the command must ask again
+under that POST's key, be answered the replay and exit 0. Either way the issue must then hold
+exactly one comment with the check's body. Each step prints one JSON line (`healthz`, `post` or
+`proxy` and `cli`, `comments_with_body`), then `{"ok":true}` and exit 0; a failed check prints
+`{"failed": "<why>"}` and exits 1, a usage error exits 2. The comment stays on the issue, so name
+a scratch one. `dispatch-keyed-comment.test.ts` (`bun test scripts/e2e/lib`) runs it against a
+stand-in Dispatch that keys comments, one that makes every POST, a `/healthz` without the field
+and a `503` with it, and with `--cli`.
 
 ## lib/stage4b-tools.jq
 
