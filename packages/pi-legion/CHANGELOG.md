@@ -196,7 +196,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the absence of a workflow run to that line rather than to the paths; the daemon's own carry of a
   code head's verdict stays keyed to paths, since it classifies by path and reads no commit
   message. The `legion-retro` skill also gives a retro worker the cure for a head it has already
-  pushed with the line.
   pushed with the line. The sentence has a fifth home here,
   `legion-worker/references/skip-checks-trailer.md`, which the entry above moved the trailer's
   contract into, and the skills guard counts it in all five.
