@@ -24,9 +24,13 @@ const origin = new URL(dispatchUrl).origin;
 /** How long an event may take to reach its issue's topic once written, and how long after that
  *  the run keeps listening for the rest of its destinations. The outbox publishes an event's
  *  destinations one after another on one connection, its issue's topic first, so a destination
- *  missing from the settle window is one this binary did not publish. */
+ *  missing from the settle window is one this binary did not publish. A new comment's copy for a
+ *  session its mention resolved to is the exception: while the mention's send is still pending the
+ *  outbox holds that copy back, defers the event two seconds and re-checks it on its next
+ *  five-second tick, so the mention cases listen `mentionWaitMs` instead. */
 const publishWaitMs = 10_000;
 const settleMs = 2_000;
+const mentionWaitMs = 15_000;
 
 const person = "alice";
 const sessionP = "claimant-e2e-p";
@@ -145,15 +149,18 @@ async function eventOf(
   return event;
 }
 
-/** The agent topics `dispatch-<id>` reached, once it reached its issue's topic and the settle
- *  window passed. Throws when the outbox never published it. */
-async function agentTopicsOf(event: DispatchEvent): Promise<string[]> {
+/** The agent topics `dispatch-<id>` reached, once it reached its issue's topic and `windowMs` more
+ *  passed, or sooner once `enough` holds of them. Throws when the outbox never published it. */
+async function agentTopicsOf(
+  event: DispatchEvent,
+  windowMs = settleMs,
+  enough?: (topics: string[]) => boolean
+): Promise<string[]> {
   const envelopeId = `dispatch-${event.id}`;
   const deadline = Date.now() + publishWaitMs;
+  const subjects = () => [...(seen.get(envelopeId) ?? [])];
   const published = () =>
-    [...(seen.get(envelopeId) ?? [])].some((subject) =>
-      subject.startsWith("notifications.dispatch.")
-    );
+    subjects().some((subject) => subject.startsWith("notifications.dispatch."));
   while (!published()) {
     if (Date.now() > deadline) {
       throw new Error(
@@ -162,10 +169,17 @@ async function agentTopicsOf(event: DispatchEvent): Promise<string[]> {
     }
     await Bun.sleep(100);
   }
-  await Bun.sleep(settleMs);
-  return [...(seen.get(envelopeId) ?? [])]
-    .filter((subject) => subject.startsWith(agentPrefix))
-    .sort();
+  const agentTopics = () =>
+    subjects()
+      .filter((subject) => subject.startsWith(agentPrefix))
+      .sort();
+  if (enough === undefined) {
+    await Bun.sleep(windowMs);
+    return agentTopics();
+  }
+  const windowEnd = Date.now() + windowMs;
+  while (!enough(agentTopics()) && Date.now() < windowEnd) await Bun.sleep(100);
+  return agentTopics();
 }
 
 function note(line: string): void {
@@ -180,12 +194,77 @@ function topic(session: string): string {
   return agentPrefix + session;
 }
 
-/** `claimant` and `route` of a read, or `absent` when the read carries no such field (a server
- *  that predates them). */
+/** `claimant`, `route` and `route_holder` of a read, or `absent` when the read carries no such
+ *  field (a server that predates them). */
 function reach(row: Json | undefined): string {
   if (row === undefined) return "no row";
   const field = (name: string) => (name in row ? JSON.stringify(row[name]) : "absent");
-  return `claimant=${field("claimant")} route=${field("route")}`;
+  return `claimant=${field("claimant")} route=${field("route")} route_holder=${field("route_holder")}`;
+}
+
+/** Has the fake listener answer every send to `session` with `status`: 404 refuses it as a
+ *  session it does not know, while the registry read a mention resolves through still finds it. */
+async function setSendStatus(session: string, status: 200 | 404): Promise<void> {
+  const response = await fetch(
+    new URL(`/__fixture/sessions/${encodeURIComponent(session)}`, envoyUrl),
+    {
+      body: JSON.stringify({ send_status: status }),
+      headers: { "Content-Type": "application/json" },
+      method: "PATCH",
+    }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `PATCH fake listener ${session} send_status=${status}: ${response.status} ${await response.text()}`
+    );
+  }
+}
+
+/** The person's comment on `key` mentioning `session` in the default mode (`steer`), with what
+ *  `extra` adds (an ask reply's `ask_id`). It prints the sessions the comment.created payload's
+ *  mentions resolved to, how many sends for the comment the fake listener took, and each delivery
+ *  row `GET /api/v1/comments/{id}` reads, and returns the event and the newest row's state. It
+ *  throws when the mention did not resolve to `session`: every mention case is about a session the
+ *  mention named, whatever its send did. */
+async function personMentions(
+  key: string,
+  session: string,
+  body: string,
+  extra: Json = {}
+): Promise<{ event: DispatchEvent; state: unknown }> {
+  const after = await newestSeq(key);
+  const comment = (await asPerson("POST", issuePath(key, "/comments"), {
+    ...extra,
+    body,
+    mentions: [{ target: `session:${session}` }],
+  })) as Json;
+  const commentId = String(comment.id);
+  const event = await eventOf(key, after, "comment.created", commentId);
+  const mentions = (event.payload?.mentions ?? []) as Json[];
+  const resolved = mentions.map(
+    (item) => `${item.target}→${JSON.stringify(item.session_id ?? null)}`
+  );
+  const sends = (await (await fetch(new URL("/__fixture/sends", envoyUrl))).json()) as {
+    idempotency_key: string;
+  }[];
+  // A mention's send is keyed `<comment id>:<target>:<mode>`.
+  const taken = sends.filter((send) => send.idempotency_key.startsWith(`${commentId}:`)).length;
+  note(
+    `the person commented ${commentId} on ${key} mentioning session:${session}; comment.created mentions ${resolved.join(" ") || "(none)"}; the fake listener took ${taken} send(s) for it`
+  );
+  const rows = (((await asAgent(`/api/v1/comments/${commentId}`)) as Json).comment as Json)
+    .deliveries as Json[];
+  for (const row of rows) {
+    const error =
+      row.error === null || row.error === undefined ? "" : ` error=${JSON.stringify(row.error)}`;
+    note(
+      `GET /api/v1/comments/${commentId} delivery: ${row.target} attempt ${row.attempt} (${row.delivery}) session_id=${JSON.stringify(row.session_id ?? null)} state=${row.state}${error}`
+    );
+  }
+  if (!mentions.some((item) => item.session_id === session)) {
+    throw new Error(`the mention did not resolve to ${session}`);
+  }
+  return { event, state: rows.at(-1)?.state };
 }
 
 const results: { name: string; ok: boolean }[] = [];
@@ -205,10 +284,13 @@ async function runCase(name: string, body: () => Promise<string | undefined>): P
 // --- setup -------------------------------------------------------------------------------------
 
 // The three sessions are live on the fake Envoy listener, so a message targeted at one of them is
-// delivered rather than refused for an unknown session.
+// delivered rather than refused for an unknown session. P and C advertise `steer`, the default
+// mode of a mention, so a mention of either resolves to that session with nothing refused before
+// the send; the mention cases then decide whether the send itself lands.
 const seeded = await fetch(new URL("/__fixture/sessions", envoyUrl), {
   body: JSON.stringify(
     [sessionP, sessionC, sessionQ].map((id) => ({
+      ...(id === sessionQ ? {} : { capabilities: ["steer"] }),
       machine_id: "claimant-e2e",
       session_id: id,
       title: id,
@@ -355,6 +437,80 @@ await runCase("unclaimed-issue", async () => {
   // Nobody holds the issue, it has no route and the comment mentions nobody: today's rules send
   // it to no session's topic.
   return topics.length === 0 ? undefined : "expected no agent topic";
+});
+
+// A mention resolved to a session hands it the comment only when its send lands: the outbox skips
+// that session's own copy for a `sent` row, holds it back while the send is pending, and publishes
+// it as if the session had not been mentioned once the send failed.
+await runCase("mention-delivered-claimant", async () => {
+  const { event, state } = await personMentions(
+    claimedKey,
+    sessionP,
+    "P, the retry order is settled."
+  );
+  const topics = await agentTopicsOf(event, mentionWaitMs);
+  note(topicsLine(event, topics));
+  if (state !== "sent") return `expected the mention's delivery row sent, read ${state}`;
+  return topics.includes(topic(sessionP))
+    ? `${topic(sessionP)} carried it beside the delivered mention`
+    : undefined;
+});
+
+await runCase("mention-failed-claimant", async () => {
+  await setSendStatus(sessionP, 404);
+  note(`the fake listener answers every send to ${sessionP} 404; its registry read still finds it`);
+  try {
+    const { event, state } = await personMentions(
+      claimedKey,
+      sessionP,
+      "P, did the retry order change?"
+    );
+    const topics = await agentTopicsOf(event, mentionWaitMs, (seen) =>
+      seen.includes(topic(sessionP))
+    );
+    note(topicsLine(event, topics));
+    if (state !== "failed") return `expected the mention's delivery row failed, read ${state}`;
+    return topics.includes(topic(sessionP))
+      ? undefined
+      : `expected ${topic(sessionP)} within ${mentionWaitMs / 1000}s`;
+  } finally {
+    await setSendStatus(sessionP, 200);
+  }
+});
+
+await runCase("mention-failed-follower", async () => {
+  const issue = (await asPerson("POST", "/api/v1/issues", {
+    project: "CLM",
+    title: "Asked about by session C",
+  })) as Json;
+  const key = String(issue.key);
+  const read = (await asAgent(issuePath(key))) as Json;
+  note(
+    `issue ${key} claim=${JSON.stringify(read.claim ?? null)} route=${JSON.stringify(read.route ?? null)}`
+  );
+  const ask = (await asSession(sessionC, "POST", issuePath(key, "/asks"), {
+    question: "Which retry order should the publisher keep?",
+  })) as Json;
+  const askId = String(ask.id);
+  note(`session C opened ask ${askId} on ${key}, so C follows it`);
+  note(`GET /api/v1/asks/${askId}: ${reach((await asAgent(`/api/v1/asks/${askId}`)) as Json)}`);
+  await setSendStatus(sessionC, 404);
+  note(`the fake listener answers every send to ${sessionC} 404; its registry read still finds it`);
+  try {
+    const { event, state } = await personMentions(key, sessionC, "C, keep the current order.", {
+      ask_id: askId,
+    });
+    const topics = await agentTopicsOf(event, mentionWaitMs, (seen) =>
+      seen.includes(topic(sessionC))
+    );
+    note(topicsLine(event, topics));
+    if (state !== "failed") return `expected the mention's delivery row failed, read ${state}`;
+    return topics.includes(topic(sessionC))
+      ? undefined
+      : `expected ${topic(sessionC)} within ${mentionWaitMs / 1000}s`;
+  } finally {
+    await setSendStatus(sessionC, 200);
+  }
 });
 
 const failed = results.filter((result) => !result.ok).map((result) => result.name);

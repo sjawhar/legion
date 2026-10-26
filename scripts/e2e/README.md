@@ -22,7 +22,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
 | `merged-root-waits.sh` | the daemon keeps a tree's order, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child, and lands once that child is parked; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
-| `dispatch-claimant-delivery.sh` | Dispatch's outbox delivers a person's answer, comment or untargeted message on an issue a session has claimed to that session's own `notifications.agent.<session>`, driven over HTTP through the real `envoy-dispatch` against a loopback PostgreSQL the caller names and a NATS of the run's own: a person's answer to an ask another session opened reaches the asker and the claimant, a person's reply in a person's thread on the issue's spec and a person's untargeted message reach the claimant, while a message targeted at another session, another session's comment and a person's comment on an unclaimed issue reach no claimant. Run against a base binary (`DISPATCH_BIN`), it is the change's negative control |
+| `dispatch-claimant-delivery.sh` | Dispatch's outbox delivers a person's answer, comment or untargeted message on an issue a session has claimed to that session's own `notifications.agent.<session>`, driven over HTTP through the real `envoy-dispatch` against a loopback PostgreSQL the caller names and a NATS of the run's own: a person's answer to an ask another session opened reaches the asker and the claimant, a person's reply in a person's thread on the issue's spec and a person's untargeted message reach the claimant, while a message targeted at another session, another session's comment and a person's comment on an unclaimed issue reach no claimant. A person's comment mentioning a session skips that session's own copy only when the mention's send landed: a delivered mention of the claimant leaves its topic out, a failed one reaches it, and a failed mention of an ask's follower still reaches the follower. Run against a base binary (`DISPATCH_BIN`), it is the change's negative control |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
@@ -1989,38 +1989,55 @@ The script drops every inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable (
 before it starts anything, so a Legion pane's real listener, Dispatch and NATS credentials reach
 none of it. It starts a NATS of its own (`internal/testnats/cmd/natsd`, JetStream on, on a port the
 kernel picks), the harness's fake Envoy listener (`packages/dispatch/e2e/fake-envoy.ts`, where the
-three sessions are registered live), and the server with NATS on, dev sign-in, an insecure cookie
-and an agent token minted for the run, in an environment holding nothing else. The driver,
-`dispatch-claimant-delivery.ts`, subscribes to `notifications.>` on that NATS, acts as the sessions
-P, C and Q with the agent token (each write naming its session as `actor`) and as one person
-through `GET /auth/_dev/signin`, finds each event's id in the issue's event log, waits up to 10 s
-for its envelope on the issue's own topic and 2 s more for its other destinations, and prints the
-agent topics that carried it. Issue `CLM-1` is the person's, with a spec and no route, claimed by P.
+three sessions are registered live and P and C advertise `steer`, a mention's default mode), and
+the server with NATS on, dev sign-in, an insecure cookie and an agent token minted for the run, in
+an environment holding nothing else. The driver, `dispatch-claimant-delivery.ts`, subscribes to
+`notifications.>` on that NATS, acts as the sessions P, C and Q with the agent token (each write
+naming its session as `actor`) and as one person through `GET /auth/_dev/signin`, finds each
+event's id in the issue's event log, waits up to 10 s for its envelope on the issue's own topic and
+2 s more for its other destinations, and prints the agent topics that carried it. The mention cases
+listen 15 s rather than 2 s: while a mention's send is pending the outbox holds back the mentioned
+session's copy and re-checks the event on its 5 s tick. Issue `CLM-1` is the person's, with a spec
+and no route, claimed by P.
 
 | case | driven | passes when the event's envelope reached |
 | :--- | :--- | :--- |
-| `case3-ask-answer` | C opens an ask on `CLM-1`; the person answers it | exactly `agent.C` and `agent.P`. It also prints `claimant` and `route` of `GET /api/v1/asks/{id}` and of the ask's Inbox row's thread (`absent` on a server that predates them) |
+| `case3-ask-answer` | C opens an ask on `CLM-1`; the person answers it | exactly `agent.C` and `agent.P`. It also prints `claimant`, `route` and `route_holder` of `GET /api/v1/asks/{id}` and of the ask's Inbox row's thread (`absent` on a server that predates them) |
 | `case2-thread-reply` | the person comments on a passage of `CLM-1`'s spec, then replies in that thread, mentioning nobody | `agent.P`, among any others |
 | `untargeted-message` | the person posts a message on `CLM-1` with no target | exactly `agent.P` |
 | `targeted-message` | the person sends a message on `CLM-1` targeted at `session:Q` | no `agent.P` |
 | `agent-comment` | C comments on `CLM-1` | no `agent.P` |
 | `unclaimed-issue` | the person comments on `CLM-2`, which nobody claims and which has no route | no agent topic at all |
+| `mention-delivered-claimant` | the person comments on `CLM-1` mentioning `session:P`; the fake listener takes the send. It prints the payload's mentions (`session:P→P`), the sends the listener took and the comment's delivery rows from `GET /api/v1/comments/{id}` | no `agent.P` within 15 s (the mention is P's one copy), and the delivery row `sent` |
+| `mention-failed-claimant` | the same, with the fake listener answering every send to P 404 while its registry read still finds P, so the mention resolves to P and its send fails | `agent.P` within 15 s, and the delivery row `failed` |
+| `mention-failed-follower` | C opens an ask on `CLM-3`, which nobody claims, so C only follows it; the person replies in the ask mentioning `session:C`, and the fake listener answers every send to C 404. It prints the ask's `claimant`, `route` and `route_holder` | `agent.C` within 15 s, and the delivery row `failed` |
+
+Each mention case fails when the comment.created payload's mention does not carry the mentioned
+session's `session_id`: the cases are about a mention that resolved, whatever its send did.
 
 Every case runs and prints `== <case>`, what it read, and `ok <case>` or `FAIL <case>: <why>`; a
 summary follows, and any FAIL exits 1. The work directory, under `TMPDIR`, holds the binaries and
 the logs of natsd, the fake listener and the server: removed when the run passes, kept (without the
 binaries) and printed when it fails. Every process the run started is stopped on any exit.
 
-**Negative control.** Built from the pull request's base commit, the same run must fail the three
-cases the claimant route adds and pass the three controls:
+**Negative control.** Built from the pull request's base commit, `81a3b5ef7b47`, which has no
+claimant route, the same run must fail the three cases the claimant route adds and
+`mention-failed-claimant`, and pass the rest. `mention-failed-follower` passes there by design:
+the base always sent the follower its copy, mentioned or not, and the case proves that behaviour is
+kept. A binary built from the pull request's earlier head `15e414ed9b6b`, which skipped a
+mentioned session's copy as soon as the mention resolved, fails both `mention-failed-claimant` and
+`mention-failed-follower`. Neither serves `route_holder`, printed `absent` there:
 
 ```sh
 mkdir -p "$TMPDIR/base-src"
 git --git-dir=<the checkout's git directory> archive <base commit> packages/envoy | tar -x -C "$TMPDIR/base-src"
 go -C "$TMPDIR/base-src/packages/envoy" build -o "$TMPDIR/envoy-dispatch-base" ./cmd/dispatch
 DATABASE_URL=… DISPATCH_BIN="$TMPDIR/envoy-dispatch-base" bash scripts/e2e/dispatch-claimant-delivery.sh
-# → FAIL case3-ask-answer (agent.C alone), FAIL case2-thread-reply and FAIL untargeted-message
-#   (no agent topic), ok for the other three, exit 1
+# → FAIL case3-ask-answer (agent.C alone), FAIL case2-thread-reply, FAIL untargeted-message and
+#   FAIL mention-failed-claimant (no agent topic), ok for the other five, exit 1
+# Built the same way from 15e414ed9b6b:
+# → FAIL mention-failed-claimant and FAIL mention-failed-follower (no agent topic), ok for the
+#   other seven, exit 1
 ```
 
 ## lib/free-port.sh

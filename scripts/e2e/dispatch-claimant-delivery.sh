@@ -6,8 +6,11 @@
 # (internal/testnats/cmd/natsd) and the e2e harness's fake Envoy listener
 # (packages/dispatch/e2e/fake-envoy.ts), drives it over HTTP as three sessions and one person, and
 # reads which `notifications.agent.*` topics carried each event's envelope, `dispatch-<event id>`
-# (dispatch-claimant-delivery.ts beside this script). Each case prints `== <case>`, what it read,
-# and `ok <case>` or `FAIL <case>`; every case runs, and any FAIL exits 1.
+# (dispatch-claimant-delivery.ts beside this script). The mention cases also prove that a person's
+# new comment mentioning a session skips that session's own copy only when the mention's send
+# landed (attempt.leftToMention): the fake listener refuses the send to make it fail. Each case
+# prints `== <case>`, what it read, and `ok <case>` or `FAIL <case>`; every case runs, and any FAIL
+# exits 1.
 #
 #   DATABASE_URL=postgres://<user>@127.0.0.1:<port>/<database>?sslmode=disable \
 #     [DISPATCH_BIN=<envoy-dispatch>] bash scripts/e2e/dispatch-claimant-delivery.sh
