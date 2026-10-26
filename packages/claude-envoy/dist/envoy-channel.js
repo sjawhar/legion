@@ -38069,9 +38069,10 @@ function parseCommand(argv, io) {
   for (let index = 0;index < rest.length; index++) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
-        if (claim("issue", "--issue", false))
-          args.issue = token;
+      const field2 = "issue";
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has(field2)) {
+        if (claim(field2, "--issue", false))
+          args[field2] = token;
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
