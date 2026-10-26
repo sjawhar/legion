@@ -2,22 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T12:56:00Z",
-  "round": 5,
-  "scope": "Narrowed by the architect: the behaviour-preserving refactor of the five cleanup items (3b91e647), and any correctness defect.",
-  "reviewedCodeHead": "3b91e647b69340a714cc2e72ae74eea8055e5156",
+  "completed": "2026-10-26T16:00:00Z",
+  "round": 6,
+  "scope": "The forward merge of main bc307fb5 (#2188) at dd04f49c and the migration renumber to 0054.",
+  "reviewedCodeHead": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
   "decision": "changes_requested",
   "critical": 1,
   "important": 0,
   "minor": 0,
-  "refactor": "All five items done and behaviour preserved, checked path by path: chains carried as []intake.DispatchIssue (IssueSummary.Ancestry removed); applyFact's records/todoWake flags gone, settle order kept (reread stays a local passed to settleReread, which keeps the settle after the observation's writes); the not-live refusal in adoptChildren alone, same order and message (intake.ChildNotAdoptable); promoteHolds uses the last pass's slots; prepareRecorded shared. The two test files only convert IssueSummary to DispatchIssue for Reconcile; no assertion changed.",
+  "mergeResolution": "Read clean by the reviewer and both thermonuclear runs: both sides survive in admit.go, architect.go, workflow.go, store.go (issueColumns, PutIssue and scanIssue all carry taken_back and ancestry in one order), intake_test.go and the two skill references (generated copies identical); go build and go vet pass on the head and on its merge with main 0587774a. migrations.All on the merge with current main lists 51 issue_suspend_release, 52 dispatch_issues, 53 issue_taken_back, 54 issue_ancestry.",
   "keyFindings": [
     {
       "severity": "critical",
-      "file": "packages/daemon/internal/store/migrations/0052_issue_ancestry.up.sql",
-      "description": "Main moved again: #2188 (bc307fb5, 2026-10-26T12:20Z) added 0052_dispatch_issues.up.sql and 0053_issue_taken_back.up.sql, so this branch's 0052 collides with main's 0052 and migrations.All would refuse the merged tree. GitHub now reports the PR CONFLICTING: git merge-tree with origin/main conflicts in admit/admit.go, api/architect.go, daemon/workflow.go, intake/intake_test.go, record/store.go, record/store_test.go and the architect wake-routing and controller admission references (source and generated). Forward-merge main, renumber the migration to 0054_issue_ancestry.up.sql, and prove migrations.All on the merged head."
+      "file": "packages/daemon/internal/daemon/blockers_scratch_dispatch_test.go",
+      "description": "The required check `test` is red at dd04f49c (Tests run 40344153501, job 121646481596): main's TestBlockedIssuesAreNotStartedAgainstScratchDispatch fails at step 10, `Legion did not admit BFEACACFD6-5 and BFEACACFD6-12 once BFEACACFD6-11 closed`, with admission.waiting [] and blocked [] and both at phase admitted. [INFERENCE from the state dump] Once the old root BFEACACFD6-3 is taken back into a slot (step 9), the adoption sweep pulls those two handed-over children (recorded parent 3, no run carried, so RanAsRoot is empty) back into 3's tree, which breaks AGENTS.md:221-222 ('A child stays its own tree after hand-over; reopening the old root later does not take it back') and plan finding 5's accepted 'an uncarried orphan rejoins its readmitted old tree'. The PR's rule and main's hand-over contract must be reconciled, and the test must pass."
     }
   ],
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 717f0b86 (code 3b91e647): both APPROVE the refactor, no findings; go build and go vet clean. Provider not verified.",
-  "ci": "At 3b91e647, read 2026-10-26T12:52Z: Tests 40317495101 success (test, lint, typecheck), PR Title 40317609872 success, Docs and Worker Image success, Legion Envoy and Contracts 40317494961 queued (not required). Required: lint, typecheck, test, pr-title. Compare 3b91e647...717f0b86 touches only .legion/."
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 1801cee6 (code dd04f49c): both APPROVE the merge resolution with no findings (they ran no Postgres tests); non-blocking: RanAsRoot now reads CarriesRun()||TakenBack instead of handed_over_roots, a behaviour change made in the merge commit. Provider not verified.",
+  "ci": "At dd04f49c, read 2026-10-26T15:58Z: lint success, typecheck success, pr-title success, test failure (TestBlockedIssuesAreNotStartedAgainstScratchDispatch). Required: lint, typecheck, test, pr-title. Compare dd04f49c...1801cee6 touches only .legion/."
 }
