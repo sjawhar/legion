@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-440",
+  "completed": "2026-10-26T13:59:42Z",
+  "round": 1,
+  "reviewedCodeHead": "e57e4be32d506fcf6fde3a22e9d30286f4462db3",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 7,
+  "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
+  "ci": "At e57e4be3 when read: lint, typecheck, test, pr-title (the required set from the main ruleset) all queued; compare e57e4be3...d03cfaa3 touches only .legion/. A request for changes does not wait on CI.",
+  "thermonuclear": "deep-review and code-quality both ran once at e57e4be3; both CHANGES. tsc, biome and bun test (2406 pass) clean per deep-review.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/inbox/AskCard.tsx:573",
+      "description": "At 390 px the Inbox ask card's asker reads 'Le…': the control variant's live link gets the global 44 px touch box (styles.css:74-79) inside the nowrap turn/author/time row. Name must stay readable beside the copy-handles button and the live link, with a 390 px browser assertion."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx:25",
+      "description": "Security[untrusted-input]: the credential approval surface now shows a requester-chosen session id as session:<8 chars>… with only a ring for its state; before, the full id and 'isn't running' / 'Couldn't check whether … is running' were visible. Show the full id and the state words for a line the registry does not list."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:169",
+      "description": "Link variant sets aria-label to the full label and then renders the attribution suffix as text after the link: a screen reader hears the attribution twice."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:146",
+      "description": "Short-form fallback session:<8>… replaced full ids in DrillDown, Pinned event lines, the delivery group editor and the mention picker; UUIDv7 prefixes collide. Expose the full id (title) whenever the short form is shown."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:108",
+      "description": "kind=control with a user/system actor returns the id and never calls control(), silently dropping the host's button."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/AgentName.tsx:140",
+      "description": "The naming rule is branched four times in the module meant to hold it once, and the attribution is found by slicing actorLabel's string; one resolver and a contracts-side attribution function."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/conversation/composer-model.ts:20",
+      "description": "ReplyTarget's actor|author union and ReplyQuote's second layout exist only for ThreadCard.tsx:539's author:'', which renders 'Replying to ' with nothing after it; pass the root comment's actor and drop the string path."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/agents/AgentsPage.tsx:229",
+      "description": "AgentText is threaded through exchangeDelivery/agentReplyTo to fill ReplyTarget.thread.title, which nothing reads; ConversationTab's sessionTitle() is a hand-rolled namer for the same dead field."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:410",
+      "description": "commentReplyTarget builds @mention text from the raw title or full id, while the picker uses useAgentText().sessionText; AGENTS.md says every @Title goes through useAgentText. Docs: AGENTS.md:471 lists a nonexistent `name` (it is `part`), SubscribedAgents.tsx:24-26 says the endpoint has no running state (Subscriber.live exists)."
+    }
+  ]
+}
