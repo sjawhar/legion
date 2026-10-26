@@ -1488,8 +1488,20 @@ its uid and so its volume. In this order:
    SQL
    ```
 
-   Then, for each issue Sandbox, set its tree label to its issue's home where the two differ, and
-   delete the Sandbox, leaving its volume, where its issue has no home:
+   Read too the trees whose lifecycle is live in the restored database (`Store.TreeLive`'s rule: a
+   `tree_lifecycles` row whose cleanup is not confirmed), spelled the same way:
+
+   ```sh
+   psql '<postgres_dsn>' -XAt -v project='<project>' > live.txt <<'SQL'
+   select case when length(tree) <= 63 then tree
+            else left(lower(tree), 54) || '-' || left(encode(sha256(convert_to(tree, 'UTF8')), 'hex'), 8) end
+   from tree_lifecycles where project = :'project' and cleanup_confirmed_at is null;
+   SQL
+   ```
+
+   Then, for each issue Sandbox: delete it, leaving its volume, where its issue has no home; keep
+   its tree label where that tree is live in the restored database or is its issue's home; and
+   otherwise set the label to its issue's home:
 
    ```sh
    kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
@@ -1498,7 +1510,7 @@ its uid and so its volume. In this order:
      home=$(awk -v issue="$issue" '$1 == issue { print $2 }' homes.txt)
      if [ -z "$home" ]; then
        kubectl -n <namespace> delete sandbox "$name" --cascade=orphan
-     elif [ "$home" != "$tree" ]; then
+     elif [ "$home" != "$tree" ] && ! grep -qxF -- "$tree" live.txt; then
        kubectl -n <namespace> patch sandbox "$name" --type json -p '[
          {"op": "test", "path": "/metadata/labels/legion.dev~1tree", "value": "'"$tree"'"},
          {"op": "replace", "path": "/metadata/labels/legion.dev~1tree", "value": "'"$home"'"}]'
@@ -1506,22 +1518,31 @@ its uid and so its volume. In this order:
    done
    ```
 
-   A relabelled Sandbox is its issue's home, so the sweep keeps it, and the earlier release's
-   launch resumes the issue's claims in it on the same volume. A Sandbox whose issue has no home
-   is one the earlier release holds for no tree, which its sweep would delete with its volume:
-   `--cascade=orphan` deletes the Sandbox alone. The volume stays, with no owner and Agent Sandbox's
-   `agents.x-k8s.io/sandbox-name-hash` label, and when the issue is admitted again the Sandbox the
-   earlier release makes under the same name adopts it, clone and session files as they were. Its
-   role Secrets stay too, with no owner, and the earlier release's next launch replaces each
-   (`writeSecret` in `relaunch.go`).
+   The sweep keeps a Sandbox whose label names a live tree, and that tree's own cleanup gives it
+   to its issue's home as the record holds the home then (`CleanupTree` in
+   `internal/runtime/sandbox/cleanup.go`), so its label stays. Relabelling it now would fix the home
+   the dump holds, and the home can still change before that cleanup: a child whose hand-over is
+   pending has its own key as its home, and its old tree's root reopened in its linger cancels the
+   hand-over (`CancelTreeHandovers`, from `internal/admit/admit.go`), which makes that root's tree
+   the child's home again. A Sandbox relabelled to the child's key would then name a tree with no
+   lifecycle that is not its issue's home, and the sweep would delete it with its volume. A
+   relabelled Sandbox is its issue's home under a tree that is not live, so the sweep keeps it, and
+   the earlier release's launch resumes the issue's claims in it on the same volume. A Sandbox whose
+   issue has no home is one the earlier release holds for no tree, which its sweep or its tree's
+   cleanup would delete with its volume: `--cascade=orphan` deletes the Sandbox alone. The volume
+   stays, with no owner and Agent Sandbox's `agents.x-k8s.io/sandbox-name-hash` label, and when the
+   issue is admitted again the Sandbox the earlier release makes under the same name adopts it,
+   clone and session files as they were. Its role Secrets stay too, with no owner, and the earlier
+   release's next launch replaces each (`writeSecret` in `relaunch.go`).
 5. **Check that nothing is left.** The `get sandboxes` query of step 3, without the loop, prints
-   nothing, and so does this one, which prints every issue Sandbox whose tree label is not its
-   issue's home:
+   nothing, and so does this one, which prints every issue Sandbox whose issue has no home, or
+   whose tree label is neither a live tree nor its issue's home:
 
    ```sh
    kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
      -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.labels.legion\.dev/issue} {.metadata.labels.legion\.dev/tree}{"\n"}{end}' |
-   awk 'NR == FNR { home[$1] = $2; next } home[$2] == "" || home[$2] != $3' homes.txt -
+   awk 'FILENAME == "live.txt" { live[$1] = 1; next } FILENAME == "homes.txt" { home[$1] = $2; next }
+        home[$2] == "" || (home[$2] != $3 && !($3 in live))' live.txt homes.txt -
    ```
 
 6. **Put `legion.yaml`'s `runtime.kubernetes.resources` block back as it was before the upgrade**
