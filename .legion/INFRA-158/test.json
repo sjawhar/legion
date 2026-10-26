@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-158",
+  "completed": "2026-10-26T11:45:00Z",
+  "head": "39c12172d83472555b3c339617b1d6cbc2bdce59",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface independently at the merged head 39c12172 (the implementer's proof ran at 3c237348, before the third merge of main): dispatch:local with the head's Go server, Postgres 17, the SPA and the dispatch CLI built at the head, and the Legion daemon's own Dispatch client (dispatch.HTTPClient.SetStatus). Every claim of the five proof entries held: closes by a person, an agent session and legion-daemon withdraw a decision block, a plain ask and an approval request with the closer named; reopen restores exactly those; the repair withdraws asks left open by main's build and restores asks main's build reopened; the browser spec close-withdraws-asks passes 6/6; closes take 0.09-0.5 s."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "Closed-issue page a person reads (spec acceptance: after a close nothing on the issue's page misleads; Sami's fix-in-place rule dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830, routed to this tree by the controller and the architect)",
+      "evidence": "A new browser profile, signed in as a person who typed nothing, opens a closed issue's spec and the status pill reads \"connected · 1 edit saved in this browser can't be sent: this document is read-only.\" The red test is \"a closed issue's document names no unsent edit to a person who typed nothing\" in packages/dispatch/e2e/close-withdraws-asks.e2e.ts. Command: cd packages/dispatch && bun run e2e -- close-withdraws-asks.e2e.ts -g \"names no unsent edit\" --repeat-each 3. Result at head 39c12172: 6 failed (chromium x3, iphone x3), each at toHaveAccessibleName(\"connected\"), with Received \"connected · 1 edit saved in this browser can't be sent: this document is read-only.\". Main's build 383b889d does the same (issue BC-1 on a fresh database), so the change does not cause it, but the tree fixes it under the rule above. Evidence comment: dispatch://INFRA-49/comment/c3a85490-ae4a-4270-9daf-93882b859ec7."
+    },
+    {
+      "criterion": "No document write that changes nothing appends an update or marks its document owing a settlement (the architect names this to be fixed in this PR)",
+      "evidence": "The implementer's own openQuestion in .legion/INFRA-158/implement.json: applyLive (packages/envoy/internal/dispatch/docs/mutation.go) appends the update ygo emits for a transaction that changes nothing, for every writer. Only WriteIssueAskStates was fixed, at its caller. Any other writer that opens a no-op transaction appends an empty update and marks its document as owing a settlement. The architect directs the general fix in applyLive. No red test from the tester: the implementer's TestARepairThatChangesNothingAppendsNoUpdateAndMarksNoDocument pins the caller's case, and the general case needs a test at applyLive."
+    }
+  ],
+  "verifiedWithoutDefect": [
+    "Closes of TT-1 by alice (cookie PATCH, 0.09 s), TT-2 by an agent session (dispatch issue-update --status done) and TT-3 by SetStatus (99 ms). Each issue held an open decision block copied into a second document, an answered block, plain asks waiting on a person and on the agent, a person's ask, an approval request, and a retracted and a resolved ask. After each close: open_asks 0, approval draft, 'Open asks: - none', every open ask Kind withdrawn By <closer>, the live blocks and the copy resolved, named versions byte-identical, no new version. The answered, retracted and resolved asks were unchanged. In Chromium: no 'Waiting on' header, no 'Awaiting approval' button, and each card reads 'Withdrawn when legion-daemon:TT closed the issue'.",
+    "Reopen by alice and by the agent: the same 5 ids are open again with their waiting_on, back in the Inbox, approval awaiting, blocks open. Then 4 close/reopen cycles by the daemon, the agent and alice: a retract and an answer made between cycles stayed, and every withdrawal named that cycle's closer.",
+    "Refusals on a closed issue: answer 409 ISSUE_CLOSED; resolve-ask 'issue is closed'; --kind withdrawn refused by the CLI; ask, doc-edit (a new decision block) and request-approval all refused with 'issue is closed' or ISSUE_CLOSED.",
+    "Races, 95 rounds with 0 problems and no 5xx: close against resolve and answer (all 4 interleavings), two closes at once (200 and 409, each ask withdrawn once), a block inserted just before the close (withdrawn with its author, 15/15), close/reopen/close at once, and two head processes on one database with the room on B and the close on A (blocks resolved through both, asks withdrawn).",
+    "Upgrade: closes on main's build 383b889d left open_asks 5. Booting the head logged withdrawn=15 and named each issue's latest closer (old-agent-6 after a reclose). In the roll, main's build reopened 2 issues and the head restored their 10 asks.",
+    "Browser suite close-withdraws-asks.e2e.ts at the head: 6 passed."
+  ],
+  "ci": "At 39c12172: Tests run 40306985472 success (lint, typecheck, test); Docs 40306985572 success; Worker Image 40306986608 success; PR Title 40309016319 success; Legion Envoy and Contracts 40306985411 in progress.",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/2233#issuecomment-6414899308"
+}
