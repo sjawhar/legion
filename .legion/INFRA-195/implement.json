@@ -2,11 +2,27 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T07:05:00Z",
+  "completed": "2026-10-26T08:05:00Z",
   "generation": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2205",
-  "codeHead": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
+  "codeHead": "fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753",
   "proof": [
+    {
+      "criterion": "Review 5648795710: each reader of the session-settings rig decodes with its own TextDecoder; the shared export is gone",
+      "surface": "a scratch probe driving the module's exported decoder as Omp.#read and Services.nextControl use it, and the rig itself in this issue pod (real Oh My Pi --mode rpc on this pi-envoy, Envoy listener, NATS, Dispatch, rootless Postgres, Chromium) on anthropic/claude-haiku-5-5 + anthropic/claude-haiku-4-5, OPENAI_API_KEY unset",
+      "command": "bun /legion/scratch/infra195-impl-evidence/decoder-probe.ts scripts/e2e/lib (before and after); SESSION_SETTINGS_MODELS='anthropic/claude-haiku-5-5 anthropic/claude-haiku-4-5' bash scripts/e2e/dispatch-session-settings.sh with fallback moved last (scratch, reverted)",
+      "observed": "After: the probe finds no shared decoder export, and with one decoder per reader stream A's line (\"café\" split across two chunks), stream B's line and the NATS message all parse. Rig: checks 1-17 and 19-20 ok, then `FAIL fallback: timed out after 240s` (Oh My Pi's dispatch://INFRA-309, unchanged); tsc and biome clean on scripts/e2e. The rig ran on a tree equal to the head but for two CHANGELOG blank lines.",
+      "headSha": "fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753",
+      "negativeControl": "Before the fix, the same probe with the driver's shared decoder: stream B's line reads \"\\uFFFD{\\\"type\\\":\\\"ready\\\"}\" and fails JSON.parse, so Omp.#take would drop it without a word."
+    },
+    {
+      "criterion": "Review round 3, item 1: the conflict with main resolved by a forward merge that changes neither side",
+      "surface": "jj forward merge of legion/INFRA-195 with main@origin (84e8f052), the unchanged-diff fingerprint",
+      "command": "jj new legion/INFRA-195 \"main\"@origin; fingerprint per conflicts-and-rewrites.md at 981aec1b and at the merge 5676d5fb",
+      "observed": "Conflicts in packages/contracts/CHANGELOG.md and packages/envoy/CHANGELOG.md (both sides' entries kept); scripts/e2e/README.md merged cleanly. Fingerprint aa4ffcd408cd… at 981aec1b and aa4ffcd408cd… at the merge 5676d5fb: unchanged. The final head adds only the README note and the decoder fix (b635db7bc0a9…).",
+      "headSha": "fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753",
+      "negativeControl": "A first resolution dropped two blank lines in packages/envoy/CHANGELOG.md; the fingerprint showed it (bc6aa6e4…, then 48136804…), and both lines were restored before any push."
+    },
     {
       "criterion": "A2 in Firefox (review round 2): rows 11a and 11d of e2e/keyboard-session-pickers.e2e.ts pass; the switch's answer reaches a Firefox page whose event stream reconnected",
       "surface": "Dispatch browser suite in this issue pod: real Go Dispatch server, production SPA bundle, rootless Postgres 17 + pgvector, Playwright Firefox 155 (and chromium/iphone)",
@@ -22,46 +38,14 @@
       "observed": "New driver and old driver each `all 19 checks passed in 251s`, same sequence of check names. At ea067bb9: checks 1-17 and 19-20 ok, then `FAIL fallback: timed out after 240s`. Check 18 cannot pass on two Anthropic models: Oh My Pi skips a same-provider fallback candidate when the last assistant turn carries a sibling model's signed thinking (dispatch://INFRA-309; its owner reproduced it from dispatch://INFRA-195/artifact/check18-fallback-log-txt, and the session's last assistant turn before the pick was anthropic/claude-haiku-4-5 with signed thinking). Check 18 last passed on the default pair at 2451b5dc.",
       "headSha": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
       "negativeControl": "Check 18 itself on the Anthropic pair → FAIL fallback with both drivers, which shows the rig still detects a session that never falls back."
-    },
-    {
-      "criterion": "A4 proof surface (the tester's failures[0]): rig check 13 `no-answer` judges the switch's delivery attempt only once Dispatch has recorded it, so it passes on correct code however the timing falls",
-      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod (real Oh My Pi --mode rpc on this pi-envoy, Envoy listener, NATS, Dispatch, rootless Postgres, Chromium)",
-      "command": "LEGION_TEST_PG_DSN=... SESSION_SETTINGS_EVIDENCE_DIR=$TMPDIR/infra195/rig-r2 bash scripts/e2e/dispatch-session-settings.sh (clean); the same with a scratch 2 s sleep before Dispatch's deliverMessage (rig-fix-race)",
-      "observed": "Clean at head: exit 0, `all 20 checks passed in 328s`, `ok no-answer (82s)`, `picked anthropic/claude-haiku-5-5 (message 537a04fa-…, attempt 1 sent)`. With the 2 s delay before the attempt is recorded: exit 0, `all 20 checks passed in 345s`, `ok no-answer (70s)`, attempt 1 sent. Evidence: https://github.com/sjawhar/legion/pull/2205#issuecomment-6406704859",
-      "headSha": "2451b5dcba7766ceea944be791e461b5162fecdb",
-      "negativeControl": "The driver of 87ea738e against the same delayed Dispatch (scratch sleep in packages/envoy/internal/dispatch/api/messages.go, never committed, reverted; diff empty) → `FAIL no-answer: Dispatch's send failed: null`, the tester's exact failure, after checks 1-12 ok."
-    },
-    {
-      "criterion": "Review round 1, findings 1-3: the local-stack rig proves A1-A4 at head with the older-plugin session on a pinned pre-settings pi-envoy (10.24.0), runs with a provider key unset when no model needs it, and gives the provider keys to the driver and Oh My Pi alone",
-      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod: /opt/omp/bin/omp in --mode rpc with this checkout's packed pi-envoy and the released @sjawhar/pi-envoy 10.24.0, nats-server v2.10.22, the real Envoy listener, Dispatch, rootless Postgres, Chromium; plus a /proc/<pid>/environ sampler (key names only)",
-      "command": "LEGION_TEST_PG_DSN=... SESSION_SETTINGS_EVIDENCE_DIR=$TMPDIR/infra195/rig-r1b bash scripts/e2e/dispatch-session-settings.sh, with $TMPDIR/infra195/env-sampler.sh sampling every 2 s",
-      "observed": "exit 0, `all 20 checks passed in 328s`; `released pi-envoy 10.24.0`; `ok older-plugin-notice (8s)`. During the run the keys were in the environment of only the script process (the caller's), the driver and the Oh My Pi processes; nats-server, the listener, Dispatch, Chromium (every process type), go build, vite build and the port holder carried none. With OPENAI_API_KEY unset and two anthropic models, setup printed `keys: ANTHROPIC_API_KEY 106 chars, OPENAI_API_KEY 0 chars` and went on to the builds. Evidence: https://github.com/sjawhar/legion/pull/2205#issuecomment-6406154086",
-      "headSha": "87ea738e6a519f4d696393c3631584d1afdda214",
-      "negativeControl": "The old line 148 shape `set -u; unset OPENAI_API_KEY; echo ${#OPENAI_API_KEY}` → `OPENAI_API_KEY: unbound variable`. With the capture at its first (later) point, commit 779874f4, the same sampler caught `tee -a …/transcript.log` holding both keys, which moving the capture before any child removed. 10.24.0's dist has no `kind: \"settings\"` (grep 0 in envoy.js and dispatch.js), while this checkout's agent-stream.ts emits it."
-    },
-    {
-      "criterion": "A2 keyboard rows and A5 settings rows still pass after the fast-follow (PHONE_PROJECTS names only iphone; SessionSettings tests render the component)",
-      "surface": "Dispatch browser suite (real Go server, production SPA bundle, rootless Postgres, Playwright Chromium) and the dispatch agent-view unit suite",
-      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/keyboard-session-pickers.e2e.ts e2e/agent-view-settings.e2e.ts --reporter=list; bun test web/src/features/agent-view",
-      "observed": "Browser: 30 passed (1.9m). Units: 85 pass, 0 fail across 8 files (SessionSettings.test.tsx 7, AgentConversationPage.test.tsx 20; before the move 81 across 7, the page file 23). AgentConversationPage.test.tsx 1,105 → 907 lines; SessionSettings.test.tsx 316 lines.",
-      "headSha": "87ea738e6a519f4d696393c3631584d1afdda214",
-      "negativeControl": "SessionSettings.tsx with the key-step marker never set (`movedByKeyboard.current = true` → `false`, reverted after, diff empty) → 4 of SessionSettings.test.tsx's 7 tests fail (arrows pick nothing; held picker keeps focus and no pick picks; held steps survive; a held step gives way to a new report); the rendering, cannot-switch and pointer tests pass, as they do not depend on the marker."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/events.go",
-    "packages/envoy/internal/dispatch/api/server_test.go",
-    "packages/envoy/internal/dispatch/api/events_identity_test.go",
-    "packages/envoy/CHANGELOG.md",
-    "scripts/e2e/lib/dispatch-session-settings.ts",
-    "scripts/e2e/lib/session-settings-common.ts (new)",
-    "scripts/e2e/lib/session-settings-omp.ts (new)",
-    "scripts/e2e/lib/session-settings-services.ts (new)",
-    "scripts/e2e/lib/session-settings-browser.ts (new)",
-    "scripts/e2e/lib/session-settings-session-file.ts (new)",
-    "scripts/e2e/dispatch-session-settings.sh",
-    "scripts/e2e/README.md",
-    "merge ea067bb9: packages/dispatch/web/src/features/agent-view/{AgentConversationPage.tsx,AgentConversationPage.test.tsx,AgentRuntimeThread.tsx,AgentThread.tsx,AgentThread.boundary.test.tsx}, packages/dispatch/web/src/features/refs/markdown-surfaces.test.tsx, packages/dispatch/AGENTS.md"
+    "merge 5676d5fb: packages/contracts/CHANGELOG.md, packages/envoy/CHANGELOG.md (conflicts), scripts/e2e/README.md (clean)",
+    "scripts/e2e/README.md (SESSION_SETTINGS_MODELS row: two Anthropic models run every check but fallback, INFRA-309)",
+    "scripts/e2e/lib/session-settings-common.ts",
+    "scripts/e2e/lib/session-settings-omp.ts",
+    "scripts/e2e/lib/session-settings-services.ts"
   ],
   "trickyParts": [
     "Rig check 14 step 2's barrier subscribes to agentStreamControlSubject(S) with a bare NATS client (Services.nextControl) and waits for the relay's first watch plus 1 s; without it the RPC change can land before the first watch and be read while nobody watches.",
@@ -69,10 +53,7 @@
     "keyboard-session-pickers.e2e.ts is self-contained (imports only ./agents, ./api, ./seed, ./users helpers present at the base) so the A5 baseline fails each row on its own assertion."
   ],
   "deviations": [
-    "The Firefox fix is in Dispatch's server (events.go), not the page or the row: the row was right, and the same gap held Firefox on 'Reconnecting…' for up to 15 s after any production reconnect.",
-    "The split is proven by checks 1-17 and 19-20 on two Anthropic models (accepted by the architect and decided by the controller, since OpenAI is paused for Legion pods), not by a 20-check run on the default pair.",
-    "Forward merge of main at ea067bb9 because GitHub reported the pull request CONFLICTING after #2227; fingerprint changed (resolution edits), so the browser proof was re-run at the merge head. The resolution adds AgentThread's `held` prop: Send stays disabled and reads 'Send' while a switch is pending, and the line under the box shows the switch's wait text, not 'Enter to send'.",
-    "Open, for the architect: the rig's default model pair still names openai/gpt-5-nano, which no Legion pod can run while OpenAI is paused; on two Anthropic models check 18 fails until dispatch://INFRA-309 ships."
+    "The forward merge, the README note, the decoder fix and this handoff go up in one push, as the architect asked; the push carries code, so it has no skip-checks line."
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
@@ -105,5 +86,5 @@
       "resolvedAt": "ea067bb9830f"
     }
   ],
-  "round": "review round 2 (code head 2451b5dc): Firefox rows 11a/11d, plus the fast-follow items brought into this pull request; then a forward merge of main (CONFLICTING after #2227)"
+  "round": "review round 3 (code head ea067bb9), architect's narrowed scope: the forward merge of main (CONFLICTING at 4eb70128) and review 5648795710's TextDecoder finding; plus the README note on two Anthropic models"
 }
