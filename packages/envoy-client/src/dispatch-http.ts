@@ -37,6 +37,7 @@ import type {
   IssueRead,
   IssueReferences,
   IssueRouteStatus,
+  IssueSummary,
   IssueSummaryPage,
   Message,
   MessageRead,
