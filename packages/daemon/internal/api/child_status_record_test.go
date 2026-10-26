@@ -91,30 +91,20 @@ func superviseRows(t *testing.T, h *harness, op string, role claim.Role) int {
 	return rows
 }
 
-// outboxRows counts every row queued for the child.
-func outboxRows(t *testing.T, h *harness) int {
-	t.Helper()
-	var rows int
-	if err := h.store.Pool().QueryRow(context.Background(), `select count(*) from outbox where issue = $1`, statusChild).Scan(&rows); err != nil {
-		t.Fatalf("count the outbox rows of %s: %v", statusChild, err)
-	}
-	return rows
-}
-
 // assertEchoChangesNothing applies the route's own Dispatch event once the route has answered, as
 // the lagging consumer finally delivers it, and holds the child's record and its queued rows to what
 // the route left.
 func assertEchoChangesNothing(t *testing.T, h *harness, handlers []intake.Handler, echo intake.DispatchIssue) {
 	t.Helper()
-	before, rows := recordedChild(t, h, statusChild), outboxRows(t, h)
+	before, rows := recordedChild(t, h, statusChild), outboxRows(t, h, statusChild)
 	if _, err := intake.ApplyFact(context.Background(), h.store.Pool(), "dispatch", "echo", echo, handlers...); err != nil {
 		t.Fatalf("apply the echo of the route's own write: %v", err)
 	}
 	if after := recordedChild(t, h, statusChild); !reflect.DeepEqual(after, before) {
 		t.Fatalf("the child after its own write's echo = %#v, want it as the route left it, %#v", after, before)
 	}
-	if after := outboxRows(t, h); after != rows {
-		t.Fatalf("the child's outbox rows after its own write's echo = %d, want the %d the route left", after, rows)
+	if after := outboxRows(t, h, statusChild); !reflect.DeepEqual(after, rows) {
+		t.Fatalf("the child's outbox rows after its own write's echo = %v, want the %v the route left", after, rows)
 	}
 }
 
@@ -135,26 +125,27 @@ func TestParkChildParksTheRecordWithoutWaitingForItsDispatchEvent(t *testing.T) 
 	if len(statuses.writes) != 1 || statuses.writes[0] != (statusWrite{issue: statusChild, status: "backlog"}) {
 		t.Fatalf("Dispatch writes = %#v, want the child's backlog", statuses.writes)
 	}
-	parked := recordedChild(t, h, statusChild)
-	if parked == nil || parked.Phase != phase.Done || parked.Status != "backlog" || parked.DispatchStatus != "backlog" || parked.LastDispatchSeq != 5 || parked.Generation != 1 {
-		t.Fatalf("the child's record once park_child answered = %#v, want it parked (phase done, status backlog) at its write's sequence 5", parked)
-	}
-	if got := superviseRows(t, h, "suspend", claim.RolePlanner); got != 1 {
-		t.Fatalf("planner suspend rows = %d, want the park to stop the planner once", got)
-	}
 
-	// The planner was mid-turn when its architect parked the child, and completes its plan.
+	// The planner was mid-turn when its architect parked the child, and completes its plan before
+	// any Dispatch event of the park is delivered.
 	result, err := intake.ApplyFact(context.Background(), h.store.Pool(), "api", "planner-completed", intake.HandoffComplete{
 		Generation: 1, Issue: statusChild, Role: claim.RolePlanner, Claim: "planner-claim", Summary: "the plan", Commit: "c0ffee",
 	}, handlers...)
 	if err != nil {
 		t.Fatalf("apply the planner's completion: %v", err)
 	}
+	if got := superviseRows(t, h, "start", claim.RoleImplementer); got != 0 {
+		t.Fatalf("implementer start rows = %d, want none: the planner's completion started the implementer of a child its architect parked", got)
+	}
 	if result.Refusal == nil || result.Refusal.Code != "HANDOFF_NOT_CURRENT_PHASE" {
 		t.Fatalf("the planner's completion after the park = %+v, want it refused: the child left the workflow", result.Refusal)
 	}
-	if got := superviseRows(t, h, "start", claim.RoleImplementer); got != 0 {
-		t.Fatalf("implementer start rows = %d, want none: a parked child starts no phase", got)
+	parked := recordedChild(t, h, statusChild)
+	if parked == nil || parked.Phase != phase.Done || parked.Status != "backlog" || parked.DispatchStatus != "backlog" || parked.LastDispatchSeq != 5 || parked.Generation != 1 {
+		t.Fatalf("the child's record once park_child answered = %#v, want it parked (phase done, status backlog) at its write's sequence 5", parked)
+	}
+	if got := superviseRows(t, h, "suspend", claim.RolePlanner); got != 1 {
+		t.Fatalf("planner suspend rows = %d, want the park to stop the planner once", got)
 	}
 
 	assertEchoChangesNothing(t, h, handlers, statusEcho(5, "backlog"))
