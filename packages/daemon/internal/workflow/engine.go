@@ -1073,14 +1073,16 @@ func (e *Engine) phaseRow(ctx context.Context, tx pgx.Tx, issue string, role cla
 	return record.PhaseRow{Issue: issue, Role: role}, nil
 }
 
-// issueForBranch is the issue whose branch legion/<KEY> is, when it is recorded on repo, as its
-// record keeps GitHub's spelling (record.Issue.GitHubRepo), compared case-insensitively as GitHub
-// compares names: a pull request on legion/<KEY> in another repository is never <KEY>'s.
+// issueForBranch is the issue whose branch (claim.IssueBranch) branch is, when it is recorded on
+// repo, as its record keeps GitHub's spelling (record.Issue.GitHubRepo), compared
+// case-insensitively as GitHub compares names: a pull request on legion/<KEY> in another repository
+// is never <KEY>'s.
 func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.Issue, error) {
-	if !strings.HasPrefix(branch, "legion/") {
+	key, ok := claim.BranchIssue(branch)
+	if !ok {
 		return nil, nil
 	}
-	issue, err := e.store.Issue(ctx, tx, strings.TrimPrefix(branch, "legion/"))
+	issue, err := e.store.Issue(ctx, tx, key)
 	if err != nil || issue == nil || !strings.EqualFold(issue.GitHubRepo, repo) {
 		return nil, err
 	}
