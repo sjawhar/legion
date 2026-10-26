@@ -172,10 +172,23 @@ export const DedupeIdentitySchema = z.object({
 
 export type DedupeIdentity = z.infer<typeof DedupeIdentitySchema>;
 
-/** What one claim recorded. `release` undoes exactly that, and only once. */
+/**
+ * What one claim recorded. `release` undoes exactly that, and only once. `settle` says the host is
+ * done with the frame without undoing the record: it was handed over, or the host chose not to
+ * show it. Until one of the two, the frame is `pending` (`DeliveryDedupe.status`), and a replay
+ * sweep leaves the stream's copy for later rather than show it beside the live one.
+ */
 export interface DeliveryClaim {
   release(): void;
+  settle(): void;
 }
+
+/**
+ * Where a frame stands in a host's live path: never claimed (or released), claimed and still
+ * being delivered, or claimed and finished with. `settled` says nothing of whether it was shown:
+ * a host that shows it records that in the replay ledger, which a replay sweep reads first.
+ */
+export type DeliveryStatus = "none" | "pending" | "settled";
 
 /**
  * A host's record of the frames it handed its agent, which drops a repeat. The whole promise it is
@@ -187,7 +200,9 @@ export interface DeliveryClaim {
  * already a repeat. It releases the claim when its agent was not handed the frame after all: the
  * hand-off threw, or the host answered the frame with an error instead (a BTW whose side turn
  * failed, a frame it could not read). Dispatch records that attempt failed, and a same-mode
- * re-send of it must then reach the agent.
+ * re-send of it must then reach the agent. Otherwise it settles the claim once it is done with the
+ * frame, shown or not: a claim left open reads as `pending` forever, and a replay sweep then never
+ * moves its stream cursor past that frame.
  */
 export interface DeliveryDedupe {
   /**
@@ -196,6 +211,11 @@ export interface DeliveryDedupe {
    * claimed already), otherwise the claim, whose `release` undoes what this call recorded.
    */
   claim(frame: DedupeIdentity | undefined): DeliveryClaim | undefined;
+  /**
+   * Where the frame stands, by the same identity rule `claim` drops a repeat by: a claim of its
+   * event id, or of a key that names its event inside the window, is that frame's claim.
+   */
+  status(frame: DedupeIdentity): DeliveryStatus;
 }
 
 /**
@@ -235,10 +255,13 @@ const DELIVERY_EVENT_ID_LIMIT = 10_000;
 export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
   // Insertion order is claim order, so the keys past the window, and the oldest key the limit
   // evicts, are always at the front. A key maps to when it was claimed, an event id to the number
-  // of the claim that recorded it, so a release removes neither once another claim took it.
+  // of the claim that recorded it, so a release removes neither once another claim took it. The
+  // pending maps hold only the claims neither settled nor released yet, each by its number.
   const keys = new Map<string, number>();
   let events = new Map<string, number>();
   let olderEvents = new Map<string, number>();
+  const pendingKeys = new Map<string, number>();
+  const pendingEvents = new Map<string, number>();
   let claims = 0;
   return {
     claim(frame) {
@@ -272,10 +295,22 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
           events = new Map();
         }
         events.set(eventId, claim);
+        pendingEvents.set(eventId, claim);
       }
+      if (named) pendingKeys.set(key, claim);
+      let open = true;
+      const close = () => {
+        if (!open) return;
+        open = false;
+        if (eventId !== undefined && pendingEvents.get(eventId) === claim) {
+          pendingEvents.delete(eventId);
+        }
+        if (named && pendingKeys.get(key) === claim) pendingKeys.delete(key);
+      };
       let released = false;
       return {
         release() {
+          close();
           if (released) return;
           released = true;
           if (named && keys.get(key) === at) keys.delete(key);
@@ -283,7 +318,26 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
           if (events.get(eventId) === claim) events.delete(eventId);
           if (olderEvents.get(eventId) === claim) olderEvents.delete(eventId);
         },
+        settle: close,
       };
+    },
+    status(frame) {
+      const eventId = frame.event_id;
+      const key = frame.dedupe_key;
+      const named = key !== undefined && dedupeKeyNamesItsEvent(frame);
+      if (
+        (eventId !== undefined && pendingEvents.has(eventId)) ||
+        (named && pendingKeys.has(key))
+      ) {
+        return "pending";
+      }
+      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
+        return "settled";
+      }
+      const claimedAt = named ? keys.get(key) : undefined;
+      return claimedAt !== undefined && now() - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS
+        ? "settled"
+        : "none";
     },
   };
 }

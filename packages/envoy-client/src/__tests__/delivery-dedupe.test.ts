@@ -166,3 +166,45 @@ test("a second release of one claim leaves a later claim of the same key in plac
   first?.release();
   expect(dedupe.claim({ ...retry, event_id: "evt-retry-2" })).toBeUndefined();
 });
+
+// A replay sweep reads where a frame stands in the live path: a claim not yet settled means the
+// live copy may still be shown, so the sweep leaves the stream's copy for later. A claim the host
+// settled, shown or not, no longer holds the sweep back, and a released one is as if never made.
+test("a claim is pending until it settles, and a release leaves no trace", () => {
+  let now = 0;
+  const dedupe = createDeliveryDedupe(() => now);
+  expect(dedupe.status(attempt)).toBe("none");
+
+  const claim = dedupe.claim(attempt);
+  expect(dedupe.status(attempt)).toBe("pending");
+  // A re-send under the same key is the same frame, by its key.
+  expect(dedupe.status(retry)).toBe("pending");
+
+  claim?.settle();
+  expect(dedupe.status(attempt)).toBe("settled");
+  expect(dedupe.status(retry)).toBe("settled");
+  // Settling did not undo the record: a repeat is still dropped.
+  expect(dedupe.claim(retry)).toBeUndefined();
+
+  const other = dedupe.claim(otherMode);
+  other?.release();
+  expect(dedupe.status(otherMode)).toBe("none");
+  // A release after a settle still undoes the record, as it always did.
+  claim?.release();
+  expect(dedupe.status(attempt)).toBe("none");
+
+  dedupe.claim(attempt)?.settle();
+  now = DELIVERY_DUPLICATE_WINDOW_MS;
+  // Past the window the key no longer names the claim; the event id still does.
+  expect(dedupe.status(retry)).toBe("none");
+  expect(dedupe.status(attempt)).toBe("settled");
+});
+
+test("a key that does not name its event never makes another frame pending", () => {
+  const dedupe = createDeliveryDedupe();
+  const bridge = { event_id: "evt-b1", source: "mcp", dedupe_key: "mcp.0f3a" };
+  dedupe.claim(bridge);
+
+  expect(dedupe.status(bridge)).toBe("pending");
+  expect(dedupe.status({ ...bridge, event_id: "evt-b2" })).toBe("none");
+});

@@ -6,6 +6,19 @@ import { machineID } from "./machine";
 const DEFAULT_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 250;
 
+/**
+ * How long one replay call may take. The listener stops reading at 5 s and its HTTP server writes
+ * for at most 10 s, so this waits out a full answer without outliving the server's own deadline.
+ */
+const REPLAY_TIMEOUT_MS = 10_000;
+
+/**
+ * The `code` a listener answers a replay with, under 503, when NATS refuses the read outright (the
+ * listener's user lacks the grant, or there is no notification stream). Retrying at once cannot
+ * help, unlike a 503 the listener's start-up gate answers, so a caller tells its session instead.
+ */
+export const REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+
 const InterestWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
@@ -48,12 +61,39 @@ const RoleHeldWireSchema = z.object({
 
 const ErrorWireSchema = z.object({
   error: z.string(),
+  code: z.string().optional(),
   expected: z.array(z.string()).optional(),
 });
 
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
+});
+
+const ReplayWireSchema = z.object({
+  stream: z.object({
+    created: z.string(),
+    first_seq: z.number().int().nonnegative(),
+    last_seq: z.number().int().nonnegative(),
+  }),
+  subjects: z.array(
+    z.object({
+      subject: z.string(),
+      messages: z.array(
+        z.object({
+          seq: z.number().int().positive(),
+          subject: z.string(),
+          time: z.string(),
+          data: z.string(),
+        })
+      ),
+      next_after: z.number().int().nonnegative(),
+      more: z.boolean(),
+      // `not_followed` or `not_retained` today; read as a string so a reason a later listener adds
+      // still parses, as a subject that answered nothing.
+      refused: z.string().optional(),
+    })
+  ),
 });
 
 export type EnvoyFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -204,9 +244,35 @@ export type PublishResult = {
   readonly holder?: string;
 };
 
+/** One followed subject of a replay request, read from after `after`, or, without one, started. */
+export interface ReplaySubjectInput {
+  readonly subject: string;
+  /** The last stream sequence handled; absent, the listener answers no messages and the watermark,
+   *  which is where a new cursor starts. */
+  readonly after?: number;
+}
+
+export interface ReplayInput {
+  readonly sessionID: string;
+  readonly subjects: readonly ReplaySubjectInput[];
+  /** The most messages across the whole answer; the listener defaults to 100 and caps it at 500. */
+  readonly maxMessages?: number;
+}
+
+export interface ReplayOptions {
+  readonly timeoutMs?: number;
+}
+
+/** The listener's answer to `POST /v1/replay`, in its wire shape. */
+export type ReplayResult = z.infer<typeof ReplayWireSchema>;
+export type ReplaySubjectResult = ReplayResult["subjects"][number];
+export type ReplayMessage = ReplaySubjectResult["messages"][number];
+
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
   readonly expected: readonly string[] | undefined;
+  /** The listener's machine-readable `code`, when its error body carries one. */
+  readonly code: string | undefined;
 
   constructor(
     readonly details: {
@@ -229,6 +295,7 @@ export class EnvoyApiError extends Error {
         : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`
     );
     this.expected = parsed?.expected;
+    this.code = parsed?.code;
   }
 }
 
@@ -242,6 +309,12 @@ export type EnvoyClient = {
   readonly setRole: (input: SetRoleInput) => Promise<SetRoleResult>;
   readonly getRole: (role: string) => Promise<RoleInfo>;
   readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
+  /**
+   * Reads what the notification stream stored for a session's followed subjects after each one's
+   * cursor. Tried once, with no retry of a 5xx: a sweep runs again on its next trigger, and a 503
+   * `REPLAY_UNAVAILABLE` must reach the caller at once so the session can be told.
+   */
+  readonly replay: (input: ReplayInput, options?: ReplayOptions) => Promise<ReplayResult>;
 };
 
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
@@ -249,9 +322,13 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
 
-  const request = async (path: string, init: RequestInit): Promise<string> => {
+  const request = async (
+    path: string,
+    init: RequestInit,
+    options: { readonly timeoutMs?: number; readonly retry?: boolean } = {}
+  ): Promise<string> => {
     const url = `${baseUrl}${path}`;
-    const attempts = config.retry === false ? 1 : 2;
+    const attempts = config.retry === false || options.retry === false ? 1 : 2;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       let response: Response;
       try {
@@ -260,7 +337,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         response = await config.fetch(url, {
           ...init,
           headers,
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs),
         });
       } catch (error) {
         if (attempt + 1 < attempts) {
@@ -287,12 +364,20 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     throw new Error("Envoy request exhausted retries");
   };
 
-  const post = (path: string, body: object) =>
-    request(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+  const post = (
+    path: string,
+    body: object,
+    options?: { readonly timeoutMs?: number; readonly retry?: boolean }
+  ) =>
+    request(
+      path,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      options
+    );
 
   return {
     subscribe: async (input) =>
@@ -405,6 +490,24 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
+    replay: async (input, options = {}) =>
+      ReplayWireSchema.parse(
+        JSON.parse(
+          await post(
+            "/v1/replay",
+            {
+              session_id: input.sessionID,
+              subjects: input.subjects.map((cursor) =>
+                cursor.after === undefined
+                  ? { subject: cursor.subject }
+                  : { subject: cursor.subject, after: cursor.after }
+              ),
+              ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
+            },
+            { timeoutMs: options.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false }
+          )
+        )
+      ),
   };
 }
 
