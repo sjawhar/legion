@@ -1072,6 +1072,12 @@ export default function envoyExtension(pi: PiApi): void {
       await replay?.recordDelivered(identity);
     },
     handCard,
+    handNotice: (content) => {
+      pi.sendMessage(
+        { customType: "envoy-message", content, display: true, details: LOCAL_ENVOY_NOTICE },
+        { deliverAs: "steer", triggerTurn: false }
+      );
+    },
     matchTurn: (message) => matchInjectedUserTurn(sessionID, message),
     turnWithdrawn: (turnSessionID, messageID) => {
       dropInjectedUserTurn(turnSessionID, messageID);
@@ -1080,6 +1086,11 @@ export default function envoyExtension(pi: PiApi): void {
     handBackFailed: (identity, error) => {
       logger.warn("envoy: a card waiting for a settled host could not be handed", {
         eventID: identity.event_id,
+        error: messageFor(error),
+      });
+    },
+    handNoticeFailed: (error) => {
+      logger.warn("envoy: a replay notice waiting for a settled host could not be handed", {
         error: messageFor(error),
       });
     },
@@ -1716,16 +1727,7 @@ export default function envoyExtension(pi: PiApi): void {
               logger.warn(`envoy: ${notice.message}`);
               routeReplayNotice(notice, {
                 warn: (message) => activeSessionContext?.ui.notify(`envoy: ${message}`, "warning"),
-                card: (content) =>
-                  pi.sendMessage(
-                    {
-                      customType: "envoy-message",
-                      content,
-                      display: true,
-                      details: LOCAL_ENVOY_NOTICE,
-                    },
-                    { deliverAs: "steer", triggerTurn: false }
-                  ),
+                card: (content) => unwritten.sendNotice(content),
               });
             },
             log: (message, error) =>
@@ -2208,11 +2210,11 @@ export default function envoyExtension(pi: PiApi): void {
       // Sessions can be created lazily after session_start (a fresh TUI has no session yet); until
       // the host mints an id there is nothing to register.
       if (context.sessionManager.getSessionId() === "") return;
-      // A held inert card, or a card the host withdrew unwritten, is handed first, while the host
-      // is settled (`hostSettled`), so the sweep finds its frame still claimed.
+      // A held inert card or replay notice, or a card the host withdrew unwritten, is handed first,
+      // while the host is settled (`hostSettled`), so the sweep finds its frame still claimed.
       // Every tick also sweeps the stream, outside the pass, so a sweep never waits on one: it
       // catches up on what a missed trigger left, and keeps probing a listener without replay.
-      unwritten.handBackWithdrawn(hostSettled());
+      unwritten.handBackWithdrawn();
       triggerReplay();
       if (healing) {
         // A pass that has not settled holds the queue, and with it the registration refresh that

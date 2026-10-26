@@ -138,7 +138,10 @@ export interface ReplayFrame {
  * nothing is recorded and the frame's subjects keep their cursors before it, so a process that
  * ends first leaves it to the next sweep after the restart; while the claim is pending every sweep
  * leaves it there. Once the host wrote it, it calls `recordDelivered` and settles the claim; if it
- * learns the frame was dropped, it releases the claim and a sweep shows it again.
+ * learns the frame was dropped, it releases the claim and a sweep shows it again. A host may also
+ * return `queued` for a frame it did not hand at all and could not hold (Oh My Pi's inert card of
+ * a frame with no ledger key, sent while the host is busy): it released the claim, so the next
+ * sweep shows the frame again.
  * `suppressed`: the host's renderer skips it for this session (`notify: false`, its own event,
  * another session's follow); nothing is recorded, so a copy on another subject that the renderer
  * does show still reaches the session. `failed`, or a throw: the frame stays for a later sweep.

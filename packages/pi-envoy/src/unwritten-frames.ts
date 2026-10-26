@@ -9,8 +9,8 @@ import { writtenCardIdentity } from "./missed-messages";
  * inert card at once and runs nothing for it; one handed while a turn streams is steered into
  * that turn, and the agent loop runs another model turn for it (measured on omp 18.12.2). So an
  * inert card is handed only to a settled host (`UnwrittenFramesHost.settled`): one sent while the
- * host is busy is held until the first settled heartbeat (`handBackWithdrawn`). A card handed
- * again keeps its delivery.
+ * host is busy is held until the first settled heartbeat (`handBackWithdrawn`), as is a replay
+ * notice (`sendNotice`), which is handed the same way. A card handed again keeps its delivery.
  */
 export type CardDelivery = "steer" | "aside" | "inert";
 
@@ -78,7 +78,8 @@ export interface UnwrittenFramesHost {
   sessionID(): string;
   /**
    * Whether the host is settled: idle, holding no message, not shutting down, and on the session
-   * this instance serves. Only a settled host is handed an inert card.
+   * this instance serves. Only a settled host is handed an inert card or a replay notice, or
+   * handed back what an interrupt withdrew.
    */
   settled(): boolean;
   /** Records a frame the host wrote in the replay ledger (`ReplayEngine.recordDelivered`). */
@@ -89,6 +90,9 @@ export interface UnwrittenFramesHost {
     deliverAs: CardDelivery,
     identity: DedupeIdentity | undefined
   ): void;
+  /** Hands the host a replay notice (`pi.sendMessage` of a card naming `LOCAL_ENVOY_NOTICE`, a
+   *  steer that starts no turn); a throw means it was not handed. */
+  handNotice(content: string): void;
   /** The Dispatch message id of the person's turn `message` is, among the turns noted for this
    *  session (`matchInjectedUserTurn`), if any. */
   matchTurn(message: unknown): string | undefined;
@@ -98,6 +102,8 @@ export interface UnwrittenFramesHost {
   /** A card the host withdrew unwritten, or an inert card held until the host settled, could not
    *  be handed; it keeps waiting, and the next settled moment tries again. */
   handBackFailed(identity: DedupeIdentity, error: unknown): void;
+  /** A replay notice could not be handed; it stays held, and the next settled moment tries again. */
+  handNoticeFailed(error: unknown): void;
 }
 
 /**
@@ -125,11 +131,18 @@ export function unwrittenCardKeys(identity: {
  * card held had nothing to wait under (`sendCard`), or the host dropped the frame unwritten (a
  * session change, `releaseOtherSessions`; a person's turn an interrupt withdrew,
  * `handBackWithdrawn`), so a sweep shows the stream's copy.
+ *
+ * It also holds the replay notices (`sendNotice`) sent while the host is not settled, in order,
+ * until the first settled moment hands them. A notice names no frame and has no claim: nothing
+ * waits on its write, and nothing records it.
  */
 export class UnwrittenFrames {
   readonly #host: UnwrittenFramesHost;
   readonly #cards = new Map<string, UnwrittenCard>();
   readonly #turns = new Map<string, UnwrittenTurn>();
+  // The replay notices not handed yet, in the order they were sent, each with the session it was
+  // raised for.
+  #notices: { readonly sessionID: string; readonly content: string }[] = [];
   // The moments the host had to queue or write a card handed before it: each heartbeat, and each
   // run that ended aborted (`handBackWithdrawn`, `runAborted`).
   #moments = 0;
@@ -190,6 +203,17 @@ export class UnwrittenFrames {
   /** Whether a card of the frame `identity` waits to be written: that card shows it. */
   waitsOnCard(identity: DedupeIdentity): boolean {
     return unwrittenCardKeys(replayLedgerIdentity(identity)).some((key) => this.#cards.has(key));
+  }
+
+  /**
+   * Hands the host a replay notice (`stream_recreated`, `retention_gap`) for the session this
+   * instance serves now, at once when the host is settled; otherwise it is held, after any held
+   * before it, until the first settled moment (`handBackWithdrawn`). A notice the host cannot be
+   * handed is held too (`handNoticeFailed`). Nothing waits on a notice's write.
+   */
+  sendNotice(content: string): void {
+    this.#notices.push({ sessionID: this.#host.sessionID(), content });
+    if (this.#host.settled()) this.#handNotices();
   }
 
   /**
@@ -265,9 +289,9 @@ export class UnwrittenFrames {
   }
 
   /**
-   * Counts a host moment (each heartbeat tick) and, when `settled` (`UnwrittenFramesHost.settled`),
-   * hands the inert cards held while the host was busy (`sendCard`) and hands back what an
-   * interrupt withdrew.
+   * Counts a host moment (each heartbeat tick) and, when the host is settled
+   * (`UnwrittenFramesHost.settled`), hands the inert cards and the replay notices held while the
+   * host was busy (`sendCard`, `sendNotice`) and hands back what an interrupt withdrew.
    *
    * Oh My Pi withdraws every card a streaming turn holds, writing none and restoring none, when
    * the person interrupts the turn (Escape; RPC `abort_and_restore_queue`), and is idle with an
@@ -277,8 +301,9 @@ export class UnwrittenFrames {
    * message was withdrawn: it is handed again, as it was, its claim kept. One handed since the
    * host's last moment is left alone, as it may still be on its way into the queue:
    * `pi.sendMessage` returns before the host queues the card or starts its run. A held inert card
-   * was never handed, so any settled moment hands it. A card that cannot be handed keeps waiting
-   * as it was (`handBackFailed`), and the next settled moment tries again.
+   * was never handed, so any settled moment hands it, and so is each held notice, once. A card or
+   * a notice that cannot be handed keeps waiting as it was (`handBackFailed`, `handNoticeFailed`),
+   * and the next settled moment tries again.
    *
    * The interrupt withdraws a person's turn the same way: a typed input (`pi.sendUserInput`,
    * answered `handled: "prompt"`) or a `pi.sendUserMessage` turn the streaming turn held goes back
@@ -292,10 +317,11 @@ export class UnwrittenFrames {
    * shown, since the host keeps no mark that would tell a withdrawn one from a written one: no
    * sweep shows the stream's copy of such a turn, which only the person who interrupted got back.
    */
-  handBackWithdrawn(settled: boolean): void {
+  handBackWithdrawn(): void {
     const since = this.#moments;
     this.#moments += 1;
-    if (!settled) return;
+    if (!this.#host.settled()) return;
+    this.#handNotices();
     const sessionID = this.#host.sessionID();
     for (const card of new Set(this.#cards.values())) {
       if (card.sessionID !== sessionID) continue;
@@ -326,7 +352,8 @@ export class UnwrittenFrames {
    * longer waited on, since the host dropped it with the session (measured on omp 18.8.9: a card a
    * turn held when RPC `new_session` ran got no `message_end`). Its claim is released and nothing
    * records it, so a sweep of that session, once the host is back on it or resumes it, shows the
-   * stream's copy again and waits on it anew.
+   * stream's copy again and waits on it anew. A notice held for the session it left is dropped:
+   * it concerns only the session it was raised for.
    */
   releaseOtherSessions(sessionID: string): void {
     for (const waiting of [this.#cards, this.#turns]) {
@@ -335,6 +362,27 @@ export class UnwrittenFrames {
         waiting.delete(key);
         frame.claim?.release();
       }
+    }
+    this.#notices = this.#notices.filter((notice) => notice.sessionID === sessionID);
+  }
+
+  // Hands the held notices of the session this instance serves, in order. One the host cannot be
+  // handed stays held, with every notice after it, so the next settled moment keeps their order.
+  #handNotices(): void {
+    const sessionID = this.#host.sessionID();
+    for (let index = 0; index < this.#notices.length; ) {
+      const notice = this.#notices[index];
+      if (notice === undefined || notice.sessionID !== sessionID) {
+        index += 1;
+        continue;
+      }
+      try {
+        this.#host.handNotice(notice.content);
+      } catch (error) {
+        this.#host.handNoticeFailed(error);
+        return;
+      }
+      this.#notices.splice(index, 1);
     }
   }
 

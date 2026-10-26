@@ -57,6 +57,8 @@ function harness() {
   const handed: Handed[] = [];
   const withdrawn: [string, string][] = [];
   const handBackFailures: string[] = [];
+  const notices: string[] = [];
+  const noticeFailures: string[] = [];
   const frames = new UnwrittenFrames({
     sessionID: () => state.session,
     settled: () => state.settled,
@@ -67,10 +69,15 @@ function harness() {
       if (state.refuseHand) throw new Error("the host refused the card");
       handed.push({ content, deliverAs, identity });
     },
+    handNotice: (content) => {
+      if (state.refuseHand) throw new Error("the host refused the notice");
+      notices.push(content);
+    },
     matchTurn: () => state.matched,
     turnWithdrawn: (sessionID, messageID) => withdrawn.push([sessionID, messageID]),
     handBackFailed: (identity, error) =>
       handBackFailures.push(`${identity.event_id}: ${(error as Error).message}`),
+    handNoticeFailed: (error) => noticeFailures.push((error as Error).message),
   });
   /** A claim of `identity`, as the live path takes one before it hands a frame on. */
   const claim = (identity: DedupeIdentity) => {
@@ -86,7 +93,18 @@ function harness() {
     again.release();
     return "released";
   };
-  return { frames, state, recorded, handed, withdrawn, handBackFailures, claim, claimState };
+  return {
+    frames,
+    state,
+    recorded,
+    handed,
+    notices,
+    withdrawn,
+    handBackFailures,
+    noticeFailures,
+    claim,
+    claimState,
+  };
 }
 
 describe("a card handed to the host", () => {
@@ -157,17 +175,19 @@ describe("a card handed to the host", () => {
 
 describe("a card the host withdrew unwritten", () => {
   test("is handed again, as it was and under its claim, only once a host moment passed", () => {
-    const { frames, handed, claim, claimState } = harness();
+    const { frames, state, handed, claim, claimState } = harness();
     const frame = dispatchFrame(1);
     frames.sendCard("card", "aside", frame, claim(frame));
 
     // Handed since the last moment: it may still be on its way into the host's queue.
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handed).toHaveLength(1);
     // The host is busy, or on another session: nothing is handed back, but the moment counts.
-    frames.handBackWithdrawn(false);
+    state.settled = false;
+    frames.handBackWithdrawn();
     expect(handed).toHaveLength(1);
-    frames.handBackWithdrawn(true);
+    state.settled = true;
+    frames.handBackWithdrawn();
 
     expect(handed).toEqual([
       { content: "card", deliverAs: "aside", identity: frame },
@@ -176,7 +196,7 @@ describe("a card the host withdrew unwritten", () => {
     expect(claimState(frame)).toBe("pending");
     expect(frames.waitsOnCard(frame)).toBe(true);
     // Just handed again, so the next settled moment leaves it alone.
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handed).toHaveLength(2);
   });
 
@@ -186,7 +206,7 @@ describe("a card the host withdrew unwritten", () => {
     frames.sendCard("card", "steer", frame, claim(frame));
 
     frames.runAborted();
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
 
     expect(handed).toHaveLength(2);
   });
@@ -198,7 +218,7 @@ describe("a card the host withdrew unwritten", () => {
 
     state.session = "s2";
     frames.runAborted();
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
 
     expect(handed).toHaveLength(1);
   });
@@ -210,13 +230,13 @@ describe("a card the host withdrew unwritten", () => {
     frames.runAborted();
 
     state.refuseHand = true;
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handBackFailures).toEqual(["event-1: the host refused the card"]);
     expect(frames.waitsOnCard(frame)).toBe(true);
     expect(claimState(frame)).toBe("pending");
 
     state.refuseHand = false;
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handed).toHaveLength(2);
   });
 });
@@ -232,16 +252,16 @@ describe("an inert card", () => {
     expect(frames.waitsOnCard(frame)).toBe(true);
     expect(claimState(frame)).toBe("pending");
 
-    frames.handBackWithdrawn(false);
+    frames.handBackWithdrawn();
     expect(handed).toEqual([]);
 
     state.settled = true;
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handed).toEqual([{ content: "card", deliverAs: "inert", identity: frame }]);
     expect(claimState(frame)).toBe("pending");
 
     // Just handed, so the next settled moment leaves it alone.
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handed).toHaveLength(1);
   });
 
@@ -262,14 +282,14 @@ describe("an inert card", () => {
 
     state.settled = true;
     state.refuseHand = true;
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handBackFailures).toEqual(["event-1: the host refused the card"]);
     expect(handed).toEqual([]);
     expect(frames.waitsOnCard(frame)).toBe(true);
     expect(claimState(frame)).toBe("pending");
 
     state.refuseHand = false;
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handed).toEqual([{ content: "card", deliverAs: "inert", identity: frame }]);
   });
 
@@ -285,9 +305,9 @@ describe("an inert card", () => {
     expect(claimState(frame)).toBe("released");
 
     state.settled = true;
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     state.session = "s1";
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(handed).toEqual([]);
   });
 
@@ -303,6 +323,70 @@ describe("an inert card", () => {
     expect(handed).toEqual([]);
     expect(frames.waitsOnCard(frame)).toBe(false);
     expect(became).toEqual(["released"]);
+  });
+});
+
+describe("a replay notice", () => {
+  test("sent while the host is not settled is held, and handed once at the first settled moment", () => {
+    const { frames, state, notices, handed } = harness();
+    state.settled = false;
+
+    frames.sendNotice("stream recreated");
+    frames.sendNotice("retention gap");
+    expect(notices).toEqual([]);
+    frames.handBackWithdrawn();
+    expect(notices).toEqual([]);
+
+    state.settled = true;
+    frames.handBackWithdrawn();
+    expect(notices).toEqual(["stream recreated", "retention gap"]);
+
+    frames.handBackWithdrawn();
+    expect(notices).toEqual(["stream recreated", "retention gap"]);
+    // A notice is no card: nothing of it is handed as one, or waited on.
+    expect(handed).toEqual([]);
+  });
+
+  test("sent while the host is settled is handed at once", () => {
+    const { frames, notices } = harness();
+
+    frames.sendNotice("retention gap");
+
+    expect(notices).toEqual(["retention gap"]);
+    frames.handBackWithdrawn();
+    expect(notices).toEqual(["retention gap"]);
+  });
+
+  test("that cannot be handed is reported and held, in order, for the next settled moment", () => {
+    const { frames, state, notices, noticeFailures } = harness();
+    state.refuseHand = true;
+
+    frames.sendNotice("stream recreated");
+    expect(noticeFailures).toEqual(["the host refused the notice"]);
+    state.settled = false;
+    frames.sendNotice("retention gap");
+    expect(notices).toEqual([]);
+
+    state.settled = true;
+    state.refuseHand = false;
+    frames.handBackWithdrawn();
+    expect(notices).toEqual(["stream recreated", "retention gap"]);
+    expect(noticeFailures).toHaveLength(1);
+  });
+
+  test("held when the host moves to another session is dropped", () => {
+    const { frames, state, notices } = harness();
+    state.settled = false;
+    frames.sendNotice("retention gap");
+
+    state.session = "s2";
+    frames.releaseOtherSessions("s2");
+    state.settled = true;
+    frames.handBackWithdrawn();
+    state.session = "s1";
+    frames.handBackWithdrawn();
+
+    expect(notices).toEqual([]);
   });
 });
 
@@ -392,14 +476,14 @@ describe("a person's turn handed to the host", () => {
     expect(claimState(text)).toBe("settled");
 
     // The typed input is not in the host's queue until the host answers that it submitted one.
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(withdrawn).toEqual([]);
     expect(claimState(typed)).toBe("pending");
 
     frames.turnSubmitted("m-1");
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
     expect(withdrawn).toEqual([]);
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
 
     expect(withdrawn).toEqual([["s1", "m-1"]]);
     expect(claimState(typed)).toBe("released");
@@ -433,8 +517,8 @@ describe("a person's turn handed to the host", () => {
     await frames.textTurnsEnded();
     frames.turnSubmitted("m-2");
     frames.runAborted();
-    frames.handBackWithdrawn(true);
-    frames.handBackWithdrawn(true);
+    frames.handBackWithdrawn();
+    frames.handBackWithdrawn();
     frames.releaseOtherSessions("s2");
     expect(recorded).toEqual([]);
     expect(withdrawn).toEqual([]);

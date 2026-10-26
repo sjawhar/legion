@@ -14966,6 +14966,7 @@ describe("messages missed while the subscription was down", () => {
 
         const second = await bootReplay("replay-issue-four-days-b", model, {
           entries: first.entries(),
+          turn: "idle",
         });
         await second.tick();
         await second.tick();
@@ -14980,6 +14981,45 @@ describe("messages missed while the subscription was down", () => {
             delivery.content.includes("messages older than 72 hours may be missing")
           )
         ).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a retention gap found while the host's turn streams is told once, at the first idle heartbeat", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-busy-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 8));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 9));
+        // Read by the host context at each call, so the turn can end mid-test.
+        const host: { readonly entries: readonly unknown[]; turn: "idle" | "streaming" } = {
+          entries: first.entries(),
+          turn: "streaming",
+        };
+        const second = await bootReplay("replay-issue-gap-busy-b", model, host);
+        const gapNotices = () =>
+          second.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          );
+        await second.tick();
+        // A card handed while the turn streams is steered into it, and runs a model turn for it.
+        expect(gapNotices()).toHaveLength(0);
+
+        // The turn takes what it held and ends: the host is idle, and the next heartbeat tells it.
+        await second.take();
+        host.turn = "idle";
+        await second.tick();
+        expect(gapNotices()).toHaveLength(1);
+        expect(gapNotices()[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
+        await second.tick();
+        expect(gapNotices()).toHaveLength(1);
       } finally {
         setSystemTime();
       }
