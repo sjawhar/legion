@@ -289,8 +289,8 @@ RUN test -n "$LEGION_REVISION" \
 # stage's `ENV CGO_ENABLED=0` sets the same value for every process that inherits the image's
 # environment; this line holds where that environment is scrubbed — Oh My Pi's Python eval kernel
 # starts with an allowlisted environment that drops CGO_ENABLED, and a test may build with go under an
-# environment it constructs. It is a default and nothing more: by Go's own order the environment
-# overrides a `go env -w` setting, which overrides $GOROOT/go.env.
+# environment it constructs. It is only a default: a role's `CGO_ENABLED=1` overrides it, as the final
+# stage's ENV comment says.
 FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256

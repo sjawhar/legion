@@ -162,8 +162,9 @@ and fails unless it is `0`, so the build fails if the `go.env` line is ever lost
 environment above its `go env -w` file; and `runtime.kubernetes.pod.env` refuses `CGO_ENABLED`, as
 it refuses every variable the image's `ENV` sets. Two cases get Go's own default, cgo on: a scrubbed
 environment that also switches toolchain (the switched toolchain's `go.env` lacks the line), and a
-`go/build` reader under a scrubbed environment (it never reads `go.env`); with `gcc` present those
-builds succeed, linked dynamically. A deployment still pinning an older image digest has no `gcc`
+`go/build` reader under a scrubbed environment (it never reads `go.env`). With `gcc` present both
+work: the switched toolchain's builds succeed, linked dynamically, and the reader's cgo processing
+runs. A deployment still pinning an older image digest has no `gcc`
 and needs zig as `CC`
 (`docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md`).
 
