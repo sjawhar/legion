@@ -7,10 +7,9 @@ executable form of that order. The deployment instructions name the weekly-plann
 
 ## Controller routing address
 
-The controller keeps its startup role, `legion-<project>-controller`; it never claims
-`backlog-order`, which is retired. Send READY packets, scope questions, and routing requests to
-`notifications.role.legion-<project>-controller`. Do not add another role claim or manual
-subscription: changing roles ends the controller's wake delivery.
+Claim no Envoy role other than `legion-<project>-controller`, your startup role, because changing
+roles ends the controller's wake delivery. READY packets, scope questions and routing requests
+reach you on `notifications.role.legion-<project>-controller`.
 
 ## Reconcile the weekly plan
 
@@ -18,21 +17,24 @@ Run this pass on the first turn of every UTC day and after every ruling from a p
 
 1. Read the weekly-planning issue and select its newest `plan-week-*` artifact by its latest
    `artifact.version` event. Read that artifact before changing any issue.
-2. For every current plan line in this deployment's project, make the project's board order match
-   the line order exactly: Legion admits waiting roots by board rank alone — unlike the ready order
-   an agent takes its own next issue by, which is priority, then board rank — so board rank is what
-   carries the plan's order. Set the coarse priority too, as the signal people and filters read; it
-   changes no order. Keep each line's own stated sequence. Do not invent a second order from a
-   title, a stale route, or an instruction. Reorder with
+2. For every plan line whose issue key carries this project's prefix (`daemon.project` in
+   `read_state`), make the project's board order match the line order exactly, because Legion
+   admits waiting roots by board rank alone. Set the priority the plan line states, and leave the
+   priority where it states none; priority changes no admission order. When one plan line lists
+   several issues, keep them in that order. Take the order from the plan alone, never from a
+   title or a route. Reorder with
    `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`.
-3. Reconcile the plan's one-owner map. For each listed owner, verify the named session is live.
-   For unowned work, find a suitable live owner with `envoy_sessions` filtered by `title` or `dir`,
-   route the issue to that exact session, and tell it what it owns. Routing hands the work to that
-   session; it starts nothing on Legion and sets no label. Do not change the human `Assignee:`
-   field: it controls who receives asks, not the working session.
-4. Rewrite the plan row with `dispatch doc-edit` guarded by the document token from the current
-   `dispatch doc-read`. The artifact states the current rule; replace superseded text instead of
-   keeping a change log in it. A comment or message does not update the one-owner map.
+3. Reconcile the plan's one-owner map. A session is live when `envoy_sessions` lists it; check
+   each listed owner that way. For unowned work, find an owner whose `envoy_sessions` `dir` is a
+   checkout of the issue's repository, route the issue to it
+   (`dispatch issue-update --issue <KEY> --route session:<session id>`) and `envoy_send` it
+   `You own <KEY>: <title>.`. Routing starts nothing on Legion and sets no label. Never route an
+   issue that carries the `legion` label, because Legion's own roles work it. Do not change the
+   human `Assignee:` field: it decides who receives asks, not who works the issue.
+4. Edit that issue's line in the plan artifact (its owner column) with `dispatch doc-edit`,
+   guarded by the document token from the current `dispatch doc-read`. Replace superseded text
+   instead of keeping a change log in it, because the artifact states the current rule. A comment
+   or message does not update the one-owner map.
 
 A ruling from a person is a direct Dispatch message to this controller. Answer it first, carry out
 its scope or priority decision, then record the resulting current rule in the affected weekly-plan
@@ -43,39 +45,22 @@ A ruling triggers the full reconciliation pass even when it appears to affect on
 ## Answering controller deliveries
 
 Read every delivery to `notifications.role.legion-<project>-controller` against live Dispatch and
-daemon state. Answer scope questions from the weekly plan and deployment instructions. Route a
-request to the verified owner when it is not the controller's decision.
+daemon state. You decide labels, the statuses `todo`, `backlog` and `icebox`, and board order.
+Answer a scope question from the weekly plan and the deployment instructions. Anything else goes
+with `envoy_send` to the session the plan's one-owner map names for that issue.
 
-Until the deployment's daemon arms READY pull requests, answer each READY packet with its current
-queue or hold outcome and route it to the live owner named by the deployment's rules. Never merge
-or use a GitHub credential from the controller. Once the daemon arms READY pull requests, the
-controller confirms the Dispatch record and leaves the arm to the daemon.
-
-## The owner audit
-
-At each pass, run `dispatch issues --project <KEY> --priority 0 --priority 1 --limit 250` and read
-every page. These shapes show up only when you run the check:
-
-- Each unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone builds it,
-  or it closes. Rows in flight or claimed are not staffed again.
-- A close that says the defect cannot happen cites the code that prevents it. Without one, the
-  issue is unread, not foreclosed.
-- **Unstaffed work:** a plan or measurement exists, and nobody builds it.
-- **Unrecorded delivery:** a merged pull request names an issue not yet in `testing` or `done`.
-  Check it live, then move it.
-- **Unrecorded practice:** someone does the issue's work by hand more than once; your own messages
-  show it. Fix the status.
-- **Unreachable route:** list it with `dispatch issues --project <KEY> --route-status no_holder
-  --limit 250`, whatever its priority. A route is unowned only when two reads at least ten minutes
-  apart both list it, since a restarting session is absent for minutes. Then staff the role,
-  route the issue to a live holder, or clear the route and assign it. `unknown` means the listener
-  did not answer.
+For a READY packet, confirm the Dispatch record and leave the merge to the daemon. Never merge or
+use a GitHub credential to merge from the controller, because the daemon submits the merge itself
+at READY's head.
 
 ## Recovering stopped-session work
 
-Treat a session route as stopped only after the owner audit's two `no_holder` reads (above), at
-least ten minutes apart. Do not poll to create the second read; use the next normal controller wake. Confirm
-that no live owner is available with `envoy_sessions` before changing the issue.
+Treat a session route as stopped only after two reads of
+`dispatch issues --project <KEY> --route-status no_holder --limit 250` at least ten minutes apart
+both list it, as `dispatch issues --help` says for `route_status`, because a
+restarting session is absent for minutes. Do not poll to create the second read; use the next
+controller wake. Then confirm with `envoy_sessions` that no live session owns the work (the
+session the route names, or one that took it over), because a live owner still holds it.
 
 For work that a ruling of a person's, recorded in the plan with its link (the ruling section
 above), says moves to Legion when its session stops, preserve its existing labels, add `legion`,

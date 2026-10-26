@@ -57,7 +57,7 @@ Under the Go daemon a check or workflow the base branch requires that settles re
 before the completion or after it, sends the work back to `implementing` with the failing checks
 named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
 failed on its own, it re-runs the failed jobs once (`gh run rerun <run-id> --failed`) and completes once
-the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Waiting for
+the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Wait for
 CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completion while that red
 still stands is sent back, at once for a required check and at the daemon's next read of the runs
 (within two minutes) for a required workflow.

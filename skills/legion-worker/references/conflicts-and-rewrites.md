@@ -1,47 +1,24 @@
 # Conflicts, retargets, fingerprints, and rewriting pushed commits
 
 Part of `skill://legion-worker`. Read it when GitHub reports the pull request `CONFLICTING`, the
-controller asks you to resolve a conflict, the base gains a change you may need, the pull request
-is retargeted to a new base, you compare two heads after such a merge, or you are about to rewrite
-a commit you already pushed.
+controller asks you to resolve a conflict, the pull request is retargeted to a new base, you
+compare two heads after such a merge, or you are about to rewrite a commit you already pushed.
 Every path it cites is in sjawhar/legion.
 
 ## Reintegrating the base
 
-- **Merge the base forward only when the pull request conflicts, when the incoming change
-  touches files the pull request touches, when the change needs something that exists only on the
-  base, and after a base retarget — always as a forward merge, never a rebase.** The implementer
-  merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller
-  asks because of a conflict, the base gained a change to a file the pull request also changes,
-  the change needs something that exists only on the base (such as a sentence it must correct), or
-  the pull request is retargeted to a new base. Otherwise, never reintegrate the base to pick up
-  the default branch or refresh CI: each merge is a new head (a single failed CI job is re-run on
-  its own: *A red CI job* in `skill://legion-worker`). In `awaiting_merge` the daemon sends a
-  conflicting head back to `implementing` by itself. In an earlier phase it records the conflict
-  and moves nothing, and the architect has the issue moved back (`skill://legion-architect`,
-  section 6). Compare the two file lists first: `gh pr diff <n> -R <owner>/<repo> --name-only`,
-  and the base's changes since the pull request left it, `jj -R "$LEGION_WORKSPACE" diff
-  --name-only --from "fork_point(legion/<KEY> | ${base}@origin)" --to "${base}@origin"` (`base`
-  read as below). No file in both lists, and nothing the change needs from the base, means no
-  merge. These triggers are the implementer's, in `implementing`. In a later phase only a
-  conflict brings the base in, and the issue goes back to `implementing` for it first.
-- **After any forward merge, build the branch and run its proof again at the merge head**, even
-  when no text conflicted. A merge with no text conflict can still break the branch: one tree's
-  merge changed a function's arity under the branch's own callers.
-- **Before you race another tree on shared files, ask it on Envoy when its next push lands.** When
-  another issue's pull request changes the same files and you are about to push or merge over it,
-  `envoy_publish` to that issue's implementer role topic (its role token, computed as
-  `skill://legion-worker` says) and ask when its next push lands. Then merge once, after it, rather
-  than once before it and again after it.
-- **Whether a forward merge needs a new tester round is judged per file, not per merge.** The
-  exemption holds only when, in every file the pull request changes, the merge's resolution
-  changes no line the pull request itself changed. The unchanged-diff fingerprint below is that
-  check: it hashes the pull request's own added and removed lines, file by file. Unchanged, the
-  new head is a confirmation of the round already run (see *The unchanged-diff check* below).
-  Changed, name the files whose own lines changed, and the head goes through the tester again.
-  Before merging, record the fingerprint at the current tip. After pushing the merged branch,
-  record it at the new tip. Post one PR comment (Legion footer), in the record's fixed format:
-  `forward merge <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
+- **Reintegrate the base only on a real conflict, except after a base retarget — and with a
+  merge, never `jj rebase`.**
+  The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
+  because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
+  pick up the default branch or refresh CI (a single failed CI job is re-run on its own: *Never waiting on CI* in
+  `skill://legion-worker/references/pr-body.md`). A conflict-forced rebase that leaves the branch's diff unchanged is a
+  confirmation, not a new round (see *The unchanged-diff check* below); that name is the event's,
+  kept by the rules below and the learnings that cite it, and the operation it names is always
+  the merge here. Before merging, record
+  the fingerprint at the current tip; after pushing the merged branch, record it at the new
+  tip; post one PR comment (Legion footer):
+  `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
   On the tmux runtime, where issue workspaces are still jj workspaces of one shared clone,
   `jj undo`, `jj abandon` and `jj op restore` rewrite the shared operation log, so a mistake there
   is recovered forward (`jj -R "$LEGION_WORKSPACE" new`, or `jj -R "$LEGION_WORKSPACE" restore
@@ -80,7 +57,7 @@ Every path it cites is in sjawhar/legion.
 
 ## The unchanged-diff check
 
-The fingerprint every role compares after a forward merge (every flag and the fileset
+The fingerprint every role compares after a conflict-forced rebase (every flag and the fileset
 verified on jj 0.45.1):
 
 ```bash
@@ -93,16 +70,16 @@ fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point
 
 - `<head-sha>` is a full commit SHA; a jj commit id is the git SHA GitHub shows.
 - `fork_point(${base}@origin | <head-sha>)` is the base the branch was cut from *at that head*:
-  the old base for the head before the merge, the new base for the merge head, so one command
-  serves both sides. `base` is the pull request's base branch as a jj string literal, as in the
-  merge above.
-- A head the merge replaced is still addressable by its SHA in the shared workspace. The check
+  the old base for the pre-rebase head, the new base for the rebased one, so one command serves
+  both sides. `base` is the pull request's base branch as a jj string literal, as in the merge
+  above.
+- A head the rebase hid is still addressable by its SHA in the shared workspace. The check
   prints a fingerprint only when every step of it succeeded: the base read, the fetch and the
   diff (`pipefail` keeps the diff's failure through `sed` and `sha256sum`, which would otherwise
   hash empty input to `e3b0c442…`). A nonzero exit or no printed fingerprint (a failed read of the
   base, or a SHA the workspace cannot resolve) counts as a changed diff — never as unchanged.
 - `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
-  on a merge) and `index` lines (blob ids move when the base's copy of a file changed). What
+  on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
   is left is exactly the added and removed lines per file.
 - The single fileset `'~(.legion | docs/solutions)'` leaves out the handoff ledger and retro's
   learnings: process artifacts the merge gate already exempts from re-review
@@ -114,10 +91,10 @@ fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point
   `.legion/` is gone, jj warns `No matching entries for paths: .legion` on stderr; the hash is
   unaffected.
 
-Where each role gets its two heads. The implementer: the tip before and after its own forward
-merge. The tester: the head its `E2E` line names, and the new head. The reviewer: the `commit_id`
-of its last submitted review (`gh api --paginate repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login, body}'`, whose pages concatenate in order, so the last line is the last submitted review, and whose body tells a no-fix request that answered a READY refusal from any other)
-and the new head. The merger never computes a fingerprint: it quotes the `--summary` lines
+Where each role gets its two heads: the implementer — the tip before and after its own rebase;
+the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of
+its last submitted review (`gh api --paginate repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login, body}'`, whose pages concatenate in order, so the last line is the last submitted review, and whose body tells a no-fix request that answered a READY refusal from any other)
+and the new head; the merger never computes a fingerprint — it quotes the `--summary` lines
 in READY, and the daemon holds the head to retro's commits.
 
 ## Rewriting pushed commits
