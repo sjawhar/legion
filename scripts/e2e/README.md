@@ -202,7 +202,7 @@ What it stands up, all of it the run's own:
   [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) at setup. Its preflight refuses loudly
   before any pane exists on an unreadable or empty key file. Every model role of every pane is
   `anthropic/claude-opus-4-8`, and `anthropic` is the one provider a pane may use, keyed through
-  `<work>/model-gateway-key/anthropic-key`, whose log records each call; no Anthropic key reaches
+  `<work>/model-gateway-key/anthropic-key`, whose log (`<work>/model-gateway/anthropic-key.log`) records each call; no Anthropic key reaches
   a pane — only the key command, which reads the file fresh on every call. The script removes the
   key command's directory on every exit.
 - **The provider key**: `provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}`, which proves the

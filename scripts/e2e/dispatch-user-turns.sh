@@ -46,6 +46,16 @@ key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
   echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" >&2
   exit 1
 }
+# The installer's own checks, before any service starts, as Stage 4b and the Claude backend proof
+# make them at their start.
+{ [ -f "$key_file" ] && [ -r "$key_file" ]; } || {
+  echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE names $key_file, which is not a readable file" >&2
+  exit 1
+}
+[[ $(stat -L -c %a -- "$key_file") =~ ^[0-7]00$ ]] || {
+  echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE $key_file is readable by group or other; chmod 600 it" >&2
+  exit 1
+}
 work=$(mktemp -d "/tmp/legion-e2e-user-turns.$$.XXXXXXXX")
 evidence=${DISPATCH_USER_TURNS_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-user-turns-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/checks"

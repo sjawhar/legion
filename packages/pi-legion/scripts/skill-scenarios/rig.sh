@@ -291,6 +291,8 @@ cmd_profile() {
   [ ! -e "$P" ] || fail "$P exists; remove it to rebuild label $label"
   co=$(cd "$2" && pwd -P)
   [ -f "$co/scripts/e2e/lib/install-plugin-profile.sh" ] || fail "$co is not a Legion checkout"
+  [ -f "$co/scripts/e2e/lib/install-key-file-model-route.sh" ] ||
+    fail "$co has no scripts/e2e/lib/install-key-file-model-route.sh, the model route a label installs with its own checkout's installer: build the label from a checkout that has it"
   [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
   mkdir -p "$P"
   on_exit "$(printf 'drop_unready_keys %q %q' "$P/ready" "$P/model-key")"
