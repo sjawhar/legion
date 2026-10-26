@@ -46,7 +46,10 @@ var __export = (target, all) => {
 var __require = import.meta.require;
 
 // ../envoy-client/bin/dispatch.ts
-import { readFileSync as readFileSync5 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
+
+// ../envoy-client/src/dispatch-cli.ts
+import { closeSync as closeSync4, constants as constants2, fstatSync as fstatSync2, openSync as openSync4, readFileSync as readFileSync5 } from "fs";
 
 // ../envoy-client/src/askgate-marker.ts
 import { createHash, randomBytes } from "crypto";
@@ -63,7 +66,7 @@ import {
   unlinkSync,
   writeFileSync
 } from "fs";
-import { join } from "path";
+import { isAbsolute, join, resolve } from "path";
 
 // ../envoy-client/src/errors.ts
 function messageFor(error) {
@@ -74,8 +77,8 @@ function hasErrnoCode(error, code) {
 }
 
 // ../envoy-client/src/askgate-marker.ts
-var ASKGATE_RECORD = "askgate.json";
-var MARKER_MAX_AGE_MS = 10 * 60000;
+var ASKGATE_RECORD = "askgate";
+var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
 var MARKERS = "markers";
 var MODE_FILE = "mode";
 var ALWAYS_GATED = {
@@ -109,6 +112,30 @@ function argvDigest(argv) {
 function argsDigest(args) {
   return digest(args);
 }
+function fileOperands(argv) {
+  const [command, ...flags] = argv;
+  const files = [];
+  for (let index = 0;index < flags.length; index++) {
+    const word = flags[index];
+    const eq = word.indexOf("=");
+    const flag = eq === -1 ? word : word.slice(0, eq);
+    const named = flag.startsWith("--") && flag.endsWith("-file");
+    if (!named && !(command === "artifact" && flag === "--path"))
+      continue;
+    const operand = eq === -1 ? flags[index + 1] : word.slice(eq + 1);
+    if (operand !== undefined && operand !== "-")
+      files.push({ flag, operand });
+  }
+  return files;
+}
+function operandPath(cwd, file) {
+  if (file.flag === "--path")
+    return resolve(cwd, file.operand);
+  return isAbsolute(file.operand) ? file.operand : `${cwd}/${file.operand}`;
+}
+function bytesDigest(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
 function processStart(pid) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
@@ -133,19 +160,51 @@ function isOwner(value) {
   const { pid, start, store } = value;
   return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && typeof store === "string" && store.startsWith("/");
 }
-function parseRecord(text) {
+function parseOwner(text) {
   let data;
   try {
     data = JSON.parse(text);
   } catch {
     return;
   }
-  if (typeof data !== "object" || data === null)
+  if (!isOwner(data) || !("v" in data) || data.v !== 1)
     return;
-  const { v, owners } = data;
-  if (v !== 1 || !Array.isArray(owners) || !owners.every(isOwner))
+  const { pid, start, store } = data;
+  return { pid, start, store };
+}
+var OWNER_FILE = ".json";
+var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+function storeTouched(store) {
+  const own = statSync(store).mtimeMs;
+  try {
+    return Math.max(own, statSync(join(store, MARKERS)).mtimeMs);
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT"))
+      return own;
+    throw error;
+  }
+}
+function sweepStores(root, now) {
+  const parent = join(root, "askgate");
+  let names;
+  try {
+    names = readdirSync(parent);
+  } catch {
     return;
-  return owners;
+  }
+  for (const name of names) {
+    const match = STORE_NAME.exec(name);
+    if (match === null)
+      continue;
+    const store = join(parent, name);
+    try {
+      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
+        continue;
+      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
+        continue;
+      rmSync(store, { recursive: true, force: true });
+    } catch {}
+  }
 }
 function storeMode(store) {
   try {
@@ -155,22 +214,37 @@ function storeMode(store) {
   }
 }
 function askgateState(dir) {
-  const file = join(dir, ASKGATE_RECORD);
-  let text;
+  const record = join(dir, ASKGATE_RECORD);
+  let names;
   try {
-    text = readFileSync(file, "utf-8");
+    names = readdirSync(record);
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return { kind: "off" };
-    return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
+    return { kind: "broken", problem: `${record}, could not be read: ${messageFor(error)}` };
   }
-  const owners = parseRecord(text);
-  if (owners === undefined)
-    return { kind: "broken", problem: `${file}, is not an AskGate record` };
-  const live = owners.filter(ownerLive);
+  const live = [];
+  for (const name of names) {
+    if (!name.endsWith(OWNER_FILE))
+      continue;
+    const file = join(record, name);
+    let text;
+    try {
+      text = readFileSync(file, "utf-8");
+    } catch (error) {
+      if (hasErrnoCode(error, "ENOENT"))
+        continue;
+      return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
+    }
+    const owner = parseOwner(text);
+    if (owner === undefined)
+      return { kind: "broken", problem: `${file}, is not an AskGate record` };
+    if (ownerLive(owner))
+      live.push({ file, store: owner.store });
+  }
   if (live.length === 0)
     return { kind: "off" };
-  for (const { store } of live) {
+  for (const { file, store } of live) {
     try {
       if (!statSync(join(store, MARKERS)).isDirectory())
         throw new Error("not a directory");
@@ -187,6 +261,7 @@ function askgateState(dir) {
     mode: live.every(({ store }) => storeMode(store) === "warn") ? "warn" : "block"
   };
 }
+var isFileDigest = (value) => typeof value === "object" && value !== null && typeof value.flag === "string" && typeof value.operand === "string" && typeof value.sha256 === "string";
 function readMarker(file) {
   let text;
   try {
@@ -203,19 +278,22 @@ function readMarker(file) {
     const data = JSON.parse(text);
     if (typeof data !== "object" || data === null)
       return;
-    const { v, argv, args, createdAt } = data;
-    if (v !== 1 || typeof argv !== "string" || typeof createdAt !== "number")
+    const { v, argv, args, files, createdAt } = data;
+    if (v !== 2 || typeof argv !== "string" || typeof createdAt !== "number")
       return;
     if (args !== null && typeof args !== "string")
       return;
-    return { argv, args, createdAt };
+    if (!Array.isArray(files) || !files.every(isFileDigest))
+      return;
+    return { argv, args, files, createdAt };
   } catch {
     return;
   }
 }
-function consumeMarker(stores, argv, args, now) {
+function consumeMarker(stores, argv, args, files, now) {
   const key = argvDigest(argv);
   const reviewed = argsDigest(args);
+  let changed;
   let mismatched = false;
   let expired = false;
   const usable = [];
@@ -233,9 +311,16 @@ function consumeMarker(stores, argv, args, now) {
         rmSync(file, { force: true });
         continue;
       }
-      if (marker.args !== null && marker.args !== reviewed) {
-        mismatched = true;
-        continue;
+      if (marker.args !== null) {
+        const differs = marker.files.find((bound, index) => bound.flag !== files[index]?.flag || bound.operand !== files[index]?.operand || bound.sha256 !== files[index]?.sha256);
+        if (differs !== undefined) {
+          changed ??= { flag: differs.flag, operand: differs.operand };
+          continue;
+        }
+        if (marker.files.length !== files.length || marker.args !== reviewed) {
+          mismatched = true;
+          continue;
+        }
       }
       usable.push({ file, bound: marker.args !== null });
     }
@@ -250,6 +335,12 @@ function consumeMarker(stores, argv, args, now) {
         throw error;
     }
   }
+  if (changed !== undefined)
+    return {
+      ok: false,
+      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      changed
+    };
   return {
     ok: false,
     why: mismatched ? "its arguments differ from the ones AskGate reviewed" : expired ? "its AskGate marker expired before it ran" : "this call carries no AskGate marker"
@@ -18882,7 +18973,9 @@ ${trailer.join(`
       const content = optionalString(args, "content");
       const artifactInput = content === undefined ? {
         name,
-        file: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))),
+        file: input.uploadBytes === undefined ? Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))) : new Blob([input.uploadBytes], {
+          type: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))).type
+        }),
         ...summary === undefined ? {} : { summary },
         actor
       } : {
@@ -19257,6 +19350,7 @@ function pruneSessions(root, now) {
         throw error48;
     }
   }
+  sweepStores(root, now);
   ensureDirectory(root);
   writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
 }
@@ -20231,8 +20325,8 @@ function createEnvoyClient(config2) {
   };
 }
 function waitForRetry() {
-  const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
-  setTimeout(resolve2, RETRY_DELAY_MS);
+  const { promise: promise2, resolve: resolve3 } = Promise.withResolvers();
+  setTimeout(resolve3, RETRY_DELAY_MS);
   return promise2;
 }
 function messageMetadata(input) {
@@ -20254,11 +20348,12 @@ var REFUSED = 1;
 var USAGE = 2;
 var HOSTS = ["omp", "claude", "opencode"];
 var CLAUDE_OUTPUT_MAX = 25000;
+var SAME_MESSAGE = "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
 var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
 function stateWriteFailed(problem) {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
-var LITERAL_FORM = "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words\u2026>`, with at most one `cd <path> &&` before it, one `2>&1` after it and one here-document opened with a quoted delimiter (`<<'EOF'`). A pipe, a loop, a variable, xargs, a script, an alias, or a process a program or an eval cell starts carries no marker.";
+var LITERAL_FORM = "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words\u2026>`. Each word is plain text, text in single quotes (also over more than one line), or text in double quotes with no `$`, backtick or `\\`. A `\\` at the end of a line continues the command. Before it, one `cd <path> &&` is permitted; after it, one `2>&1`, one here-document opened with a quoted delimiter (`<<'EOF'`) and one `| head -n N` or `| tail -n N`. For text with `$` or a backtick in it, use `--<field>-file - <<'EOF'`. A variable, `~`, a glob, an assignment, another redirect (`2>/dev/null`, `> file`), another pipe, another command (`;`, `&&`, `||`), a loop, xargs, `bash -c`, a script, an alias, or a process that a program or an eval cell starts carries no marker.";
 var SUBSCRIPTIONS_TIMEOUT_MS = 1500;
 function fitOutput(text, pictures, kept, limit, writeFull) {
   const whole = [text, ...pictures, ...kept].join(`
@@ -20333,7 +20428,7 @@ async function runDispatchCli(argv, rawEnv, io) {
   const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
-    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
+    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
   }
   const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
   const sessionId = env[sessionVariable];
@@ -20372,7 +20467,7 @@ async function runDispatchCli(argv, rawEnv, io) {
     return refuse(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`, USAGE, parsed.tool);
   }
   const config2 = resolution;
-  let unmarked;
+  let uploadBytes;
   if (gatedWrite(parsed.tool, parsed.args)) {
     const notCalled = `dispatch ${commandName(parsed.tool)} was not called:`;
     try {
@@ -20381,13 +20476,33 @@ async function runDispatchCli(argv, rawEnv, io) {
         return refuse(`${notCalled} AskGate's record for this session, ${gate.problem}, so whether AskGate reviewed this write cannot be told.`, REFUSED, parsed.tool, { mode: "block", why: gate.problem });
       }
       if (gate.kind === "on") {
-        const spent = consumeMarker(gate.stores, argv, parsed.args, Date.now());
+        const files = [];
+        for (const file3 of fileOperands(argv)) {
+          let bytes;
+          try {
+            const fd = openSync4(operandPath(io.cwd, file3), constants2.O_RDONLY | constants2.O_NONBLOCK);
+            try {
+              if (fstatSync2(fd).isFile())
+                bytes = readFileSync5(fd);
+            } finally {
+              closeSync4(fd);
+            }
+          } catch {}
+          files.push({ ...file3, sha256: bytes === undefined ? null : bytesDigest(bytes) });
+          if (file3.flag === "--path" && file3.operand === parsed.args.path)
+            uploadBytes = bytes;
+        }
+        const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
         if (!spent.ok && gate.mode === "block") {
-          return refuse(`${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.`, REFUSED, parsed.tool, { mode: "block", why: spent.why });
+          return refuse(spent.changed === undefined ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.` : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`, REFUSED, parsed.tool, { mode: "block", why: spent.why });
         }
         if (!spent.ok) {
-          unmarked = { mode: "warn", why: spent.why };
-          print(`dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.`);
+          try {
+            appendResult(dir, { tool: parsed.tool, askgate: { mode: "warn", why: spent.why } });
+          } catch (error48) {
+            return refuse(`${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error48)}.`, REFUSED, parsed.tool);
+          }
+          print(spent.changed === undefined ? `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.` : `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${SAME_MESSAGE} Send a write in a later message than the call that changes its file.`);
         }
       }
     } catch (error48) {
@@ -20435,6 +20550,7 @@ async function runDispatchCli(argv, rawEnv, io) {
       tool,
       args,
       cwd: io.cwd,
+      ...uploadBytes === undefined ? {} : { uploadBytes },
       host,
       sessionId,
       sessionTitle: env.DISPATCH_SESSION_TITLE ?? readSessionTitle(dir),
@@ -20461,15 +20577,11 @@ async function runDispatchCli(argv, rawEnv, io) {
       follows.add(followed.ask);
       notes.push(followNoticeText(followed, await subscriptions()));
     }
-    entry = {
-      tool,
-      details: result.details,
-      ...unmarked === undefined ? {} : { askgate: unmarked }
-    };
+    entry = { tool, details: result.details };
     code = OK;
   } catch (error48) {
     text = messageFor(error48);
-    entry = { tool, error: text, ...unmarked === undefined ? {} : { askgate: unmarked } };
+    entry = { tool, error: text };
     code = REFUSED;
   }
   try {
@@ -20490,11 +20602,11 @@ async function runDispatchCli(argv, rawEnv, io) {
 }
 
 // ../envoy-client/bin/dispatch.ts
-var readText = (path2) => readFileSync5(path2 === "-" ? 0 : path2, "utf-8");
+var readText = (path2) => readFileSync6(path2 === "-" ? 0 : path2, "utf-8");
 var pending = [];
 var writeTo = (stream) => (text) => {
-  const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
-  stream.write(text, () => resolve2());
+  const { promise: promise2, resolve: resolve3 } = Promise.withResolvers();
+  stream.write(text, () => resolve3());
   pending.push(promise2);
 };
 var code = await runDispatchCli(Bun.argv.slice(2), process.env, {

@@ -18683,7 +18683,9 @@ ${trailer.join(`
       const content = optionalString(args, "content");
       const artifactInput = content === undefined ? {
         name,
-        file: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))),
+        file: input.uploadBytes === undefined ? Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))) : new Blob([input.uploadBytes], {
+          type: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))).type
+        }),
         ...summary === undefined ? {} : { summary },
         actor
       } : {

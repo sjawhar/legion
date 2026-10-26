@@ -63,12 +63,12 @@ not fit. Post it first as a `dispatch comment` on the report issue, which prints
 `Posted comment <id>`, and cite that comment with `--ref`, the one reference an ask takes:
 
 ```bash
-dispatch comment --issue <REPORT KEY> --body-file - <<'EOF'
+dispatch comment --issue '<REPORT KEY>' --body-file - <<'EOF'
 <the evidence: commands, output with its time, file:line, links>
 EOF
 # Only when your Legion addressing line lists the repository where the fix belongs, keep the
 # `File it for Legion` option; otherwise drop that line.
-dispatch ask --issue <REPORT KEY> --ref 'dispatch://<REPORT KEY>/comment/<id>' --question-file - \
+dispatch ask --issue '<REPORT KEY>' --ref 'dispatch://<REPORT KEY>/comment/<id>' --question-file - \
   --option 'File an issue: <what it would track, and who would own it>' \
   --option 'File it for Legion: Legion works it once it is filed' \
   --option 'Do not file: <what stays as it is>' <<'EOF'

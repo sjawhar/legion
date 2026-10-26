@@ -79,10 +79,12 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
    Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
 7. **Post one Dispatch message on the issue**, the record of the retro that the architect reads.
    No `gh issue` write: Legion issues live on Dispatch. The body is at most 32,000 characters,
-   Dispatch's message limit, and ends with your attribution footer:
+   Dispatch's message limit, and ends with your attribution footer. `<KEY>` is your issue's key,
+   the value of `LEGION_ISSUE`. Write the key itself: a `$` variable puts the write outside the
+   literal form that AskGate reads, and the `dispatch` CLI then refuses it:
 
    ```bash
-   dispatch message --issue "$LEGION_ISSUE" --body-file - <<'EOF'
+   dispatch message --issue '<KEY>' --body-file - <<'EOF'
    ## Retro Complete
 
    **Learnings documented in:** docs/solutions/<path>.md, or none: <why no point qualified>.
