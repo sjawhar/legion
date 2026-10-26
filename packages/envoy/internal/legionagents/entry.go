@@ -6,8 +6,10 @@
 // Key layout. session.<session_id> holds the entry, and two index keys hold the same entry JSON:
 // issue.<ISSUE>.<session_id> and role.<role_token>.<session_id>. project.<legion_project> is
 // reserved for the daemon's own record (INFRA-204), and no read here reaches it: every read is a
-// session key or an issue or role prefix. Nothing is ever deleted, so a closed issue's agents keep
-// their entries and no read replays delete markers.
+// session key or an issue or role prefix. A write claims the session key first, by compare-and-swap,
+// and writes the index keys after it, so a session two writes race for is listed under the winner's
+// issue alone. Nothing is ever deleted, so a closed issue's agents keep their entries and no read
+// replays delete markers.
 package legionagents
 
 import (
@@ -99,7 +101,9 @@ var ErrNotFound = errors.New("unknown legion agent")
 var ErrTooMany = fmt.Errorf("a batch takes at most %d legion agents", MaxBatch)
 
 // ConflictError is a write that would move a recorded session to another issue or role: a session
-// belongs to one issue and role for good, so no index key is ever orphaned.
+// belongs to one issue and role for good, so no index key is ever orphaned. Every write claims the
+// session key before it writes an index key (Store.write), so the refusal holds against a
+// concurrent write and a write that ended partway alike.
 type ConflictError struct {
 	SessionID, Issue, Role string
 }
@@ -117,6 +121,20 @@ type BatchError struct {
 func (e *BatchError) Error() string { return fmt.Sprintf("entries[%d]: %v", e.Index, e.Err) }
 
 func (e *BatchError) Unwrap() error { return e.Err }
+
+// PartialWriteError is a batch that failed after its checks: Written of its Total entries were
+// written whole, in order, before Err, the failed entry's *BatchError. Written is 0 when the
+// failure came before the first write.
+type PartialWriteError struct {
+	Written, Total int
+	Err            error
+}
+
+func (e *PartialWriteError) Error() string {
+	return fmt.Sprintf("wrote %d of %d legion agents, then %v", e.Written, e.Total, e.Err)
+}
+
+func (e *PartialWriteError) Unwrap() error { return e.Err }
 
 func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))

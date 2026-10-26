@@ -125,11 +125,12 @@ func (c *interestMarkerCollector) pass(js nats.JetStreamContext, afterScan func(
 		return 0, fmt.Errorf("interest markers: read the bucket's stream: %w", err)
 	}
 	pass.read1 = &read1
-	scan, err := kvwatch.ScanExistingKeys(kv, "interest markers", c.log, func(entry nats.KeyValueEntry) {
+	scan, err := kvwatch.ScanExistingKeys(context.Background(), kv, nats.AllKeys, "interest markers", c.log, func(entry nats.KeyValueEntry) error {
 		if pass.floor == 0 || entry.Revision() < pass.floor {
 			pass.floor = entry.Revision()
 		}
-	})
+		return nil
+	}, nats.MetaOnly())
 	if err != nil {
 		// A scan short of the bucket is not a reading of it: the keys it never delivered are still
 		// there, and the lowest revision among those it did is no floor.

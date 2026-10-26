@@ -27,9 +27,10 @@ changes what the proof's own reads see. Expect the first runs of the stage to fa
 not the daemon, and read each failure's artifact for which it is before touching runtime code.
 These six held at main and broke under the new order.
 
-- **A fixture for work after the close waits for no Dispatch message.** A closed issue takes no
-  Dispatch write (`409 ISSUE_CLOSED`, `requireOpenIssue`), so a `send_agent` to the implementer
-  of a just-closed issue fails the checkpoint, and an instructions sentence telling that agent to
+- **A fixture for work after the close waits for no Dispatch message.** When this was written a
+  closed issue took no Dispatch write (`409 ISSUE_CLOSED`; since INFRA-448 it takes comments and
+  messages, and still refuses asks and document edits), so a `send_agent` to the implementer
+  of a just-closed issue failed the checkpoint, and an instructions sentence telling that agent to
   "reply WAITING and wait for the targeted message" holds its look forever. The daemon's own task
   text carries the look's rule; the proof reads the report from the daemon's state.
 - **A shared resource is judged against every co-tenant it can legitimately hold.** A node's

@@ -38,9 +38,9 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
-	// legionAgents is the Legion agent registry the /v1/legion/agents routes serve. It keeps no
-	// cache, so it is in no list of caches.
-	legionAgents *legionagents.Store
+	// legionAgents is the Legion agent registry the /v1/legion/agents routes serve, or why it is
+	// unavailable. It keeps no cache, so it is in no list of caches.
+	legionAgents *legionAgentRegistry
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// live is the live topics lane's own client (openLiveTopics), nil when ENVOY_SUBSCRIBE_ALL_TOPICS
@@ -731,14 +731,11 @@ func main() {
 	sessionCacheReadyCancel()
 
 	// The Legion agent registry (internal/legionagents) keeps no cache: every read is a read of its
-	// bucket, so it joins no warm-up, self-health or drain. Its reconnect hook moves its bucket
-	// handle onto a connection the bus dialled to replace a closed one. A listener whose NATS grant
-	// lacks the bucket stops here, so the grant ships before an image that opens it.
-	legionAgents, err := legionagents.Open(client.Conn, legionagents.WithReplicas(cfg.NATSReplicas))
-	if err != nil {
-		log.Fatal(err)
-	}
-	client.AddReconnectHook(legionAgents.Reopen)
+	// bucket, so it joins no warm-up, self-health or drain. A listener whose NATS grant lacks the
+	// bucket logs one ERROR naming it and serves on, its registry routes answering 503 until an open
+	// after a reconnect succeeds (legionAgentRegistry). Its reconnect hook runs after the caches'
+	// rewatch, and moves its bucket handle onto a connection the bus dialled to replace a closed one.
+	legionAgents := openLegionAgentRegistry(client.Conn, logger, legionagents.WithReplicas(cfg.NATSReplicas), legionagents.WithLogger(logger.Slog()))
 
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection, and end them in the drain before the connection's own.
@@ -746,6 +743,7 @@ func main() {
 	client.AddReconnectHook(func(conn *nats.Conn) error {
 		return rewatchListenerKVWatchers(conn, caches)
 	})
+	client.AddReconnectHook(legionAgents.reconnect)
 	client.AddDrainHook(func(ctx context.Context) {
 		endListenerKVWatchers(ctx, caches)
 	})

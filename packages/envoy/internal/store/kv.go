@@ -195,9 +195,10 @@ func (r *Registry) roles() bus.KeyValue {
 // fails the caller, and only a complete one logs.
 func roleRevisions(kv bus.KeyValue, log *slog.Logger) (map[string]uint64, error) {
 	revisions := map[string]uint64{}
-	scan, err := kvwatch.ScanExistingKeys(kv, "role revisions", log, func(entry nats.KeyValueEntry) {
+	scan, err := kvwatch.ScanExistingKeys(context.Background(), kv, nats.AllKeys, "role revisions", log, func(entry nats.KeyValueEntry) error {
 		revisions[entry.Key()] = entry.Revision()
-	})
+		return nil
+	}, nats.MetaOnly())
 	if err != nil {
 		return nil, err
 	}

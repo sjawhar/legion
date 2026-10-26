@@ -1671,7 +1671,11 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions`, `legion_agents`
   (the Legion agent registry) and `envoy_ci_state`, the calls nats.go's key-value store makes: the
   info and create of the bucket's stream `KV_<bucket>`, its direct and stream message gets,
-  `$KV.<bucket>.>`, and its watchers' consumer create and delete and their flow-control replies;
+  `$KV.<bucket>.>`, and its watchers' consumer create and delete and their flow-control replies. A
+  listener whose grant lacks `legion_agents`, one whose image is newer than the release that
+  applied its grant, serves everything else and answers 503 on the registry routes
+  (`/v1/legion/agents`) until the grant is applied, and opens the bucket again after each NATS
+  reconnect;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

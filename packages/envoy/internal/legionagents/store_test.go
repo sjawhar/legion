@@ -180,9 +180,9 @@ func TestABatchRoundTripsInOrder(t *testing.T) {
 		agent("infra", "INFRA-448", "implementer", "ses-impl", "2026-10-26T02:00:00Z"),
 		agent("infra", "INFRA-449", "tester", "ses-other", "2026-10-26T03:00:00Z"),
 	}
-	stored, written, err := r.store.PutAll(ctx(t), entries)
-	if err != nil || written != 3 {
-		t.Fatalf("put all = %d, %v; want 3 written", written, err)
+	stored, err := r.store.PutAll(ctx(t), entries)
+	if err != nil || len(stored) != 3 {
+		t.Fatalf("put all = %v, %v; want 3 stored", stored, err)
 	}
 	for i := range entries {
 		entries[i].RecordedAt = "2026-10-26T04:00:00Z"
@@ -323,10 +323,11 @@ func TestEveryInvalidEntryIsRefusedByBothWrites(t *testing.T) {
 		if !errors.Is(err, legionagents.ErrInvalid) || !strings.Contains(err.Error(), tc.names) {
 			t.Fatalf("%s: put err = %v, want an invalid entry naming %s", tc.name, err, tc.names)
 		}
-		_, written, err := r.store.PutAll(ctx(t), []legionagents.Entry{valid(), entry})
+		_, err = r.store.PutAll(ctx(t), []legionagents.Entry{valid(), entry})
 		var batch *legionagents.BatchError
-		if !errors.As(err, &batch) || batch.Index != 1 || !errors.Is(err, legionagents.ErrInvalid) || written != 0 {
-			t.Fatalf("%s: put all = %d, %v; want entries[1] refused as invalid, nothing written", tc.name, written, err)
+		var partial *legionagents.PartialWriteError
+		if !errors.As(err, &batch) || batch.Index != 1 || !errors.Is(err, legionagents.ErrInvalid) || errors.As(err, &partial) {
+			t.Fatalf("%s: put all = %v; want entries[1] refused as invalid, nothing written", tc.name, err)
 		}
 		if held := r.contents(t); len(held) != 0 {
 			t.Fatalf("%s: a refused write left %v", tc.name, held)
@@ -352,11 +353,12 @@ func TestABatchMemberMovingASessionRefusesTheWholeBatch(t *testing.T) {
 			agent("infra", "INFRA-450", "implementer", "ses-new", "2026-10-26T03:30:00Z"),
 		},
 	} {
-		_, written, err := r.store.PutAll(ctx(t), batch)
+		_, err := r.store.PutAll(ctx(t), batch)
 		var refused *legionagents.BatchError
 		var conflict *legionagents.ConflictError
-		if !errors.As(err, &refused) || refused.Index != 1 || !errors.As(err, &conflict) || written != 0 {
-			t.Fatalf("%s: put all = %d, %v; want entries[1] refused as a conflict, nothing written", name, written, err)
+		var partial *legionagents.PartialWriteError
+		if !errors.As(err, &refused) || refused.Index != 1 || !errors.As(err, &conflict) || errors.As(err, &partial) {
+			t.Fatalf("%s: put all = %v; want entries[1] refused as a conflict, nothing written", name, err)
 		}
 		if after := r.contents(t); !mapsEqual(before, after) {
 			t.Fatalf("%s: the refused batch changed the bucket: %v, then %v", name, before, after)
@@ -370,8 +372,8 @@ func TestABatchPastTheBoundIsRefusedWhole(t *testing.T) {
 	for i := range batch {
 		batch[i] = agent("infra", "INFRA-448", "tester", "ses-"+strconv.Itoa(i), "2026-10-26T03:15:00Z")
 	}
-	if _, written, err := r.store.PutAll(ctx(t), batch); !errors.Is(err, legionagents.ErrTooMany) || written != 0 {
-		t.Fatalf("put all = %d, %v; want ErrTooMany with nothing written", written, err)
+	if _, err := r.store.PutAll(ctx(t), batch); !errors.Is(err, legionagents.ErrTooMany) {
+		t.Fatalf("put all = %v; want ErrTooMany with nothing written", err)
 	}
 	if held := r.contents(t); len(held) != 0 {
 		t.Fatalf("the refused batch left %v", held)
@@ -382,7 +384,7 @@ func TestABatchPastTheBoundIsRefusedWhole(t *testing.T) {
 // start; the newest has no replacement. The derivation is made at each read, never stored.
 func TestEachReadDerivesWhoReplacedASession(t *testing.T) {
 	r := openRegistry(t)
-	_, _, err := r.store.PutAll(ctx(t), []legionagents.Entry{
+	_, err := r.store.PutAll(ctx(t), []legionagents.Entry{
 		agent("infra", "INFRA-448", "reviewer", "ses-new-reviewer", "2026-10-26T03:00:00Z"),
 		agent("infra", "INFRA-448", "reviewer", "ses-old-reviewer", "2026-10-26T01:00:00Z"),
 		agent("infra", "INFRA-448", "reviewer", "ses-mid-reviewer", "2026-10-26T02:00:00Z"),
@@ -432,7 +434,7 @@ func TestEachReadDerivesWhoReplacedASession(t *testing.T) {
 // role in workflow order, then newest first.
 func TestListingsFilterByIssueAndRoleToken(t *testing.T) {
 	r := openRegistry(t)
-	_, _, err := r.store.PutAll(ctx(t), []legionagents.Entry{
+	_, err := r.store.PutAll(ctx(t), []legionagents.Entry{
 		agent("infra", "INFRA-448", "merger", "ses-merger", "2026-10-26T05:00:00Z"),
 		agent("infra", "INFRA-448", "tester", "ses-tester-1", "2026-10-26T02:00:00Z"),
 		agent("infra", "INFRA-448", "tester", "ses-tester-2", "2026-10-26T03:00:00Z"),
@@ -567,5 +569,225 @@ func TestReopenMovesTheStoreToANewConnection(t *testing.T) {
 	}
 	if got, err := store.Get(ctx(t), "ses-tester"); err != nil || got.SessionID != "ses-tester" {
 		t.Fatalf("get after reopen = %#v, %v", got, err)
+	}
+}
+
+// heldReads holds the first n reads of key until all n have arrived, so n writes of one session all
+// read it before any of them claims it.
+type heldReads struct {
+	natsgo.KeyValue
+	key     string
+	mu      sync.Mutex
+	pending int
+	release chan struct{}
+}
+
+func (h *heldReads) Get(key string) (natsgo.KeyValueEntry, error) {
+	entry, err := h.KeyValue.Get(key)
+	if key != h.key {
+		return entry, err
+	}
+	h.mu.Lock()
+	if h.pending == 0 {
+		h.mu.Unlock()
+		return entry, err
+	}
+	h.pending--
+	if h.pending == 0 {
+		close(h.release)
+	}
+	h.mu.Unlock()
+	select {
+	case <-h.release:
+	case <-time.After(5 * time.Second):
+	}
+	return entry, err
+}
+
+// keys is the bucket's keys, sorted.
+func (r *registry) keys(t *testing.T) []string {
+	t.Helper()
+	held := r.contents(t)
+	keys := make([]string, 0, len(held))
+	for key := range held {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// listsUnder requires the session lists of issue and of its role token to be want.
+func (r *registry) listsUnder(t *testing.T, issue, role string, want []string) {
+	t.Helper()
+	byIssue, err := r.store.ByIssue(ctx(t), issue)
+	if err != nil {
+		t.Fatalf("by issue %s: %v", issue, err)
+	}
+	byRole, err := r.store.ByRoleToken(ctx(t), legionagents.RoleToken("infra", issue, role))
+	if err != nil {
+		t.Fatalf("by role token of %s %s: %v", issue, role, err)
+	}
+	if got := sessionIDs(byIssue); !slices.Equal(got, want) {
+		t.Fatalf("%s lists %v, want %v", issue, got, want)
+	}
+	if got := sessionIDs(byRole); !slices.Equal(got, want) {
+		t.Fatalf("the role token of %s %s lists %v, want %v", issue, role, got, want)
+	}
+}
+
+// Two writes moving one session to different issues, both reading it before either claims it,
+// record it once: one is stored, the other is refused naming the winner's issue, and only the
+// winner's issue and role token list the session.
+func TestConcurrentWritesOfOneSessionRecordItOnce(t *testing.T) {
+	r := openRegistry(t)
+	r.store.WrapBucket(func(kv natsgo.KeyValue) natsgo.KeyValue {
+		return &heldReads{KeyValue: kv, key: "session.ses-raced", pending: 2, release: make(chan struct{})}
+	})
+	writes := []legionagents.Entry{
+		agent("infra", "INFRA-448", "tester", "ses-raced", "2026-10-26T03:15:00Z"),
+		agent("infra", "INFRA-449", "tester", "ses-raced", "2026-10-26T03:15:00Z"),
+	}
+	c := ctx(t)
+	errs := make([]error, len(writes))
+	var wg sync.WaitGroup
+	for i, entry := range writes {
+		wg.Go(func() { _, errs[i] = r.store.Put(c, entry) })
+	}
+	wg.Wait()
+	won, lost := 0, 1
+	if errs[0] != nil {
+		won, lost = 1, 0
+	}
+	var conflict *legionagents.ConflictError
+	if errs[won] != nil || !errors.As(errs[lost], &conflict) || conflict.Issue != writes[won].Issue {
+		t.Fatalf("the two writes = %v, %v; want one stored and the other refused naming the stored one's issue", errs[0], errs[1])
+	}
+	r.listsUnder(t, writes[won].Issue, "tester", []string{"ses-raced"})
+	r.listsUnder(t, writes[lost].Issue, "tester", nil)
+	want := []string{"issue." + writes[won].Issue + ".ses-raced", "role." + writes[won].RoleToken + ".ses-raced", "session.ses-raced"}
+	if got := r.keys(t); !slices.Equal(got, want) {
+		t.Fatalf("the bucket holds %v, want the winner's keys %v", got, want)
+	}
+}
+
+// claimFirst runs before the first claim of key through the handle it wraps: another writer's
+// claim of the same session lands between a batch's read and its write.
+type claimFirst struct {
+	natsgo.KeyValue
+	key    string
+	before func()
+	once   sync.Once
+}
+
+func (c *claimFirst) Create(key string, value []byte) (uint64, error) {
+	if key == c.key {
+		c.once.Do(c.before)
+	}
+	return c.KeyValue.Create(key, value)
+}
+
+// A batch whose session another write claims after the batch read it is refused at that entry as a
+// conflict once the entries before it are written: a *PartialWriteError naming how many, and the
+// claimed session is listed under the other write's issue alone.
+func TestABatchLosingASessionMidWriteNamesWhatItWrote(t *testing.T) {
+	uri := testnats.URL(t)
+	r := openRegistryAt(t, uri)
+	other := openRegistryAt(t, uri)
+	claimed := agent("infra", "INFRA-448", "tester", "ses-raced", "2026-10-26T03:15:00Z")
+	r.store.WrapBucket(func(kv natsgo.KeyValue) natsgo.KeyValue {
+		return &claimFirst{KeyValue: kv, key: "session.ses-raced", before: func() {
+			if _, err := other.store.Put(ctx(t), claimed); err != nil {
+				t.Errorf("the other write: %v", err)
+			}
+		}}
+	})
+	_, err := r.store.PutAll(ctx(t), []legionagents.Entry{
+		agent("infra", "INFRA-450", "reviewer", "ses-first", "2026-10-26T03:00:00Z"),
+		agent("infra", "INFRA-449", "tester", "ses-raced", "2026-10-26T03:15:00Z"),
+	})
+	var partial *legionagents.PartialWriteError
+	var batch *legionagents.BatchError
+	var conflict *legionagents.ConflictError
+	if !errors.As(err, &partial) || partial.Written != 1 || partial.Total != 2 || !errors.As(err, &batch) || batch.Index != 1 || !errors.As(err, &conflict) {
+		t.Fatalf("put all = %v; want entries[1] refused as a conflict after 1 of 2 written", err)
+	}
+	if got := err.Error(); got != "wrote 1 of 2 legion agents, then entries[1]: legion agent ses-raced is recorded for INFRA-448 tester" {
+		t.Fatalf("err = %q", got)
+	}
+	r.listsUnder(t, "INFRA-448", "tester", []string{"ses-raced"})
+	r.listsUnder(t, "INFRA-449", "tester", nil)
+	r.listsUnder(t, "INFRA-450", "reviewer", []string{"ses-first"})
+}
+
+// failingPuts fails every index key write after the first left, as a write that ends partway.
+type failingPuts struct {
+	natsgo.KeyValue
+	mu   sync.Mutex
+	left int
+}
+
+func (f *failingPuts) Put(key string, value []byte) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.left == 0 {
+		return 0, errors.New("the write ended here")
+	}
+	f.left--
+	return f.KeyValue.Put(key, value)
+}
+
+// A write that ends after its claim leaves the session key, and no issue key, so it orphans no
+// index key: a later write moving the session to another issue is refused and changes nothing, and
+// the same write sent again completes the session's listings.
+func TestAWriteEndingAfterItsClaimIsCompletedByItsRetry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		puts int
+		left []string
+	}{
+		"after the claim":    {0, []string{"session.ses-crashed"}},
+		"after the role key": {1, []string{"role.legion-infra-infra-448-tester.ses-crashed", "session.ses-crashed"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			uri := testnats.URL(t)
+			crashed := openRegistryAt(t, uri)
+			crashed.store.WrapBucket(func(kv natsgo.KeyValue) natsgo.KeyValue { return &failingPuts{KeyValue: kv, left: tc.puts} })
+			entry := agent("infra", "INFRA-448", "tester", "ses-crashed", "2026-10-26T03:15:00Z")
+			if _, err := crashed.store.Put(ctx(t), entry); err == nil || !strings.Contains(err.Error(), "the write ended here") {
+				t.Fatalf("the write that ends = %v, want its failure", err)
+			}
+			r := openRegistryAt(t, uri)
+			if got := r.keys(t); !slices.Equal(got, tc.left) {
+				t.Fatalf("the ended write left %v, want %v", got, tc.left)
+			}
+			before := r.contents(t)
+			_, err := r.store.Put(ctx(t), agent("infra", "INFRA-449", "tester", "ses-crashed", "2026-10-26T03:15:00Z"))
+			var conflict *legionagents.ConflictError
+			if !errors.As(err, &conflict) || conflict.Issue != "INFRA-448" {
+				t.Fatalf("a move after the ended write = %v, want a conflict naming INFRA-448", err)
+			}
+			if after := r.contents(t); !mapsEqual(before, after) {
+				t.Fatalf("the refused move changed the bucket: %v, then %v", before, after)
+			}
+			r.listsUnder(t, "INFRA-449", "tester", nil)
+			if got, err := r.store.Get(ctx(t), "ses-crashed"); err != nil || got.Issue != "INFRA-448" {
+				t.Fatalf("get after the ended write = %#v, %v; want the session alone", got, err)
+			}
+
+			stored, err := r.store.Put(ctx(t), entry)
+			if err != nil {
+				t.Fatalf("the retried write: %v", err)
+			}
+			r.listsUnder(t, "INFRA-448", "tester", []string{"ses-crashed"})
+			value, _ := json.Marshal(stored)
+			held := r.contents(t)
+			if len(held) != 3 {
+				t.Fatalf("after the retry the bucket holds %v, want the session's three keys", held)
+			}
+			for key, got := range held {
+				if got != string(value) {
+					t.Fatalf("after the retry %s holds %s, want %s", key, got, value)
+				}
+			}
+		})
 	}
 }

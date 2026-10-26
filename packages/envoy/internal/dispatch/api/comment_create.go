@@ -310,9 +310,12 @@ func (s *server) beginCommentWrite(ctx context.Context, owner owner, route comme
 // reply, a reply on an ask, one anchored to a document's quote - but not a suggestion: that is
 // a proposed document edit, and accepting it, its only outcome, is refused on a closed issue.
 func (s *server) lockCommentOwner(ctx context.Context, tx pgx.Tx, owner owner, route commentRoute, suggestion bool) (*string, error) {
-	status, err := ownerStatus(ctx, tx, owner, ownerRowLock, suggestion)
+	status, open, err := ownerStatus(ctx, tx, owner, ownerRowLock)
 	if err != nil {
 		return nil, err
+	}
+	if suggestion && !open {
+		return nil, errIssueClosed
 	}
 	if !route.checked {
 		return status, nil

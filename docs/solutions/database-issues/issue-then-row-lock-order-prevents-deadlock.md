@@ -26,14 +26,16 @@ severity: high
 ## Problem
 
 Dispatch's transactional document mutations lock the issue row first
-(`requireOpenIssue`, `packages/envoy/internal/dispatch/api/server.go`, a `select …
-from issues where key = $1 for no key update` — it was `for update` when this was written; see
+(`requireOpenOwner`, `packages/envoy/internal/dispatch/api/owner.go`, which reads it through
+`ownerStatus` and `issueStatus` in `server.go` with a `select … from issues where key = $1 for no
+key update` — it was `for update` when this was written; see
 `packages/envoy/internal/dispatch/docs/persistence.go`'s `lockDocumentRoom` for why no lock on
 `issues`, `artifacts`, `projects` or `asks` may be `for update` now) and then the
 artifact/comment row inside the same transaction. Before the
 fix, `answerAsk` and `commentAction` did the opposite: they locked the specific ask or
 comment row first (`lockAskForTransition`/`loadCommentForUpdate`, a row lock on that row) and
-only *then* called `requireOpenIssue` to lock the issue row. Two transactions taking the same
+only *then* called the open-issue check (`requireOpenOwner` today) to lock the issue row. Two
+transactions taking the same
 two locks in opposite orders is the textbook Postgres deadlock: a concurrent document edit
 holding the issue lock and waiting on the ask row, alongside an answer request holding the ask
 row and waiting on the issue lock, deadlock each other — Postgres detects the cycle and kills
@@ -44,24 +46,23 @@ one side with `40P01`.
 Nothing upstream caught this with ordinary tests: each handler's own unit tests exercise one
 request at a time and never contend for both locks simultaneously, so the inverted order looked
 correct in isolation. It surfaced only in a scoped thermonuclear review of the fix commit that
-introduced the modern `requireOpenIssue` gate on the ask/comment paths (see
+introduced the modern open-issue gate on the ask/comment paths (see
 `docs/solutions/controller/thermonuclear-pair-follows-the-code.md`).
 
 ## Solution
 
 Fixed by loading the ask/comment row *unlocked* first, then acquiring the issue
 lock, then acquiring the row lock — matching the edit path's order everywhere
-(`packages/envoy/internal/dispatch/api/asks.go:199-208`,
-`packages/envoy/internal/dispatch/api/comments.go:280-289`):
+(`packages/envoy/internal/dispatch/api/ask_transitions.go`'s `transitionAskTx`,
+`packages/envoy/internal/dispatch/api/comment_actions.go`'s `lockedComment`):
 
 ```go
-unlockedAsk, err := s.loadAsk(r.Context(), tx, r.PathValue("id"))   // no lock yet
+unlockedAsk, err := s.loadAsk(ctx, tx, id) // no lock yet
 // ...
-if err := s.requireOpenIssue(r.Context(), tx, unlockedAsk.IssueKey); err != nil { // issue lock first
-    s.writeHandlerError(w, err)
-    return
+if err := s.requireOpenOwner(ctx, tx, ownerOf(unlockedAsk.IssueKey, unlockedAsk.ArtifactID)); err != nil { // issue lock first
+    return model.Ask{}, err
 }
-ask, err := s.lockAskForTransition(r.Context(), tx, r.PathValue("id"))  // row lock second
+ask, err := s.lockAskForTransition(ctx, tx, id) // row lock second
 ```
 
 The deterministic regression test that proves the ordering
@@ -96,10 +97,12 @@ other handler that follows the correct order, because a deadlock needs only one 
 
 ## Prevention
 
-- Any new handler that takes both an issue-row lock (`requireOpenIssue`) and a child-row lock
-  in the same transaction must acquire them issue-then-row, matching every existing handler.
+- Any new handler that takes both an issue-row lock and a child-row lock in the same
+  transaction must acquire them issue-then-row, matching every existing handler. The issue-row
+  lock is `requireOpenOwner` for a write a closed issue refuses, and `lockIssue` for the lock a
+  closed issue's message writes take (the same `for no key update`, without the closed refusal).
   Load the child row unlocked first if you need its data (e.g. its `issue_key`) before you can
-  call `requireOpenIssue`.
+  take either.
 - When adding a regression test for a lock-ordering fix, use the two-transaction-plus-
   `pg_stat_activity`-poll recipe above rather than a bare goroutine race — it fails
   deterministically (a timeout) if the ordering regresses, instead of only sometimes catching

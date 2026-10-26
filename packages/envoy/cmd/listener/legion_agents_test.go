@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/legionagents"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
@@ -41,7 +43,7 @@ func newLegionListener(t *testing.T, client *bus.Client) *legionListener {
 	if err != nil {
 		t.Fatalf("open the legion agent registry: %v", err)
 	}
-	deps := &listenerDeps{client: client, sessions: sessions, legionAgents: agents}
+	deps := &listenerDeps{client: client, sessions: sessions, legionAgents: newLegionAgentRegistry(agents)}
 	mux := http.NewServeMux()
 	registerV1Routes(mux, deps, "test-machine", logging.New("test"))
 	return &legionListener{deps: deps, mux: mux}
@@ -316,5 +318,103 @@ func TestLegionAgentsSurviveAListenerRestart(t *testing.T) {
 	}
 	if ids := legionIDs(t, after.want(t, http.StatusOK, http.MethodGet, "/v1/legion/agents?issue=INFRA-448", "")); !slices.Equal(ids, []string{"ses-tester"}) {
 		t.Fatalf("after the restart INFRA-448 lists %v", ids)
+	}
+}
+
+// A batch that failed after its checks answers how many entries it wrote, whatever its status: a
+// key NATS refuses is the caller's 4xx, as the single PUT answers it, never a 503 a caller retries
+// without end; a session another write claimed is a 409; and only a write the bucket did not answer
+// is a 503 to retry.
+func TestABatchFailureAnswersItsOwnStatusWithWhatItWrote(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		status int
+		retry  string
+	}{
+		{"a key NATS refuses", fmt.Errorf("write legion agent key role.x: %w", bus.ErrInvalidSubject), http.StatusBadRequest, ""},
+		{"a key too long", fmt.Errorf("write legion agent key role.x: %w", bus.ErrTooLarge), http.StatusRequestEntityTooLarge, ""},
+		{"a session another write claimed", &legionagents.ConflictError{SessionID: "ses-raced", Issue: "INFRA-448", Role: "tester"}, http.StatusConflict, ""},
+		{"a write the bucket did not answer", errors.New("nats: timeout"), http.StatusServiceUnavailable, "1"},
+	} {
+		recorder := httptest.NewRecorder()
+		writeLegionAgentError(recorder, &legionagents.PartialWriteError{Written: 2, Total: 3, Err: &legionagents.BatchError{Index: 2, Err: tc.cause}})
+		failure := decodeLegion[legionAgentBatchFailure](t, recorder.Body.String())
+		if recorder.Code != tc.status || recorder.Header().Get("Retry-After") != tc.retry {
+			t.Fatalf("%s: %d (Retry-After %q) %s, want %d (Retry-After %q)", tc.name, recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String(), tc.status, tc.retry)
+		}
+		if failure.Written != 2 || !strings.Contains(failure.Error, "wrote 2 of 3 legion agents, then entries[2]: "+tc.cause.Error()) {
+			t.Fatalf("%s: body %s, want written 2 and the failed entry's cause", tc.name, recorder.Body.String())
+		}
+	}
+}
+
+// listenerGrant is a NATS configuration whose one user, listener, may subscribe to everything and
+// publish to everything but the subjects deny names.
+func listenerGrant(deny ...string) string {
+	quoted := make([]string, len(deny))
+	for i, subject := range deny {
+		quoted[i] = strconv.Quote(subject)
+	}
+	return fmt.Sprintf(`jetstream {}
+authorization {
+  users = [ { user: listener, password: listener, permissions: { publish: { allow: [">"], deny: [%s] }, subscribe: { allow: [">"] } } } ]
+}
+`, strings.Join(quoted, ", "))
+}
+
+// A listener whose NATS user lacks the grant on the legion_agents bucket, as one deployed before
+// that grant is applied, starts and serves every other route, logs one ERROR naming the bucket, and
+// answers each registry route 503 naming the missing grant. Once the server applies the grant and
+// the listener reconnects, its reconnect hook opens the bucket and the routes serve.
+func TestAListenerWithoutTheRegistryGrantServesAndAnswersItsRoutes503(t *testing.T) {
+	bucket := "KV_" + bus.LegionAgentBucket
+	server, uri := testnats.StartConfig(t, listenerGrant(
+		"$JS.API.STREAM.*."+bucket, "$JS.API.STREAM.*.*."+bucket,
+		"$JS.API.CONSUMER.*."+bucket, "$JS.API.CONSUMER.*."+bucket+".>",
+		"$JS.API.DIRECT.GET."+bucket+".>", "$KV."+bus.LegionAgentBucket+".>",
+	), []string{"-js"}, false)
+	uri = strings.Replace(uri, "nats://", "nats://listener:listener@", 1)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "no-registry-grant")
+	listener.waitHealthy(t)
+
+	if status, answer := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusOK {
+		t.Fatalf("GET /v1/sessions without the registry grant = %d %s, want 200\n%s", status, answer, listener.Output.String())
+	}
+	entry := legionEntry("ses-tester", "INFRA-448", "tester", "2026-10-26T03:15:00Z")
+	routes := []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/legion/agents/sessions/ses-tester", ""},
+		{http.MethodPut, "/v1/legion/agents/sessions/ses-tester", entry},
+		{http.MethodGet, "/v1/legion/agents/roles/legion-infra-infra-448-tester", ""},
+		{http.MethodGet, "/v1/legion/agents?issue=INFRA-448", ""},
+		{http.MethodPut, "/v1/legion/agents", `{"entries":[` + entry + `]}`},
+	}
+	for _, route := range routes {
+		status, answer := callListener(t, listener.port, route.method, route.path, route.body)
+		if status != http.StatusServiceUnavailable || !strings.Contains(answer, "could not open the legion_agents bucket, which its NATS user needs a grant on") {
+			t.Fatalf("%s %s without the registry grant = %d %s, want a 503 naming the grant", route.method, route.path, status, answer)
+		}
+	}
+	if count := countRecords(listener, "legion agent registry unavailable: this listener's NATS user lacks the grant on the legion_agents bucket, so the /v1/legion/agents routes answer 503 until the grant is applied; every other route serves, and the listener opens the bucket again after its next NATS reconnect", func(record map[string]any) bool {
+		return record["level"] == "ERROR" && record["bucket"] == bus.LegionAgentBucket
+	}); count != 1 {
+		t.Fatalf("%d ERROR records name the missing grant, want 1:\n%s", count, listener.Output.String())
+	}
+
+	server.Restart(t, listenerGrant())
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		status, answer := callListener(t, listener.port, http.MethodPut, "/v1/legion/agents/sessions/ses-tester", entry)
+		if status == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the grant the registry still answers %d %s\n%s", status, answer, listener.Output.String())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	status, answer := callListener(t, listener.port, http.MethodGet, "/v1/legion/agents?issue=INFRA-448", "")
+	if ids := legionIDs(t, answer); status != http.StatusOK || !slices.Equal(ids, []string{"ses-tester"}) {
+		t.Fatalf("GET INFRA-448's agents after the grant = %d %s, want the tester", status, answer)
 	}
 }

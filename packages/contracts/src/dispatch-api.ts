@@ -1576,10 +1576,10 @@ export interface IssueCollaboratorLegion {
 
 /**
  * An agent session on `GET /api/v1/issues/{key}/collaborators`, one per session id. It carries no
- * running state: a reader takes that from the live agents registry. `title` is the registry's,
- * else the session's newest stamped title, null when neither names one; `reasons` is empty and
- * `last_at` null for a registry entry with no event on the issue; `legion` is null for a session
- * the registry does not record for the issue, or when it did not answer.
+ * running state: a reader takes that from the live agents registry. `title` is the registry
+ * entry's title, else the title on the session's newest event, null when that event carries none;
+ * `reasons` is empty and `last_at` null for a registry entry with no event on the issue; `legion`
+ * is null for a session the registry does not record for the issue, or when it did not answer.
  */
 export interface IssueCollaboratorAgent {
   readonly kind: "session";

@@ -93,8 +93,8 @@ type collaboratorPerson struct {
 type collaboratorAgent struct {
 	Kind      string `json:"kind"`
 	SessionID string `json:"session_id"`
-	// Title is the registry entry's title, else the session's newest stamped title; null when
-	// neither names one.
+	// Title is the registry entry's title, else the title on the session's newest event; null
+	// when that event carries none.
 	Title   *string  `json:"title"`
 	Reasons []string `json:"reasons"`
 	// LastAt is the newest event that made the session a collaborator; null for a registry
@@ -243,7 +243,9 @@ func (s *server) issueLegionAgents(ctx context.Context, key string) ([]envoy.Leg
 
 // collaboratorAgents merges the event-derived sessions with the registry's entries by session id:
 // the registry's sessions first, in its order (by role in workflow order, then newest first), then
-// the other sessions newest first.
+// the other sessions newest first. Each agent's title is the registry entry's title, else the
+// title on the session's newest event (delivery.ResolveSessionTitles); null when that event
+// carries none.
 func (s *server) collaboratorAgents(
 	ctx context.Context, sessions map[string]*collaboratorTally, registry []envoy.LegionAgent,
 ) ([]collaboratorAgent, error) {

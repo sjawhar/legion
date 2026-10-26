@@ -11,13 +11,17 @@
   `role.<role_token>.<id>` (`project.*` is reserved for the daemon and no read reaches it). The
   daemon writes it with `PUT /v1/legion/agents/sessions/<id>` (one entry) and `PUT
   /v1/legion/agents` (`{"entries":[…]}`, at most 256 entries and 1 MiB, every entry validated
-  before the first write, a bad one refusing the batch with a 400 naming its index, and a write
-  that fails partway a 503 naming how many were written). `role_token` must be
-  `legion-<legion_project>-<issue lower-cased>-<role>` with the Legion project token, not the
-  Dispatch project, and a write moving a recorded session to another issue or role is
-  `409 {"error":"legion agent <id> is recorded for <issue> <role>"}` with nothing written;
-  `recorded_at` is the listener's time at a session's first write. `GET
-  /v1/legion/agents/sessions/<id>` (or `404 {"error":"unknown legion agent <id>"}`), `GET
+  before the first write, a bad one refusing the batch with a 400 naming its index, and a batch
+  that fails after that naming how many were written, `written`, with the failed entry's own
+  status: a 503 to retry for a write the bucket did not answer, a 409 or 400 as a single PUT
+  answers it). `role_token` must be `legion-<legion_project>-<issue lower-cased>-<role>` with the
+  Legion project token, not the Dispatch project, and a write moving a recorded session to another
+  issue or role is `409 {"error":"legion agent <id> is recorded for <issue> <role>"}` with nothing
+  written: every write claims `session.<id>` by compare-and-swap before it writes the index keys,
+  so of two concurrent writes moving one session only one lands, and a write that ends after its
+  claim is completed by its retry; `recorded_at` is the listener's time at a session's first
+  write. `GET /v1/legion/agents/sessions/<id>` (or `404 {"error":"unknown legion agent <id>"}`),
+  `GET
   /v1/legion/agents/roles/<role_token>` (newest first) and `GET /v1/legion/agents?issue=<KEY>` (by
   role in workflow order, then newest first) read the bucket itself, never a cache, and add `live`
   (from the session registry) and `replaced_by`/`replaced_at` (the next session of the role token by
@@ -25,8 +29,9 @@
   `RoleAgents` and `IssueAgents`. The listener's NATS grant (`ListenerPermissions`, and so
   `HostPermissions` and `DispatchPermissions`) gains the bucket's key-value calls, so a hub's
   rendered authorization changes, which replaces a GCP hub's VM on its next update. Deploy order:
-  apply the `envoy-infra` release carrying the grant before a listener image that opens the bucket;
-  a listener whose grant lacks it fails at start when it opens the bucket.
+  a listener without the grant serves everything else and answers 503 on the registry routes until
+  the grant is applied, logging one ERROR naming the `legion_agents` bucket; it opens the bucket
+  again after each NATS reconnect.
 - `GET /api/v1/issues/{key}/collaborators` lists everyone who worked an issue, running or not
   (INFRA-448): `people` (one per login: the assignee, everyone who claimed it, posted on it or its
   documents, or answered one of its asks) and `agents` (one per session: the same writers that are
@@ -693,9 +698,10 @@
   `409 ISSUE_CLOSED` before: a new comment (issue-level, a thread reply, a reply on an ask, one
   anchored to a quote of one of its documents, and that thread's replies) and a new message post
   from people and agents, and so do their deliveries, retries and the mentioned or targeted agent's
-  reply. Every other closed-issue rule stays: a new ask, an ask's edit, answer or resolve, a
-  suggestion, a document edit, a named version, an upload, a review, an approval request, a claim,
-  a PATCH outside the closed allow-list, and a resolve, reopen, edit, accept or reject of an
+  reply; a reply still reopens a resolved root there, as it does on an open issue. Every other
+  closed-issue rule stays: a new ask, an ask's edit, answer or resolve, a suggestion, a document
+  edit, a named version, an upload, a review, an approval request, a claim, a PATCH outside the
+  closed allow-list, and the comment actions resolve, reopen, edit, accept and reject on an
   existing comment are still `409 ISSUE_CLOSED` until the issue reopens.
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default

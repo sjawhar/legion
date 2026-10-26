@@ -121,23 +121,19 @@ func (c *Client) authorize(request *http.Request) {
 
 // Sessions returns the listener's live sessions.
 func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions", nil)
+	const path = "/v1/sessions"
+	response, err := c.get(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: build GET /v1/sessions request: %v", ErrUnavailable, err)
-	}
-	c.authorize(request)
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("%w: GET /v1/sessions: %v", ErrUnavailable, err)
+		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: GET /v1/sessions returned %d", ErrUnavailable, response.StatusCode)
+		return nil, unavailableStatus(response, path)
 	}
 
 	var sessions []Session
 	if err := json.NewDecoder(response.Body).Decode(&sessions); err != nil {
-		return nil, fmt.Errorf("%w: decode GET /v1/sessions response: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: decode GET %s response: %v", ErrUnavailable, path, err)
 	}
 	if sessions == nil {
 		sessions = []Session{}
@@ -157,23 +153,19 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 // live or not: the source Dispatch reads to find which sessions would
 // receive an issue's or document's events.
 func (c *Client) ListInterests(ctx context.Context) ([]Interest, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/interests/", nil)
+	const path = "/v1/interests/"
+	response, err := c.get(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: build GET /v1/interests/ request: %v", ErrUnavailable, err)
-	}
-	c.authorize(request)
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("%w: GET /v1/interests/: %v", ErrUnavailable, err)
+		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: GET /v1/interests/ returned %d", ErrUnavailable, response.StatusCode)
+		return nil, unavailableStatus(response, path)
 	}
 
 	var interests []Interest
 	if err := json.NewDecoder(response.Body).Decode(&interests); err != nil {
-		return nil, fmt.Errorf("%w: decode GET /v1/interests/ response: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: decode GET %s response: %v", ErrUnavailable, path, err)
 	}
 	if interests == nil {
 		interests = []Interest{}
@@ -193,29 +185,23 @@ func (c *Client) ListInterests(ctx context.Context) ([]Interest, error) {
 // the listener lists an interest a direct bucket write stored under such a key until an operator
 // purges it, so a removal left pending on one completes once the interest is gone.
 func (c *Client) Interest(ctx context.Context, sessionID string) (Interest, error) {
-	request, err := http.NewRequestWithContext(
-		ctx, http.MethodGet, c.baseURL+"/v1/interests/"+url.PathEscape(sessionID), nil,
-	)
+	path := "/v1/interests/" + url.PathEscape(sessionID)
+	response, err := c.get(ctx, path)
 	if err != nil {
-		return Interest{}, fmt.Errorf("%w: build GET /v1/interests/%s request: %v", ErrUnavailable, sessionID, err)
-	}
-	c.authorize(request)
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return Interest{}, fmt.Errorf("%w: GET /v1/interests/%s: %v", ErrUnavailable, sessionID, err)
+		return Interest{}, err
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
+	case http.StatusOK:
 	case http.StatusNotFound, http.StatusBadRequest, http.StatusRequestEntityTooLarge:
 		return Interest{}, ErrNotFound
-	}
-	if response.StatusCode != http.StatusOK {
-		return Interest{}, fmt.Errorf("%w: GET /v1/interests/%s returned %d", ErrUnavailable, sessionID, response.StatusCode)
+	default:
+		return Interest{}, unavailableStatus(response, path)
 	}
 
 	var interest Interest
 	if err := json.NewDecoder(response.Body).Decode(&interest); err != nil {
-		return Interest{}, fmt.Errorf("%w: decode GET /v1/interests/%s response: %v", ErrUnavailable, sessionID, err)
+		return Interest{}, fmt.Errorf("%w: decode GET %s response: %v", ErrUnavailable, path, err)
 	}
 	if interest.Topics == nil {
 		interest.Topics = []string{}
@@ -264,14 +250,10 @@ func (c *Client) Unsubscribe(ctx context.Context, sessionID string, topics []str
 
 // Role resolves a live role holder and returns its current session metadata.
 func (c *Client) Role(ctx context.Context, role string) (Session, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/roles/"+url.PathEscape(role), nil)
+	path := "/v1/roles/" + url.PathEscape(role)
+	response, err := c.get(ctx, path)
 	if err != nil {
-		return Session{}, fmt.Errorf("%w: build GET /v1/roles/%s request: %v", ErrUnavailable, role, err)
-	}
-	c.authorize(request)
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return Session{}, fmt.Errorf("%w: GET /v1/roles/%s: %v", ErrUnavailable, role, err)
+		return Session{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -282,7 +264,7 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 		Session
 	}
 	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
-		return Session{}, fmt.Errorf("%w: decode GET /v1/roles/%s response: %v", ErrUnavailable, role, err)
+		return Session{}, fmt.Errorf("%w: decode GET %s response: %v", ErrUnavailable, path, err)
 	}
 	responseBody.SessionID = responseBody.Holder
 	if responseBody.Capabilities == nil {
@@ -308,40 +290,23 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 // transport failure alike are ErrUnavailable carrying the listener's own reason, so a read the
 // message bus did not answer reads as "ask again", never as "that session is gone".
 func (c *Client) Session(ctx context.Context, sessionID string) (Session, error) {
-	request, err := http.NewRequestWithContext(
-		ctx, http.MethodGet, c.baseURL+"/v1/registry/"+url.PathEscape(sessionID), nil,
-	)
+	path := "/v1/registry/" + url.PathEscape(sessionID)
+	response, err := c.get(ctx, path)
 	if err != nil {
-		return Session{}, fmt.Errorf("%w: build GET /v1/registry/%s request: %v", ErrUnavailable, sessionID, err)
-	}
-	c.authorize(request)
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return Session{}, fmt.Errorf("%w: GET /v1/registry/%s: %v", ErrUnavailable, sessionID, err)
+		return Session{}, err
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
+	case http.StatusOK:
 	case http.StatusNotFound, http.StatusBadRequest, http.StatusRequestEntityTooLarge:
 		return Session{}, ErrNotFound
-	}
-	if response.StatusCode != http.StatusOK {
-		var failure struct {
-			Error string `json:"error"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&failure); err == nil && failure.Error != "" {
-			return Session{}, fmt.Errorf(
-				"%w: GET /v1/registry/%s returned %d: %s",
-				ErrUnavailable, sessionID, response.StatusCode, failure.Error,
-			)
-		}
-		return Session{}, fmt.Errorf(
-			"%w: GET /v1/registry/%s returned %d", ErrUnavailable, sessionID, response.StatusCode,
-		)
+	default:
+		return Session{}, unavailableStatus(response, path)
 	}
 
 	var session Session
 	if err := json.NewDecoder(response.Body).Decode(&session); err != nil {
-		return Session{}, fmt.Errorf("%w: decode GET /v1/registry/%s response: %v", ErrUnavailable, sessionID, err)
+		return Session{}, fmt.Errorf("%w: decode GET %s response: %v", ErrUnavailable, path, err)
 	}
 	if session.SessionID == "" {
 		session.SessionID = sessionID

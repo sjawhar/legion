@@ -96,7 +96,14 @@ func (s *server) requireOpenOwner(ctx context.Context, tx pgx.Tx, owner owner) e
 // requireOpenOwnerStatus also returns the lifecycle status for an issue owner.
 // Project documents have no issue status and return nil.
 func (s *server) requireOpenOwnerStatus(ctx context.Context, tx pgx.Tx, owner owner) (*string, error) {
-	return ownerStatus(ctx, tx, owner, ownerRowLock, true)
+	status, open, err := ownerStatus(ctx, tx, owner, ownerRowLock)
+	if err != nil {
+		return nil, err
+	}
+	if !open {
+		return nil, errIssueClosed
+	}
+	return status, nil
 }
 
 // ownerRowLock is the clause a refusal adds when it runs inside the transaction that will
@@ -104,30 +111,31 @@ func (s *server) requireOpenOwnerStatus(ctx context.Context, tx pgx.Tx, owner ow
 const ownerRowLock = " for no key update"
 
 // ownerStatus is the refusal table an owner gets, spelled once for both the check that decides
-// and the one that only spares work: an owner naming neither an issue nor a document, an issue
-// that is closed (when refuseClosed says the write refuses one), a document that does not
-// exist. q is the transaction whose lock the refusal takes, or the pool for a read made before
+// and the one that only spares work: an owner naming neither an issue nor a document, or a
+// document that does not exist. It answers an issue owner's status and whether that issue is
+// open - a project document is always open - and leaves refusing a closed issue to each write
+// that does. q is the transaction whose lock the read takes, or the pool for a read made before
 // any transaction opens; lock is that lock's clause, empty for the unlocked read.
-func ownerStatus(ctx context.Context, q queryer, owner owner, lock string, refuseClosed bool) (*string, error) {
+func ownerStatus(ctx context.Context, q queryer, owner owner, lock string) (*string, bool, error) {
 	if (owner.IssueKey == nil) == (owner.ArtifactID == nil) {
-		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
+		return nil, false, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 	}
 	if owner.IssueKey != nil {
-		status, err := issueStatus(ctx, q, *owner.IssueKey, lock, refuseClosed)
+		status, open, err := issueStatus(ctx, q, *owner.IssueKey, lock)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return &status, nil
+		return &status, open, nil
 	}
 	if err := q.QueryRow(ctx, `
 		select true from artifacts where id = $1 and issue_key is null`+lock,
 		*owner.ArtifactID).Scan(new(bool)); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
+			return nil, false, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
 		}
-		return nil, err
+		return nil, false, err
 	}
-	return nil, nil
+	return nil, true, nil
 }
 
 // refuseOwnerBeforeResolving answers, from the pool and locking nothing, the refusal the
@@ -137,10 +145,16 @@ func ownerStatus(ctx context.Context, q queryer, owner owner, lock string, refus
 // the listener says, so a request that cannot be written costs no listener call at all. The
 // locked check still decides; this one only spares the calls, and takes no lock of its own so
 // a comment on a busy owner waits for that lock once rather than twice.
-func (s *server) refuseOwnerBeforeResolving(ctx context.Context, owner owner, refuseClosed bool) error {
+func (s *server) refuseOwnerBeforeResolving(ctx context.Context, owner owner, suggestion bool) error {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
 	}
-	_, err := ownerStatus(ctx, s.deps.Store.Pool, owner, "", refuseClosed)
-	return err
+	_, open, err := ownerStatus(ctx, s.deps.Store.Pool, owner, "")
+	if err != nil {
+		return err
+	}
+	if suggestion && !open {
+		return errIssueClosed
+	}
+	return nil
 }
