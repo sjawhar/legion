@@ -2,45 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T03:48:17Z",
-  "round": 1,
-  "reviewedCodeHead": "15e414ed9b6bcda8eb0751074ad16e9f9bb06a4f",
+  "completed": "2026-10-26T05:52:19Z",
+  "round": 2,
+  "reviewedCodeHead": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
-  "minor": 2,
-  "ci": "CI head 15e414ed (newest pull_request run; compare to handoff head 1af6f4b6 touches only .legion/): required lint, typecheck, test, pr-title all completed success; non-required dispatch check-run in_progress at the read.",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 15e414ed: both CHANGES; findings folded into keyFindings.",
+  "important": 2,
+  "minor": 3,
+  "ci": "CI head 5ab9e459 (newest pull_request run; compare to handoff head 274f0c08 touches only .legion/): lint and typecheck success; the required test job is queued on the architect's re-run of Tests run 40272884546 (attempt 2) after an image-pull failure; pr-title success. Not yet green, so no approval was possible this round in any case.",
+  "thermo": "thermonuclear-deep-review at 5ab9e459: APPROVE with two Minors (receipt-timeout duplicate undocumented; stale PR body risk lines). thermonuclear-code-quality: CHANGES (ask reach drops route_status; file size; suppressed_authors simplification; sentinel error; duplicated 1-minute window; create/edit reorder).",
+  "roundOneThreads": "All seven round-1 threads verified fixed and replied to (PRRT_kwDORFy7ds6wIQHp, Hr, Hv, Hw, Hx, H0, H3); census re-run: 25 files, matches the body.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:532,568",
-      "description": "Claimant and follower routes are skipped when a new comment's mention resolved to that session (mentions[].session_id), not when the mention was delivered. A failed send (listener 404, receipt timeout, cancelled handler, or a live session lacking the delivery mode, which resolveMentionTargets still resolves) leaves the session with no copy. For followers this regresses base, which always sent the follower copy. Fix: suppress only a delivered mention; when the send fails, the claimant/follower copy is published; Go table row and live-script case for the failed-mention shape; docs that say 'arrives once, as the mention' updated."
+      "file": "packages/dispatch/web/src/api/sse.ts:160",
+      "description": "Round-1 finding 3's fixes (ask card refresh on issue.closed carrying a route change, and on a claim landing during an in-flight Inbox fetch) are proven only by unit tests; the tester did not drive them. The deployment rule for a reader-facing Dispatch change requires a browser-suite test failing before and passing at the head: add both cases to packages/dispatch/e2e (Playwright route.fetch then delayed route.fulfill for the in-flight Inbox)."
     },
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/inbox/AskRecipients.tsx:162-171,220",
-      "description": "The role route row bypasses the listed-once dedupe, so Reaches N counts the role holder twice when it is the claimant, a follower or a subscriber; the Unfollow/Unsubscribe dialog for a follower holding the route's role says nothing still reaches it. Fix: count distinct sessions using the route holder the server computes (route_holder), name the holder on a role route row, cover in the browser test."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/api/sse.ts:591,844",
-      "description": "The ask-thread refresh misses issue.closed carrying a route change, and the issue-scoped marker bypasses markAskThreadsSeededByAnInFlightInbox (sse.ts:909 passes raw keys), so a card mounted from an Inbox body composed before a claim keeps the old claimant (staleTime Infinity)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/contracts/src/dispatch-api.ts:818,2297",
-      "description": "New required members claimant/route on exported AskThread and AskRead with no '## Contract change census' in the PR body."
+      "file": "packages/envoy/internal/dispatch/api/inbox_queries.go:159; packages/dispatch/web/src/features/inbox/AskRecipients.tsx:143",
+      "description": "The ask read keeps only RouteHolder from roster.reach and drops RouteStatus, so 'listener did not answer' and 'nobody holds the role' are both null: during a listener outage a held role route renders offline and uncounted while a session route is counted. Carry route_status (embed IssueRouteReach) and render unknown as unknown."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:577",
-      "description": "loadSessionClaimant adds a per-event query beside scanPendingEvents' existing issues join that already reads the route at publish time; read the claimant there."
+      "file": "packages/envoy/AGENTS.md:2273",
+      "description": "A receipt-timeout send is recorded failed though it may have landed, so the session gets both the mention and the outbox copy (tester reproduced); a row created over a minute before its claim does the same. Docs promise one copy: state the at-least-once exception in AGENTS.md, envoy.md, for-agents.md, the skill and the CHANGELOG."
     },
     {
       "severity": "minor",
-      "file": "packages/contracts/src/dispatch-api.ts:815-822,2294-2301",
-      "description": "claimant/route and their docs pasted into two interfaces, and getAsk's anonymous struct copies askThread: fast-follow (shared AskReach / embed askThread)."
+      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:540",
+      "description": "The outbox's '1 minute' pending window duplicates api's claimLapsed by comment only; share one constant so the two cannot drift."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:550",
+      "description": "While a comment.created is deferred, its comment.edited/resolved/reopened can reach the session first (reorder new this round); document it in AGENTS.md beside the mention rule."
     }
   ]
 }
