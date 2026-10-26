@@ -43,9 +43,9 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of, or route, an issue with the `legion` label, or under one.
 
-A claim brings a person's answers, comments and messages; otherwise, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.
+A claim brings a person's answers, comments and messages; for anything else, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.
 
 ## Close what you opened
 
