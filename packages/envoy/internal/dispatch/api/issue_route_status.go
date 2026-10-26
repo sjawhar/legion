@@ -57,9 +57,11 @@ const routeRosterTimeout = 2 * time.Second
 // decode of the whole fleet's list off every read but one in five seconds.
 // routeRosterSilenceTTL is how long a listener that failed or did not answer is left alone: every
 // read in that window reads unknown at once rather than waiting out routeRosterTimeout of its own.
-// It is as long as routeRosterTTL, so a listener that hangs costs one shared routeRosterTimeout
-// wait per routeRosterTimeout+routeRosterSilenceTTL (7 s), and no read is answered from an older
-// listener answer than an answered fetch already allows.
+// A failed fetch serves unknown, never an older answer, so this window changes no answer's age; it
+// is as long as routeRosterTTL so that a listener that hangs costs fewer routeRosterTimeout waits:
+// one shared wait per routeRosterTimeout+routeRosterSilenceTTL (7 s) rather than per 3 s. A
+// route_status, unknown included, then lags the listener by at most routeRosterTTL, plus
+// routeRosterTimeout while the listener hangs.
 const (
 	routeRosterTTL        = 5 * time.Second
 	routeRosterSilenceTTL = 5 * time.Second

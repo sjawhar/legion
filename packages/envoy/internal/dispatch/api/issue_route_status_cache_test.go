@@ -210,6 +210,92 @@ func TestAListenerThatDoesNotAnswerHoldsAReadOnlyForTheFetchBound(t *testing.T) 
 	}
 }
 
+// timedRosterServer is a server register builds whose listener answers GET /v1/sessions with
+// ses-sre holding sre after delay, or, when hang is set, not until the test ends. calls counts the
+// requests that reached it. The listener client's own window is a minute, so only the fetch's
+// bound ends a call early.
+func timedRosterServer(t *testing.T, delay time.Duration, hang bool) (*server, *atomic.Int32) {
+	t.Helper()
+	calls := &atomic.Int32{}
+	gate := make(chan struct{})
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if hang {
+			<-gate
+		}
+		time.Sleep(delay)
+		_, _ = w.Write([]byte(`[{"session_id":"ses-sre","title":"worker","roles":["sre"]}]`))
+	}))
+	// Cleanups run last first: the gate opens, then the close waits for the requests it freed.
+	t.Cleanup(listener.Close)
+	t.Cleanup(func() { close(gate) })
+	return register(http.NewServeMux(), Deps{Envoy: envoy.New(listener.URL, envoy.WithTimeout(time.Minute))}), calls
+}
+
+// An answer's TTL counts from the moment its call was sent, so a slow listener cannot stretch the
+// age of the answers a read is served past the TTL. A 1 s fetch with a 1.5 s TTL expires 1.5 s
+// after it was sent: a read 2.2 s in asks again, where a TTL counted from the answer would serve
+// it until 2.5 s.
+func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
+	served, calls := timedRosterServer(t, time.Second, false)
+	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = 1500*time.Millisecond, time.Minute, time.Minute
+	started := time.Now()
+	if !served.readRouteRoster(context.Background()).answered {
+		t.Fatal("the first read did not answer")
+	}
+	time.Sleep(time.Until(started.Add(2200 * time.Millisecond)))
+	_ = served.readRouteRoster(context.Background())
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("a read 2.2 s after a 1 s fetch with a 1.5 s TTL made %d listener calls in all, want 2: the TTL must count from when the call was sent", got)
+	}
+}
+
+// A failure's window counts from the moment the failure is known, so a listener that hangs is left
+// alone for the whole window after its call times out. A call bound at 1 s with a 1.5 s window
+// leaves the listener alone until 2.5 s: a read 2 s in asks nothing, where a window counted from
+// the send would have ended at 1.5 s.
+func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
+	served, calls := timedRosterServer(t, 0, true)
+	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = time.Minute, 1500*time.Millisecond, time.Second
+	started := time.Now()
+	if served.readRouteRoster(context.Background()).answered {
+		t.Fatal("a listener that hangs answered")
+	}
+	time.Sleep(time.Until(started.Add(2000 * time.Millisecond)))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = served.readRouteRoster(ctx)
+	// Long enough for a call a read started to reach the listener.
+	time.Sleep(300 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("a read 1 s into a 1.5 s window that began when a 1 s call timed out made %d listener calls in all, want 1", got)
+	}
+}
+
+// A shutdown ends a fetch in flight: it runs on the server's lifetime, so a read waiting on a
+// listener that hangs returns unknown once the lifetime ends, not when the fetch's bound (a minute
+// here) runs out.
+func TestAShutdownEndsAFetchInFlight(t *testing.T) {
+	served, _ := timedRosterServer(t, 0, true)
+	lifetime, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+	// Set after register, which with a Lifetime would also build the delivery hub on a nil store.
+	served.deps.Lifetime = lifetime
+	served.rosters.timeout = time.Minute
+	answer := make(chan routeRoster, 1)
+	go func() { answer <- served.readRouteRoster(context.Background()) }()
+	time.Sleep(200 * time.Millisecond)
+	shutdown()
+	select {
+	case roster := <-answer:
+		if roster.answered {
+			t.Fatal("a read answered a roster after the shutdown")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a read waiting on a listener that hangs did not return within 5 s of the shutdown")
+	}
+}
+
 // Reads that miss a cold cache together share one listener call: each waits for the one fetch
 // rather than starting its own.
 func TestConcurrentReadsOnAColdCacheMakeOneListenerCall(t *testing.T) {
