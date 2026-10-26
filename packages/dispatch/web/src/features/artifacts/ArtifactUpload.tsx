@@ -434,7 +434,8 @@ export function ArtifactUploadStatus({ upload }: { upload: ArtifactUpload }): Re
 }
 
 /** The two ways to hand `upload` a file: a drop anywhere over `children`, and the one hidden
- * `Upload artifact` file input that the host's picker button opens through `openPicker`. */
+ * `Upload artifact` file input that the host's picker button opens through `openPicker`. While the
+ * upload is refused the input is disabled, so no key opens a chooser whose file would be ignored. */
 export function ArtifactDropZone({
   children,
   upload,
@@ -457,6 +458,7 @@ export function ArtifactDropZone({
       <input
         aria-label="Upload artifact"
         className="sr-only left-0"
+        disabled={upload.refusal !== null}
         onChange={upload.selectFile}
         ref={upload.fileInputRef}
         type="file"

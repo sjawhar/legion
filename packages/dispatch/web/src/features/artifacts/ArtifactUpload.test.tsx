@@ -33,7 +33,10 @@ test("choosing a file stages it behind a summary field instead of uploading imme
 
   try {
     const file = new File(["content"], "notes.md", { type: "text/markdown" });
-    fireEvent.change(screen.getByLabelText("Upload artifact"), { target: { files: [file] } });
+    const input = screen.getByLabelText("Upload artifact");
+    // Only a refused upload (a closed issue) disables the chooser.
+    expect(input instanceof HTMLInputElement && input.disabled).toBe(false);
+    fireEvent.change(input, { target: { files: [file] } });
 
     expect(await screen.findByText("notes.md")).not.toBeNull();
     expect(screen.getByLabelText("Summary (optional)")).not.toBeNull();

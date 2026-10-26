@@ -91,7 +91,8 @@ test("renders one row per artifact with no compare controls", async () => {
 
 // W41. A closed issue takes no upload, and Dispatch would refuse one only after its whole body went
 // up: the tab refuses before a file is picked, with the reason on its Upload control - and on the
-// line beside it, for a reader with no pointer - and a file dropped on it is not staged.
+// line beside it, for a reader with no pointer - and a file dropped on it is not staged. W46. The
+// hidden file input is disabled too, so no keyboard path opens a chooser whose file is ignored.
 test("a closed issue's Artifacts tab refuses an upload before a file is picked", async () => {
   const { getIssueReferences, listArtifacts, view } = renderTab([artifact], noReferences, true);
   const pick = spyOn(HTMLInputElement.prototype, "click");
@@ -107,6 +108,8 @@ test("a closed issue's Artifacts tab refuses an upload before a file is picked",
     fireEvent.drop(screen.getByTestId("artifact-diagram-png"), { dataTransfer: { files: [file] } });
     expect(screen.queryByText("late.png")).toBeNull();
     expect(screen.queryByLabelText("Summary (optional)")).toBeNull();
+    const input = screen.getByLabelText("Upload artifact");
+    expect(input instanceof HTMLInputElement && input.disabled).toBe(true);
   } finally {
     pick.mockRestore();
     view.unmount();
