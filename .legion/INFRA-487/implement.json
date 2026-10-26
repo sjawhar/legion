@@ -2,15 +2,20 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T19:30:42Z",
+  "completed": "2026-10-26T20:06:29Z",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2269",
+  "answersTesterFailures": [
+    "Daemon login: a token login answered any 5xx (the broker's 500 INTERNAL while its database is away, or the HTTPS front door's 502 while no broker serves) now takes the short schedule (2 s doubling to 10 s) with the no-HTTP-answer case; 4xx (429 included) and local failures keep 30 s doubling to 5 min. Fixed in 18abf099; the tester's two red tests in 8502875f pass unmodified.",
+    "No CI / CONFLICTING: forward merge of main@origin b4bea385 as 18f76f3c, resolving docs/site/src/content/docs/broker/operate.md; fingerprint 250fca96… unchanged before and after (PR comment 6425899340); GitHub now reports MERGEABLE."
+  ],
   "proof": [
     {
       "criterion": "After a broker outage longer than a pod's lease, a Legion pod fetches a secret again within one renewal interval of the broker serving again, with no relaunch and no person acting",
       "surface": "the real broker binary run twice on one real Postgres 16.4 database, the real agent-secrets binary (keygen, renew --pod-token-file, NAME -- cmd) as the worker shim runs it, a test-owned TCP forwarder holding one address across the restart; lease 45 s, sweep 1 s, drain 0",
       "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
-      "observed": "survivor held 39.947s at the stop; second broker listened 58.088s after the first exited; survivor's first CLI fetch served 78ms after listening; its renewer (never exited) renewed to 44.924s past now 5.968s after listening; broker logged 'INFO broker: gave back the time no broker was serving ... gap=58.307957s ... enrollments=2'; --- PASS (83.84s); 0 '--- SKIP'",
-      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
+      "observed": "survivor held 39.948s at the stop; second broker listened 58.085s after the first exited; survivor's first CLI fetch served 86ms after listening; its renewer (never exited) renewed to 44.984s past now 5.908s after listening; broker logged 'INFO broker: gave back the time no broker was serving ... gap=58.218528s ... enrollments=2'; --- PASS (83.41s); 0 '--- SKIP'",
+      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
       "negativeControl": "the same outage_test.go in a git-archive export of eee16056's packages/envoy, GOWORK=off: --- FAIL (77.75s) at step (1), 'agent-secrets: proof invalid: not live (PROOF_INVALID)', 0 skips"
     },
     {
@@ -18,46 +23,38 @@
       "surface": "the same real-binary run after the restart",
       "command": "the same command, steps (3) and (4)",
       "observed": "revoked pod (launcher DELETE) and lapsed pod (ended by the first broker's sweeper) each refused fetch 401 PROOF_INVALID 'not live' and renew 401 ENROLLMENT_NOT_LIVE; the mismatch pod's renewal with a token naming another pod UID and with another service account each refused 403 POD_IDENTITY_MISMATCH, its lease_expires_at unchanged",
-      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
+      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
       "negativeControl": "renewing the survivor with its own pod token after the restart succeeds (step 2), so the refusals are identity- and state-specific, not a broker that refuses everything"
     },
     {
       "criterion": "The guard holds for a database outage while the broker process keeps running, and under concurrent beats",
       "surface": "in-process broker services on real Postgres",
       "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v ./internal/broker/enroll ./internal/broker/api ./internal/broker/requests ./internal/broker/config",
-      "observed": "all ok (383 PASS, 0 SKIP at e53dda04; enroll and config re-run ok with 0 SKIP at 8f8b7ddb); TestAPodWhoseLeaseRanOutWhileNoBrokerServedRenewsAndReadsItsGrant: stale serving row, pod renews 200 and reads WORKER_TOKEN; TestTwoBeatsAtOnceGiveTheTimeBackOnce passes",
-      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
+      "observed": "all ok, 395 PASS, 0 SKIP at 18abf099 (after the forward merge of main); includes TestAPodWhoseLeaseRanOutWhileNoBrokerServedRenewsAndReadsItsGrant and TestTwoBeatsAtOnceGiveTheTimeBackOnce",
+      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
       "negativeControl": "in the same api test, a pod whose lease ran out before the last beat is refused renew 401 ENROLLMENT_NOT_LIVE; TestBeforeAnyBeatALapsedLeaseIsLapsed shows the guard off with no threshold recorded"
     },
     {
-      "criterion": "The daemon logs in again within about 10 s of the broker answering",
-      "surface": "the daemon's broker client against an httptest broker that hijacks and closes login connections, then answers",
-      "command": "cd packages/daemon && go test -count=5 -v -run TestTokenLoginRetries ./internal/agentsecrets",
-      "observed": "TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer and TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses PASS 5/5 (and 3/3 after the simplify pass)",
-      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
-      "negativeControl": "a broker answering 401 keeps the long schedule: the second login arrives no earlier than the long wait (TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses)"
+      "criterion": "The daemon logs in again within about 10 s of the broker answering, also when its front door answers 502 for a down broker or the broker answers 500 while its database is away",
+      "surface": "the daemon's broker client over real HTTP: a real httputil.ReverseProxy (as Tailscale serve runs it) in front of a dead port, then forwarding to the fake broker; a broker answering 500 INTERNAL 'token login failed' (the real broker binary's answer with its Postgres stopped); a broker that hijacks and closes the connection",
+      "command": "cd packages/daemon && go test -count=3 -v -run TestTokenLoginRetries ./internal/agentsecrets && go test -count=1 ./internal/agentsecrets",
+      "observed": "TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker, TestTokenLoginRetriesQuicklyWhileTheBrokerCannotReachItsDatabase (the tester's, unmodified), TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer and TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses PASS 3/3; the whole package ok",
+      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
+      "negativeControl": "at 8502875f (before the fix) the tester's two tests both FAIL after 5 s 'timed out waiting: a login to succeed'; a broker answering 401 keeps the long schedule (TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql (new: broker_serving row, enrollment_lease_live)",
-    "packages/envoy/internal/broker/enroll/enroll.go (predicate at recoverConflict, EndLapsed, Renew, liveCredentials, Lookup; EndLapsed doc)",
-    "packages/envoy/internal/broker/requests/machine_read.go, machine_state.go (predicate at :50, :614, :924, :937), sweeper.go (comment)",
-    "packages/envoy/internal/broker/enroll/serving.go (new: ServingClock), serving_test.go (new)",
-    "packages/envoy/cmd/broker/main.go (clock on serving), outage_test.go (new acceptance test)",
-    "packages/envoy/internal/broker/config/config.go (NotServingSweeps, lease/sweep refusal, field comments), config_test.go",
-    "packages/envoy/internal/broker/api/renew_liveness_test.go",
-    "packages/daemon/internal/agentsecrets/client.go, client_test.go (short retry when the broker gives no HTTP answer)",
-    "packages/daemon/internal/shim/agentsecrets.go (comment)",
-    "docs: broker concepts, revoke-a-session, run-an-agent-in-a-container, troubleshooting, operate; legion troubleshooting; docs/kubernetes.md; packages/envoy/AGENTS.md; packages/envoy/CHANGELOG.md"
+    "round 2: packages/daemon/internal/agentsecrets/client.go (5xx joins the short schedule; unansweredError -> brokerUnavailableError, unavailableRetry* vars), client_test.go (renames outside the tester's tests; three long-schedule tests that used a 503 refusal now use 429 RATE_LIMITED, which stays on the long schedule)",
+    "round 2: docs/kubernetes.md, docs/site/src/content/docs/legion/troubleshooting.md (short schedule covers 5xx from the broker or its front door)",
+    "round 2: merge commit 18f76f3c resolving docs/site/src/content/docs/broker/operate.md against main",
+    "round 1 (unchanged): migration 0019, enroll.go, serving.go, requests machine_read/machine_state/sweeper, config, cmd/broker main and outage_test, api renew_liveness_test, shim comment, broker docs, envoy AGENTS.md and CHANGELOG"
   ],
   "trickyParts": [
-    "The guard is a SQL function evaluated in the same statement as every lease read, so a request stalled on Postgres past the threshold answers as it would once the time was given back; only the beat locks broker_serving, so there is no lock cycle.",
-    "The beat reads clock_timestamp() only after taking the row lock, so a second concurrent beat sees the gap the first closed (time given back once).",
-    "outage_test.go uses only symbols present on eee16056 so it proves the failure there; it stops the broker between two survivor renewals so the given-back lease is distinguishable from a real renewal."
+    "The 5xx error wraps the existing *APIError (Unwrap), so errors.As(err, &api) on Start's error still finds the status the tester's tests assert.",
+    "Three existing tests used a 503 refusal to exercise the long schedule; a 503 now means the broker is unavailable, so they use 429, keeping what each tests."
   ],
   "deviations": [
-    "Simplify pass changed ServingClock to hold Enrollments *Service instead of Store and Lease, and added config.NotServingSweeps; the plan named the fields Store/Interval/NotServingAfter/Lease.",
-    "Local runs skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken by name (the pod's Postgres trusts every password); internal/broker/helper and cmd/agent-secrets fail locally on SO_PEERPIDFD and terminal job control under gVisor, identically on eee16056, and are untouched; CI runs them."
+    "Local runs skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken by name (the pod's Postgres trusts every password); internal/broker/helper and cmd/agent-secrets fail locally on SO_PEERPIDFD and terminal job control under gVisor, identically on eee16056, and are untouched; CI runs them now that the PR is mergeable."
   ],
   "openQuestions": []
 }
