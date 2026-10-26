@@ -22,6 +22,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
 | `merged-root-waits.sh` | the daemon keeps a tree's order, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child, and lands once that child is parked; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
+| `dispatch-claimant-delivery.sh` | Dispatch's outbox delivers a person's answer, comment or untargeted message on an issue a session has claimed to that session's own `notifications.agent.<session>`, driven over HTTP through the real `envoy-dispatch` against a loopback PostgreSQL the caller names and a NATS of the run's own: a person's answer to an ask another session opened reaches the asker and the claimant, a person's reply in a person's thread on the issue's spec and a person's untargeted message reach the claimant, while a message targeted at another session, another session's comment and a person's comment on an unclaimed issue reach no claimant. Run against a base binary (`DISPATCH_BIN`), it is the change's negative control |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
@@ -1964,6 +1965,63 @@ migrations, the HTTP API, the claim supervision, `openWorkflow`, the JetStream c
 outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fresh `/tmp`
 directory, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
 which the driver writes through `LEGION_E2E_DAEMON_LOG`.
+
+## dispatch-claimant-delivery.sh
+
+```sh
+DATABASE_URL=postgres://<user>@127.0.0.1:<port>/<database>?sslmode=disable \
+  [DISPATCH_BIN=<envoy-dispatch>] bash scripts/e2e/dispatch-claimant-delivery.sh     # → "dispatch claimant delivery e2e: PASS in <n>s", exit 0
+```
+
+Runs on any Linux host with `go`, `bun`, `curl`, `psql` and `openssl` — no Docker. It proves
+`publishClaimantRoute` (`packages/envoy/internal/dispatch/outbox/publisher.go`) on the wire: the
+real `envoy-dispatch` publishes each event, and the run reads which `notifications.agent.*` topics
+carried its envelope, `dispatch-<event id>`.
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | required | a scratch PostgreSQL database with `pgvector` available, on `127.0.0.1`, `localhost` or `::1` (any other host, or a host given as a parameter, is refused). The run drops and recreates its `public` schema before the server migrates it, and leaves what it wrote there for inspection |
+| `DISPATCH_BIN` | unset | a prebuilt `envoy-dispatch` to run; unset, the script builds `./cmd/dispatch` from this checkout's `packages/envoy` |
+| `CLAIMANT_E2E_DISPATCH_PORT` | `19051` | the server's port; refused when something already answers on it |
+| `CLAIMANT_E2E_ENVOY_PORT` | `19053` | the fake Envoy listener's port; refused the same way |
+
+The script drops every inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable (and `PGHOSTADDR`)
+before it starts anything, so a Legion pane's real listener, Dispatch and NATS credentials reach
+none of it. It starts a NATS of its own (`internal/testnats/cmd/natsd`, JetStream on, on a port the
+kernel picks), the harness's fake Envoy listener (`packages/dispatch/e2e/fake-envoy.ts`, where the
+three sessions are registered live), and the server with NATS on, dev sign-in, an insecure cookie
+and an agent token minted for the run, in an environment holding nothing else. The driver,
+`dispatch-claimant-delivery.ts`, subscribes to `notifications.>` on that NATS, acts as the sessions
+P, C and Q with the agent token (each write naming its session as `actor`) and as one person
+through `GET /auth/_dev/signin`, finds each event's id in the issue's event log, waits up to 10 s
+for its envelope on the issue's own topic and 2 s more for its other destinations, and prints the
+agent topics that carried it. Issue `CLM-1` is the person's, with a spec and no route, claimed by P.
+
+| case | driven | passes when the event's envelope reached |
+| :--- | :--- | :--- |
+| `case3-ask-answer` | C opens an ask on `CLM-1`; the person answers it | exactly `agent.C` and `agent.P`. It also prints `claimant` and `route` of `GET /api/v1/asks/{id}` and of the ask's Inbox row's thread (`absent` on a server that predates them) |
+| `case2-thread-reply` | the person comments on a passage of `CLM-1`'s spec, then replies in that thread, mentioning nobody | `agent.P`, among any others |
+| `untargeted-message` | the person posts a message on `CLM-1` with no target | exactly `agent.P` |
+| `targeted-message` | the person sends a message on `CLM-1` targeted at `session:Q` | no `agent.P` |
+| `agent-comment` | C comments on `CLM-1` | no `agent.P` |
+| `unclaimed-issue` | the person comments on `CLM-2`, which nobody claims and which has no route | no agent topic at all |
+
+Every case runs and prints `== <case>`, what it read, and `ok <case>` or `FAIL <case>: <why>`; a
+summary follows, and any FAIL exits 1. The work directory, under `TMPDIR`, holds the binaries and
+the logs of natsd, the fake listener and the server: removed when the run passes, kept (without the
+binaries) and printed when it fails. Every process the run started is stopped on any exit.
+
+**Negative control.** Built from the pull request's base commit, the same run must fail the three
+cases the claimant route adds and pass the three controls:
+
+```sh
+mkdir -p "$TMPDIR/base-src"
+git --git-dir=<the checkout's git directory> archive <base commit> packages/envoy | tar -x -C "$TMPDIR/base-src"
+go -C "$TMPDIR/base-src/packages/envoy" build -o "$TMPDIR/envoy-dispatch-base" ./cmd/dispatch
+DATABASE_URL=… DISPATCH_BIN="$TMPDIR/envoy-dispatch-base" bash scripts/e2e/dispatch-claimant-delivery.sh
+# → FAIL case3-ask-answer (agent.C alone), FAIL case2-thread-reply and FAIL untargeted-message
+#   (no agent topic), ok for the other three, exit 1
+```
 
 ## lib/free-port.sh
 
