@@ -2,37 +2,38 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T04:44:00Z",
+  "completed": "2026-10-26T05:40:30Z",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 0,
-  "kind": "new round (round 14): fingerprint changed",
+  "minor": 1,
+  "kind": "round 15, narrow by the architect's decision: the round-14 skill fixes (ae3f92ecd6c7), their claude-envoy copies, the skills guard, the podKind.disk refactor (71705421a303), required checks",
   "lastReview": {
-    "id": 5647297954,
-    "state": "APPROVED",
-    "commitId": "3b90e2498e8e07686c9c3a480f7af80233896950"
+    "id": 5647511344,
+    "state": "CHANGES_REQUESTED",
+    "commitId": "152c849ca282c1628df7893ed05a2fe200112128"
   },
-  "fingerprint": {
-    "atLastReview": "3b90e2498e8e fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9",
-    "atMerge": "8867bd5d67a1 c907e753d2df31e6b4cbe3c7f90effc7741ecc1466d3d9a434d791e7716d66c4",
-    "atHead": "b0e681fdf296 62c5fa089d137f97881aef34abc891defae1a28421ecafb84cbd5896c45abb56",
-    "restricted": "excluding the three skill files and their claude-envoy copies as well: 032f4c81... at 3b90e249 and 8867bd5d, so outside those paths the merge changed nothing; at b0e681fd it differs by the new skills-guard test alone"
-  },
-  "thermonuclear": {
-    "deepReview": "APPROVE at b0e681fd: acceptance.md child-closed bullet true of workflow/linger.go:30-33 and check.go:60-117, 205-302, 374-403; no stale statement from #2197; skills-guard test 12 pass; claude-envoy check-dist in sync",
-    "codeQuality": "CHANGES: (1) acceptance.md duplicates merge-gate.md's look lifecycle (taken as fast-follow), (2) merge-gate.md:282-284 false at this head (taken), (3) worker SKILL.md step-1 tail wording (not a defect)"
-  },
+  "verified": [
+    "merge-gate.md:282-284 now true of closeCheck (check.go:283-302): IssueSuspend for root and child alike",
+    "acceptance.md child-closed bullet links merge-gate.md instead of restating it",
+    "refactor keeps behaviour: two podKind implementors, two callers each taking the half its old method returned; go build, go vet, go vet -tags e2e clean; go test ./internal/runtime/sandbox ok (thermonuclear pair)",
+    "claude-envoy bun run check-dist in sync; skills-guard 12 pass (thermonuclear pair)"
+  ],
   "ci": {
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "752a8e4edf9e (code of 4bee7ec164de; compare to b0e681fd lists only .legion/)",
-    "state": "queued at 04:43Z; a request for changes does not wait on it"
+    "ciHead": "71705421a303 (compare to ea4e175c lists only .legion/)",
+    "state": "queued at 05:30Z; a request for changes does not wait on it. Worker Image run 40270907952 at 58d8060c failed in docker/setup-buildx-action with 'unknown blob' (registry pull), not a required check and superseded by run 40273842423 at 71705421"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "skills/legion-worker/references/merge-gate.md:282-284 (and packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md:282-284)",
-      "description": "Says `pass` or `fail` closes the check and, 'for a child, the issue's Sandbox and volume are released'. This PR made closeCheck enqueue IssueSuspend for every issue not back in the workflow, root or child, lingering or not (packages/daemon/internal/workflow/check.go:275-302; main's version gated it with Release: !IsTreeRoot && !root.Lingers()). At this head a root's Sandbox also goes with its pod and disk, so the sentence is false about the mechanism this PR changed."
+      "file": "docs/kubernetes.md:2418, 2424, 3867, 3889",
+      "description": "The refactor 71705421a303 removed issuePod.diskSource and issuePod.claimTemplates and renamed every Go comment that cited them, but this PR's operator doc still cites both names four times; a reader searching podkind.go for them finds nothing. Fix: issuePod.disk."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-worker/references/merge-gate.md:254-256",
+      "description": "acceptance.md now sends the architect to merge-gate.md for when the issue's pod and Sandbox go, but merge-gate.md's pending bullet says only that the pod and disk go; endLookPending (check.go:262-270) enqueues IssueSuspend, which deletes the Sandbox too. Fix: name the Sandbox in that sentence (claude-envoy copy too)."
     }
   ]
 }
