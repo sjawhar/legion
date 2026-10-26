@@ -812,13 +812,30 @@ prove_daemon_container() {
     printf "gid %s\n" "$(id -g)"
     printf "hosts %s\n" "$(awk -v host="$1" "!/^#/ { for (i = 2; i <= NF; i++) if (\$i == host) { print; exit } }" /etc/hosts)"
     printf "runner %s\n" "$(command -v "$2")"
-    [ -z "$3" ] || printf "plugin %s\n" "$(command -v "$3")"' sh "$host" "$app_key_runner" "$plugin_word" 2>&1) ||
+    "$2" --help >/dev/null 2>&1; printf "runner-exec %s\n" "$?"
+    if [ -n "$3" ]; then
+      printf "plugin %s\n" "$(command -v "$3")"
+      "$3" --help >/dev/null 2>&1; printf "plugin-exec %s\n" "$?"
+    fi' sh "$host" "$app_key_runner" "$plugin_word" 2>&1) ||
     fail "the daemon's container ($daemon_image) could not run its probe: $(tr '\n' ' ' <<<"$inside" | cut -c1-300)"
   got_uid=$(sed -n 's/^uid //p' <<<"$inside")
   got_gid=$(sed -n 's/^gid //p' <<<"$inside")
   got_hosts=$(sed -n 's/^hosts //p' <<<"$inside")
   got_runner=$(sed -n 's/^runner //p' <<<"$inside")
   got_plugin=$(sed -n 's/^plugin //p' <<<"$inside")
+  # Each binary is started once with --help: busybox holds no dynamic loader and no interpreter, so a
+  # dynamically linked binary or a script (a version manager's shim) cannot be executed there, which
+  # the shell reports as 126 or 127, whatever the binary would answer --help with.
+  case "$(sed -n 's/^runner-exec //p' <<<"$inside")" in
+    126 | 127 | '')
+      fail "the App key runner $runner cannot be executed in the daemon's container ($daemon_image): it is dynamically linked or a script; name a static binary by its path in LEGION_E2E_APP_KEY_RUNNER (a version manager's shim resolves elsewhere: \`mise which agent-secrets\`, say)" ;;
+  esac
+  if [ -n "$plugin" ]; then
+    case "$(sed -n 's/^plugin-exec //p' <<<"$inside")" in
+      126 | 127 | '')
+        fail "the auth plugin $plugin cannot be executed in the daemon's container ($daemon_image): it is dynamically linked or a script; point the runtime kubeconfig's exec command at a static binary" ;;
+    esac
+  fi
   [ "$got_uid $got_gid" = "$(id -u) $(id -g)" ] ||
     fail "the daemon's container ran its probe as uid ${got_uid:-<none>} gid ${got_gid:-<none>}, want $(id -u) $(id -g), the devbox user's own"
   awk -v host="$host" '$1 == "127.0.0.1" { for (i = 2; i <= NF; i++) if ($i == host) found = 1 } END { exit !found }' <<<"$got_hosts" ||

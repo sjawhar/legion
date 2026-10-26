@@ -1020,7 +1020,12 @@ must resolve nothing on the devbox; the auth plugin and the key runner must each
 regular executable; and a probe container run with exactly the daemon's `docker run` arguments,
 which one helper builds for both, must print the devbox user's own uid and gid, an `/etc/hosts` line
 mapping the name to `127.0.0.1`, and the key runner and the auth plugin, looked up by name, at the
-paths the devbox resolves them to. Each observed value is printed. `getent` is required beside the
+paths the devbox resolves them to, each of them also started once with `--help` inside it and refused
+when the container's shell cannot execute it (126 or 127): busybox holds no dynamic loader and no
+interpreter, so a dynamically linked binary or a script, such as a version manager's shim that
+`command -v` finds first, cannot run there. Name a static runner by its path in
+`LEGION_E2E_APP_KEY_RUNNER` in that case (`LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets)`,
+say). Each observed value is printed. `getent` is required beside the
 tools both modes need (`sha256sum` among them, which holds the session table's copy of the
 transcript to the pod's).
 
