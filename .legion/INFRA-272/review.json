@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-272",
+  "completed": "2026-10-26T03:04:11Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "4e0bf68c654d67fa81cb961765e4dc8f2529e915",
+  "ci": "sjawhar/legion main requires lint, typecheck, test, pr-title (rulesets; no branch protection set). Newest pull_request runs at 4e0bf68c: Tests 40259286382 success (lint, typecheck, test success), PR Title 40259317604 success, Docs, Legion Envoy and Contracts, Worker Image success; compare 4e0bf68c...4318b53d touches only .legion/.",
+  "thermonuclear": "deep-review at 4318b53d: no correctness finding (HeadVerdict's only changed result is green -> none for a settled head on a base requiring nothing; every other consumer compares to red; nothingRequired equals HeadChecks ok-and-empty; go test ./internal/classify and go vet incl. -tags e2e ok). code-quality at 4318b53d: no correctness defect; harness/script duplication, prompt wording, stale comments.",
+  "critical": 0,
+  "important": 1,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/prompts/go/architect-common.md:10; skills/legion-architect/references/wake-routing.md:24 (and its generated copy in packages/claude-envoy/legion/)",
+      "description": "The architect's instructions say a push onto 'a head whose base branch requires no check' leaves the counted attempt (three times in architect-common.md). The code (classify/required.go:175-177, decisions.go:34) needs a settled head and no required workflow either; decisions_export_test.go pins a pushed head on a base requiring only a running workflow, or with no settlement, as staying in the attempt. An architect reading this expects a checks-red that never comes. concepts.md and troubleshooting.md already state the exact rule: use the same words and regenerate the claude-envoy copy."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/no_required_checks_live_test.go:372",
+      "description": "'Without the change the push stayed in the attempt' is false against main: main's HeadVerdict read the empty set green, so AdvancePullRequestHead cleared the mark there too. Step 4 discriminates only against HeadVerdict's change without nothingRequired (the implementer's negative control b). The PR body's Change bullet 2 likewise presents kept behaviour as new."
+    }
+  ],
+  "fastFollow": "Share the whole-daemon live-proof harness (no_required_checks_live_test.go copies mergedRootWaitsLive's log/step/note/issue/publish/noticesOfKind/waitNotices and boot prelude and reaches into mergedRootWaitsNATSURL/Log/Dispatch/Stream) and the script body (no-required-checks.sh vs merged-root-waits.sh); nothingRequired could ask HeadChecks instead of re-encoding its ok condition; reflow concepts.md:247, troubleshooting.md:516 and :593-594."
+}
