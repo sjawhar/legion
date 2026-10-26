@@ -2,47 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-225",
-  "completed": "2026-10-26T06:12:00Z",
-  "round": 8,
-  "verdict": "PASS at code head b2be8c44abcb11a95a89192e27ef40932bc09c18. The review-round changes (93cfafc9 skill text, b2be8c44 a verbatim move plus an equivalent predicate) were driven: the architect skill's link-and-park procedure works as written on the booted daemon, every earlier driven scenario still passes, and the moved tick re-read is caught by a bite. No defect is open.",
-  "headTested": "b2be8c44abcb11a95a89192e27ef40932bc09c18, code head under the handoff-only db8e47ff8d0413fba7bc4b61f5882a150b11899b (skip-checks trailer), resolved from legion/INFRA-225@origin after my own jj git fetch at 05:58Z. Commits since round 7's ff167c1b: d82ac5ee (review handoff, changes_requested, 2 important findings), 93cfafc9 and b2be8c44 (legion-implementer[bot]), db8e47ff (implement handoff). No merge of main; PR #2188 MERGEABLE, 85 changed files.",
-  "changesRead": {
-    "93cfafc9": "Skill text only, plus two doc comments (contracts legion-api.ts admission comment, record/outbox.go Blocked comment): architect SKILL section 2 (one call naming every blocker, the call replaces the whole list, read links first; release with the rest; cross-repository children not held by a link; before park_child re-set or clear each waiting sibling's list or park it too), wake-routing child-closed and pr-blocked Split rows, decomposition 'Across repositories', and the controller's admission/daily-report/wakes wording on how a wait ends. Each with its claude-envoy legion/ copy.",
-    "b2be8c44": "applyControllerTick, blockerReadFanout, observeWaitedOn, waitedOn and readObserved moved from daemon/workflow.go to daemon/controller_tick_reread.go: the removed block and the new file's body (from line 16) differ by one trailing blank line (diff output '116d115 <' only). StartUnblockedChildren's gate is !Holdable || len(Unfinished) > 0, the same predicate as round 7's !Holdable || len(Holds) > 0 since Holds = Unfinished when Holdable. Holds' doc comment updated. go build ./... and go vet of daemon, workflow and blockers clean."
-  },
-  "skillClaimsChecked": [
-    "Replace semantics: two PATCH blocked_by calls on one issue left [second] alone (driven); dispatch issue-update --help says 'Replacement list of issue keys ... [] clears it ... One item per flag, repeated'.",
-    "'--blocked-by on dispatch issue at creation': dispatch issue --help lists --blocked-by ('Issue keys in the same project this issue waits on ... One item per flag, repeated'); driven by creating two siblings with blocked_by [A,B] at creation.",
-    "'read its existing links first (dispatch read)': dispatch read's Links: section comes from the reference graph (packages/envoy-client/src/dispatch-execute.ts:1903-1908 graphSections, GET /api/v1/references ?from=), and blocked_by is a graph kind (packages/envoy/internal/dispatch/refs/graph.go:17); driven GET /api/v1/references?kind=blocked_by&from=dispatch://<child> returned both blockers.",
-    "Park guidance: driven below — re-set sibling held on the rest and started at its close, cleared sibling started at once with the links-taken-off child-status, untouched sibling held on the parked child with no notice.",
-    "wake-routing Split row 'Release it now ... Legion holds it on that --blocked-by link until this issue closes, and starts it then': a sibling blocked by a sibling child, released together, starts at that sibling's done (round 7's R7-A, re-run green).",
-    "Controller wording 'the wait ends when each blocker reaches done ... or its link is taken off (by a person or the tree's architect)': link removal starting a held child is driven below and in TestTesterHeldChildLinksRemovedStarts; link edits on a waiting root in TestTesterLegionStateCLIAndLinkEdits, both green."
-  ],
-  "ci": "Read at 06:10Z for b2be8c44: Tests 40277201591, Legion Envoy and Contracts 40277201517, Docs 40277201550, Worker Image 40277201639 queued; PR Title 40277201636 cancelled and five later PR Title runs queued; check runs lint, typecheck, test, changes, build queued. Not waited on. For context, the superseded head e2c36e93 settled Tests, Docs, Worker Image and PR Title success, and Legion Envoy and Contracts 40270142660 failure: eight Envoy/Dispatch jobs (dispatch, envoy-go, envoy-go-race, broker-multiprocess, envoy-smoke, envoy-client, dispatch-multiprocess, envoy-infra-go) failed at 'Initialize containers' / image pre-pull with 'Docker pull failed with exit code 1' before any test ran — a runner image-pull failure in packages this change does not touch, not a test result.",
+  "completed": "2026-10-26T06:35:00Z",
+  "round": 9,
+  "verdict": "PASS at code head 24d58a97d324210c84faf24a5d70ad6d8d330348. The round changes skill prose (the park rule scoped to a child parked for good; a park followed by rerun_child keeps its dependents' links; 'the blocker's own merge') and comments in three Go files; the new sentence was driven as written on the booted daemon and every earlier driven scenario still passes. No defect is open.",
+  "headTested": "24d58a97d324210c84faf24a5d70ad6d8d330348, code head under the handoff-only f15531532a729d863fe8877f77b69ebe2a70766c, resolved from legion/INFRA-225@origin after my own jj git fetch at 06:20Z. Commits since round 8's 935d2839: 644bfd74 (review handoff, changes_requested, one important finding: the round-4 park rule broke the park-then-rerun restart), 24d58a97 (legion-implementer[bot]), f1553153 (implement handoff). No merge of main; PR #2188 MERGEABLE, 85 files.",
+  "changesRead": "jj diff -r 24d58a97: skills/legion-architect/SKILL.md section 2 park bullet ('for good (one made unneeded, or parked so its tree can finish)' plus 'A park followed by rerun_child keeps its dependents' links: they wait through the rerun and start when the rerun's merge closes the child'), wake-routing child-status ('a person or you taking its blocked-by links off') and child-closed ('park obsolete work for good'), controller admission/daily-report/wakes ('the blocker's own merge'), each with its claude-envoy copy; Go: comment-only hunks in blockers/blockers.go (Blocked doc), workflow/effects.go (ChildUnblockedNotice doc; the reason string unchanged) and admit/controller_wake_test.go (test comment). go build ./... clean.",
+  "ci": "Read at 06:33Z for 24d58a97: Tests 40279753303, Legion Envoy and Contracts 40279753279, Docs 40279753207 queued; Worker Image 40279753172 pending; PR Title 40279753194 cancelled and three later runs queued. Not waited on. The superseded head b2be8c44 had Docs and four PR Title runs success, Tests and Legion Envoy and Contracts cancelled (superseded by the new push), Worker Image in progress.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at b2be8c44 against tester-owned Postgres 17.11 and NATS 2.10.22: TestBlockedIssuesAreNotStartedAgainstScratchDispatch PASS in 12.63s. Its round-4 proof entry's claims (help text, no daemon behaviour change, no test file edited) checked above."
+    "how": "Re-ran the implementer's command at 24d58a97 against tester-owned Postgres 17.11 and NATS 2.10.22: TestBlockedIssuesAreNotStartedAgainstScratchDispatch PASS in 16.05s; its round-5 claim that only prose and comments changed checked by reading the diff."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 4: the architect skill's procedure for setting a child's dependencies and for parking a child that siblings wait on works as written — one call keeps every link where two lose the first, a sibling re-set without the parked child starts at its remaining blocker's close, a sibling cleared starts at once, and an untouched sibling stays held with no notice.",
-      "surface": "The Legion daemon booted in-process against the real Dispatch server (packages/envoy/cmd/dispatch) with its events on, tester-owned Postgres 17.11 and NATS 2.10.22 JetStream; links set through Dispatch's HTTP API, the release and park_child over the daemon's HTTP routes with a real architect grant, assertions from GET /legion/v1/state, Dispatch's /api/v1/references and the daemon's outbox.",
-      "command": "cd packages/daemon && LEGION_TEST_PG_DSN='postgres://legion@127.0.0.1:55532/postgres?sslmode=disable' LEGION_TEST_NATS_URL=nats://127.0.0.1:4322 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:8322 go test -count=1 -run TestTesterR8ArchitectLinkAndParkProcedure ./internal/daemon/ -v (throwaway, not committed; copy under $TMPDIR/infra225/r7)",
-      "observed": "PASS in 13.35s (and 11.20s in the full run). Two calls left blocked_by [A] of [B, A]; links at creation kept [A,B] and the reference graph returned both blocked_by edges. Release of five answered {released:[A,B,R,C,X], started:[A,B], held:[R on A,B; C on A,B; X on A]}. R re-set to [B]: held on [B] at admitted. X cleared with []: planning, one child-status 'blocked-by links were taken off'. park_child A -> done. B closed: R planning with exactly one child-status 'every issue it waited on (B) is done'. Final admission.blocked [{C,[A]}].",
-      "headSha": "b2be8c44abcb11a95a89192e27ef40932bc09c18",
-      "negativeControl": "C, linked to A and left untouched, stayed at admitted named in admission.blocked on [A] with no start notice after A was parked and B closed — the silent hold the new park guidance tells the architect to clear."
+      "criterion": "Review round 5: a park followed by rerun_child keeps its dependents' links — they wait through the rerun and start when the rerun's close closes the child — so the restart path the skill names elsewhere stays right.",
+      "surface": "The Legion daemon booted in-process against the real Dispatch server (packages/envoy/cmd/dispatch) with its events on, tester-owned Postgres 17.11 and NATS 2.10.22 JetStream; the release, park_child and rerun_child over the daemon's HTTP routes with a real architect grant, links through Dispatch's API, assertions from GET /legion/v1/state and the daemon's outbox.",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN='postgres://legion@127.0.0.1:55532/postgres?sslmode=disable' LEGION_TEST_NATS_URL=nats://127.0.0.1:4322 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:8322 go test -count=1 -run TestTesterR9ParkThenRerunKeepsDependentsHeld ./internal/daemon/ -v (throwaway, not committed; copy under $TMPDIR/infra225/r7)",
+      "observed": "PASS in 14.16s (15.42s in the full run). D blocked_by R: R planning, D admitted held on [R]; park_child R -> R done, D still held; rerun_child R -> R planning at generation 2, D still admitted under admission.blocked [{D,[R]}] two seconds later with no start notice; R set done -> D planning, admission.blocked without D, exactly one child-status 'every issue it waited on (R) is done'.",
+      "headSha": "24d58a97d324210c84faf24a5d70ad6d8d330348",
+      "negativeControl": "The round-4 rule applied to a restart (the dependent's link taken off before the park) starts the dependent at once: TestTesterR8ArchitectLinkAndParkProcedure's cleared sibling reached planning with a 'blocked-by links were taken off' child-status, in the same run."
     },
     {
-      "criterion": "Every acceptance criterion the earlier rounds drove still holds at the head after b2be8c44's move of the tick re-read and the restated start predicate.",
+      "criterion": "Every acceptance criterion the earlier rounds drove still holds at the head.",
       "surface": "The same booted daemon and servers.",
-      "command": "go test -count=1 -timeout 1500s -run 'TestBlockedIssuesAreNotStartedAgainstScratchDispatch$|^TestTester' ./internal/daemon/ -v, same environment (17 throwaway TestTester scenarios from rounds 1-7 plus R8)",
-      "observed": "All 18 PASS, package ok in 225.8s; NATS total_connections 81 -> 154, in_msgs 1083 -> 2085 across the run (external server, no Docker in the pod).",
-      "headSha": "b2be8c44abcb11a95a89192e27ef40932bc09c18",
-      "negativeControl": "observeWaitedOn in the moved controller_tick_reread.go made to return nil: TestTesterTickRepairsALostClose FAIL ('Legion did not admit root on the tick', still waiting 1.5s after the tick); file restored from a copy, jj diff showed only the throwaway files."
+      "command": "go test -count=1 -timeout 1500s -run 'TestBlockedIssuesAreNotStartedAgainstScratchDispatch$|^TestTester' ./internal/daemon/ -v, same environment (18 throwaway TestTester scenarios from rounds 1-8 plus R9)",
+      "observed": "All 19 PASS, package ok in 276.2s.",
+      "headSha": "24d58a97d324210c84faf24a5d70ad6d8d330348",
+      "negativeControl": "Within the run, R8's untouched sibling stays held on its parked blocker with no notice, and R9's dependent stays held through the rerun; a start in either would fail its scenario."
     }
   ],
-  "earlierRounds": "Round 7 is in the test handoff at commit ff167c1bd8b5; rounds 1-6 at 7864e7f4579cec1b280dc2150e1db2fc0e5f69dc.",
-  "scenarioHarness": "All throwaway scenario files were removed from the workspace before this commit; copies are under $TMPDIR/infra225 (zz_tester_blockers_test.go) and $TMPDIR/infra225/r7 (zz_tester_r7_test.go, zz_tester_r8_test.go)."
+  "earlierRounds": "Round 8 is in the test handoff at commit 935d28398fc6; round 7 at ff167c1bd8b5; rounds 1-6 at 7864e7f4579cec1b280dc2150e1db2fc0e5f69dc.",
+  "scenarioHarness": "All throwaway scenario files were removed from the workspace before this commit; copies are under $TMPDIR/infra225 and $TMPDIR/infra225/r7."
 }
