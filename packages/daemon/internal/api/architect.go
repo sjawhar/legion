@@ -941,9 +941,14 @@ func (s *server) owns(ctx context.Context, grant credential.Grant, recorded reco
 }
 
 // parkChild takes a running child of the architect's tree out of the workflow by moving it to
-// backlog in Dispatch, the move a human would make. The move's event parks it as it parks any child
-// leaving the workflow (the workflow's leave): its workers are suspended and its phase parked, and
-// the architect is told. rerun_child, or release_children on the backlog child, runs it again.
+// backlog in Dispatch, the move a human would make, and applies that move to the record before it
+// answers (applyOwnStatusWrite), as the move's event would: the child is parked as any child leaving
+// the workflow is (the workflow's leave), its workers suspended and its phase parked, and the
+// architect is told. The record does not wait for the event to come back through the Dispatch
+// consumer, which can run far behind: until then the workflow would keep running the child, start
+// its next phase's worker on a completion, and refuse rerun_child. The event, once delivered, finds
+// the record at its sequence and changes nothing. rerun_child, or release_children on the backlog
+// child, runs it again.
 func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
 	child, ok := s.childOfTree(w, r)
 	if !ok {
@@ -953,16 +958,17 @@ func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "CHILD_NOT_RUNNING", fmt.Sprintf("%s is already out of the workflow; rerun_child runs it again", child.Key))
 		return
 	}
-	if _, ok := s.setDispatchStatus(w, r, child.Key, "backlog"); ok {
+	if written, ok := s.setDispatchStatus(w, r, child.Key, "backlog"); ok && s.applyOwnStatusWrite(w, r, written) {
 		writeJSON(w, http.StatusOK, EmptyResponse{})
 	}
 }
 
 // rerunChild runs a child of the architect's tree again once it is out of the workflow, parked or
-// signed off, by moving it to todo in Dispatch, the move a human would make. The move's event starts
-// the child's next run under the tree from planning (the workflow's reenterChild). A running child
-// is parked first, and a lingering tree runs nothing more; a todo it reached anyway would admit the
-// child as an orphan root of its own.
+// signed off, by moving it to todo in Dispatch, the move a human would make, and applies that move to
+// the record before it answers (applyOwnStatusWrite), as the move's event would: the child's next
+// run starts under the tree from planning (the workflow's reenterChild), and the event, once
+// delivered, changes nothing. A running child is parked first, and a lingering tree runs nothing
+// more; a todo it reached anyway would admit the child as an orphan root of its own.
 func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 	child, ok := s.childOfTree(w, r)
 	if !ok {
@@ -981,7 +987,7 @@ func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
 		return
 	}
-	if _, ok := s.setDispatchStatus(w, r, child.Key, "todo"); ok {
+	if written, ok := s.setDispatchStatus(w, r, child.Key, "todo"); ok && s.applyOwnStatusWrite(w, r, written) {
 		writeJSON(w, http.StatusOK, EmptyResponse{})
 	}
 }
