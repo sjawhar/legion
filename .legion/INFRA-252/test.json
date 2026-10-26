@@ -2,53 +2,38 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T18:05:00Z",
-  "round": 9,
+  "completed": "2026-10-26T19:25:00Z",
+  "round": 10,
+  "generation": 3,
   "headSha": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at the branch head afedb19d1ca7 (PASS in 40s) and on its merge with main ad909178, tree 91c8f6437233 (PASS in 53s, all eleven steps); https://github.com/sjawhar/legion/pull/2226#issuecomment-6423225866."
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` on a freshly installed embedded PostgreSQL and nats-server (the pod and volume are new): at the branch head afedb19d1ca7, PASS in 91s; on its merge with main 6cdb99959fa1, tree cd3db7067e7f, PASS in 63s, all eleven steps (https://github.com/sjawhar/legion/pull/2226#issuecomment-6424874293)."
   },
   "failures": [],
   "failed": 0,
   "previousFailures": [
-    {
-      "criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree",
-      "round": 1,
-      "status": "fixed; red test passes on the merged tree"
-    },
-    {
-      "criterion": "The daemon boots and migrates once this pull request merges (migration 54 collided with main's 0054_issue_pod_roles_container)",
-      "round": 8,
-      "status": "fixed at afedb19d1ca7 (0055_issue_ancestry); store suite and child-adoption.sh pass on the merge with main ad909178"
-    }
+    {"criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree", "round": 1, "status": "fixed; red test passes on the merged tree"},
+    {"criterion": "The daemon boots and migrates once this pull request merges", "round": 8, "status": "fixed at afedb19d1ca7 (0055_issue_ancestry); store suite and child-adoption.sh pass on the merge with main 6cdb99959fa1"}
   ],
   "proof": [
     {
-      "criterion": "Round 8's failure: the merged tree's migrations load and the daemon boots and migrates",
-      "surface": "the repository's store suite and the whole daemon (the function `legion start` calls) over a fresh PostgreSQL and its own nats-server, run from the merged tree `git merge-tree --write-tree ad909178 afedb19d1ca7` = 91c8f6437233",
-      "command": "cd <merged tree>/packages/daemon && LEGION_TEST_PG_DSN=<fresh postgres> go test -count=1 ./internal/store/; cd <merged tree> && LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh",
-      "observed": "store `ok` (80s); `child adoption e2e: PASS in 53s`, all eleven steps",
+      "criterion": "Generation 3 with no code change: the merge with current main still migrates, boots and adopts",
+      "surface": "the repository's store suite and the whole daemon (the function `legion start` calls) over a fresh PostgreSQL and its own nats-server, run from the merged tree `git merge-tree --write-tree 6cdb99959fa1 afedb19d1ca7` = cd3db7067e7f",
+      "command": "cd <merged tree>/packages/daemon && LEGION_TEST_PG_DSN=<fresh postgres> go test -count=1 ./internal/store/; go test -run TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree ./internal/daemon/; cd <merged tree> && LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh",
+      "observed": "store ok (89s); red test ok; `child adoption e2e: PASS in 63s`, all eleven steps",
       "headSha": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5",
-      "negativeControl": "round 8, the merge at fd6ddb475d72: `migrations 0054_issue_ancestry.up.sql and 0054_issue_pod_roles_container.up.sql share version 54` in every migrating test and before the driver's first step"
+      "negativeControl": "round 8's merge at fd6ddb475d72 failed every migrating test with `share version 54`; release-refuses here answers 409 CHILD_IN_OTHER_TREE with the record unchanged and no Dispatch write"
     },
     {
-      "criterion": "Review round 6 (round 8's code fix): a root handed over from another tree is never adopted back",
-      "surface": "whole daemon on the merged tree (throwaway -tags e2e driver)",
-      "command": "O seeded as its own root, HandedOverFrom T, phase admitted, todo, parent T; O's labelled todo envelope under T; release {O}",
-      "observed": "O stays its own tree and in admission.waiting over 3 s; release 409 CHILD_NOT_ADOPTABLE `O cannot join the tree of T: it was handed over as a root of its own`; no Dispatch write",
+      "criterion": "The tester's round 1-9 scenarios (handed-over root, ancestry holds, restarts, blockers, refusals)",
+      "surface": "whole daemon on the merge with main ad909178 (round 9, https://github.com/sjawhar/legion/pull/2226#issuecomment-6423225866)",
+      "command": "round 9's throwaway -tags e2e drivers (lost with the old volume)",
+      "observed": "all ok in round 9; since then neither the code head (afedb19d1ca7) nor main's packages/daemon/internal (ad909178..6cdb99959fa1, empty diff) changed",
       "headSha": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5",
-      "negativeControl": "a labelled todo root with no hand-over (queued-root-leaves-the-line) joins T on the same envelope"
-    },
-    {
-      "criterion": "AC1-AC4, D2 and the tester's earlier scenarios on the merged tree",
-      "surface": "whole daemon on the merged tree (scripts/e2e/child-adoption.sh and throwaway -tags e2e drivers) and round 1's red test",
-      "command": "child-adoption.sh; red test; twelve round 1-4 scenarios; two round-6 daemon restarts; round-7 blocker-held adoption and carried-run refusal",
-      "observed": "all ok",
-      "headSha": "afedb19d1ca7254b2da09d55760c74b10cd3f7e5",
-      "negativeControl": "release-refuses, wave-atomic, not-adoptable and carried-run-not-adoptable drive 409s with nothing written; red test failed at fac524684344 before the fix"
+      "negativeControl": "round 9: handed-over root release 409 CHILD_NOT_ADOPTABLE with nothing written"
     }
   ],
-  "ci": "At afedb19d1ca7, read 2026-10-26T18:00Z: Tests 40369963835 queued; Legion Envoy and Contracts 40369963793 queued; Docs 40369963879 queued; Worker Image 40369963768 pending; PR Title 40370064190 queued (40369963786 cancelled). At the previous code head fd6ddb475d72, Tests 40363077934 failed in TestARestartedDaemonReadoptsItsControllerAndLaunchesNoSecond (`the controller was spawned 2 times across the restart, want once`): the controller relaunch path, outside this diff; 5/5 green on the merged tree locally. GitHub reports MERGEABLE; main is ad909178.",
+  "ci": "At afedb19d1ca7, read 2026-10-26T19:20Z: Tests 40369963835 success (lint, typecheck, test); PR Title 40370064190 success; Docs 40369963879 success; Worker Image 40369963768 in progress; Legion Envoy and Contracts 40369963793 queued. GitHub reports MERGEABLE; main 6cdb99959fa1 ends at migration 0054.",
   "verdictProvider": "provider not verified (no review subagents ran)"
 }
