@@ -13,6 +13,15 @@
   containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
   CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
   Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
+  the app Deployment's pods from being displaced, so a deployment sets both in its program rather
+  than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
+  that already exists in the cluster. `appPdbMinAvailable` registers a PodDisruptionBudget named
+  for the app, over its pods alone, with that `minAvailable` and `unhealthyPodEvictionPolicy:
+  AlwaysAllow`, so a drain waits while a pod that is not ready can still be evicted. The front door
+  and the listener are unchanged, and with neither set the component renders what it always did.
+  The component refuses, naming the input, an empty `appPriorityClassName` or one that is not a
+  DNS subdomain, and an `appPdbMinAvailable` below 1 or above `replicas`.
 - Dispatch writes one access-log line per served request, so the callers behind a load spike can
   be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
   pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal

@@ -141,6 +141,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
 | Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. All three pod templates carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler evicts these pods whenever it consolidates a node, and the one-replica front door takes Dispatch off the tailnet until its replacement is ready. Autopilot honours the annotation as [extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods) protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute Engine maintenance and drains still evict), with each such pod on a node of its own whenever possible and raised to at least 500m CPU and 512Mi memory, so the front door and the listener each request 500m and 512Mi. |
+| PodDisruptionBudget (only with `appPdbMinAvailable`) | `<hostname>`, over the app's pods (`app=<hostname>`) alone, with `minAvailable` set to `appPdbMinAvailable` and `unhealthyPodEvictionPolicy: AlwaysAllow`, so a drain cannot take the app below that many ready pods, while a pod that is not ready may still be evicted. |
 
 ### Inputs
 
@@ -191,6 +192,22 @@ that does not, Autopilot also rounds the pod's CPU up to a multiple of 250m (the
 1200m becomes 1250m).
 A change to either replaces the app's pods as any change to its pod template does: recreated at
 one replica, rolled above one.
+
+`appPriorityClassName` and `appPdbMinAvailable` protect the app's pods from being displaced; the
+front door and the listener are unchanged by either, and with neither set the component renders
+what it always did. `appPriorityClassName` is the app pod's `priorityClassName`: the name, a DNS
+subdomain, of a PriorityClass that already exists in the cluster, which the component never
+creates or checks. The scheduler may preempt pods of a lower priority to place a higher-priority
+app pod, and a node under memory or disk pressure evicts lower-priority pods first. Like
+`appCpu`, a change to it replaces the app's pods. `appPdbMinAvailable`, from 1 to `replicas`,
+registers the PodDisruptionBudget `<hostname>` with that `minAvailable`. The `safe-to-evict`
+annotation already keeps the autoscaler's scale-down from evicting the pods, but not a drain; the
+budget makes a drain wait, and at `replicas` it blocks every voluntary eviction. GKE respects a
+budget for up to 60 minutes per node during an upgrade and then evicts anyway
+([Best practices for upgrading clusters](https://cloud.google.com/kubernetes-engine/docs/best-practices/upgrading-clusters)).
+The budget never slows the app's own rollouts, which Kubernetes does not run through the eviction
+API. The component refuses an empty or malformed `appPriorityClassName` and an
+`appPdbMinAvailable` below 1 or above `replicas`, each by name, before it registers a resource.
 
 Two optional groups each come as all their inputs or none. Neither takes a secret value: the
 broker relay's credential is a token the kubelet mints and the App key is read at run time, so no
@@ -280,7 +297,9 @@ Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 [Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
 namespaces, allowed namespaces, an `appCpu` or `appMemory` outside Autopilot's bounds for the app
-pod (above), missing inputs, and nkey seeds in its own name and in plain inputs
+pod (above), an `appPriorityClassName` that is empty or not a DNS subdomain, an
+`appPdbMinAvailable` outside 1 to `replicas`, missing inputs, and nkey seeds in its own name and in
+plain inputs
 before it registers a resource; it refuses an
 `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an `appClientId`,
 `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing

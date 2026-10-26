@@ -2,6 +2,7 @@ package gcp_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -266,6 +267,16 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
 		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
+		{name: "an empty app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("") }, err: []string{"appPriorityClassName is empty", "leave it unset for no priority class"}},
+		{name: "an app priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`appPriorityClassName "Example_Priority"`, "DNS subdomain"}},
+		{name: "an app priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`appPriorityClassName "example-priority "`, "DNS subdomain"}},
+		{name: "a disruption budget of no pod", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"appPdbMinAvailable 0", "from 1 to replicas (1)", "leave it unset for no PodDisruptionBudget"}},
+		{name: "a negative disruption budget", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(-1) }, err: []string{"appPdbMinAvailable -1", "from 1 to replicas (1)"}},
+		{name: "a disruption budget above the default replica count", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(2) }, err: []string{"appPdbMinAvailable 2", "from 1 to replicas (1)"}},
+		{name: "a disruption budget above the replica count", edit: func(a *gcp.DispatchArgs) {
+			a.Replicas = pulumi.IntRef(3)
+			a.AppPdbMinAvailable = pulumi.IntRef(4)
+		}, err: []string{"appPdbMinAvailable 4", "from 1 to replicas (3)"}},
 		{name: "an app CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("two") }, err: []string{`appCpu "two"`, "Kubernetes quantity"}},
 		{name: "an app CPU with a memory suffix in the wrong case", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1gi") }, err: []string{`appCpu "1gi"`, "Kubernetes quantity"}},
 		{name: "an app memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4 GiB") }, err: []string{`appMemory "4 GiB"`, "Kubernetes quantity"}},
@@ -408,6 +419,7 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
 		{"a seed as the app CPU", "appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(seed) }},
 		{"a seed as the app memory", "appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(seed) }},
+		{"a seed as the app priority class", "appPriorityClassName", func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(lower) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
 		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
@@ -1460,5 +1472,83 @@ func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
 	args.AppCpu = pulumi.StringRef("100m")
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appCpu "100m" must be at least 300m`)
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+}
+
+const podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
+
+// Unset, appPriorityClassName and appPdbMinAvailable leave the component as it was before they
+// existed: no PodDisruptionBudget, and an app pod naming no priority class
+// (TestDispatchPodMatchesGolden pins the whole template).
+func TestDispatchRegistersNoBudgetOrPriorityClassUnset(t *testing.T) {
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Empty(t, settings.AppPriorityClassName)
+	require.Zero(t, settings.AppPdbMinAvailable)
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Zero(t, countRegistrations(m, podDisruptionBudgetType))
+	require.NotContains(t, deploymentPodTemplate(t, m, "example-dispatch")["spec"], "priorityClassName")
+}
+
+// appPriorityClassName reaches the app's pod and nothing else: its template is the default's with
+// priorityClassName added, the front door's and the listener's pods match their goldens, and the
+// component registers no resource it did not before, no PriorityClass among them.
+func TestDispatchAppPriorityClassReachesTheAppPodAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	args := dispatchArgs()
+	args.AppPriorityClassName = pulumi.StringRef("example-priority")
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	want := deploymentPodTemplate(t, defaults, "example-dispatch")
+	want["spec"].(map[string]any)["priorityClassName"] = "example-priority"
+	require.Equal(t, want, deploymentPodTemplate(t, m, "example-dispatch"))
+	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+	require.ElementsMatch(t, defaults.Types(), m.Types())
+}
+
+// appPdbMinAvailable registers one PodDisruptionBudget, named for the app, in its namespace,
+// selecting the app's pods by the label the app Deployment's own selector matches, and no other
+// workload's; a pod that is not ready may still be evicted. The app's pod template is unchanged.
+func TestDispatchAppPdbCoversTheAppPods(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, row := range []struct{ replicas, minAvailable int }{{1, 1}, {3, 2}, {3, 3}} {
+		t.Run(fmt.Sprintf("%d of %d", row.minAvailable, row.replicas), func(t *testing.T) {
+			args := dispatchArgs()
+			args.Replicas = pulumi.IntRef(row.replicas)
+			args.AppPdbMinAvailable = pulumi.IntRef(row.minAvailable)
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, row.minAvailable, settings.AppPdbMinAvailable)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			require.Equal(t, 1, countRegistrations(m, podDisruptionBudgetType))
+			budget := m.Named(t, podDisruptionBudgetType, "example-dispatch").Inputs.Mappable()
+			require.Equal(t, map[string]any{"name": "example-dispatch", "namespace": "dispatch"}, budget["metadata"])
+			require.Equal(t, map[string]any{
+				"minAvailable":               float64(row.minAvailable),
+				"selector":                   map[string]any{"matchLabels": map[string]any{"app": "example-dispatch"}},
+				"unhealthyPodEvictionPolicy": "AlwaysAllow",
+			}, budget["spec"])
+			deploymentSpec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
+			require.Equal(t, deploymentSpec["selector"], budget["spec"].(map[string]any)["selector"])
+			require.Equal(t, deploymentPodTemplate(t, defaults, "example-dispatch"), deploymentPodTemplate(t, m, "example-dispatch"))
+			require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
+		})
+	}
+}
+
+// A budget the app's replica count cannot meet is refused by the resolver, before the component
+// registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesAnAppPdbBeforeRegistering(t *testing.T) {
+	args := dispatchArgs()
+	args.AppPdbMinAvailable = pulumi.IntRef(2)
+	m, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appPdbMinAvailable 2 must be from 1 to replicas (1)`)
 	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 }

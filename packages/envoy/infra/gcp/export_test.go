@@ -31,21 +31,23 @@ type DispatchRollingUpdate struct {
 // exporting the component's internal representation. RollingUpdate is nil unless StrategyType is
 // RollingUpdate.
 type DispatchSettings struct {
-	DatabaseVersion    string
-	DatabaseTier       string
-	DeletionProtection bool
-	Namespace          string
-	Replicas           int
-	StrategyType       string
-	RollingUpdate      *DispatchRollingUpdate
-	ServeConfig        string
-	AgentSecretsURL    string
-	AppClientID        string
-	AppID              string
-	AppKeySecretName   string
-	AppKeySecretKey    string
-	AppCPU             string
-	AppMemory          string
+	DatabaseVersion      string
+	DatabaseTier         string
+	DeletionProtection   bool
+	Namespace            string
+	Replicas             int
+	StrategyType         string
+	RollingUpdate        *DispatchRollingUpdate
+	ServeConfig          string
+	AgentSecretsURL      string
+	AppClientID          string
+	AppID                string
+	AppKeySecretName     string
+	AppKeySecretKey      string
+	AppCPU               string
+	AppMemory            string
+	AppPriorityClassName string
+	AppPdbMinAvailable   int
 }
 
 // ResolveDispatch resolves Dispatch's plain inputs for the external refusal and default tests.
@@ -55,20 +57,22 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		return DispatchSettings{}, err
 	}
 	settings := DispatchSettings{
-		DatabaseVersion:    s.databaseVersion,
-		DatabaseTier:       s.databaseTier,
-		DeletionProtection: s.deletionProtection,
-		Namespace:          s.namespace,
-		Replicas:           s.replicas,
-		StrategyType:       s.strategy.strategyType,
-		ServeConfig:        s.serveConfig,
-		AgentSecretsURL:    s.agentSecretsURL,
-		AppClientID:        s.appClientID,
-		AppID:              s.appID,
-		AppKeySecretName:   s.appKeySecretName,
-		AppKeySecretKey:    s.appKeySecretKey,
-		AppCPU:             s.appCPU,
-		AppMemory:          s.appMemory,
+		DatabaseVersion:      s.databaseVersion,
+		DatabaseTier:         s.databaseTier,
+		DeletionProtection:   s.deletionProtection,
+		Namespace:            s.namespace,
+		Replicas:             s.replicas,
+		StrategyType:         s.strategy.strategyType,
+		ServeConfig:          s.serveConfig,
+		AgentSecretsURL:      s.agentSecretsURL,
+		AppClientID:          s.appClientID,
+		AppID:                s.appID,
+		AppKeySecretName:     s.appKeySecretName,
+		AppKeySecretKey:      s.appKeySecretKey,
+		AppCPU:               s.appCPU,
+		AppMemory:            s.appMemory,
+		AppPriorityClassName: s.appPriorityClassName,
+		AppPdbMinAvailable:   s.appPdbMinAvailable,
 	}
 	if rolling := s.strategy.rollingUpdate; rolling != nil {
 		settings.RollingUpdate = &DispatchRollingUpdate{MaxUnavailable: rolling.maxUnavailable, MaxSurge: rolling.maxSurge}

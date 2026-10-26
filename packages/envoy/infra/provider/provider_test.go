@@ -166,6 +166,12 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
+	// The app pod's disruption protection is an optional plain string and an optional plain integer.
+	for input, typ := range map[string]string{"appPriorityClassName": "string", "appPdbMinAvailable": "integer"} {
+		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
 		require.Equal(t, "string", dispatch.Properties[output].Type, output)

@@ -137,6 +137,15 @@ type DispatchArgs struct {
 	AppCpu    *string `pulumi:"appCpu,optional"`
 	AppMemory *string `pulumi:"appMemory,optional"`
 
+	// AppPriorityClassName is the app pod's priorityClassName, the name of a PriorityClass that
+	// already exists in the cluster, which this component never creates. Unset, the pod names none
+	// and runs at the cluster's default priority. The front door and the listener are unchanged.
+	AppPriorityClassName *string `pulumi:"appPriorityClassName,optional"`
+
+	// AppPdbMinAvailable turns on a PodDisruptionBudget, <hostname>, over the app's pods: its
+	// minAvailable, from 1 to replicas. Unset, the component creates no budget.
+	AppPdbMinAvailable *int `pulumi:"appPdbMinAvailable,optional"`
+
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the app's NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster
 	// namespace: only the component's own tailnet front door, which Tailscale Serve on 443 proxies
@@ -212,6 +221,9 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
 		return "appMemory", true
 	}
+	if args.AppPriorityClassName != nil && bus.HoldsSeed(*args.AppPriorityClassName) {
+		return "appPriorityClassName", true
+	}
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
 	}
@@ -258,6 +270,8 @@ type dispatchSettings struct {
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
 	appCPU, appMemory                           string
+	appPriorityClassName                        string
+	appPdbMinAvailable                          int
 	strategy                                    dispatchStrategy
 	serveConfig                                 string
 	azure                                       dispatchAzure
@@ -512,6 +526,23 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.strategy = dispatchStrategyFor(s.replicas)
 	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
+	}
+	if args.AppPriorityClassName != nil {
+		if *args.AppPriorityClassName == "" {
+			return dispatchSettings{}, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
+		}
+		if !dnsSubdomain(*args.AppPriorityClassName) {
+			return dispatchSettings{}, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", *args.AppPriorityClassName)
+		}
+		s.appPriorityClassName = *args.AppPriorityClassName
+	}
+	if args.AppPdbMinAvailable != nil {
+		// A budget of 0 allows every eviction, and one above replicas can never be met, so it
+		// would block every eviction as replicas itself does.
+		if n := *args.AppPdbMinAvailable; n < 1 || n > s.replicas {
+			return dispatchSettings{}, fmt.Errorf("appPdbMinAvailable %d must be from 1 to replicas (%d); leave it unset for no PodDisruptionBudget", n, s.replicas)
+		}
+		s.appPdbMinAvailable = *args.AppPdbMinAvailable
 	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
