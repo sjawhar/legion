@@ -2,31 +2,21 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T06:53:44Z",
-  "round": "generation 4, conflict return: eleventh forward merge of main@origin (2216dbc86e35, #2222 gcc in the worker image) at READY head 25686c368f69; one doc-comment conflict, no code change",
+  "completed": "2026-10-26T07:11:06Z",
+  "round": "generation 4, answer to review 5648528335 (round 17 at ffb68a71af37) and the architect's note: one docs line",
   "proof": [
     {
-      "criterion": "The forward merge changes the branch's diff only in the hunk the conflict touched (architect's conflict-return instruction: before/after fingerprints, the changed hunks named)",
-      "surface": "the reference fingerprint command (skill://legion-worker/references/conflicts-and-rewrites.md) over the real branch history, base read from GitHub",
-      "command": "base=$(gh pr view 2173 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj git fetch && jj diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '<fileset>' | sed -e '/^@@/d' -e '/^index /d' | sha256sum at 25686c368f69 and 261787696ec8, with '~(.legion | docs/solutions)' and with packages/daemon/internal/runtime/sandbox/operatorpod.go also excluded",
-      "observed": "c037869c19fbb114687b0f29ddc27646c17fa943b205f5041ece5a57a83b3f7a -> 1feb7d7e75f14785c9ffefbc27a3b98c3aa78a0570f55256a0ea8720fac16baf (changed); with operatorpod.go excluded 78ccb817c013774496643de18002f7d66f159d93f32c0b04bc52b100fa45172e at both heads. The changed hunk is operatorpod.go @@ -24, the imageEnv doc comment, whose removed lines are now main's re-wrapped text; the @@ -175 and @@ -188 hunks are unchanged. GitHub reports MERGEABLE (was CONFLICTING/DIRTY). Recorded: https://github.com/sjawhar/legion/pull/2173#issuecomment-6410090465",
-      "headSha": "261787696ec8d0c717432095ebf0cc1d4fdeeb52",
-      "negativeControl": "the same command on the unresolved merge 389ded217f52 printed ccb5172868c52564e7bde667ef8c2e7ed60f7acdbb54873e09278a031de84b82"
-    },
-    {
-      "criterion": "#2222's new image environment name (CGO_ENABLED) meets this change's pod baseline and env-refusal code without breaking either",
-      "surface": "the Sandbox runtime, podsafety, launcher, config and the legion CLI's real start --check-config, at the merged head",
-      "command": "cd packages/daemon && gofmt -l ./internal ./cmd && go build ./... && go vet ./... && go vet -tags e2e ./... && CGO_ENABLED=0 go test ./internal/runtime/sandbox/... ./internal/podsafety/... ./internal/launcher/... ./internal/config/... ./cmd/legion/...; a legion built at 261787696ec8 running start --check-config on deploy/kubernetes/daemon/legion.yaml.example as is, with session_store: pvc, and with pod.env CGO_ENABLED: \"1\"",
-      "observed": "gofmt empty, build and both vets clean; sandbox ok (263.3s, TestImageEnvIsWhatTheWorkerImageSets included), podsafety ok, launcher ok, config ok, cmd/legion ok; check-config: as is 'Config OK: project=WIDGETS' (exit 0); pvc refused 'runtime.kubernetes.session_store must name a store that keeps sessions in a database … (INFRA-80)' (exit 1); CGO_ENABLED refused 'runtime.kubernetes.pod.env sets CGO_ENABLED, which the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)' (exit 1). This change adds no image environment name and no hand-built copy of the image environment (grep of its diff for DO_NOT_TRACK, OMP_PROFILE=, COREPACK_DEFAULT, env -i finds only that comment)",
-      "headSha": "261787696ec8d0c717432095ebf0cc1d4fdeeb52",
-      "negativeControl": "the unmodified example config passes (Config OK), so each refusal is caused by the one line changed"
+      "criterion": "Round 17 finding 1: docs/kubernetes.md:172 no longer says Oh My Pi writes sessions under the profile, since every pod keeps its sessions in the session database (manifest.go mainEnvironment, OMP_SESSION_STORAGE=sql)",
+      "surface": "the operator doc docs/kubernetes.md, read beside operatorpod.go's imageEnv comment",
+      "command": "grep -n -i 'session' docs/kubernetes.md skills/legion-worker/references/*.md -r packages/daemon/internal/prompts (the architect's sweep), then each hit placing a session file on the pod's disk or under the profile read in context; grep -rn -i 'writes sessions\\|sessions, logs' docs/site/src; bash .github/scripts/check-private-names.sh",
+      "observed": "docs/kubernetes.md:172-174 now read 'which must be writable (OMP writes logs and `models.db` under `~/.omp/profiles/legion`; every session is a row in the session database)', agreeing with operatorpod.go:24-25. Sweep: 378 matching lines; 18 placed a session file somewhere and were read. Only :172 was false and is fixed. The rest are correct: :120-121 and skills/legion-worker/references/tools.md:25 (a role's results.jsonl/state.json/title under XDG_STATE_HOME, not an Oh My Pi session, and the store is Postgres), :589-593 (the session row's path key), :777 and :875 (no session file sought; the resume lookup's error names the recorded path), :962-1058 and :1391 (the one-off import from legion-v10.0.0's tree volumes and that release's pvc store, as history), and :4913-4991 (the cutover-from-tmux and retired layout tables, labelled as such). No hit in packages/daemon/internal/prompts or docs/site/src. check-private-names passes",
+      "headSha": "7ad1c609da458f66d1e15179fec33c2ead5c6ae5",
+      "negativeControl": "at ffb68a71af37 the same doc line reads 'OMP writes sessions, logs, and `models.db` under `~/.omp/profiles/legion`', contradicting operatorpod.go:24-25 'whose sessions a pod never writes'"
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/runtime/sandbox/operatorpod.go (merge resolution of the imageEnv doc comment: #2222's CGO_ENABLED sentence and list kept, with this change's HOME/OMP_PROFILE clause)"
+    "docs/kubernetes.md (:172-174)"
   ],
-  "deviations": [
-    "Writing this handoff brings .legion/INFRA-80/ back on the branch; the next retro removes it again before READY."
-  ],
+  "deviations": [],
   "openQuestions": []
 }
