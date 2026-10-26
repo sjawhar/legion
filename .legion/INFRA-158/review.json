@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-158",
+  "completed": "2026-10-26T15:16:00Z",
+  "round": 1,
+  "head": "bc5dcfe9a7a7d467e6a4b9f3ffb707bcc225cb74",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At CI head bc5dcfe9: lint, typecheck, test success (run 40333005216); pr-title success (run 40334998057). Compare bc5dcfe9...40e93a68 touches only .legion/. PR body's CI line is stale (says Tests in progress).",
+  "thermonuclear": "deep-review: APPROVE at 40e93a68 with one minor client finding and two hardening items; code-quality: CHANGES at 40e93a68 (structural). Reviewer probes at the head (throwaway Go tests on the pod's Postgres 17) confirmed the unloadable-document close refusal and the decision-20 gap.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/ask_lifecycle.go:202",
+      "description": "A close of an issue with an open ask is refused 409 DOCUMENT_UNLOADABLE when any document of the issue has a history that cannot decode (WriteIssueAskStates loads every document and returns the error). Probe at the head: one open plain ask plus a corrupted notes.md -> PATCH status done answered 409. The Legion daemon's done write then retries forever (outbox.go:530); the reopen and the repair fail the same way. Skip such a document, as the outside-schema case does."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/issue_ask_repair.go:111",
+      "description": "markedSince advances only when the whole pass has no error, so one issue that fails every pass (finding 1 is one such issue) keeps every interval pass a full sweep of every closed issue that owes a settlement, a set every close of this release adds to."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/doc/pending-sync.ts:332",
+      "description": "readOnly is set only in firstSync, once per connection; a later writable admission (a reconnect after the issue is reopened) makes the editor writable (ProofDocument.tsx:526-530) but onUpdate still skips record(), so typing is never stored in IndexedDB and the pending count stays 0: edits lost with no warning if the socket drops and the tab closes. A regression from round 2."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/roomstate.go:70",
+      "description": "Plan decision 20 is not met after a real close: the close closes the room, OnUnloadDocument releases its state and lifecycleAuthors with it, and the reopen's settlement names system:document-settlement instead of the latest editor. Probe: the close with the room resident, SetIssueClosed(true), state released, reopen -> 'settlement names {Kind:system ID:document-settlement}, want {session reopened-session}'. handOverFailedRoomLocked does not carry it either, which the plan required."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/issue_patch.go:131",
+      "description": "The pre-close settlement runs under r.Context(): a client that hangs up after the settlement stamped ids into the room makes abandon fail the room (service.go:1449-1457), reloading it for every connected browser. Use context.WithoutCancel, with issueSettleBudget still bounding it."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "No Contract change census: the close route gains new failure answers (409/503 from a document write) at the Legion daemon and CLI boundary, and AskResolution.kind / the ask event payload enum widen with withdrawn, which released plugins parse."
+    }
+  ],
+  "fastFollow": "Simplify the close/repair plumbing: one WriteIssueAskStates per repair (drop withdrawIssueAsksTx's markUnindexed; IssueAskRepair.Swept then counts every marked block), closing/reopening computed once in patchIssue, a typed settleRoomWithin outcome in place of the failed callback, and pending-sync's readableType wrapped away from Yjs private fields."
+}
