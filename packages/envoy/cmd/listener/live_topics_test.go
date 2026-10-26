@@ -555,68 +555,79 @@ func TestANonOwningListenerLeavesAnInboxMessageToTheOwnerSilently(t *testing.T) 
 }
 
 // A session that registered through one listener and then re-registered through another, same
-// session, port and host, keeps the first listener's MachineID on its stored subscription, so that
-// listener is the only one matching its topics. It is also the session's owner, and delivers a
-// stored topic to it once. Before the fix the owner was read from the session entry, which the
-// re-registration moved to the second listener: the first matched the topic and refused the
-// session, logging a failed delivery and retrying it until the durable gave up, while the second
-// matched nothing, so the session was never prompted.
-func TestARehomedSessionStillReceivesItsStoredTopicOnce(t *testing.T) {
-	uri := testnats.URL(t)
+// session and port, keeps the first listener's MachineID on its stored subscription, so that
+// listener owns it and alone delivers to it: a stored topic, an inbox message and a team topic each
+// reach it once, whatever host bridge either listener holds, with no failed delivery logged and no
+// exception reported. The owner reaches the session at the host it recorded, unless that host is the
+// owner's own machine id: the session stayed on the owner's machine, so it goes through the owner's
+// bridge when there is one. 127.0.0.2 stands for a bridge that does not reach the session, a
+// loopback address the serving port, bound on 127.0.0.1, does not listen on: an owner that used its
+// bridge for a session on another machine would never prompt it. A bridge on the second listener
+// must make no second delivery. The owner's machine id that resolves nowhere, recorded as the host,
+// is reached only through the owner's bridge; with no bridge the owner dials the recorded host.
+func TestAMovedSessionReceivesEachKindOnceWhateverTheBridges(t *testing.T) {
+	const (
+		live      = "ENVOY_SUBSCRIBE_ALL_TOPICS=1"
+		unreached = "ENVOY_HOST_BRIDGE=127.0.0.2"
+		loopback  = "ENVOY_HOST_BRIDGE=127.0.0.1"
+		other     = "moved-other"
+		nowhere   = "envoy-moved-owner-nowhere"
+	)
 	binary := cmdtest.Build(t, "envoy-listener")
-	first := startListenerProcess(t, binary, uri, "rehome-first")
-	first.waitHealthy(t)
-	second := startListenerProcess(t, binary, uri, "rehome-second")
-	second.waitHealthy(t)
+	for _, cell := range []struct {
+		name               string
+		owner              string
+		ownerEnv, otherEnv []string
+		recorded           string
+	}{
+		{"no bridge on either listener", "moved-owner", []string{live}, []string{live}, "127.0.0.1"},
+		{"the owner's bridge does not reach a session on another machine", "moved-owner", []string{live, unreached}, []string{live}, "127.0.0.1"},
+		{"the second listener's bridge makes no second delivery", "moved-owner", []string{live}, []string{live, loopback}, "127.0.0.1"},
+		{"both bridges, the owner's not reaching the session", "moved-owner", []string{live, unreached}, []string{live, loopback}, "127.0.0.1"},
+		{"a session recording the owner's machine id goes through the owner's bridge", nowhere, []string{live, loopback}, []string{live}, nowhere},
+		{"a session recording the owner's machine id is reached there with no bridge", "localhost", []string{live}, []string{live}, "localhost"},
+	} {
+		t.Run(cell.name, func(t *testing.T) {
+			t.Parallel()
+			uri := testnats.URL(t)
+			first := startListenerProcess(t, binary, uri, cell.owner, cell.ownerEnv...)
+			second := startListenerProcess(t, binary, uri, other, cell.otherEnv...)
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Logf("the owner's output:\n%s\nthe second listener's output:\n%s", first.Output.String(), second.Output.String())
+				}
+			})
+			for _, listener := range []*listenerProcess{first, second} {
+				listener.waitHealthy(t)
+				listener.WaitForOutput(t, liveLaneLine)
+			}
 
-	topic := "notifications.github.acme.repo" + id.New() + ".pr.1"
-	serving := startServingPort(t, "ses_rehome_"+id.New(), http.StatusNoContent)
-	registerServingSession(t, first, serving, "127.0.0.1", topic)
-	registerServingSession(t, second, serving, "127.0.0.1", topic)
-	first.awaitSessionMachine(t, serving.sessionID, "rehome-second")
+			stored := newEnvelope("github", "notifications.github.acme.repo"+id.New()+".pr.1", "pull request 1 was opened")
+			team := newEnvelope("agent", "notifications.team."+id.New(), "a message for the team")
+			team.SourceSession = "ses_publisher_" + id.New()
+			serving := startServingPort(t, "ses_moved_"+id.New(), http.StatusNoContent)
+			registerServingSession(t, first, serving, cell.recorded, stored.Topic, team.Topic)
+			registerServingSession(t, second, serving, cell.recorded, stored.Topic, team.Topic)
+			first.awaitSessionMachine(t, serving.sessionID, other)
+			exceptions := subscribeExceptions(t, uri)
 
-	item := newEnvelope("github", topic, "pull request 1 was opened")
-	publish(t, connectPublisher(t, uri), item)
-
-	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
-	serving.noPrompt(t, 3*time.Second)
-	for _, listener := range []*listenerProcess{first, second} {
-		if output := listener.Output.String(); strings.Contains(output, "listener delivery failed") {
-			t.Fatalf("the listener on port %d logged a failed delivery:\n%s", listener.port, output)
-		}
-	}
-}
-
-// The same re-homed session, with the first listener holding a host bridge, as every compose
-// listener does (ENVOY_HOST_BRIDGE=127.0.0.1 there). The bridge is the first listener's way to its
-// own machine's sessions; the re-registered session runs on the second listener's machine, so its
-// owner reaches it at the host it recorded. 127.0.0.2 stands for that bridge: a loopback address
-// the serving port, bound on 127.0.0.1, does not listen on. Before the bridge was limited to
-// sessions registered through the listener, the owner dialled it, was refused, logged a failed
-// delivery and retried, and the session was never prompted.
-func TestARehomedSessionStillReceivesItsStoredTopicOnceFromAnOwnerWithABridge(t *testing.T) {
-	uri := testnats.URL(t)
-	binary := cmdtest.Build(t, "envoy-listener")
-	first := startListenerProcess(t, binary, uri, "rehome-bridged-first", "ENVOY_HOST_BRIDGE=127.0.0.2")
-	first.waitHealthy(t)
-	second := startListenerProcess(t, binary, uri, "rehome-bridged-second")
-	second.waitHealthy(t)
-
-	topic := "notifications.github.acme.repo" + id.New() + ".pr.1"
-	serving := startServingPort(t, "ses_rehome_"+id.New(), http.StatusNoContent)
-	registerServingSession(t, first, serving, "127.0.0.1", topic)
-	registerServingSession(t, second, serving, "127.0.0.1", topic)
-	first.awaitSessionMachine(t, serving.sessionID, "rehome-bridged-second")
-
-	item := newEnvelope("github", topic, "pull request 1 was opened")
-	publish(t, connectPublisher(t, uri), item)
-
-	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
-	serving.noPrompt(t, 3*time.Second)
-	for _, listener := range []*listenerProcess{first, second} {
-		if output := listener.Output.String(); strings.Contains(output, "listener delivery failed") {
-			t.Fatalf("the listener on port %d logged a failed delivery:\n%s", listener.port, output)
-		}
+			inbox := newEnvelope("agent", contracts.AgentSubject(serving.sessionID), "a message for this session alone")
+			inbox.SourceSession = "ses_sender_" + id.New()
+			publisher := connectPublisher(t, uri)
+			for _, item := range []contracts.Envelope{stored, inbox, team} {
+				publish(t, publisher, item)
+				requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
+			}
+			serving.noPrompt(t, 3*time.Second)
+			for _, listener := range []*listenerProcess{first, second} {
+				if output := listener.Output.String(); strings.Contains(output, "listener delivery failed") {
+					t.Fatalf("the listener on port %d logged a failed delivery:\n%s", listener.port, output)
+				}
+			}
+			if report, err := exceptions.NextMsg(time.Second); err == nil {
+				t.Fatalf("an exception was published on %s: %s", report.Subject, report.Data)
+			}
+		})
 	}
 }
 
