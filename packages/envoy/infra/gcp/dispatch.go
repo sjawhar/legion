@@ -137,6 +137,12 @@ type DispatchArgs struct {
 	AppCpu    *string `pulumi:"appCpu,optional"`
 	AppMemory *string `pulumi:"appMemory,optional"`
 
+	// PprofPort turns on envoy-dispatch's Go profiler: DISPATCH_PPROF_PORT on its container alone,
+	// so it serves net/http/pprof on 127.0.0.1 at this port, reachable through kubectl
+	// port-forward and from nowhere outside the pod. Unset, nothing is rendered and no profiler
+	// listens.
+	PprofPort *int `pulumi:"pprofPort,optional"`
+
 	// AppPriorityClassName is the app pod's priorityClassName, the name of a PriorityClass that
 	// already exists in the cluster, which this component never creates. Unset, the pod names none
 	// and runs at the cluster's default priority. The front door and the listener are unchanged.
@@ -270,6 +276,7 @@ type dispatchSettings struct {
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
 	appCPU, appMemory                           string
+	pprofPort                                   int
 	appPriorityClassName                        string
 	appPdbMinAvailable                          int
 	strategy                                    dispatchStrategy
@@ -527,6 +534,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
+	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
+		return dispatchSettings{}, err
+	}
 	if args.AppPriorityClassName != nil {
 		if *args.AppPriorityClassName == "" {
 			return dispatchSettings{}, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
@@ -580,6 +590,27 @@ func dnsSubdomain(value string) bool {
 		}
 	}
 	return true
+}
+
+// newDispatchPprofPort resolves pprofPort, the port envoy-dispatch's profiler binds on the pod's
+// loopback: 0, rendering nothing, when it is unset. It refuses a value outside 1-65535, which
+// Dispatch would refuse at startup, and the two ports the app pod already binds on its loopback,
+// envoy-dispatch's own 8766 and the cloud-sql-proxy sidecar's 5432, where the bind would fail and
+// the pod would never start.
+func newDispatchPprofPort(args *DispatchArgs) (int, error) {
+	if args.PprofPort == nil {
+		return 0, nil
+	}
+	port := *args.PprofPort
+	switch {
+	case port < 1 || port > 65535:
+		return 0, fmt.Errorf("pprofPort %d must be a port number 1-65535; leave it unset for no profiler", port)
+	case port == 8766:
+		return 0, fmt.Errorf("pprofPort %d is envoy-dispatch's own port; choose another, such as 6060", port)
+	case port == 5432:
+		return 0, fmt.Errorf("pprofPort %d is the cloud-sql-proxy sidecar's port in the same pod; choose another, such as 6060", port)
+	}
+	return port, nil
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request

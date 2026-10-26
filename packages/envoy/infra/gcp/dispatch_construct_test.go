@@ -105,6 +105,18 @@ func TestConstructRefusesDispatchReplicasFromAnotherResource(t *testing.T) {
 	require.Empty(t, m.Types())
 }
 
+// pprofPort is a plain *int, refused from another resource's output as replicas is.
+func TestConstructRefusesDispatchPprofPortFromAnotherResource(t *testing.T) {
+	inputs := dispatchConstructInputs()
+	inputs["pprofPort"] = property.New(6060.0).WithDependencies([]resource.URN{upstream})
+	for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+		inputs[key] = property.New("example").WithDependencies([]resource.URN{upstream})
+	}
+	m, _, err := constructDispatch(t, inputs, false)
+	require.ErrorContains(t, err, "pprofPort")
+	require.Empty(t, m.Types())
+}
+
 // appCpu and appMemory are plain strings, refused from another resource's output as replicas is.
 func TestConstructRefusesDispatchAppResourcesFromAnotherResource(t *testing.T) {
 	for _, input := range []string{"appCpu", "appMemory"} {

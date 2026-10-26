@@ -491,6 +491,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			ServiceAccountToken: &corev1.ServiceAccountTokenProjectionArgs{Audience: pulumi.String(s.azure.audience), ExpirationSeconds: pulumi.Int(3600), Path: pulumi.String("token")},
 		}}}})
 	}
+	if s.pprofPort != 0 {
+		// The profiler binds 127.0.0.1 inside the pod, so no Service or NetworkPolicy changes:
+		// an operator reaches it through kubectl port-forward.
+		appEnv = append(appEnv, valueEnv("DISPATCH_PPROF_PORT", strconv.Itoa(s.pprofPort)))
+	}
 	appPod := corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{

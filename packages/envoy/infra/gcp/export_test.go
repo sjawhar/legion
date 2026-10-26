@@ -46,6 +46,7 @@ type DispatchSettings struct {
 	AppKeySecretKey      string
 	AppCPU               string
 	AppMemory            string
+	PprofPort            int
 	AppPriorityClassName string
 	AppPdbMinAvailable   int
 }
@@ -71,6 +72,7 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		AppKeySecretKey:      s.appKeySecretKey,
 		AppCPU:               s.appCPU,
 		AppMemory:            s.appMemory,
+		PprofPort:            s.pprofPort,
 		AppPriorityClassName: s.appPriorityClassName,
 		AppPdbMinAvailable:   s.appPdbMinAvailable,
 	}
