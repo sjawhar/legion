@@ -1158,14 +1158,13 @@ func (s *Service) readSettlementTree(state *roomState, owed map[string]model.Act
 }
 
 // settlementAuthors takes the authors a settlement's version lists (captureAuthors), and names
-// the actor its derived events carry: the latest editor when the version lists them, or lists no
-// one besides authors that only server lifecycle writes credited (roomState.lifecycleAuthors),
-// none of whom made an edit; otherwise SettlementActor. The caller holds state.mu.
+// the actor its derived events carry: the latest editor when the version lists them or lists no
+// one, otherwise SettlementActor. The caller holds state.mu.
 func settlementAuthors(state *roomState, owed map[string]model.Actor) settlementVersionCredit {
 	capture := captureAuthors(state, owed, nil, nil)
 	credit := settlementVersionCredit{capture: capture, state: state, authors: actorSlice(capture.authors)}
 	if latest := state.lastActor; latest != nil {
-		if _, found := capture.authors[actorKey(*latest)]; found || state.onlyLifecycleAuthors(capture.authors) {
+		if _, found := capture.authors[actorKey(*latest)]; found || len(credit.authors) == 0 {
 			credit.actor = *latest
 			return credit
 		}

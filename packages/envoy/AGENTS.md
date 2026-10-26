@@ -1921,9 +1921,12 @@ good; a failed room's `503` and a database error still fail them. Asks already a
 are left as they were, and the close records no answer, review or approval. A reopen opens again
 exactly the asks whose resolution kind is `withdrawn`, with `state: open`, no answer and no
 resolution and everything else kept, each with one `ask.opened` (actor the reopener) before
-`issue.updated`, and their blocks read `state="open"` again. Only the server writes `withdrawn`:
-the resolve route accepts `retracted` and `resolved` alone, and an answer, resolution or
-retraction on a closed issue is still `409 ISSUE_CLOSED`. What a release older than this one
+`issue.updated`, and their blocks read `state="open"` again. The close's and the reopen's block
+writes (`docs.Service.WriteIssueAskStates`) are no edit: they credit no pending author and leave
+each document's latest edit source as it was, so the settlement a reopen leaves owed names the
+person who last edited the document, never the closer or the reopener. Only the server writes
+`withdrawn`: the resolve route accepts `retracted` and `resolved` alone, and an answer, resolution
+or retraction on a closed issue is still `409 ISSUE_CLOSED`. What a release older than this one
 closed or reopened is converged by `api.RepairIssueAsks`, at boot (bounded at 30 s) and then
 every `api.IssueAskRepairInterval` (10 minutes) under the lease `issue-ask-repair`, each interval
 pass bounded at 5 minutes. Per issue, under its row, a closed issue's open asks are withdrawn in

@@ -34,10 +34,11 @@ type lifecycleWriteContextKey struct{}
 
 // withLifecycleWrite marks the live writes made with ctx as server lifecycle writes
 // (WriteIssueAskStates): the server writing into an ask's blocks the state an issue's close or
-// reopen gave it. Such a write credits its actor as a pending author, as any live write does, but
-// is no edit of the document, so it does not become the document's latest edit source
-// (liveWrite.editSource), which settlement names as the author of an ask block it indexes with no
-// author of its own: the close of an issue must not take the credit for a block a session wrote.
+// reopen gave it. Such a write is no edit of the document, so it credits no pending author and
+// leaves the document's latest edit source (roomState.lastActor) as it was (applyLive). A
+// settlement then names the person who last edited the document, as the author of an ask block it
+// indexes with no author of its own and on its derived events, never the closer or the reopener,
+// however the room is released and loaded between the close and the reopen.
 func withLifecycleWrite(ctx context.Context) context.Context {
 	return context.WithValue(ctx, lifecycleWriteContextKey{}, true)
 }
@@ -88,11 +89,10 @@ func isLifecycleWrite(ctx context.Context) bool {
 // It runs in the transaction ctx joined (errUnjoined otherwise), and its caller holds the issue's
 // row, as settlement holds it, so the writes are owner-verified: they reach a document whose room
 // is flagged closed, and one no room holds, while every other write to a closed issue's document
-// is refused. A write is credited to actor as any live write is (applyLive), never clearing the
-// authors already pending, but leaves the document's latest edit source as it was
-// (withLifecycleWrite), and writes no version: the settlement it leaves owed versions it, and
-// none whose markdown repeats the latest version is written. A document it changes nothing in is
-// written nothing.
+// is refused. A write credits no one (withLifecycleWrite): it adds no pending author, leaves the
+// authors already pending and the document's latest edit source as they were, and writes no
+// version: the settlement it leaves owed versions it, and none whose markdown repeats the latest
+// version is written. A document it changes nothing in is written nothing.
 func (s *Service) WriteIssueAskStates(ctx context.Context, issueKey string, asks []model.Ask, actor model.Actor, markUnindexed bool) ([]BlockRef, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {

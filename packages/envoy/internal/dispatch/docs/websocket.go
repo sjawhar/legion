@@ -618,9 +618,7 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 	defer s.unlockState(room, state)
 	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: make(map[string]model.Actor, len(state.connected))}
 	for _, actor := range state.connected {
-		key := actorKey(actor)
-		record.authors[key] = actor
-		delete(state.lifecycleAuthors, key)
+		record.authors[actorKey(actor)] = actor
 	}
 	record.lastActor, _ = soleConnectedActor(state.connected)
 	state.inflight[record.seq] = record

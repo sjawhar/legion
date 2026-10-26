@@ -60,20 +60,12 @@ type roomState struct {
 	// for names it, so the state holds it until one commits (settleRoomWithin). Closing persists
 	// it on the pending-settlement row before clearing it (SetIssueClosed), so that row carries it
 	// through a room release or restart. The authors themselves are in F and R, never only here.
-	unsettled bool
-	// lifecycleAuthors are the keys of the authors this process credited for server lifecycle
-	// writes alone (WriteIssueAskStates, withLifecycleWrite) and for no edit since: an issue's
-	// close or reopen writing its asks' states, which is no edit of the document and so never its
-	// latest edit source. settlementAuthors does not count them against lastActor, so such a
-	// credit does not stop a settlement naming the latest editor. An edit credited to one of them
-	// takes it out (Ledger.creditRooms, creditContentChange). Like lastActor it lives in the
-	// process: a release or a restart forgets it, and a settlement then counts every author.
-	lifecycleAuthors map[string]struct{}
-	updateClasses    []documentUpdateClass
-	pendingUpdates   int
-	settle           *time.Timer
-	unrecorded       map[pmdoc.MarkRef]time.Time
-	durableAppends   atomic.Int64
+	unsettled      bool
+	updateClasses  []documentUpdateClass
+	pendingUpdates int
+	settle         *time.Timer
+	unrecorded     map[pmdoc.MarkRef]time.Time
+	durableAppends atomic.Int64
 	// roomGeneration moves at each of this room's own in-process invalidations (a reload, a
 	// failure, a settlement's own commit): a settlement compares the value it started at against
 	// the room's current one to tell a read still good from one a change since has invalidated.

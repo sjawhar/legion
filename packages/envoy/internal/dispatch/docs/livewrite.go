@@ -89,13 +89,9 @@ type liveWrite struct {
 	// credits are the authors of the transaction's content changes no version the transaction
 	// wrote lists (Ledger.recordVersion takes out each author a version lists), and creditedBy the
 	// append that recorded each one's latest change, which its pending row names; actor made the
-	// latest content change, and is nil while the transaction has made none. editSource made the
-	// latest content change that was an edit, which becomes the document's latest edit source at
-	// commit (Ledger.recordSettlementCredit, Ledger.creditRooms), and is nil while the transaction
-	// has made none: a transaction whose every change is a server lifecycle write
-	// (WriteIssueAskStates, withLifecycleWrite) leaves the document the latest edit source it had.
-	// lifecycleCredits are the keys of credits only such lifecycle writes credited, which commit
-	// records in the room (Ledger.creditRooms, roomState.lifecycleAuthors).
+	// latest content change, and is nil while the transaction has made none. A server lifecycle
+	// write (WriteIssueAskStates, withLifecycleWrite) is no edit, so it leaves credits, creditedBy
+	// and actor as they were (applyLive).
 	// addedAskBlockIDs is every ask block id a readable operation of this transaction introduced,
 	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.creditRooms,
 	// registerAskAuthors) rather than guessed from whichever update's observer happens to render
@@ -119,8 +115,6 @@ type liveWrite struct {
 	credits            map[string]model.Actor
 	creditedBy         map[string]persistence.Version
 	actor              *model.Actor
-	editSource         *model.Actor
-	lifecycleCredits   map[string]struct{}
 	addedAskBlockIDs   map[string]struct{}
 	renamedAskBlockIDs map[string]struct{}
 	carriedAskAuthors  map[string]model.Actor
@@ -620,30 +614,16 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
 // commits: its actor alone, as a service mutation that reaches the room directly is credited
 // (creditContentChange). A browser connected to the room made none of it, and no version the
-// transaction wrote before holds it. An edit also makes actor the write's latest edit source; a
-// server lifecycle write (withLifecycleWrite) credits actor as a pending author and leaves the
-// edit source as it was, and marks the credit a lifecycle write's alone unless an edit of the
-// write holds it too.
-func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor, edit bool) {
+// transaction wrote before holds it.
+func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)
 		write.creditedBy = make(map[string]persistence.Version)
 	}
 	key := actorKey(actor)
-	_, credited := write.credits[key]
 	write.credits[key] = actor
 	write.creditedBy[key] = write.versions[len(write.versions)-1]
 	write.actor = new(actor)
-	switch {
-	case edit:
-		delete(write.lifecycleCredits, key)
-		write.editSource = write.actor
-	case !credited:
-		if write.lifecycleCredits == nil {
-			write.lifecycleCredits = make(map[string]struct{})
-		}
-		write.lifecycleCredits[key] = struct{}{}
-	}
 }
 
 // publishLiveWrite applies write's updates to the room one operation at a time, in the order

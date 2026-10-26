@@ -31,8 +31,8 @@ const (
 // of it on another document of the issue, which keeps naming its source. A copy of an answered
 // ask, a block asking something else under a withdrawn ask's id, and a block no settlement has
 // indexed yet are left as they are; the last is written resolved only by a write that marks
-// unindexed blocks, which names it. No version is written, and the closer is credited beside the
-// authors already pending.
+// unindexed blocks, which names it. No version is written, and the closer is credited as no
+// pending author: the authors already pending stay, and no one else is added.
 func TestWritingIssueAskStatesReachesTheAsksBlocksAndTheirCopiesAlone(t *testing.T) {
 	service, original := newTestService(t)
 	service.settle = time.Hour
@@ -103,11 +103,11 @@ func TestWritingIssueAskStatesReachesTheAsksBlocksAndTheirCopiesAlone(t *testing
 	if versions := documentVersions(t, service, original, copied); !reflect.DeepEqual(versions, versionsBefore) {
 		t.Fatalf("the writes changed the stored versions:\n%v\nwant\n%v", versions, versionsBefore)
 	}
-	if pending := pendingAuthorRows(t, service.store, original); !slices.Contains(pending, closer) {
-		t.Fatalf("the original's pending authors = %+v, want %+v among them", pending, closer)
+	if pending := pendingAuthorRows(t, service.store, original); len(pending) != 0 {
+		t.Fatalf("the original's pending authors = %+v, want none", pending)
 	}
-	if pending := pendingAuthorRows(t, service.store, copied); !slices.Contains(pending, closer) || !slices.Contains(pending, asker) {
-		t.Fatalf("the copy's pending authors = %+v, want %+v and %+v among them", pending, closer, asker)
+	if pending := pendingAuthorRows(t, service.store, copied); !reflect.DeepEqual(pending, []model.Actor{asker}) {
+		t.Fatalf("the copy's pending authors = %+v, want %+v alone", pending, asker)
 	}
 }
 
@@ -183,12 +183,12 @@ func appendLiveBlock(t *testing.T, service *Service, artifactID, markdown string
 	}
 }
 
-// The close's write of its asks' states credits the closer as a pending author, as any live write
-// does, but is no edit: the document's latest edit source, which settlement names as the author of
-// an ask block it indexes with no author of its own, stays the session that wrote the unindexed
-// block, on the pending-settlement row and in the room, and settlement still names it when the
-// session's edit wrote its own version, as POST /edits does, so that the closer alone is pending.
-// An edit the same transaction made before the close's write is still the latest edit source.
+// The close's write of its asks' states is no edit: it credits the closer as no pending author,
+// and the document's latest edit source, which settlement names as the author of an ask block it
+// indexes with no author of its own, stays the session that wrote the unindexed block, on the
+// pending-settlement row and in the room. Settlement still names it when the session's edit wrote
+// its own version, as POST /edits does, so that no one is pending. An edit the same transaction
+// made before the close's write is still the latest edit source.
 func TestWritingIssueAskStatesLeavesTheLatestEditSourceAlone(t *testing.T) {
 	session := model.Actor{Kind: "session", ID: "late-asking-session"}
 	closer := model.Actor{Kind: "user", ID: "carol"}
@@ -200,9 +200,9 @@ func TestWritingIssueAskStatesLeavesTheLatestEditSourceAlone(t *testing.T) {
 		want    model.Actor
 		pending []model.Actor
 	}{
-		{name: "the close's write alone", version: withoutVersion, want: session, pending: []model.Actor{closer, session}},
-		{name: "after the session's edit wrote its own version", version: withSnapshotVersion, want: session, pending: []model.Actor{closer}},
-		{name: "after an edit in the same transaction", version: withoutVersion, edit: true, want: editor, pending: []model.Actor{closer, session, editor}},
+		{name: "the close's write alone", version: withoutVersion, want: session, pending: []model.Actor{session}},
+		{name: "after the session's edit wrote its own version", version: withSnapshotVersion, want: session},
+		{name: "after an edit in the same transaction", version: withoutVersion, edit: true, want: editor, pending: []model.Actor{session, editor}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
@@ -234,9 +234,12 @@ func TestWritingIssueAskStatesLeavesTheLatestEditSourceAlone(t *testing.T) {
 			}
 			requireLatestEditSource(t, service, artifactID, test.want)
 			pending := pendingAuthorRows(t, service.store, artifactID)
+			if len(pending) != len(test.pending) || slices.Contains(pending, closer) {
+				t.Fatalf("pending authors = %+v, want %+v", pending, test.pending)
+			}
 			for _, author := range test.pending {
 				if !slices.Contains(pending, author) {
-					t.Fatalf("pending authors = %+v, want %+v among them", pending, test.pending)
+					t.Fatalf("pending authors = %+v, want %+v", pending, test.pending)
 				}
 			}
 		})
@@ -244,9 +247,9 @@ func TestWritingIssueAskStatesLeavesTheLatestEditSourceAlone(t *testing.T) {
 }
 
 // The close moves a document's latest edit source from its room to its pending-settlement row, and
-// a room that loads while the issue is closed restores none. The reopen gives it back, after the
-// close's write of its asks' states credited the closer, so the settlement the document owes names
-// the session that edited it last.
+// a room that loads while the issue is closed restores none. The reopen gives it back, so the
+// settlement the document owes names the session that edited it last, not the closer whose write
+// of its asks' states came after that edit.
 func TestReopeningAnIssueRestoresTheLatestEditSourceOfARoomLoadedWhileClosed(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -268,6 +271,80 @@ func TestReopeningAnIssueRestoresTheLatestEditSourceOfARoomLoadedWhileClosed(t *
 
 	reopenTestIssue(t, service)
 	requireLatestEditSource(t, service, artifactID, session)
+}
+
+// A close and a reopen are no edit of a document, so neither is ever its latest editor, and
+// neither credits its actor as a pending author. That holds when the close releases the room and
+// the reopen loads it again, which forgets every edit source the room held: the settlement the
+// reopen leaves owed names the session that edited the document last on the ask it indexes,
+// whether that session's edit already wrote its own version or still waits for this settlement's,
+// and a version the settlement writes lists neither the closer nor the reopener and is the
+// session's.
+func TestASettlementAfterAReleasingCloseAndAReopenNamesTheLatestEditor(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		version ledgerWriteVersion
+	}{
+		{name: "the session's edit still owed its version", version: withoutVersion},
+		{name: "the session's edit already versioned", version: withSnapshotVersion},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			ctx := context.Background()
+			seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
+			settleCurrentGeneration(t, service, artifactID)
+			region := blockAskOn(t, service, artifactID, "region")
+			session := model.Actor{Kind: "session", ID: "reopened-session"}
+			writeThroughLedger(t, service, artifactID, session, freshBlock, row.version)
+			if service.srv.GetDoc(artifactID) == nil {
+				t.Fatal("the edited document's room is not resident")
+			}
+
+			closer := model.Actor{Kind: "user", ID: "carol"}
+			writeIssueAskStates(t, service, []model.Ask{withdrawnAsk(region, closer)}, closer, true)
+			closeTestIssue(t, service)
+			waitFor(t, 30*time.Second, "the closed issue's room state to be released", func() bool {
+				state := service.lockExistingState(artifactID)
+				if state == nil {
+					return true
+				}
+				service.unlockState(artifactID, state)
+				return false
+			})
+
+			reopenTestIssue(t, service)
+			reopener := model.Actor{Kind: "user", ID: "dave"}
+			writeIssueAskStates(t, service, []model.Ask{region}, reopener, false)
+			versionsBefore := len(documentVersions(t, service, artifactID))
+			if err := service.SettleIssueDocuments(store.WithTransactionTracking(ctx), "DOC-1"); err != nil {
+				t.Fatalf("settle the reopened issue's documents: %v", err)
+			}
+
+			if ask := blockAskOn(t, service, artifactID, "fresh"); ask.State != "open" || ask.Author != session {
+				t.Fatalf("the settled block's ask is %s by %+v, want open by %+v", ask.State, ask.Author, session)
+			}
+			if row.version == withSnapshotVersion {
+				// The reopen wrote the blocks back as the version holds them, so no version is owed.
+				return
+			}
+			if versions := len(documentVersions(t, service, artifactID)); versions != versionsBefore+1 {
+				t.Fatalf("the settlement left %d versions, want %d: one more than before it", versions, versionsBefore+1)
+			}
+			if authors := latestVersionAuthors(t, service, artifactID); slices.Contains(authors, closer) || slices.Contains(authors, reopener) {
+				t.Fatalf("the settlement's version lists %+v, want neither %+v nor %+v", authors, closer, reopener)
+			}
+			var eventActor model.Actor
+			if err := service.store.Pool.QueryRow(ctx, `
+				select actor from events where issue_key = 'DOC-1' and type = 'artifact.version' order by seq desc limit 1
+			`).Scan(&eventActor); err != nil {
+				t.Fatalf("read the settlement's version event: %v", err)
+			}
+			if eventActor != session {
+				t.Fatalf("the settlement's version event names %+v, want %+v", eventActor, session)
+			}
+		})
+	}
 }
 
 // requireLatestEditSource fails unless want is artifactID's latest edit source: on its
@@ -384,8 +461,8 @@ func TestWritingAReopensAskStatesBackLeavesNoVersionToWrite(t *testing.T) {
 		if text, latest := documentText(t, service, document), latestVersionMarkdown(t, service, document); text != latest {
 			t.Fatalf("the reopened document renders\n%s\nwant its latest version\n%s", text, latest)
 		}
-		if pending := pendingAuthorRows(t, service.store, document); !slices.Contains(pending, closer) || !slices.Contains(pending, reopener) {
-			t.Fatalf("the reopened document's pending authors = %+v, want %+v and %+v among them", pending, closer, reopener)
+		if pending := pendingAuthorRows(t, service.store, document); len(pending) != 0 {
+			t.Fatalf("the reopened document's pending authors = %+v, want none: neither %+v nor %+v made an edit", pending, closer, reopener)
 		}
 		settleCurrentGeneration(t, service, document)
 		requireSettledAtLatestVersion(t, service, document)

@@ -516,33 +516,6 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWr
 	return capture
 }
 
-// recordCreditKinds records in lifecycleAuthors whom a committed write credited (credits): each
-// author whose credit only its server lifecycle writes gave (lifecycle) as a lifecycle author,
-// and every other author as an editor, which takes it out. The caller holds state.mu.
-func (state *roomState) recordCreditKinds(credits map[string]model.Actor, lifecycle map[string]struct{}) {
-	for key := range credits {
-		if _, alone := lifecycle[key]; !alone {
-			delete(state.lifecycleAuthors, key)
-			continue
-		}
-		if state.lifecycleAuthors == nil {
-			state.lifecycleAuthors = make(map[string]struct{})
-		}
-		state.lifecycleAuthors[key] = struct{}{}
-	}
-}
-
-// onlyLifecycleAuthors reports whether every author of authors is one only server lifecycle writes
-// credited (lifecycleAuthors), as it is when authors is empty. The caller holds state.mu.
-func (state *roomState) onlyLifecycleAuthors(authors map[string]model.Actor) bool {
-	for key := range authors {
-		if _, lifecycle := state.lifecycleAuthors[key]; !lifecycle {
-			return false
-		}
-	}
-	return true
-}
-
 // withoutInflight is capture for a version rendered from the stored document rather than the
 // room: a room behind the durable head (captureLiveTextAndAuthors), or a write whose fork came from
 // the store (coldFork). The store holds no change still in flight in the room, so the version

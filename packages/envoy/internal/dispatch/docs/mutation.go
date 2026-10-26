@@ -230,8 +230,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	write.updates = append(write.updates, update)
 	write.versions = append(write.versions, version)
 	recorded = true
-	if contentChanged {
-		s.creditLiveWrite(write, actor, !isLifecycleWrite(ctx))
+	// A server lifecycle write (withLifecycleWrite) is no edit of the document: it credits no
+	// pending author and leaves the document's latest edit source as it was.
+	if contentChanged && !isLifecycleWrite(ctx) {
+		s.creditLiveWrite(write, actor)
 		maps.DeleteFunc(added, func(id string, _ struct{}) bool {
 			_, excluded := write.renamedAskBlockIDs[id]
 			return excluded
