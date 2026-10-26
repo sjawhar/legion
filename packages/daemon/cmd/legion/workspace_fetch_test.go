@@ -51,13 +51,9 @@ if [ "$1 $2 $3 $4" = "clone --bare --quiet https://github.com/acme/widgets" ]; t
 fi
 if [ "$2 $3 $4 $5" = "fetch --prune --quiet https://github.com/acme/widgets" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
-	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" fetch --prune --quiet "$WINIT_REMOTE" "$6"
-fi
-if [ "$2 $3 $4" = "fetch --quiet https://github.com/acme/widgets" ]; then
-	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
 	first="$1"
-	shift 4
-	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$first" fetch --quiet "$WINIT_REMOTE" "$@"
+	shift 5
+	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$first" fetch --prune --quiet "$WINIT_REMOTE" "$@"
 fi
 if [ "$2 $3 $4 $5" = "ls-remote --symref https://github.com/acme/widgets HEAD" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"

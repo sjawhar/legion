@@ -26,11 +26,11 @@ import (
 // FetchTimeout, and the shared clone's own clone, under CloneTimeout (both below).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the one bound for everything whose duration follows the repository's size and
-// the network's speed in a fetch, once it may start: every attempt of a transfer from GitHub, and,
-// for a feed filled from the repository cache, the cache's stream and its verification too, all
-// together (Fetch). It is long enough for a large repository's slow but steadily progressing
-// transfer to finish.
+// FetchTimeout is the bound of each stage of a fetch whose duration follows the repository's size
+// and the network's speed, once it may start (Fetch): a feed filled from the repository cache gets
+// one for the cache's stream and its verification together and another for the delta from GitHub,
+// every attempt of it included; a clone or a fetch from GitHub alone gets one. It is long enough
+// for a large repository's slow but steadily progressing transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
 // CloneTimeout is the one bound ensureRepoClone gives its size-following steps, together, as the

@@ -1653,8 +1653,8 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	if fetch.Argv == nil {
 		t.Fatalf("Fetch fetched no delta from GitHub into the feed: %q", run.Calls())
 	}
-	if want := []string{"https://github.com/acme/widgets", "+refs/heads/main:refs/heads/main", "+refs/heads/legion/*:refs/heads/legion/*"}; !slices.Equal(fetch.Argv[len(fetch.Argv)-3:], want) || slices.Contains(fetch.Argv, "--prune") {
-		t.Errorf("the delta ran %q, want it ending in %q and pruning nothing", fetch.Argv, want)
+	if want := []string{"https://github.com/acme/widgets", "+refs/heads/main:refs/heads/main", "+refs/heads/legion/*:refs/heads/legion/*"}; !slices.Equal(fetch.Argv[len(fetch.Argv)-3:], want) || !slices.Contains(fetch.Argv, "--prune") {
+		t.Errorf("the delta ran %q, want it pruning and ending in %q", fetch.Argv, want)
 	}
 	assertCredentialedEnvironmentBounded(t, fetch, fetch.Timeout)
 	if fetch.Timeout > FetchTimeout || fetch.Timeout < FetchTimeout-time.Minute {
@@ -1755,7 +1755,9 @@ func TestFetchGivesTheCachesStreamAndTheDeltaTheirOwnBounds(t *testing.T) {
 		took     map[string]time.Duration
 		timeouts map[string][]time.Duration
 		fails    string
-		elapsed  time.Duration
+		// settled is whether a failed fetch has already moved the verified stream into the feed.
+		settled bool
+		elapsed time.Duration
 	}{
 		{
 			name: "a cache ready 35 minutes in", notReady: polls(35 * time.Minute),
@@ -1769,13 +1771,34 @@ func TestFetchGivesTheCachesStreamAndTheDeltaTheirOwnBounds(t *testing.T) {
 			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}, "fetch": {FetchTimeout}},
 			elapsed:  CacheWaitTimeout - CachePoll + FetchTimeout,
 		},
+		{
+			name: "a pack whose indexing takes the whole first bound", notReady: 0,
+			took:     map[string]time.Duration{"index-pack": FetchTimeout},
+			timeouts: map[string][]time.Duration{"index-pack": {FetchTimeout}},
+			fails:    "the fetch's " + FetchTimeout.String() + " bound ran out before checking the repository cache's history is whole",
+			elapsed:  FetchTimeout,
+		},
+		{
+			name: "a delta that takes its whole own bound", notReady: 0,
+			took:     map[string]time.Duration{"fetch": FetchTimeout},
+			timeouts: map[string][]time.Duration{"fsck": {FetchTimeout}, "fetch": {FetchTimeout}},
+			fails:    "the fetch's " + FetchTimeout.String() + " bound ran out before the ls-remote from GitHub",
+			settled:  true,
+			elapsed:  FetchTimeout,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
 			clock := newTestClock()
 			start := clock.Now()
 			slow := &slowSteps{recordingRunner: run, clock: clock, step: cacheFetchStep, took: tc.took, timeouts: map[string][]time.Duration{}}
-			served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: tc.notReady}
+			cache := cacheOf(t, run.remote)
+			if _, indexes := tc.took["index-pack"]; indexes {
+				if err := os.Remove(strings.TrimSuffix(packOf(t, cache), ".pack") + ".idx"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			served := &fakeCache{body: cacheTar(t, cache), notReady: tc.notReady}
 			req := fetchRequest(t)
 			req.CacheURL, req.CacheToken, req.Clock, req.Log = served.serve(t), testCacheToken, clock, func(string) {}
 
@@ -1787,12 +1810,17 @@ func TestFetchGivesTheCachesStreamAndTheDeltaTheirOwnBounds(t *testing.T) {
 				t.Fatalf("Fetch = %+v, %v; want it failed: %q", report, err, tc.fails)
 			}
 			if !maps.EqualFunc(slow.timeouts, tc.timeouts, slices.Equal[[]time.Duration]) {
-				t.Errorf("the fetch's commands were given %v, want %v: what remained of one bound from the cache's readiness", slow.timeouts, tc.timeouts)
+				t.Errorf("the fetch's commands were given %v, want %v: each stage's own bound, from when it began", slow.timeouts, tc.timeouts)
 			}
 			if elapsed := clock.Now().Sub(start); elapsed != tc.elapsed || elapsed > FetchBudget {
 				t.Errorf("the fetch ran %s, want %s, within FetchBudget %s", elapsed, tc.elapsed, FetchBudget)
 			}
-			if tc.fails != "" {
+			switch {
+			case tc.fails != "" && tc.settled:
+				if _, err := os.Stat(filepath.Join(req.Feed, "acme", "widgets.git")); err != nil {
+					t.Errorf("the delta's failure left no feed: %v", err)
+				}
+			case tc.fails != "":
 				assertNothingFilledTheFeed(t, run, req)
 			}
 		})
@@ -1839,6 +1867,104 @@ func TestAFetchThatFailsInTheDeltaLeavesTheCachesStreamInTheFeed(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/legion/ACME-7")); got != moved {
 		t.Errorf("the feed's legion/ACME-7 is %s, want the remote's %s", got, moved)
 	}
+}
+
+// A feed kept on the issue's volume is fetched into with the narrowed refspecs, pruned within them:
+// an issue branch GitHub deleted leaves the feed, as provisioning relies on (a bookmark with no row
+// starts at the default branch), while a branch outside the two that the cache's stream brought
+// stays as the stream left it, and a branch outside them pushed since is not taken.
+func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *testing.T) {
+	run := newLocalRunner(t)
+	pushRemoteBranch(t, run.remote, "legion/ACME-1", "doomed.txt")
+	pushRemoteBranch(t, run.remote, "release/v7.1", "streamed.txt")
+	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
+	req := fetchRequest(t)
+	req.CacheURL, req.CacheToken, req.Log = served.serve(t), testCacheToken, func(string) {}
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	feed := filepath.Join(req.Feed, "acme", "widgets.git")
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "-D", "legion/ACME-1")
+	moved := pushRemoteBranch(t, run.remote, "legion/ACME-2", "kept.txt")
+	pushRemoteBranch(t, run.remote, "unread/big", "unread.txt")
+	before := len(run.Calls())
+
+	report, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the second Fetch: %v", err)
+	}
+	if report.CacheBytes != 0 || served.tarAsked != 1 {
+		t.Fatalf("the second Fetch reported %+v after %d tars, want the delta alone into the feed on the volume", report, served.tarAsked)
+	}
+	var fetch Command
+	for _, call := range run.Calls()[before:] {
+		if commandWith(call.Argv, "git", "--git-dir="+feed, "fetch") {
+			fetch = call
+		}
+	}
+	if want := []string{"--prune", "--quiet", "https://github.com/acme/widgets", "+refs/heads/main:refs/heads/main", "+refs/heads/legion/*:refs/heads/legion/*"}; fetch.Argv == nil || !slices.Equal(fetch.Argv[len(fetch.Argv)-5:], want) {
+		t.Fatalf("the feed on the volume was fetched with %q, want it ending in %q", fetch.Argv, want)
+	}
+	refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)")
+	for ref, want := range map[string]bool{"refs/heads/legion/ACME-1": false, "refs/heads/legion/ACME-2": true, "refs/heads/release/v7.1": true, "refs/heads/unread/big": false} {
+		if got := strings.Contains(refs, ref+"\n"); got != want {
+			t.Errorf("the feed holds %s: %t, want %t; its refs are %q", ref, got, want, refs)
+		}
+	}
+	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/legion/ACME-2")); got != moved {
+		t.Errorf("the feed's legion/ACME-2 is %s, want the remote's %s", got, moved)
+	}
+}
+
+// The narrowed delta takes the default branch GitHub's HEAD names, which need not be main and may
+// hold a slash.
+func TestTheDeltaTakesTheDefaultBranchGitHubNames(t *testing.T) {
+	run := newLocalRunnerOnBranch(t, "release/v7.1")
+	req := fetchRequest(t)
+	req.CacheURL, req.CacheToken, req.Log = (&fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}).serve(t), testCacheToken, func(string) {}
+	moved := pushRemoteBranch(t, run.remote, "release/v7.1", "newer.txt")
+	report, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	var fetch Command
+	for _, call := range run.Calls() {
+		if commandWith(call.Argv, "git", "--git-dir="+report.Feed, "fetch") {
+			fetch = call
+		}
+	}
+	if want := "+refs/heads/release/v7.1:refs/heads/release/v7.1"; !slices.Contains(fetch.Argv, want) || slices.Contains(fetch.Argv, "+refs/heads/main:refs/heads/main") {
+		t.Errorf("the delta ran %q, want it naming %q and no main", fetch.Argv, want)
+	}
+	if got := strings.TrimSpace(runSetup(t, report.Feed, "git", "--git-dir="+report.Feed, "rev-parse", "refs/heads/release/v7.1")); got != moved {
+		t.Errorf("the feed's release/v7.1 is %s, want the remote's %s", got, moved)
+	}
+}
+
+// A pack the cache streamed without its index — a cache on a release that never streamed one —
+// is indexed in the pod, as every pack was before, and the feed is whole.
+func TestAPackWithoutItsIndexIsIndexedInThePod(t *testing.T) {
+	run := newLocalRunner(t)
+	cache := cacheOf(t, run.remote)
+	if err := os.Remove(strings.TrimSuffix(packOf(t, cache), ".pack") + ".idx"); err != nil {
+		t.Fatal(err)
+	}
+	req := fetchRequest(t)
+	req.CacheURL, req.CacheToken, req.Log = (&fakeCache{body: cacheTar(t, cache)}).serve(t), testCacheToken, func(string) {}
+	report, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	indexed := 0
+	for _, call := range run.Calls() {
+		if slices.Contains(call.Argv, "index-pack") {
+			indexed++
+		}
+	}
+	if indexed != 1 {
+		t.Errorf("Fetch indexed %d packs, want the one the cache streamed without its index", indexed)
+	}
+	runSetup(t, report.Feed, "git", "--git-dir="+report.Feed, "fsck", "--connectivity-only")
 }
 
 // failingStep is a Runner whose named step (step) always fails as git's own failure does, and

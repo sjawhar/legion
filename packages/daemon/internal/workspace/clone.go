@@ -187,10 +187,9 @@ func FeedRepository(feed string, repository ghrepo.Repository) (string, error) {
 // feed takes from it: HEAD, packed-refs, what lies under refs/, and each pack of objects/pack/,
 // both its pack-<id>.pack and the pack-<id>.idx git reads it through. The index comes with the
 // pack because building it again costs every issue pod minutes of CPU on a large repository
-// (`git index-pack` inflates and hashes every object), where the cache that wrote it is a pod of
-// this deployment, serving its tar to the pods of its own repository alone and only against the
-// bearer token their provisioning Secret holds; what the feed still checks of the history it
-// received is that every object its refs reach is there (verifyCache). Never a loose object, a
+// (`git index-pack` inflates and hashes every object); the feed holds both to the checksums git
+// wrote into them and takes the index's names on the cache's word, which verifyCache states
+// exactly. Never a loose object, a
 // pack's reverse index or bitmap, a multi-pack index or a commit-graph, which git builds for
 // itself; never the repository's own configuration, hooks, info or description, which a feed makes
 // for itself, nor objects/info/alternates or http-alternates, which would point the feed at

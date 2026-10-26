@@ -2121,15 +2121,16 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    there that would run a hook or follow a setting in the token-holding fetch: such a feed is removed,
    logged, and filled from the repository cache. Every fetch from GitHub then
    points the feed's `HEAD` at the branch GitHub names as the default now (`git
-   ls-remote --symref`, under the same credential and bound), since a fetch never moves `HEAD` and
-   prunes the branch a rename left behind; a move is logged (`the default branch of
+   ls-remote --symref`, under the same credential and bound), since a fetch never moves `HEAD`; a move is logged (`the default branch of
    <owner>/<repo> is now <name> (HEAD named <ref>)`). A branch GitHub renamed between the fetch and
    that read is not yet in the feed, so `HEAD` stays until a fetch brings it, logged (`GitHub's
    default branch of <owner>/<repo> is now <name>, which this fetch did not bring: HEAD stays at
    <ref> until a fetch brings it`). Once the fetch may start — at once, or once the cache is ready
-   — the cache's stream, its verification and the delta from GitHub share one 30-minute bound
-   (`workspace.FetchTimeout`), each given what remains of it, so the fetch's waits, transfers and
-   checks end within 100 minutes (`workspace.FetchBudget`: the wait, then one bound for the cache's stream and its verification, then one of its own for the delta from GitHub) however long it waited, and the few local
+   — the cache's stream and its verification share one 30-minute bound (`workspace.FetchTimeout`),
+   each given what remains of it, and the delta from GitHub has a 30-minute bound of its own,
+   started once the verified stream has been moved into the feed, so a fetch killed in the delta
+   leaves the stream for the next one. The fetch's waits, transfers and checks end within 100
+   minutes (`workspace.FetchBudget`) however long it waited, and the few local
    git commands around them take moments; a step with nothing left fails the fetch, naming the
    bound. Each transfer from GitHub is tried again up to four times after a transient failure,
    within that bound. It is the only process that holds the provisioning token
@@ -2572,10 +2573,15 @@ received to the checksums git wrote into them — each file's own trailing hash 
 the pack hash the index records, which must be that pack's — and checks every object the refs
 reach is there (`git fsck --connectivity-only`) before the feed is used, and a damaged or
 incomplete history fails the fetch. A pack that arrived without its index is indexed here instead
-(`git index-pack`). Re-indexing every pack the cache wrote is what the feed no longer does: it
-inflates and rehashes every object, 8 to 12 minutes per issue pod on a 3.2 GB cache, to catch only
-a pack whose bytes are self-consistent and whose objects are not what their names say — which
-anyone who could write the cache's volume could write with a matching index too.
+(`git index-pack`). Re-indexing every pack the cache wrote is what the feed no longer does: it inflates
+and rehashes every object, 8 to 12 minutes per issue pod on a 3.2 GB cache. The feed takes the index's
+names on the cache's word instead. The cache named every object by its content when `git fetch`
+received its pack from GitHub, so what this trusts is that nothing has written another index since:
+the cache pod's volume, and whoever answers at the cache's address, since the bearer token proves
+the pod to the cache and nothing proves the cache to the pod. An index whose checksums hold but
+which maps an object's name to another object passes the fetch's checks, and a checkout of a blob it
+misnames writes the other blob's content without an error; the daemon hands a pod the cache's
+address only while its Service is the cache's own (below).
 
 From GitHub the fetch then takes the repository's default branch and `refs/heads/legion/*` alone,
 which is what the issue's clone is made from and all the cache can be behind on: every other
@@ -3883,9 +3889,9 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: once the fetch may
   start — at once, or once the repository cache is ready, after a wait of at most 40 minutes — the
-  cache's stream, its verification, every attempt of the transfer from GitHub and its read of
-  GitHub's `HEAD` run under one `workspace.FetchTimeout` (30 minutes) instead, each given what
-  remains of it, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (100
+  cache's stream and its verification run under one `workspace.FetchTimeout` (30 minutes), and every
+  attempt of the transfer from GitHub and its reads of GitHub's `HEAD` under another, each given what
+  remains of its own, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (100
   minutes). A transfer
   that fails transiently is run again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a

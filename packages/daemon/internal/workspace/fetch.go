@@ -556,29 +556,32 @@ func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging 
 	return stream.read, nil
 }
 
-// verifyCache holds the history the cache streamed into staging to what git takes from a remote,
-// in three steps: every pack's bytes must be whole, its index must be the one git builds for that
-// pack, and every object the refs reach must be there (`git fsck --connectivity-only`, which reads
-// the commits and trees of every pack through its index).
+// verifyCache holds the history the cache streamed into staging to what a feed takes: every pack's
+// bytes must be the ones its checksum names, its index must carry its own checksum and name that
+// pack, and every object the refs reach must be there (`git fsck --connectivity-only`, which walks
+// the commits and trees of every pack through its index and reads no blob).
 //
 // A pack the cache streamed its index with (FeedEntry) is checked by the checksums git writes into
 // both (packChecksums): the pack's own trailing hash over its bytes, the index's over its, and the
 // pack hash the index records, which must be the pack's. That catches a pack or an index a
-// transfer or a disk damaged, at a few seconds per gigabyte. What it does not repeat is
-// `git index-pack`'s inflation and rehashing of every object, which would catch only a pack whose
-// bytes are self-consistent and whose objects are not what their names say — a pack somebody wrote
-// deliberately, which anyone who can write the cache's volume could write with a matching index
-// too. The cache is a pod of this deployment, its tar reaches its own repository's issue pods
-// alone and only against the bearer token their provisioning Secret holds, and re-indexing it in
-// every pod costs minutes of CPU per gigabyte — on the LINUX deployment's 3.2 GB cache, 8 to 12
-// minutes in every issue pod, inside the one FetchTimeout the delta from GitHub must also fit
-// (dispatch://INFRA-460).
+// transfer or a disk damaged, at a few seconds per gigabyte. It does not repeat `git index-pack`'s
+// inflation and rehashing of every object, so it takes the index's names on the cache's word: an
+// index whose checksums hold but which maps an object's name to another object's offset passes
+// here and passes `fsck --connectivity-only`, and a checkout of a blob it misnames writes the other
+// blob's content without an error. The cache wrote its index with `git index-pack` when `git fetch`
+// received each pack from GitHub, which named every object by its content then; what this trusts is
+// that nothing has written another index since — the cache pod's volume, and whoever answers at the
+// cache's address, since the bearer token proves the pod to the cache and nothing proves the cache
+// to the pod. The daemon hands a pod the cache's address only while its Service is the cache's own
+// (docs/kubernetes.md "The repository cache"). Rehashing instead costs minutes of CPU per gigabyte
+// in every pod — on the LINUX deployment's 3.2 GB cache, 8 to 12 minutes in every issue pod, the
+// verification nine of them ran out of their bound in (dispatch://INFRA-460).
 //
 // A pack that arrived without its index is indexed here, as every pack was before: then the feed,
 // and not the cache, writes the index git reads. A pack that does not verify and a history that is
 // not whole are refused, naming what failed. Each git command runs within what remains before
-// deadline, the bound the stream and the delta share, since both follow the repository's size; one
-// with nothing left fails the fetch, naming the bound.
+// deadline, the bound the stream and its verification share; one with nothing left fails the
+// fetch, naming the bound.
 func verifyCache(ctx context.Context, run Runner, request FetchRequest, staging string, deadline time.Time) error {
 	packs, err := filepath.Glob(filepath.Join(staging, "objects", "pack", "pack-*.pack"))
 	if err != nil {
@@ -624,8 +627,11 @@ func verifyCache(ctx context.Context, run Runner, request FetchRequest, staging 
 }
 
 // objectHash is the hash function the repository at gitDir names its objects with, as git reports
-// it (`git rev-parse --show-object-format`): sha1, or sha256 for a repository created with it.
-// Every checksum a pack and its index carry is that hash's, so its size is how those files end.
+// it (`git rev-parse --show-object-format`). Every checksum a pack and its index carry is that
+// hash's, so its size is how those files end. Today it is always sha1: unpackCache makes the staging
+// repository with `git init --bare` under no configuration, and a feed refuses any object format but
+// sha1 (feedConfigKeys), so a SHA-256 cache is refused at its pack's checksum. The sha256 case is
+// for a git whose default format has changed, and reads the same file layout with 32-byte hashes.
 func objectHash(ctx context.Context, run Runner, gitDir string) (func() hash.Hash, error) {
 	named, err := FeedGit(ctx, run, gitDir, "rev-parse", "--show-object-format")
 	if err != nil {
@@ -786,18 +792,22 @@ type feedTransfer struct {
 // upstream-sync branch pushed five minutes before they launched, which with the cache's stream and
 // verification left nine of fourteen pods over FetchTimeout, each restarting the whole fetch
 // (dispatch://INFRA-460). The issue branches' refspec is a pattern, so a fetch brings whichever
-// exist and never fails on an issue whose branch is not pushed yet. Nothing is pruned: the
-// refspecs name what is taken, and a branch GitHub deleted leaves the feed at the next stream from
-// the cache.
+// exist and never fails on an issue whose branch is not pushed yet. The fetch prunes, and with
+// refspecs on its command line git prunes only the refs those refspecs write: an issue branch
+// GitHub deleted leaves the feed, as provisioning relies on (a bookmark with no row on the feed
+// starts at the default branch, and the refusals that tell an operator to delete a branch on
+// GitHub promise the next provisioning drops its row), while a branch outside the two that the
+// cache's stream brought stays as the stream left it. A feed kept on the volume is never streamed
+// again, so the prune here is the only one it gets.
 //
 // The repository cache's own process (defaultRef empty) takes every branch instead, pruned of
 // those GitHub deleted: what it holds is what every issue pod of its repository starts from.
 func fetchInto(feed string, repo ghrepo.Repository, defaultRef string) feedTransfer {
-	argv := []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "--git-dir=" + feed, "fetch"}
+	argv := []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "--git-dir=" + feed, "fetch", "--prune", "--quiet", GitHubURL(repo)}
 	if defaultRef == "" {
-		argv = append(argv, "--prune", "--quiet", GitHubURL(repo), "+refs/heads/*:refs/heads/*")
+		argv = append(argv, "+refs/heads/*:refs/heads/*")
 	} else {
-		argv = append(argv, "--quiet", GitHubURL(repo), "+"+defaultRef+":"+defaultRef, "+"+issueBranches+":"+issueBranches)
+		argv = append(argv, "+"+defaultRef+":"+defaultRef, "+"+issueBranches+":"+issueBranches)
 	}
 	return feedTransfer{verb: "fetch", argv: argv}
 }
