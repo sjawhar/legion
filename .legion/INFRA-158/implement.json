@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-158",
+  "completed": "2026-10-26T11:02:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
+  "head": "39c12172d83472555b3c339617b1d6cbc2bdce59",
+  "proof": [
+    {
+      "criterion": "Close by a person, an agent session and the Legion daemon, over a decision block, a plain ask and an approval request: no ask reads waiting (Open asks, issue page data, the block, the approval), and each record says withdrawn by the close naming the closer",
+      "surface": "dispatch:local in the issue pod: the real Go server (packages/dispatch/e2e/run-server.sh), real Postgres 17, the production SPA bundle, and the branch's dispatch CLI (packages/pi-envoy/dist/dispatch.js)",
+      "command": "PATCH /api/v1/issues/PROOF-{1,2,3} {status: done} as alice (cookie), session proof-agent-7 (bearer) and {kind: session, id: legion-daemon:PROOF} (bearer); then dispatch read --issue PROOF-n; dispatch read --ref dispatch://PROOF-n/ask/<id> for each of the 3 asks; dispatch doc-read --issue PROOF-n; GET /api/v1/issues/PROOF-n. Logs /legion/scratch/infra158-proof/final-2-closes.log; summary https://github.com/sjawhar/legion/pull/2233#issuecomment-6413961372",
+      "observed": "Each close 200 in 0.05-0.08 s. open_asks [] and spec_approval draft (not awaiting). 'Open asks:' then '- none', with ask.resolved x3 by the closer before issue.closed. Every ask: 'State: resolved / By: alice|proof-agent-7|legion-daemon:PROOF / Kind: withdrawn / Reason: Withdrawn by the close of PROOF-n.' The block reads :::ask{#decision urgency=\"high\" multiple=\"false\" state=\"resolved\"}.",
+      "headSha": "3c237348e14a0656f88a99c4c94563166e721142",
+      "negativeControl": "POST /api/v1/asks/<id>/resolve {kind: withdrawn} on an open ask -> 400 INVALID_RESOLUTION 'resolution kind must be \"retracted\" or \"resolved\", not \"withdrawn\"'; retracted/resolved on a closed issue's ask -> 409 ISSUE_CLOSED; the asks were unchanged afterwards"
+    },
+    {
+      "criterion": "Reopening a closed issue brings back exactly the asks its close withdrew",
+      "surface": "dispatch:local (same stack)",
+      "command": "PATCH /api/v1/issues/PROOF-1 {status: todo} as alice; dispatch read --issue PROOF-1; dispatch read --ref for each ask; dispatch doc-read --issue PROOF-1",
+      "observed": "The same 3 ask ids read State: open with no resolution; ask.opened x3 by alice come before issue.updated; spec_approval awaiting again; the block reads state=\"open\".",
+      "headSha": "3c237348e14a0656f88a99c4c94563166e721142",
+      "negativeControl": "PROOF-2 and PROOF-3, not reopened, kept their withdrawn asks and resolved blocks; a resolve on their asks still answered 409 ISSUE_CLOSED"
+    },
+    {
+      "criterion": "Not on the ask's own card and not in the page header; earlier versions unchanged; the daemon named whole (the page a person reads)",
+      "surface": "Dispatch's own browser suite (Playwright, chromium and iphone) on the real Go server and production SPA",
+      "command": "cd packages/dispatch && bun run e2e -- close-withdraws-asks.e2e.ts, at main 12cbe2cdcc62 (the head's spec copied in) and at the head; runs posted at https://github.com/sjawhar/legion/pull/2233#issuecomment-6413547825",
+      "observed": "Head: 6 passed (person close + reopen, agent session close, daemon close, on both projects). Base: 6 failed, each at close-withdraws-asks.e2e.ts:111 expect(getByTestId('issue-whose-turn')).toHaveCount(0): Expected 0, Received 1; the base server leaves the 3 asks open and the approval awaiting.",
+      "headSha": "3c237348e14a0656f88a99c4c94563166e721142",
+      "negativeControl": "The same spec against the base build (12cbe2cdcc62, before the change) fails 6 of 6 at the page-header check"
+    },
+    {
+      "criterion": "The asks already open on closed issues are withdrawn, each naming its issue's earlier closer, and a repair that finds nothing writes nothing",
+      "surface": "dispatch:local: 400 issues closed in SQL as a release before this change closes (no withdrawal, each document owing a settlement for an unindexed decision block), the server booted on that database, and the repair pass (api.RepairIssueAsks) run as the interval runs it",
+      "command": "final-step4/seed.ts into final_repair; boot run-server.sh on it; then /legion/scratch/infra158-proof/repairpass twice (SINCE unset, then SINCE=now-10min) with SQL snapshots of every doc_settlements_pending.marked_at and doc_updates before and after; log /legion/scratch/infra158-proof/final-4-repair.log",
+      "observed": "Boot: 'dispatch: repaired the asks of closed and reopened issues withdrawn=400 restored=0 swept=400' in 8.3 s (30 s bound). 0 open asks on closed issues; 400 withdrawn, each naming the actor of its issue's latest issue.closed (alice 133, legion-daemon:REPAIR 133, proof-agent-old 134); every block reads state=\"resolved\". Both later passes 'withdrawn=0 restored=0 swept=0' (3.2 s, 2.9 s), snapshots identical; the same on the database of issues this release closed.",
+      "headSha": "3c237348e14a0656f88a99c4c94563166e721142",
+      "negativeControl": "At 15181b69, before 84ebd186, the same no-op passes appended an update to every owed document and moved every mark (infra158-proof/4-repair.log), which is the defect the fix and TestARepairThatChangesNothingAppendsNoUpdateAndMarksNoDocument now lock"
+    },
+    {
+      "criterion": "The close stays inside the Legion daemon's 10 s request bound with the pre-close settlement and the document writes",
+      "surface": "dispatch:local (same stack)",
+      "command": "step3/latency.ts: three issues with three documents each and a decision block inserted 24-44 ms before the close; curl -w '%{time_total}' of the daemon-actor PATCH",
+      "observed": "0.126 s, 0.092 s, 0.093 s; all 4 blocks of each issue withdrawn by legion-daemon:PROOF, the unsettled one included",
+      "headSha": "3c237348e14a0656f88a99c4c94563166e721142",
+      "negativeControl": "The base server's close of the same shape took 0.037 s and withdrew nothing (its asks stayed open), so the time measured is the withdrawal's"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/ask_lifecycle.go: pre-close settlement retries (3 attempts / 3 s; a refused room reloaded by #2212's reloadRoomBehindHead); repeated block ids marked by position; answered copies written without the answer; a write that changes nothing opens no transaction",
+    "packages/envoy/internal/dispatch/api/issue_ask_lifecycle.go, issue_ask_repair.go: one shared sweep (sweepIssueAskBlocksTx) over resolved and answered block asks; withdrawnAsk predicate; issueOpenStatus; one-UPDATE restore",
+    "packages/envoy/internal/dispatch/api/ask_transitions.go: resolve's 400 names the kinds it takes",
+    "packages/envoy/internal/dispatch/store/pool.go: leasePoolSize 9 for the ninth leased loop",
+    "packages/envoy/internal/dispatch/docs/testhooks.go: AfterSettleLockForTest",
+    "tests: api/issue_close_asks_test.go, api/issue_close_races_test.go (new), api/issue_ask_repair_test.go, api/interactions_test.go, docs/ask_lifecycle_test.go, docs/ask_lifecycle_retry_test.go (new), cmd/dispatch/multiprocess_test.go",
+    "docs: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/{AGENTS.md,README.md}, packages/dispatch/AGENTS.md, api/routes_table.go, packages/contracts/src/dispatch-tools.ts, skills/dispatch/references/{asks.md,issues.md}, skills/legion-controller/references/daily-report.md, skills/legion-worker/references/findings.md",
+    "packages/claude-envoy/dist and legion/ regenerated; CHANGELOGs of envoy, contracts, envoy-client, pi-envoy, pi-legion, claude-envoy",
+    "three forward merges of main (cf81b3ba, 15181b69, 517e10a4), each after GitHub reported CONFLICTING"
+  ],
+  "trickyParts": [
+    "#2212 merged mid-run and removed evictInstance; the pre-close settlement now relies on its reloadRoomBehindHead, and its retry settles from the reloaded room (plan decision 18). TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind covers that path.",
+    "ygo emits an update for every transaction, a no-op one included, and applyLive appends it: a WriteIssueAskStates that changed nothing appended an empty update and moved the document's settlement mark, which made every interval repair pass sweep every closed issue's documents. writeDocumentAskStates now checks each write against the tree first and opens no transaction when none changes.",
+    "A resolve or answer committing between the close's settlement and its transaction leaves the decision's copies owed a settlement that never runs on a closed issue; both sweeps write those copies from their rows (an answered copy without the answer's bytes, since WriteIssueAskStates is not weighed for size)."
+  ],
+  "deviations": [
+    "Plan R2's evictInstance path is replaced by #2212's reloadRoomBehindHead (the plan's own fallback in decision 18).",
+    "Beyond the plan: the answered/resolved copy race (found by the R4 race test), the repair no-op write (found by the R8 proof), the lease pool size, and resolve's 400 message, each fixed here with a test.",
+    "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
+  ],
+  "openQuestions": [
+    "applyLive (docs/mutation.go) appends the update ygo emits for a transaction that changes nothing, for every writer, not only WriteIssueAskStates (fixed here at that caller). Another writer that opens a no-op transaction appends an empty update and marks its document owing a settlement. A general fix (a state-vector check in applyLive) touches the shared write path; named to the architect rather than widened here."
+  ]
+}
