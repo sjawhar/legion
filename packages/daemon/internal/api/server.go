@@ -41,8 +41,16 @@ type Options struct {
 	Supervisor Supervisor
 	// BootTokens resolves a registration's boot token.
 	BootTokens *BootTokens
-	// Project is the project token new claims are filed under (`claim.ProjectToken`).
-	Project string
+	// Project and DispatchProject are the two names this one project answers to, and the daemon
+	// holds both because a row written under one is invisible to a read with the other. Project is
+	// the claim project token (`claim.ProjectToken`): lowercased and alphanumeric, the form every
+	// claim token, tree lifecycle and controller record is keyed by. DispatchProject is the
+	// project key Dispatch itself files the issues under (config.Config.Project, which Dispatch
+	// constrains to `^[A-Z][A-Z0-9]{1,9}$`), and so the key of the issue records and of the
+	// blockers mirror the release routes read. The two can never be equal in a deployment, since
+	// the token is the lowercase of a key that must start uppercase.
+	Project         string
+	DispatchProject string
 	// OperatorToken is the bearer every operator route compares against; empty admits no one.
 	OperatorToken string
 	// Controller is the project's controller record, which the controller secret route mints,
@@ -136,11 +144,13 @@ type server struct {
 	stateTransactions StateTransactions
 	supervisor        Supervisor
 	bootTokens        *BootTokens
-	project           string
-	operatorSet       bool
-	operatorHash      [sha256.Size]byte
-	controller        ControllerStore
-	designGate        config.DesignGate
+	// project and dispatchProject are Options.Project and Options.DispatchProject.
+	project         string
+	dispatchProject string
+	operatorSet     bool
+	operatorHash    [sha256.Size]byte
+	controller      ControllerStore
+	designGate      config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
 	// pluginRelaunchable is Options.PluginRelaunchable.
@@ -186,6 +196,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		supervisor:         opts.Supervisor,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
+		dispatchProject:    opts.DispatchProject,
 		controller:         opts.Controller,
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
