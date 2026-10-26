@@ -8,7 +8,13 @@
 # to the working tree. The in-repo corpora are always read: testdata/corpus/*.md (ids
 # corpus:<name>), which the fixture generator also reads, and testdata/diffcorpus/*.md (ids
 # diffcorpus:<name>), shapes only the differential reads, such as a mark on an image that the
-# fixtures' schema check refuses. Each --corpus adds a JSONL file of {"id", "md"} lines, or every
+# fixtures' schema check refuses. The output of fuzz.ts (ids fuzz:<n>) is always read too: a few
+# thousand image titles and link titles over many lines, each line opening with a block start, an
+# HTML block's start or end, a near-miss or text, in every container, generated from a fixed seed,
+# so every run reads the same documents. The writer keeps a title's line feed raw by an allow-list
+# of line starts (rawTitleLinesHold), and its misses - a link lost to a lazy line one reader opens
+# a block at, a raw line both hold churned to `&#10;` - were reached only by such a corpus, never
+# by the in-repo ones (INFRA-190). Each --corpus adds a JSONL file of {"id", "md"} lines, or every
 # *.jsonl in a directory, ids prefixed with the file's name. It prints each gated class's count on
 # its own GATE line - regressions, misreads, churn, panics, lost fixed points, a write the head
 # refuses that the base takes, and a linked image's link lost or changed, among others - and exits
@@ -34,7 +40,8 @@ done
 out=${out:-$(mktemp -d)}
 mkdir -p "$out"
 
-# The corpus: the in-repo documents, then each given file, every line with a unique id.
+# The corpus: the in-repo documents, the generated fuzz corpus, then each given file, every line
+# with a unique id.
 corpus=$out/corpus.jsonl
 : > "$corpus"
 for dir in corpus diffcorpus; do
@@ -42,6 +49,7 @@ for dir in corpus diffcorpus; do
     jq -Rsc --arg id "$dir:$(basename "$file" .md)" '{id: $id, md: .}' "$file" >> "$corpus"
   done
 done
+bun "$gen/fuzz.ts" | jq -c '{id: ("fuzz:" + (.id | tostring)), md: .md}' >> "$corpus"
 for path in "${corpora[@]}"; do
   if [ -d "$path" ]; then files=("$path"/*.jsonl); else files=("$path"); fi
   for file in "${files[@]}"; do
