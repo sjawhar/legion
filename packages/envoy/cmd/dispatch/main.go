@@ -111,6 +111,9 @@ type bootConfig struct {
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
 	EnvoyToken string
+	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
+	// checked whole; newEmbedder builds its client.
+	Embedder embedderConfig
 }
 
 func main() {
@@ -282,14 +285,13 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
-	// embedder is nil (meaning search off, search answers keyword-only and says so) when no AWS
-	// region/credentials reach this process at boot - a CI job or a devbox with no AWS_REGION set
-	// - which embed.New reports as an error rather than a reason to refuse to boot.
-	var embedder embed.Embedder
-	if client, err := embed.New(ctx); err != nil {
-		slog.Warn("dispatch: meaning search unavailable", "error", err)
-	} else {
-		embedder = client
+	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
+	// the default place, finds no AWS region/credentials at boot - a CI job or a devbox with no
+	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
+	embedder, err := newEmbedder(ctx, boot.Embedder)
+	if err != nil {
+		slog.Error("dispatch: build the embedder", "error", err)
+		os.Exit(1)
 	}
 
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
@@ -358,17 +360,17 @@ func main() {
 			Leases:    leases,
 		})
 	}
-	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: a later
-	// deploy that grants Bedrock credentials needs no other wiring change to pick up meaning
-	// search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
+	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
+	// embedding queue keeps coverage itself, so a later deploy that gives meaning search a place
+	// to embed needs no other wiring change and no person-run step to cover existing content.
 	// It gets a rate-limited wrapper around the same client api.Deps holds unwrapped above
-	// (embedder, line 296's Embedder field): the write-time queue's poller and a backfill run are
-	// the only two embedqueue callers, and pacing only their calls - never a live search
-	// request's own query embedding, which always goes straight through the unwrapped client -
-	// is what keeps a saturating backfill from taking live search down with it (LEGION-549 round
-	// 5; embed.RateLimitedEmbedder's own doc comment has the AIMD mechanism and the headroom
-	// this leaves). A nil embedder (meaning search off) stays nil rather than becoming a non-nil
-	// wrapper around nothing, which embedqueue.Run's own nil check depends on.
+	// (embedder, BuildAppContext's Embedder option): the queue is the only embedqueue caller, and
+	// pacing only its calls - never a live search request's own query embedding, which always
+	// goes straight through the unwrapped client - is what keeps saturating background work from
+	// taking live search down with it (LEGION-549 round 5; embed.RateLimitedEmbedder's own doc
+	// comment has the AIMD mechanism and the headroom this leaves). A nil embedder (meaning
+	// search off) stays nil rather than becoming a non-nil wrapper around nothing, which
+	// embedqueue.Run's own nil check depends on.
 	var backgroundEmbedder embed.Embedder
 	if embedder != nil {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
@@ -658,6 +660,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		if boot.AgentSecretsTokenFile == "" {
 			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE is required when DISPATCH_AGENT_SECRETS_URL is set: Dispatch calls the broker with its own projected Kubernetes ServiceAccount token")
 		}
+	}
+	boot.Embedder, err = resolveEmbedder(env)
+	if err != nil {
+		return bootConfig{}, err
 	}
 
 	if devSignIn {

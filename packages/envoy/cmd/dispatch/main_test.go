@@ -171,10 +171,17 @@ func TestResolveBootConfigRefusesSignInSettingsItCannotUse(t *testing.T) {
 
 // A setting a release removed is refused, never silently ignored.
 func TestResolveBootConfigRefusesRemovedSettings(t *testing.T) {
-	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET", "DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE"} {
+	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET", "COHERE_API_KEY", "DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE"} {
 		_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{name: "value"})))
 		if err == nil || !strings.Contains(err.Error(), name+" is no longer read") {
 			t.Errorf("%s set: err = %v, want a refusal naming it", name, err)
+		}
+	}
+	// Meaning search reaches Cohere through either place, and the refusal names both.
+	_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{"COHERE_API_KEY": "value"})))
+	for _, want := range []string{"AWS Bedrock", "Azure AI Foundry", "DISPATCH_EMBEDDER"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("COHERE_API_KEY set: err = %v, want it to name %q", err, want)
 		}
 	}
 }
@@ -846,20 +853,23 @@ func TestRebuildRefsRefusesWithoutServerURL(t *testing.T) {
 
 // An argument envoy-dispatch does not know is refused, never served: the server migrates the
 // database at boot, so `envoy-dispatch census` on an image that predates the subcommand would
-// otherwise apply the very migrations the census was to inspect.
+// otherwise apply the very migrations the census was to inspect. backfill-embeddings is one such
+// argument now: the server's embedding queue keeps coverage itself.
 func TestRunSubcommandRefusesAnUnknownSubcommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runSubcommand(context.Background(), []string{"cenus"}, envGetter(nil), &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("exit %d, want 2", code)
-	}
-	for _, want := range []string{`unknown subcommand "cenus"`, "census", "redeliver-webhooks"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("stderr %q lacks %q", stderr.String(), want)
+	for _, name := range []string{"cenus", "backfill-embeddings"} {
+		var stdout, stderr bytes.Buffer
+		code := runSubcommand(context.Background(), []string{name}, envGetter(nil), &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("%s: exit %d, want 2", name, code)
 		}
-	}
-	if strings.Contains(stderr.String(), "DATABASE_URL") {
-		t.Errorf("stderr %q reads like a boot, not a refusal", stderr.String())
+		for _, want := range []string{fmt.Sprintf("unknown subcommand %q", name), "census", "redeliver-webhooks"} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("%s: stderr %q lacks %q", name, stderr.String(), want)
+			}
+		}
+		if strings.Contains(stderr.String(), "DATABASE_URL") || strings.Contains(stderr.String(), "backfill-embeddings,") {
+			t.Errorf("%s: stderr %q reads like a boot, or still lists backfill-embeddings", name, stderr.String())
+		}
 	}
 }
 

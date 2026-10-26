@@ -53,7 +53,8 @@ func RemoveStaleGitLocks(workspace Workspace, now time.Time, log func(string)) e
 // logged with the file's path and age, and one it cannot remove is an error naming it. A feed's
 // only writer is Fetch, called by one process at a time: a pod's workspace-fetch, its first init
 // container and the one container that mounts the feed writable, or the repository cache's process
-// under its write lock, so no lock or transfer there is live when Fetch starts.
+// under its maint mutex, which also keeps its repack from running beside a fetch (repocache's
+// refresh), so no lock, transfer or repack there is live when Fetch starts.
 func RemoveStaleFeedLocks(gitDir string, now time.Time, log func(string)) error {
 	why := "a feed's only writer is the fetch now starting"
 	if err := removeLocksUnder(gitDir, "", now, log, why); err != nil {
