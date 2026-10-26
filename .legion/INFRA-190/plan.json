@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-190",
-  "completed": "2026-10-25T15:20:21Z",
+  "completed": "2026-10-26T07:55:46Z",
   "planDocument": "dispatch://INFRA-190/artifact/plan-md",
   "requiredSkills": {
     "implement": [
@@ -116,5 +116,30 @@
     "Stay-as-today shapes in new pmdoc/testdata/diffcorpus read by differential.sh by default.",
     "pending-sync replay refuses a saved row that deletes an image's link/linkTitle key."
   ],
-  "harness": "Pod has no Postgres server or Playwright browser: follow docs/solutions/testing/*INFRA-42*.md and *INFRA-43*.md on the issue volume under $TMPDIR/infra190/harness; Go suites per *LEGION-752*.md. The differential corpus export lives at /legion/scratch/tmp/infra190/theorem.jsonl (never committed)."
+  "harness": "Pod has no Postgres server or Playwright browser: follow docs/solutions/testing/*INFRA-42*.md and *INFRA-43*.md on the issue volume under $TMPDIR/infra190/harness; Go suites per *LEGION-752*.md. The differential corpus export lives at /legion/scratch/tmp/infra190/theorem.jsonl (never committed).",
+  "resumption": {
+    "generation": 3,
+    "confirmed": "Plan v1 (dispatch://INFRA-190/artifact/plan-md and this file's decisions, harness, requiredSkills, specDepartures []) stands unchanged against approved spec v9; re-admitted after the 2026-10-25 restore park (dispatch://INFRA-80). The gap analyst was not re-run because nothing in the plan changed: gapAnalysis above is generation 1's. planReview above is the generation-3 review of this resumption block (approved, 1 round); generation 1's plan review was also approved in 1 round.",
+    "scope": "Only the round-4 content already on the branch (437ef2a9e666 answering red test TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand from b9246afcee94, and R2) plus the forward merge below; nothing else enters PR #2204, per dispatch://INFRA-190/comment/211c1734-84f9-41ac-b119-9f006b3344de.",
+    "measured": {
+      "prHead": "95ad2eedb30fcd49ba4ff1437135bc28ffdb256a (= legion/INFRA-190@origin); GitHub mergeable CONFLICTING, mergeStateStatus DIRTY, no checks reported",
+      "workspaceRecovery": "workspace-recovered.json names dfa29883, the empty working copy above 95ad2eed: nothing unpushed was lost",
+      "main": "main@origin 748e8d952a76, 34 commits past fork point 7af60a22b33f",
+      "conflict": "probe merge (jj new --no-edit legion/INFRA-190@origin main@origin, abandoned) conflicts only in packages/contracts/CHANGELOG.md: both sides add bullets under Unreleased '### Added'",
+      "overlap": "both sides also change packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md and packages/envoy/internal/dispatch/docs/websocket.go, all merging clean; websocket.go hunks are disjoint (branch: schemaReadOnly/authorizeSchemaVersion editor_schema fence; main 5bc72900fc83 #2212 and f1ea47aed78d #2211: StoreUpdateContext, owed-settlement load, settleLastPeer)",
+      "risk": "the branch admits a document websocket read-write only with editor_schema in the query and the '<schema>:<editor>' token (docstest.AdmissionQuery/AdmissionToken); main's new docs and cmd/dispatch tests add no literal schema_version and use docstest.Peer and existing helpers, but any that dials with a hand-built URL would be admitted read-only after the merge and fail",
+      "fingerprintBefore": "07459b8d6ccec0295bd19b34fa803ecce4651f450d0c60355fa67ca4e605150e (conflicts-and-rewrites.md 'The unchanged-diff check', base main, head 95ad2eedb30fcd49ba4ff1437135bc28ffdb256a)"
+    },
+    "implementerSteps": [
+      "1. Forward merge, never a rebase: base=$(gh pr view 2204 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj -R \"$LEGION_WORKSPACE\" new legion/INFRA-190 \"${base}@origin\" -m \"merge: resolve conflict against ${base}@origin\". Resolve packages/contracts/CHANGELOG.md by keeping both sides' bullets (main's and the branch's DOCUMENT_EDITOR_SCHEMA_VERSION bullet) under the one Unreleased '### Added'; no other edit in the merge commit.",
+      "2. Before the push, run what the merge can break, on the pod harness above: go test for packages/envoy/internal/dispatch/docs/..., .../pmdoc/..., .../api/..., packages/envoy/cmd/dispatch/...; bun test in packages/proof-editor; bun run test in packages/dispatch (bun test --parallel web/src e2e/__tests__); bunx tsc --noEmit; bunx biome check on the touched packages. A main test that fails because it dials a document websocket without the admission query or token is fixed in the merge commit by routing that dial through docstest.AdmissionQuery/AdmissionToken (merge resolution, not new scope); any other failure goes to the architect before pushing.",
+      "3. jj -R \"$LEGION_WORKSPACE\" new, then bookmark set legion/INFRA-190 -r @- and jj git push --bookmark legion/INFRA-190 (a code push: no skip-checks trailer). Compute the fingerprint at the new head with the same command and post one PR #2204 comment with the Legion footer: 'rebase 95ad2eedb30fcd49ba4ff1437135bc28ffdb256a → <new-head>; fingerprint 07459b8d6ccec0295bd19b34fa803ecce4651f450d0c60355fa67ca4e605150e → <after>; unchanged|changed'. Unchanged is expected; a changed one (only from step 2's admission fixes) is named in that comment and in implement.json.",
+      "4. Re-prove at the new head on plan v1's surfaces so the E2E (implementer) line names the head that merges: packages/dispatch/e2e/linked-images.e2e.ts via bun run e2e from packages/dispatch, pmdoc gen/differential.sh over every corpus, and round 4's generated reader/writer inverse test. Update the PR body's E2E (implementer) line and implement.json proof to the new head, then complete; the tester takes that head."
+    ],
+    "acceptance": [
+      "PR #2204 is not CONFLICTING at the merged head and CI runs on it.",
+      "PR #2204 carries the fingerprint comment with both hashes; the fingerprint is unchanged, or changed only by admission-query fixes to main's tests that the comment names.",
+      "The E2E (implementer) line and implement.json proof name the merged head."
+    ]
+  }
 }
