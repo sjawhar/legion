@@ -361,12 +361,43 @@ nothing. To end every session's automatic access to a secret, change its tags
 
 ## Approvals
 
-An approval happens in Dispatch, never in the broker. The broker holds no Dispatch credential and
-sends Dispatch nothing: Dispatch's server reads the broker's pending list and records for the
-person signed in, and when that person clicks **Approve** or **Deny**, Dispatch's server calls the
+An approval starts in Dispatch and is made on the broker. The broker holds no Dispatch credential
+and sends Dispatch nothing: Dispatch's server reads the broker's pending list and records for the
+person signed in, and when that person clicks **Approve**, Dispatch's server calls the
 broker as its own Kubernetes ServiceAccount, which the broker lists as a caller
-(`BROKER_API_ACCOUNTS`), with that person's email, taken from their Dispatch session. No secret
-is shared between them. The broker then checks that email against the record's approver: anyone
+(`BROKER_API_ACCOUNTS`), naming that person's email from their Dispatch session. That call
+decides nothing. The broker opens a single-use approval for that record and that person and
+answers a link to a page it serves itself; the browser goes there, the page shows what is being
+approved from the broker's own record, and the person presses its button and signs in at the
+broker's approval issuer (`BROKER_APPROVAL_ISSUER`, Google in production) for an OAuth client
+whose secret only the broker holds. The broker checks the ID token that comes back — the issuer's
+own signature, that client as its audience, the nonce that approval's own cookie binds, and a
+verified email in `BROKER_APPROVAL_DOMAIN` — and applies the decision only when that email is the
+approval's own approver. So a service that relays the pages cannot approve anything: the proof
+travels from the identity provider to the broker, and holding Dispatch's own token, its Google
+client secret or the refresh tokens it keeps mints none of it. Dispatch's own credential still
+lists a request, reads it, **denies** it and opens an approval nobody but the named person can
+complete — a denial and a revoke stay on its word, since either can only take access away.
+
+What binds an approval to its person is five things together: the press of the button on the
+broker's own page, which the broker refuses from any other site, so no page elsewhere can send a
+person straight to the account chooser without showing what they approve; a cookie that press
+sets for that approval alone, which on an https broker no other host of its domain can plant; the
+nonce the ID token carries, derived from that cookie; the account the person picks in the
+identity provider's account chooser, which is shown every time; and the email match. What it does
+not bind is freshness. Google re-authenticates nobody on request — it honours neither `max_age`
+nor `prompt=login` — and returns when the person last signed in (`auth_time`) only for a
+published, verified app with "Session age claims" turned on, so the broker asks for it, records
+what comes back on the approval, and refuses only a time in the future. What that leaves: anyone
+in control of the person's signed-in browser, whose live Google session there approves with a
+press of the page's button and a pick in the chooser; a sign-in code or ID token stolen inside its
+own minutes of validity; and the fact that an approval page can show no more than the broker's own
+record holds. On a broker whose `BROKER_APPROVAL_*` group is unset — a deployment that has not
+turned this on yet, which the broker warns about at every boot — an approval is still taken on the
+calling service's word, and whoever holds that service's token can approve as any person it names;
+Dispatch's **Approve** then decides at once, as it did before.
+
+The broker then checks the approving email against the record's approver: anyone
 else is refused `NOT_APPROVER`, whatever state the record is in. A request for a shared
 human-tier secret, or for a shared agent-tier secret its session's operator withheld from it,
 names the approver `anyone`: it waits in every person's Inbox, any person signed in to Dispatch may

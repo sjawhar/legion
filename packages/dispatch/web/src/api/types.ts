@@ -256,7 +256,6 @@ export interface CredentialRecord {
   decided: CredentialDecisionEvent | null;
   session?: CredentialSession;
 }
-
 export interface CredentialApproval {
   state: "approved";
   grant_id: string | null;
@@ -265,9 +264,29 @@ export interface CredentialApproval {
 export interface CredentialDenial {
   state: "denied";
 }
-/** What approve and deny answer, relayed verbatim from the broker: an approval names the grant or
- *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
+/** What deny answers, relayed verbatim from the broker: `{state: "denied"}` alone. */
 export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
+
+/** What opening an approval answers, relayed verbatim from the broker: the broker's own page for
+ *  the approver to sign in on, which the browser then goes to, and when the link stops working.
+ *  Nothing is approved until that sign-in reaches the broker. */
+export interface CredentialApprovalResponse {
+  url: string;
+  expires_at: string;
+}
+
+/** What Approve answers: the broker's approval page (`CredentialApprovalResponse`) on a broker
+ *  that takes the approver's own sign-in, or, on one whose `BROKER_APPROVAL_*` group is unset, the
+ *  decision itself (`CredentialApproval`), which that broker makes on Dispatch's word. */
+export type CredentialApproveResponse = CredentialApprovalResponse | CredentialApproval;
+
+/** Whether Approve's answer is the broker's approval page, for the browser to go to, rather than
+ *  a decision already made. */
+export function isApprovalPage(
+  response: CredentialApproveResponse
+): response is CredentialApprovalResponse {
+  return "url" in response;
+}
 
 interface CredentialGrantFields {
   grant_id: string;

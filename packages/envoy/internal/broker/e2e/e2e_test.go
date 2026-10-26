@@ -44,6 +44,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/helper"
@@ -96,6 +97,23 @@ type e2eServer struct {
 	// uiToken is dispatchAccount's own projected token, the credential the routes Dispatch's
 	// server calls take.
 	uiToken string
+	// approvalIssuer is the local issuer the broker's own approval client signs people in at,
+	// standing in for the deployment's (Google's); nil on a server built without
+	// withApprovalSignIn, whose approvals are taken on the listed caller's word.
+	approvalIssuer *oidctest.Issuer
+}
+
+// e2eOption varies how newE2EServer wires its broker.
+type e2eOption func(*e2eConfig)
+
+type e2eConfig struct{ approval bool }
+
+// withApprovalSignIn gives the broker the BROKER_APPROVAL_* group: its own confidential client at
+// the test's issuer, so an approval is applied only by the approving person's own sign-in on the
+// broker's own page (approval_e2e_test.go). Without it the broker is the rollout's first half,
+// which TestEndToEnd drives.
+func withApprovalSignIn() e2eOption {
+	return func(c *e2eConfig) { c.approval = true }
 }
 
 // newE2EServer holds e2eSecrets in a fake Secrets Manager and wires the full service graph —
@@ -103,8 +121,12 @@ type e2eServer struct {
 // same way main.go does, minus the HTTP listener and signal handling (api.Register mounts on an
 // httptest.Server instead of a real net/http.Server, as api_test.go's newTestServer does). The
 // broker logs through slog's default handler, as main.go's does, here into Log.
-func newE2EServer(t *testing.T) *e2eServer {
+func newE2EServer(t *testing.T, options ...e2eOption) *e2eServer {
 	t.Helper()
+	var config e2eConfig
+	for _, option := range options {
+		option(&config)
+	}
 	st := storetest.Open(t)
 	logged := policytest.CaptureLog(t)
 
@@ -145,6 +167,21 @@ func newE2EServer(t *testing.T) *e2eServer {
 		OAuth: provider, Replay: enr.Replay,
 	}
 
+	// The broker's own approval client at the same local issuer, when this server takes a
+	// person's sign-in: nothing but a browser signing in there can approve a record.
+	var approvalSignIn *api.ApprovalSignIn
+	var approvalIssuer *oidctest.Issuer
+	if config.approval {
+		issuer.EnableCodeFlow(issuerKey, approvalClientID, approvalClientSecret)
+		flow, err := oidc.NewConfirmFlow(context.Background(), issuer.URL(), approvalClientID, approvalClientSecret, approvalDomain)
+		if err != nil {
+			t.Fatalf("oidc.NewConfirmFlow: %v", err)
+		}
+		approvalSignIn = &api.ApprovalSignIn{
+			Challenges: &approval.Service{Store: st}, Flow: flow, Domain: approvalDomain,
+		}
+		approvalIssuer = issuer
+	}
 	api.Register(mux, api.Deps{
 		PublicURL:     srv.URL,
 		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
@@ -153,6 +190,7 @@ func newE2EServer(t *testing.T) *e2eServer {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		Approval: approvalSignIn,
 	})
 
 	// The caller's token lives well inside the hour one may, as a projected token does.
@@ -160,7 +198,8 @@ func newE2EServer(t *testing.T) *e2eServer {
 	callerClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
 	return &e2eServer{
 		URL: srv.URL, Store: st, Secrets: local, Log: logged,
-		uiToken: issuer.Mint(t, issuerKey, callerClaims),
+		uiToken:        issuer.Mint(t, issuerKey, callerClaims),
+		approvalIssuer: approvalIssuer,
 	}
 }
 

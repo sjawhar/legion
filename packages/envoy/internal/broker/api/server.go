@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
@@ -42,6 +43,17 @@ type Deps struct {
 	Machine       *requests.Machine
 	MachineLogin  *machine.Service
 	Proof         *proof.Verifier
+	// Approval is how an approval carries the approving person's own sign-in: the broker's own
+	// OAuth client at BROKER_APPROVAL_ISSUER, and the single-use challenges a person spends on
+	// the broker's own pages (handlers_approval.go). With it, POST
+	// /v1/credential-requests/{record}/approve is refused 403 APPROVAL_NEEDS_PERSON, whoever
+	// calls it, and an approval goes through those pages instead.
+	//
+	// Nil is a broker whose BROKER_APPROVAL_* group is unset: the pages are not mounted, POST
+	// .../approval is refused 503 APPROVAL_SIGN_IN_OFF, and approve goes on taking the approver
+	// on the calling service's word. That is the rollout's first half, and cmd/broker warns at
+	// boot for as long as it lasts.
+	Approval *ApprovalSignIn
 	// Policy is the live agent-secret policy, which POST /v1/secrets/{name}/reread rereads one
 	// name of (policy.Current.RefreshOne).
 	Policy *policy.Current
@@ -82,6 +94,9 @@ type Deps struct {
 	// the whole class shares and spent before the caller's token is verified; nil means
 	// DefaultAccountLimit.
 	AccountLimit *ratelimit.Limit
+	// ApprovalLimit bounds the three approval pages a person's browser reaches per source
+	// address, in one bucket they share; nil means DefaultApprovalLimit.
+	ApprovalLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
 	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
@@ -121,9 +136,11 @@ type server struct {
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
 	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own
-	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route shares.
-	tokenLimiter   *ratelimit.Keyed
-	accountLimiter *ratelimit.Keyed
+	// bucket, accountLimiter AccountLimit, over the bucket every accountAuth route shares, and
+	// approvalLimiter ApprovalLimit, over the bucket the approval pages share.
+	tokenLimiter    *ratelimit.Keyed
+	accountLimiter  *ratelimit.Keyed
+	approvalLimiter *ratelimit.Keyed
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -154,6 +171,10 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.AccountLimit != nil {
 		account = *deps.AccountLimit
 	}
+	approvalLimit := DefaultApprovalLimit
+	if deps.ApprovalLimit != nil {
+		approvalLimit = *deps.ApprovalLimit
+	}
 	s := &server{
 		deps:            deps,
 		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
@@ -161,9 +182,16 @@ func Register(mux *http.ServeMux, deps Deps) {
 		rereadOverall:   ratelimit.NewBucket(rereadOverall),
 		tokenLimiter:    ratelimit.NewKeyed(token),
 		accountLimiter:  ratelimit.NewKeyed(account),
+		approvalLimiter: ratelimit.NewKeyed(approvalLimit),
 	}
 	for _, route := range routes() {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
+			continue
+		}
+		// A broker with no approval issuer has no page to serve: the account route stays, and
+		// says so (APPROVAL_SIGN_IN_OFF), so a caller learns what is unset rather than meeting a
+		// bare 404 from the mux.
+		if deps.Approval == nil && strings.HasPrefix(route.Pattern, approvalRoutes) {
 			continue
 		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +206,29 @@ func Register(mux *http.ServeMux, deps Deps) {
 
 // oauthRoutes prefixes the routes the OAuth provider serves, which Register mounts only with one.
 const oauthRoutes = "/v1/oauth/"
+
+// ApprovalSignIn is what the broker needs to take an approval with the approving person's own
+// sign-in: the challenges a person spends, and the broker's own confidential OAuth client at the
+// issuer that signs them in. cmd/broker builds one from the BROKER_APPROVAL_* group.
+//
+// The client is the whole point of holding it here. It is the broker's, not the relaying
+// service's: the ID token it gets back is issued for this client alone, by the issuer, to the
+// browser the person is signed in with, so no service that relays Dispatch's pages — and no
+// holder of that service's own credentials, its Google client secret or the refresh tokens it
+// keeps — can mint one.
+type ApprovalSignIn struct {
+	// Challenges stores the single-use approvals: one row per record a person was sent to the
+	// broker's own page for.
+	Challenges *approval.Service
+	// Flow is that OAuth client, for the issuer, the client id and the Workspace domain
+	// BROKER_APPROVAL_ISSUER, BROKER_APPROVAL_CLIENT_ID and BROKER_APPROVAL_DOMAIN name
+	// (oidc.NewConfirmFlow). The deployment registers BROKER_PUBLIC_URL + /approve/callback as
+	// its one redirect URI.
+	Flow *oidc.CodeFlow
+	// Domain is BROKER_APPROVAL_DOMAIN, the Workspace domain Flow holds every sign-in to, which
+	// the page names so a person knows which account to pick.
+	Domain string
+}
 
 // authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad

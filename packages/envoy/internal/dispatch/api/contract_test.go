@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/google/uuid"
 
 	brokerapi "github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
@@ -58,6 +60,13 @@ const (
 	// legion-daemon, and contractTokenAudience the audience its tokens carry.
 	contractDaemonAccount = "system:serviceaccount:legion-system:legion-daemon-contract"
 	contractTokenAudience = "agent-secrets"
+	// The broker's own OAuth client at its approval issuer and the Workspace domain it holds
+	// every approving sign-in to: BROKER_APPROVAL_CLIENT_ID, BROKER_APPROVAL_CLIENT_SECRET and
+	// BROKER_APPROVAL_DOMAIN. Dispatch holds none of them, which is the whole point of the rig:
+	// its own credential opens an approval and cannot complete one.
+	contractApprovalClientID     = "broker-approval-client"
+	contractApprovalClientSecret = "broker-approval-secret"
+	contractApprovalDomain       = "example.com"
 )
 
 // contractRig is the real broker (real Postgres) behind Dispatch's own mounted routes. Every UI
@@ -73,8 +82,24 @@ type contractRig struct {
 	issuerKey   *oidctest.Key
 }
 
-func newContractRig(t *testing.T) *contractRig {
+// contractRigOption varies how newContractRig wires its broker.
+type contractRigOption func(*contractRigConfig)
+
+type contractRigConfig struct{ noApprovalGroup bool }
+
+// withoutApprovalGroup leaves the broker's BROKER_APPROVAL_* group unset: a broker that takes no
+// person's sign-in and still decides an approval on its listed caller's word, the one a deployment
+// runs until it sets the group.
+func withoutApprovalGroup() contractRigOption {
+	return func(c *contractRigConfig) { c.noApprovalGroup = true }
+}
+
+func newContractRig(t *testing.T, options ...contractRigOption) *contractRig {
 	t.Helper()
+	var config contractRigConfig
+	for _, option := range options {
+		option(&config)
+	}
 	brokerStore := brokerstoretest.Open(t)
 
 	local := secrets.NewLocal(
@@ -113,6 +138,24 @@ func newContractRig(t *testing.T) *contractRig {
 		Audience: brokerServer.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		OAuth: provider, Replay: enr.Replay,
 	}
+	// The broker's own approval client, armed on the same local issuer: an approving person signs
+	// in there, in their own browser, and the ID token comes back to the broker. Dispatch's own
+	// credential cannot mint one, which is what every approval below has to go round — unless the
+	// rig was asked for a broker without the group, which takes its caller's word instead.
+	var approvalSignIn *brokerapi.ApprovalSignIn
+	if !config.noApprovalGroup {
+		issuer.EnableCodeFlow(issuerKey, contractApprovalClientID, contractApprovalClientSecret)
+		approvalFlow, err := oidc.NewConfirmFlow(context.Background(), issuer.URL(),
+			contractApprovalClientID, contractApprovalClientSecret, contractApprovalDomain)
+		if err != nil {
+			t.Fatalf("oidc.NewConfirmFlow: %v", err)
+		}
+		approvalSignIn = &brokerapi.ApprovalSignIn{
+			Challenges: &approval.Service{Store: brokerStore},
+			Flow:       approvalFlow,
+			Domain:     contractApprovalDomain,
+		}
+	}
 	// Dispatch calls the broker as its own listed caller: a projected ServiceAccount token of the
 	// same issuer the broker verifies a pod's with, minted to live well inside the hour a caller's
 	// token may.
@@ -127,6 +170,7 @@ func newContractRig(t *testing.T) *contractRig {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		Approval: approvalSignIn,
 	})
 
 	dispatchDB := storetest.Open(t)
@@ -297,10 +341,103 @@ func (rig *contractRig) values(t *testing.T, pending contractSession, grantID st
 }
 
 type contractRecord struct {
-	RecordID string `json:"record_id"`
-	Kind     string `json:"kind"`
-	State    string `json:"state"`
-	Approver string `json:"approver"`
+	RecordID string           `json:"record_id"`
+	Kind     string           `json:"kind"`
+	State    string           `json:"state"`
+	Approver string           `json:"approver"`
+	Decided  *contractDecided `json:"decided"`
+}
+
+// contractDecided is a decided record's terminal event, which is where the machine credential an
+// approval minted is read now that no decision answers one.
+type contractDecided struct {
+	Event        string  `json:"event"`
+	CredentialID *string `json:"credential_id"`
+}
+
+// approvalAnswer is what Dispatch's approve route answers now: the broker's own page for the
+// approver to sign in on, relayed verbatim.
+type approvalAnswer struct {
+	URL       string `json:"url"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// openApproval clicks Approve in Dispatch as login, which opens an approval on the broker and
+// answers the page the browser goes to. It decides nothing: signInAndApprove does.
+func (rig *contractRig) openApproval(t *testing.T, recordID string, body map[string]any, login string) *httptest.ResponseRecorder {
+	t.Helper()
+	return dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+recordID+"/approve", body, login)
+}
+
+// signInAndApprove is the half of an approval Dispatch cannot do: the person opens the broker's
+// own page, signs in at the approval issuer as email, and the broker applies the decision. It
+// answers the callback's status and page.
+func (rig *contractRig) signInAndApprove(t *testing.T, approvalURL, email string) (int, string) {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	browser := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	page, err := browser.Get(approvalURL)
+	if err != nil {
+		t.Fatalf("GET %s: %v", approvalURL, err)
+	}
+	page.Body.Close()
+	if page.StatusCode != http.StatusOK {
+		t.Fatalf("the broker's approval page = %d", page.StatusCode)
+	}
+	// The button on the broker's own page: a same-origin form post, which a browser marks with
+	// the broker's own Origin and which /start refuses from anywhere else.
+	startRequest, err := http.NewRequest(http.MethodPost, approvalURL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRequest.Header.Set("Origin", rig.BrokerURL)
+	started, err := browser.Do(startRequest)
+	if err != nil {
+		t.Fatalf("POST %s/start: %v", approvalURL, err)
+	}
+	started.Body.Close()
+	if started.StatusCode != http.StatusSeeOther {
+		t.Fatalf("the sign-in's start = %d, want 303", started.StatusCode)
+	}
+	rig.issuer.SignInAs(map[string]any{
+		"sub": "google-subject-" + email, "email": email, "email_verified": true,
+		"hd": contractApprovalDomain, "auth_time": time.Now().Add(-time.Minute).Unix(),
+	})
+	code, state := rig.issuer.Authorize(t, started.Header.Get("Location"))
+	callback := rig.BrokerURL + "/approve/callback?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(state)
+	done, err := browser.Get(callback)
+	if err != nil {
+		t.Fatalf("GET the callback: %v", err)
+	}
+	defer done.Body.Close()
+	body, err := io.ReadAll(done.Body)
+	if err != nil {
+		t.Fatalf("read the callback's page: %v", err)
+	}
+	return done.StatusCode, string(body)
+}
+
+// approveAsPerson is the whole of one approval as a person makes it: Approve in Dispatch, then
+// the sign-in on the broker's own page. It fails t on any refusal, so a test that calls it is
+// asserting the record is decided.
+func (rig *contractRig) approveAsPerson(t *testing.T, recordID string, body map[string]any, login string) {
+	t.Helper()
+	resp := rig.openApproval(t, recordID, body, login)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("open an approval as %s = %d %s", login, resp.Code, resp.Body.String())
+	}
+	opened := decodeBody[approvalAnswer](t, resp)
+	if !strings.HasPrefix(opened.URL, rig.BrokerURL+"/approve/") {
+		t.Fatalf("Dispatch answered %q, want the broker's own approval page", opened.URL)
+	}
+	if status, page := rig.signInAndApprove(t, opened.URL, login); status != http.StatusOK || !strings.Contains(page, "Approved") {
+		t.Fatalf("%s's sign-in = %d: %s", login, status, page)
+	}
 }
 
 type contractError struct {
@@ -311,34 +448,46 @@ type contractError struct {
 
 // TestApproveThroughDispatchReleasesTheValue drives the approval as a signed-in human end to
 // end against the real broker: another Dispatch login is refused NOT_APPROVER even when its
-// browser body names the approver, the approver's own click succeeds whatever login its browser
-// body names, the session then releases the value, and replaying the approval is the broker's
-// own 409, forwarded unchanged.
+// browser body names the approver; the approver's own click opens an approval, which decides
+// nothing until that person has signed in on the broker's own page; another person's sign-in on
+// the approver's own approval decides nothing either; the approver's does, the session then
+// releases the value, and a second approval of the decided record is the broker's own 409,
+// forwarded unchanged.
 func TestApproveThroughDispatchReleasesTheValue(t *testing.T) {
 	rig := newContractRig(t)
 	pending := rig.createPendingAgentSecretRecord(t, "need it for the demo", "DEEL_API_KEY")
-	approvePath := "/api/v1/credential-requests/" + pending.RecordID + "/approve"
 
 	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractApprover)
 	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != contractApprover {
 		t.Fatalf("record read = %s, want pending with approver %s", readResp.Body.String(), contractApprover)
 	}
 
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"approver": contractApprover}, contractOther)
+	resp := rig.openApproval(t, pending.RecordID, map[string]any{"approver": contractApprover}, contractOther)
 	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
-		t.Fatalf("approve as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
+		t.Fatalf("open an approval as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
 	}
 
-	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"approver": contractOther}, contractApprover)
+	resp = rig.openApproval(t, pending.RecordID, map[string]any{"approver": contractOther}, contractApprover)
 	if resp.Code != http.StatusOK {
-		t.Fatalf("approve as %s = %d %s", contractApprover, resp.Code, resp.Body.String())
+		t.Fatalf("open an approval as %s = %d %s", contractApprover, resp.Code, resp.Body.String())
 	}
-	approved := decodeBody[struct {
-		State   string  `json:"state"`
-		GrantID *string `json:"grant_id"`
-	}](t, resp)
-	if approved.State != "approved" || approved.GrantID == nil {
-		t.Fatalf("approve response = %s, want state=approved with a grant_id", resp.Body.String())
+	opened := decodeBody[approvalAnswer](t, resp)
+	if !strings.HasPrefix(opened.URL, rig.BrokerURL+"/approve/") {
+		t.Fatalf("Dispatch answered %q, want the broker's own approval page", opened.URL)
+	}
+	// Opening it decided nothing, and neither does anyone else's sign-in on it.
+	if read := decodeBody[contractRecord](t, dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractApprover)); read.State != "pending" {
+		t.Fatalf("the record is %q once an approval is open, want it still pending", read.State)
+	}
+	if status, page := rig.signInAndApprove(t, opened.URL, contractOther); status != http.StatusForbidden {
+		t.Fatalf("%s's sign-in on %s's approval = %d, want 403: %s", contractOther, contractApprover, status, page)
+	}
+	if read := decodeBody[contractRecord](t, dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractApprover)); read.State != "pending" {
+		t.Fatalf("the record is %q after another person signed in, want it still pending", read.State)
+	}
+
+	if status, page := rig.signInAndApprove(t, opened.URL, contractApprover); status != http.StatusOK || !strings.Contains(page, "Approved") {
+		t.Fatalf("%s's own sign-in = %d: %s", contractApprover, status, page)
 	}
 	var decidedBy string
 	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
@@ -346,13 +495,43 @@ func TestApproveThroughDispatchReleasesTheValue(t *testing.T) {
 		t.Fatalf("approved event login = %q (%v), want %s", decidedBy, err, contractApprover)
 	}
 
-	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["DEEL_API_KEY"] != "deel-v1" {
+	granted := rig.grantsOf(t, contractApprover)
+	if len(granted) != 1 {
+		t.Fatalf("grants after the approval = %s, want the one it made", asJSON(t, granted))
+	}
+	if status, released := rig.values(t, pending, granted[0].GrantID); status != http.StatusOK || released["DEEL_API_KEY"] != "deel-v1" {
 		t.Fatalf("values = %d %v, want DEEL_API_KEY=deel-v1", status, released)
 	}
 
-	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
+	resp = rig.openApproval(t, pending.RecordID, map[string]any{}, contractApprover)
 	if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "RECORD_TERMINAL") {
 		t.Fatalf("terminal forwarding: %d %s", resp.Code, resp.Body.String())
+	}
+}
+
+// TestApproveThroughDispatchOnABrokerThatTakesNoSignIn drives the rollout's first half against a
+// real broker whose BROKER_APPROVAL_* group is unset: the broker refuses the approval route
+// APPROVAL_SIGN_IN_OFF, Dispatch then sends the same decision to its approve route, and the click
+// approves at once, under the caller's own login, for that person's record only.
+func TestApproveThroughDispatchOnABrokerThatTakesNoSignIn(t *testing.T) {
+	rig := newContractRig(t, withoutApprovalGroup())
+	pending := rig.createPendingAgentSecretRecord(t, "need it for the demo", "DEEL_API_KEY")
+
+	resp := rig.openApproval(t, pending.RecordID, map[string]any{}, contractOther)
+	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
+		t.Fatalf("approve as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
+	}
+	resp = rig.openApproval(t, pending.RecordID, map[string]any{}, contractApprover)
+	approved := decodeBody[struct {
+		State   string  `json:"state"`
+		GrantID *string `json:"grant_id"`
+		URL     *string `json:"url"`
+	}](t, resp)
+	if resp.Code != http.StatusOK || approved.State != "approved" || approved.GrantID == nil || approved.URL != nil {
+		t.Fatalf("approve as %s = %d %s, want the decision itself, approved with a grant", contractApprover, resp.Code, resp.Body.String())
+	}
+	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["DEEL_API_KEY"] != "deel-v1" {
+		t.Fatalf("values = %d %v, want DEEL_API_KEY=deel-v1", status, released)
 	}
 }
 
@@ -383,20 +562,13 @@ func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	pending := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY")
 
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/approve",
-		map[string]any{}, contractApprover)
-	approved := decodeBody[struct {
-		GrantID *string `json:"grant_id"`
-	}](t, approveResp)
-	if approveResp.Code != http.StatusOK || approved.GrantID == nil {
-		t.Fatalf("approve = %d %s, want a grant_id", approveResp.Code, approveResp.Body.String())
-	}
-	grantID := *approved.GrantID
+	rig.approveAsPerson(t, pending.RecordID, map[string]any{}, contractApprover)
 
 	listed := rig.grantsOf(t, contractApprover)
-	if len(listed) != 1 || listed[0].GrantID != grantID || listed[0].Granted != "approval" || listed[0].Approver == nil || *listed[0].Approver != contractApprover {
-		t.Fatalf("grants list = %s, want the grant %s approved by %s", asJSON(t, listed), grantID, contractApprover)
+	if len(listed) != 1 || listed[0].Granted != "approval" || listed[0].Approver == nil || *listed[0].Approver != contractApprover {
+		t.Fatalf("grants list = %s, want one grant approved by %s", asJSON(t, listed), contractApprover)
 	}
+	grantID := listed[0].GrantID
 
 	revokePath := "/api/v1/credential-grants/" + grantID + "/revoke"
 	otherResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractOther)
@@ -452,20 +624,17 @@ func TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt(t *testing.T) {
 		t.Fatalf("record read = %s, want pending with approver %s", readResp.Body.String(), record.AnyoneApprover)
 	}
 
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/approve", map[string]any{}, contractOther)
-	approved := decodeBody[struct {
-		State   string  `json:"state"`
-		GrantID *string `json:"grant_id"`
-	}](t, resp)
-	if resp.Code != http.StatusOK || approved.State != "approved" || approved.GrantID == nil {
-		t.Fatalf("approve as %s = %d %s, want approved with a grant", contractOther, resp.Code, resp.Body.String())
-	}
+	rig.approveAsPerson(t, pending.RecordID, map[string]any{}, contractOther)
 	var decidedBy string
 	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
 		`select login from credential_request_events where record_id=$1 and event='approved'`, pending.RecordID).Scan(&decidedBy); err != nil || decidedBy != contractOther {
 		t.Fatalf("approved event login = %q (%v), want %s", decidedBy, err, contractOther)
 	}
-	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["SHARED_KEY"] != "shared-v1" {
+	granted := rig.grantsOf(t, contractOther)
+	if len(granted) != 1 {
+		t.Fatalf("%s's grants after the approval = %s, want the one it made", contractOther, asJSON(t, granted))
+	}
+	if status, released := rig.values(t, pending, granted[0].GrantID); status != http.StatusOK || released["SHARED_KEY"] != "shared-v1" {
 		t.Fatalf("values = %d %v, want SHARED_KEY=shared-v1", status, released)
 	}
 	for _, login := range []string{contractApprover, contractOther} {
@@ -565,11 +734,12 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 }
 
 // approveMachineLogin logs approver's own machine in as a person does: the machine asks the
-// broker's device authorization for its signed login, naming approver in its login_hint; approver looks its code
-// up through Dispatch (ruling 13's one selector), which answers the pending launcher_credential
-// record; an approval without the code is refused CODE_REQUIRED; and approver's approval with the
-// same code mints a launcher credential. It returns the launcher credential the approval minted and
-// the machine's key. A service logs in with its own token instead (tokenLogin).
+// broker's device authorization for its signed login, naming approver in its login_hint; approver
+// looks its code up through Dispatch (ruling 13's one selector), which answers the pending
+// launcher_credential record; an approval without the code is refused CODE_REQUIRED before anyone
+// signs in; and approver opens an approval with the same code and signs in on the broker's own
+// page, which mints the launcher credential. It returns that credential and the machine's key. A
+// service logs in with its own token instead (tokenLogin).
 func (rig *contractRig) approveMachineLogin(t *testing.T, approver, host string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
 	machineKey := contractSigningKey(t)
@@ -579,20 +749,17 @@ func (rig *contractRig) approveMachineLogin(t *testing.T, approver, host string)
 		t.Fatalf("record.Sign: %v", err)
 	}
 	code, recordID := rig.startMachineLogin(t, machineKey, compact, approver)
-	approvePath := "/api/v1/credential-requests/" + recordID + "/approve"
-	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, approver)
+	noCode := rig.openApproval(t, recordID, map[string]any{}, approver)
 	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
-		t.Fatalf("machine approve without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
+		t.Fatalf("machine approval without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
 	}
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": code}, approver)
-	approved := decodeBody[struct {
-		State        string  `json:"state"`
-		CredentialID *string `json:"credential_id"`
-	}](t, approveResp)
-	if approveResp.Code != http.StatusOK || approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("approve the machine login = %d %s, want state=approved with a credential_id", approveResp.Code, approveResp.Body.String())
+	rig.approveAsPerson(t, recordID, map[string]any{"code": code}, approver)
+	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+recordID, nil, approver)
+	read := decodeBody[contractRecord](t, readResp)
+	if read.State != "approved" || read.Decided == nil || read.Decided.CredentialID == nil || *read.Decided.CredentialID == "" {
+		t.Fatalf("the machine login after the sign-in = %s, want approved with a credential", readResp.Body.String())
 	}
-	return *approved.CredentialID, machineKey
+	return *read.Decided.CredentialID, machineKey
 }
 
 // startMachineLogin asks the broker's device authorization for the machine's signed login, with
@@ -828,9 +995,9 @@ func TestAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch(t *testing.T)
 		t.Fatalf("record.Sign: %v", err)
 	}
 	code, recordID := rig.startMachineLogin(t, machineKey, compact, contractOther)
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+recordID+"/approve", map[string]any{"code": code}, contractOther)
+	resp := rig.openApproval(t, recordID, map[string]any{"code": code}, contractOther)
 	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
-		t.Fatalf("approve %s's machine login as %s = %d %s, want 403 NOT_APPROVER", contractApprover, contractOther, resp.Code, resp.Body.String())
+		t.Fatalf("open an approval of %s's machine login as %s = %d %s, want 403 NOT_APPROVER", contractApprover, contractOther, resp.Code, resp.Body.String())
 	}
 	if looked := rig.lookupMachineLogin(t, code, contractApprover); looked.State != "pending" {
 		t.Fatalf("the login after the refused approval = %+v, want pending", looked)
@@ -860,19 +1027,22 @@ func TestAnyoneApprovalCannotReleaseAPersonsWithheldSecret(t *testing.T) {
 	if resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-grants/"+*auto.GrantID+"/revoke", map[string]any{}, contractApprover); resp.Code != http.StatusOK {
 		t.Fatalf("revoke = %d: %s", resp.Code, resp.Body.String())
 	}
-	approvePath := "/api/v1/credential-requests/" + *mixed.RecordID + "/approve"
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractOther)
+	resp := rig.openApproval(t, *mixed.RecordID, map[string]any{}, contractOther)
 	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
-		t.Fatalf("approve as %s after %s withheld AUTO_TOKEN = %d %s, want 403 NOT_APPROVER", contractOther, contractApprover, resp.Code, resp.Body.String())
+		t.Fatalf("open an approval as %s after %s withheld AUTO_TOKEN = %d %s, want 403 NOT_APPROVER", contractOther, contractApprover, resp.Code, resp.Body.String())
 	}
-	owner := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
-	approved := decodeBody[struct {
-		GrantID *string `json:"grant_id"`
-	}](t, owner)
-	if owner.Code != http.StatusOK || approved.GrantID == nil {
-		t.Fatalf("approve as %s = %d %s, want a grant", contractApprover, owner.Code, owner.Body.String())
+	rig.approveAsPerson(t, *mixed.RecordID, map[string]any{}, contractApprover)
+	granted := rig.grantsOf(t, contractApprover)
+	var mixedGrant string
+	for _, grant := range granted {
+		if grant.RecordID != nil && *grant.RecordID == *mixed.RecordID {
+			mixedGrant = grant.GrantID
+		}
 	}
-	if status, released := rig.values(t, session, *approved.GrantID); status != http.StatusOK || released["AUTO_TOKEN"] == "" {
+	if mixedGrant == "" {
+		t.Fatalf("grants after the owner's approval = %s, want one for the mixed request", asJSON(t, granted))
+	}
+	if status, released := rig.values(t, session, mixedGrant); status != http.StatusOK || released["AUTO_TOKEN"] == "" {
 		t.Fatalf("values of the owner's approval = %d %v, want AUTO_TOKEN released", status, released)
 	}
 }

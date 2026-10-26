@@ -339,11 +339,11 @@ test("two logins of one service on one host are told apart by their credential i
   }
 });
 
-test("a machine login approved on the page joins the list", async () => {
-  let live: MachineLogin[] = [];
-  const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
-    credentials: live,
-  }));
+// A machine login is not approved on this page any more: Approve opens an approval on the broker
+// and the browser goes there to sign in, so the list below is still what the broker holds — no
+// login appears until that sign-in has minted its credential and the page is read again.
+test("Approve hands the browser to the broker's page and adds nothing to the list", async () => {
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockResolvedValue({ credentials: [] });
   const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue({
     approver: "ada@example.com",
     decided: null,
@@ -359,12 +359,11 @@ test("a machine login approved on the page joins the list", async () => {
     service: null,
     state: "pending",
   });
-  const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockImplementation(
-    async () => {
-      live = [devbox];
-      return { credential_id: "cred-devbox", grant_id: null, state: "approved" };
-    }
-  );
+  const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
+    expires_at: "2026-10-03T12:10:00Z",
+    url: "https://broker.example/approve/challenge-4",
+  });
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
 
   try {
     renderPage();
@@ -378,11 +377,16 @@ test("a machine login approved on the page joins the list", async () => {
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
-    expect(await section.findByText("devbox.example.com")).toBeDefined();
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith("https://broker.example/approve/challenge-4")
+    );
+    expect(section.queryByText("devbox.example.com")).toBeNull();
+    expect(section.getByText("No live machine logins.")).toBeDefined();
   } finally {
     cleanup();
     getMachineLogins.mockRestore();
     lookupMachineCredential.mockRestore();
     approveCredentialRecord.mockRestore();
+    assign.mockRestore();
   }
 });

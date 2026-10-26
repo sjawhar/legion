@@ -12,6 +12,8 @@ package machine
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -511,6 +513,35 @@ func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, er
 		RecordID: id, Host: detail.Identifier, Service: detail.Service, Approver: approver,
 		State: state, CredentialID: credentialID, CreatedAt: createdAt, ExpiresAt: expiresAt,
 	}, nil
+}
+
+// CodeHash is the SHA-256 of a machine login's confirmation code as its record stores it
+// (oauth.NormalizeUserCode), the form an approval challenge keeps instead of the code
+// (internal/broker/approval).
+func CodeHash(code string) []byte {
+	sum := sha256.Sum256([]byte(oauth.NormalizeUserCode(code)))
+	return sum[:]
+}
+
+// CodeFor answers recordID's own confirmation code when hash is CodeHash of it, and
+// ErrCodeMismatch when it is not; ErrNotFound is a record no machine login has. It is the one
+// check a typed code gets outside ApplyDecision, and it serves both ends of an approval that a
+// person signs in for: the broker refuses a challenge whose code is not the record's before
+// anyone signs in, and the sign-in's callback reads the code back through the hash the challenge
+// kept, so the decision carries the code the person typed without the challenge holding it.
+func (s *Service) CodeFor(ctx context.Context, recordID string, hash []byte) (string, error) {
+	var code string
+	err := s.Store.Pool.QueryRow(ctx, `select code from credential_requests where id=$1 and kind='launcher_credential'`, recordID).Scan(&code)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if subtle.ConstantTimeCompare(CodeHash(code), hash) != 1 {
+		return "", ErrCodeMismatch
+	}
+	return code, nil
 }
 
 // ExpirePending writes an 'expired' event for every launcher_credential record whose own

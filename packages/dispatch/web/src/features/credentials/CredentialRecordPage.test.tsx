@@ -60,14 +60,16 @@ test("renders the broker's facts before the agent's reason, rendered as plain te
   }
 });
 
-test("Approve is one plain POST for the record, with no body", async () => {
+// Approving no longer decides anything here: Dispatch opens an approval on the broker, which
+// answers its own page, and the browser goes there for the approver's own Google sign-in.
+test("Approve opens an approval for the record and sends the browser to the broker's page", async () => {
   const record = secretRecord();
   const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(record);
   const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
-    credential_id: null,
-    grant_id: "grant-1",
-    state: "approved",
+    expires_at: "2026-09-27T00:10:00Z",
+    url: "https://broker.example/approve/challenge-1",
   });
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
 
   try {
     renderPage();
@@ -76,10 +78,47 @@ test("Approve is one plain POST for the record, with no body", async () => {
 
     await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
     expect(approveCredentialRecord).toHaveBeenCalledWith("req-1");
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith("https://broker.example/approve/challenge-1")
+    );
   } finally {
     cleanup();
     getCredentialRecord.mockRestore();
     approveCredentialRecord.mockRestore();
+    assign.mockRestore();
+  }
+});
+
+// A broker whose BROKER_APPROVAL_* group is unset decides on Dispatch's word, so Approve answers
+// the decision itself: the page stays, reads the record back, and shows it decided.
+test("on a broker that takes no sign-in, Approve decides at once and the page shows the decision", async () => {
+  const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(secretRecord());
+  const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockImplementation(
+    async () => {
+      getCredentialRecord.mockResolvedValue(
+        secretRecord({
+          decided: { at: "2026-09-27T00:30:00Z", credential_id: null, event: "approved" },
+          state: "approved",
+        })
+      );
+      return { credential_id: null, grant_id: "grant-1", state: "approved" };
+    }
+  );
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
+
+  try {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
+    expect(screen.getByText(/approved/)).toBeDefined();
+    expect(assign).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    getCredentialRecord.mockRestore();
+    approveCredentialRecord.mockRestore();
+    assign.mockRestore();
   }
 });
 

@@ -148,13 +148,16 @@ func TestListCredentialPendingWithAndWithoutABroker(t *testing.T) {
 	})
 }
 
-// fakeBrokerRig is a fake broker recording the last request it served, answering canned
-// status/body pairs keyed by "METHOD path".
+// fakeBrokerRig is a fake broker recording the last request it served and every route it was
+// asked for, in order, answering canned status/body pairs keyed by "METHOD path".
 type fakeBrokerRig struct {
 	server        *httptest.Server
 	lastAuth      string
+	lastRoute     string
 	lastQuery     string
 	lastBody      string
+	routes        []string
+	bodies        []string
 	calls         int
 	statusByRoute map[string]int
 	bodyByRoute   map[string]string
@@ -166,9 +169,12 @@ func newFakeBrokerRig(t *testing.T) *fakeBrokerRig {
 	rig.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rig.calls++
 		rig.lastAuth = r.Header.Get("Authorization")
+		rig.lastRoute = r.Method + " " + r.URL.Path
+		rig.routes = append(rig.routes, rig.lastRoute)
 		rig.lastQuery = r.URL.RawQuery
 		body, _ := io.ReadAll(r.Body)
 		rig.lastBody = string(body)
+		rig.bodies = append(rig.bodies, rig.lastBody)
 		key := r.Method + " " + r.URL.Path
 		status, ok := rig.statusByRoute[key]
 		if !ok {
@@ -205,8 +211,8 @@ func TestCredentialRouteForwardsBrokerSuccessBodyAndAuth(t *testing.T) {
 
 func TestCredentialRouteForwardsBrokerErrorStatusAndBodyVerbatim(t *testing.T) {
 	rig := newFakeBrokerRig(t)
-	rig.statusByRoute["POST /v1/credential-requests/rec1/approve"] = http.StatusConflict
-	rig.bodyByRoute["POST /v1/credential-requests/rec1/approve"] = `{"code":"RECORD_TERMINAL","error":"already decided"}`
+	rig.statusByRoute["POST /v1/credential-requests/rec1/approval"] = http.StatusConflict
+	rig.bodyByRoute["POST /v1/credential-requests/rec1/approval"] = `{"code":"RECORD_TERMINAL","error":"already decided"}`
 	handler := newCredentialTestHandler(t, rig.server.URL)
 
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/rec1/approve",
@@ -216,6 +222,56 @@ func TestCredentialRouteForwardsBrokerErrorStatusAndBodyVerbatim(t *testing.T) {
 	}
 	if response.Body.String() != `{"code":"RECORD_TERMINAL","error":"already decided"}` {
 		t.Fatalf("body = %s, want the broker's error body verbatim", response.Body.String())
+	}
+}
+
+// TestApproveFallsBackToTheCallersWordOnlyOnABrokerThatTakesNoSignIn: a broker whose
+// BROKER_APPROVAL_* group is unset refuses an approval 503 APPROVAL_SIGN_IN_OFF and still decides
+// on its listed caller's word, so Dispatch sends the same decision to its approve route and relays
+// that answer — the decision the browser then reads as made. Every other refusal of the approval,
+// a 503 of any other kind among them, is relayed as it stands and approves nothing.
+func TestApproveFallsBackToTheCallersWordOnlyOnABrokerThatTakesNoSignIn(t *testing.T) {
+	rig := newFakeBrokerRig(t)
+	rig.statusByRoute["POST /v1/credential-requests/rec1/approval"] = http.StatusServiceUnavailable
+	rig.bodyByRoute["POST /v1/credential-requests/rec1/approval"] = `{"code":"APPROVAL_SIGN_IN_OFF","error":"this broker takes no person's sign-in"}`
+	rig.bodyByRoute["POST /v1/credential-requests/rec1/approve"] = `{"credential_id":null,"grant_id":"grant-1","state":"approved"}`
+	handler := newCredentialTestHandler(t, rig.server.URL)
+
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/rec1/approve",
+		map[string]any{"approver": "bob", "code": "ABCD-1234"}, "Alice")
+	if response.Code != http.StatusOK || response.Body.String() != `{"credential_id":null,"grant_id":"grant-1","state":"approved"}` {
+		t.Fatalf("approve on a broker with no sign-in = %d %s, want the approve route's own answer", response.Code, response.Body.String())
+	}
+	wantRoutes := []string{"POST /v1/credential-requests/rec1/approval", "POST /v1/credential-requests/rec1/approve"}
+	if strings.Join(rig.routes, ",") != strings.Join(wantRoutes, ",") {
+		t.Fatalf("the broker was asked %v, want %v", rig.routes, wantRoutes)
+	}
+	for i, body := range rig.bodies {
+		if body != `{"approver":"alice","code":"ABCD-1234"}` {
+			t.Fatalf("the broker's call %d carried %s, want the caller's own login and the typed code", i, body)
+		}
+	}
+
+	for name, refusal := range map[string]struct {
+		status int
+		body   string
+	}{
+		"a 503 of another kind":   {http.StatusServiceUnavailable, `{"code":"DATABASE_UNAVAILABLE","error":"read failed"}`},
+		"a refusal of the person": {http.StatusForbidden, `{"code":"NOT_APPROVER","error":"another approver"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newFakeBrokerRig(t)
+			rig.statusByRoute["POST /v1/credential-requests/rec1/approval"] = refusal.status
+			rig.bodyByRoute["POST /v1/credential-requests/rec1/approval"] = refusal.body
+			handler := newCredentialTestHandler(t, rig.server.URL)
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/rec1/approve", map[string]any{}, "alice")
+			if response.Code != refusal.status || response.Body.String() != refusal.body {
+				t.Fatalf("approve = %d %s, want the broker's own %d %s", response.Code, response.Body.String(), refusal.status, refusal.body)
+			}
+			if len(rig.routes) != 1 || rig.routes[0] != "POST /v1/credential-requests/rec1/approval" {
+				t.Fatalf("the broker was asked %v, want the approval route alone", rig.routes)
+			}
+		})
 	}
 }
 
@@ -234,28 +290,40 @@ func TestCredentialRouteRelaysRequestBodyVerbatim(t *testing.T) {
 }
 
 // TestDecisionsNameTheCallerNeverTheBrowsersApprover pins the one thing Dispatch adds to a
-// decision: the broker trusts the approver field on its listed caller's word, so approve, deny and
-// revoke must send the login Dispatch's own session resolved, canonical lowercase, and forward a
-// machine login's typed code — never an approver, or anything else, the browser put in its body.
+// decision: the login Dispatch's own session resolved, canonical lowercase, with a machine
+// login's typed code — never an approver, or anything else, the browser put in its body. For a
+// deny or a revoke that login is the whole of what the broker is told; for an approval it names
+// the person the broker then requires a sign-in from, which is why Approve reaches the broker's
+// approval route and never its approve route.
 func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {
 	browserBody := map[string]any{"approver": "bob", "code": "ABCD-1234", "assertion": map[string]string{"id": "x"}}
 	for _, tc := range []struct {
-		path     string
-		body     any
-		wantBody string
+		name      string
+		path      string
+		body      any
+		wantRoute string
+		wantBody  string
 	}{
-		{"/api/v1/credential-requests/rec1/approve", browserBody, `{"approver":"alice","code":"ABCD-1234"}`},
-		{"/api/v1/credential-requests/rec1/deny", browserBody, `{"approver":"alice","code":"ABCD-1234"}`},
-		{"/api/v1/credential-requests/rec1/approve", nil, `{"approver":"alice"}`},
-		{"/api/v1/credential-grants/grant1/revoke", browserBody, `{"approver":"alice"}`},
-		{"/api/v1/machine-logins/cred1/revoke", browserBody, `{"approver":"alice"}`},
+		{"approval", "/api/v1/credential-requests/rec1/approve", browserBody,
+			"POST /v1/credential-requests/rec1/approval", `{"approver":"alice","code":"ABCD-1234"}`},
+		{"deny", "/api/v1/credential-requests/rec1/deny", browserBody,
+			"POST /v1/credential-requests/rec1/deny", `{"approver":"alice","code":"ABCD-1234"}`},
+		{"approval with no body at all", "/api/v1/credential-requests/rec1/approve", nil,
+			"POST /v1/credential-requests/rec1/approval", `{"approver":"alice"}`},
+		{"grant revoke", "/api/v1/credential-grants/grant1/revoke", browserBody,
+			"POST /v1/grants/grant1/revoke-by-approver", `{"approver":"alice"}`},
+		{"machine login revoke", "/api/v1/machine-logins/cred1/revoke", browserBody,
+			"POST /v1/launcher-credentials/cred1/revoke-by-approver", `{"approver":"alice"}`},
 	} {
-		t.Run(tc.path, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			rig := newFakeBrokerRig(t)
 			handler := newCredentialTestHandler(t, rig.server.URL)
 			response := dispatchRequest(t, handler, http.MethodPost, tc.path, tc.body, "Alice")
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			if rig.lastRoute != tc.wantRoute {
+				t.Fatalf("broker saw %s, want %s", rig.lastRoute, tc.wantRoute)
 			}
 			if rig.lastBody != tc.wantBody {
 				t.Fatalf("broker saw body %s, want %s", rig.lastBody, tc.wantBody)

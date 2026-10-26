@@ -478,20 +478,29 @@ linkification, `white-space: pre-wrap` — since it is the agent's own words, no
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
 you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's),
 "Approving lets `<service> on <host>` start worker pods as `<service>`, not as you: no secret of
-yours reaches its pods unless you approve the request for it."; an approval made on the machine
-page reads "Approved. `<host>` can start agent sessions as you." or "Approved. `<service> on
-<host>` can start worker pods as `<service>`."; the record page renders no buttons at all for a
+yours reaches its pods unless you approve the request for it."; a login the machine page looks up
+already decided reads "Approved. `<host>` can start agent sessions as you." or "Approved.
+`<service> on <host>` can start worker pods as `<service>`."; the record page renders no buttons
+at all for a
 machine record, pointing instead at the machine page, whose code-entry lookup is the only way to
-decide it. A decision is one plain
-POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
-send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
-decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
+decide it.
+Deny is one plain POST — a plain record's sends no body, a machine record's sends `{code}`, the
+code the viewer typed for that lookup — and leaves the record decided on the page. Approve POSTs
+the same body to `/api/v1/credential-requests/{id}/approve`, which Dispatch relays to the
+broker's approval route, and on a broker that takes the approver's own sign-in the answer is the
+broker's own page (`{url, expires_at}`, `isApprovalPage`), which the page navigates the browser
+to with `window.location.assign` — a top-level navigation, since the sign-in that approves
+happens on the broker's origin, in the address bar — and shows no decision: what that approval
+did is read back off the record (or the machine logins list) after the browser comes back. On a
+broker whose `BROKER_APPROVAL_*` group is unset the answer is the decision itself
+(`{state: "approved", …}`), which the page folds in as it does a denial.
+The page never says who decides: Dispatch's server names the signed-in viewer (below),
 and the broker refuses anyone the record's rule does not admit (anyone signed in for a service's
 machine login or a shared secret naming `anyone`; otherwise its approver) with `403 NOT_APPROVER`,
-surfaced verbatim.
+surfaced verbatim, and refuses an approval whose sign-in is not that person's on its own page.
 Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
 recorded decision and no buttons, on the record page and on the machine page alike, whether the
-machine page looked the login up already decided or decided it itself; every broker error
+machine page looked the login up already decided or denied it itself; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
 `RevocableList.tsx` is the revocable table both lists below render through, as
@@ -537,11 +546,20 @@ ServiceAccount token, both resolved in `cmd/dispatch/main.go`'s boot config, thr
 presents that token, read from the file at call time behind a 30-second cache since the kubelet
 rewrites it in place; the broker verifies it and finds Dispatch in its `BROKER_API_ACCOUNTS`. Its
 reads and the machine lookup return the broker's JSON body as `json.RawMessage`, relayed
-unmodified. The listed account's token is the approval credential: the broker takes the approving
-human from the request body on that caller's word, so Dispatch builds every decision
-body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
-is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
-browser's body; any other field the browser sends, an `approver` among them, is dropped.
+unmodified. What Dispatch's own credential can do to a pending request is list it, read it, deny
+it and open an approval: `Approval` and `Deny` take an `agentsecrets.Decision{Approver, Code}`,
+where `Approver` is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only
+field read from the browser's body; any other field the browser sends, an `approver` among them,
+is dropped. `Approval` reaches the broker's `POST /v1/credential-requests/{id}/approval`, which
+decides nothing: it answers the broker's own page (`{url, expires_at}`, relayed verbatim), where
+the person approves with their own Google sign-in for an OAuth client only the broker holds, and
+a broker with its `BROKER_APPROVAL_*` group set refuses `.../approve` outright. A broker with the
+group unset answers `503 APPROVAL_SIGN_IN_OFF`, and on exactly that refusal
+(`agentsecrets.ApprovalSignInOff`: that status and that code, never another 503) Dispatch sends
+the same `Decision` to `Approve`, that broker's `.../approve`, and relays its decision — which
+that broker would take on Dispatch's word anyway, so Dispatch and the broker ship together and a
+deployment sets the group when it is ready. A deny and a revoke still travel
+on this caller's word, since either can only take access away:
 `RevokeByApprover`, `MachineLogins` and `RevokeMachineLogin` send only the caller's canonical login
 as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
@@ -561,19 +579,25 @@ broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TE
 that stopped at Dispatch's own token, a file missing, unreadable or empty, is
 `500 AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE`, logged with the file's path, since the broker was
 never asked; any other failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go`
-pins the decision bodies
-against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
-(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
-`403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
-whatever login its body names, and the value released; a shared secret's request in two people's
-lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
+pins each decision's body and the broker route it reaches against a fake broker, and that
+Approve falls back to `.../approve` on `APPROVAL_SIGN_IN_OFF` alone, and
+`internal/dispatch/api/contract_test.go` round-trips a real broker
+(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`, its approval group set
+against a local issuer standing in for Google, where a test signs in as a browser does): another
+login refused `403 NOT_APPROVER` even when its browser body names the approver, the approver's
+click opening an approval that decides nothing until that person has signed in, another person's
+sign-in on it deciding nothing either, then the approver's own sign-in granting it and the value
+released; the same click against a broker with the group unset approving at once;
+a shared secret's request in two people's lists and approved by the second's sign-in;
+an automatic grant listed as automatic, revoked, and the same
 session's next request for it waiting on its owner while another session still gets it at once;
 once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
 was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a person's
 machine login listed for the person who approved it alone, another person's revoke refused
 `403 NOT_APPROVER` whatever their body names, and the approver's revoke ending the session it
 enrolled and its launcher proofs; a person's machine login refused `403 NOT_APPROVER` to another
-person's approval; and a service's login approved by a person it names nowhere, listed with its
+person's approval, and minted by that person's own sign-in with the code they typed; and a
+service's login approved by no person at all, listed with its
 service and its approver for every signed-in person, and revoked by another.
 
 ## Dark mode

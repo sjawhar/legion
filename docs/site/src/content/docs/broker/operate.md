@@ -47,6 +47,40 @@ so the list needs that pair. No secret is shared between the broker and Dispatch
 lives longer than an hour from its issue is refused, and an account the list does not name is
 answered `403 ACCOUNT_NOT_LISTED`.
 
+`BROKER_APPROVAL_ISSUER`, `BROKER_APPROVAL_CLIENT_ID`, `BROKER_APPROVAL_CLIENT_SECRET` (or
+`BROKER_APPROVAL_CLIENT_SECRET_FILE`) and `BROKER_APPROVAL_DOMAIN` are what make an approval
+carry the approving person's own sign-in. Set the four together or none of them:
+
+```sh
+BROKER_APPROVAL_ISSUER=https://accounts.google.com
+BROKER_APPROVAL_CLIENT_ID=<the broker's own OAuth client id>
+BROKER_APPROVAL_CLIENT_SECRET_FILE=/etc/agent-secrets/approval-client-secret
+BROKER_APPROVAL_DOMAIN=<your Workspace domain>
+```
+
+The client is **the broker's own**, not the one Dispatch signs people in with: create a Google
+OAuth web client whose consent screen is Internal, give it the one authorized redirect URI
+`<BROKER_PUBLIC_URL>/approve/callback` (the broker logs it at boot, on its `approval sign-in`
+line), and keep its secret where no agent and no other service can read it. With the group set,
+the broker serves its own approval pages, and `POST /v1/credential-requests/{record}/approve` is
+refused `403 APPROVAL_NEEDS_PERSON` whoever calls it. With it unset, the broker serves no page,
+refuses `POST /v1/credential-requests/{record}/approval` with `503 APPROVAL_SIGN_IN_OFF`, and
+warns at every boot that every approval is taken on the calling service's word; Dispatch reads
+that refusal and approves through `approve` instead, so a Dispatch of this release works against
+either broker, and you turn the group on once both are deployed — then turn it on before you rely
+on anything below.
+
+The broker asks for the sign-in's `auth_time` and records it on each approval it applies. Google
+returns that claim only for an app that is published and verified and has "Session age claims"
+turned on in its OAuth settings; without them the approval is recorded with none. Nothing is
+refused for it: Google re-authenticates nobody on request, so the broker sets no freshness bound.
+
+Behind a proxy or load balancer, set `BROKER_TRUSTED_PROXY_HEADER` before you set this group. The
+three approval pages take no credential, so their per-address bucket (a burst of 30, one back
+every two seconds) is the only thing in front of them, and without the header every request
+arrives from the proxy's address: one bucket for every person, which one busy client empties for
+everyone.
+
 `BROKER_SECRETS_STORE` picks the secret store: `aws-secrets-manager`, the default when it is unset,
 as above, or `gcp-secret-manager`, which takes the Google Cloud forms of the namespace and the key
 and reads nothing from AWS:
@@ -198,6 +232,7 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | Kind secrets | A `github-app` secret needs outbound HTTPS access to `api.github.com`, and a `github-owners` tag naming the GitHub accounts it mints for, which the deployment sets when it creates the secret. A `google-login` secret needs outbound HTTPS access to `oauth2.googleapis.com`. The broker reads the stored value for each release, as it reads any secret, and returns only the minted token. It needs no IAM permission to mint these values. A mint GitHub or Google refuses answers the session `502 MINT_FAILED`, naming their reason, and logs `broker: mint failed` (below). |
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
 | Dispatch | Dispatch's server calls the broker's approval routes as its own ServiceAccount. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. |
+| The approval issuer | The identity provider an approving person signs in at (`BROKER_APPROVAL_ISSUER`, Google in production), through an OAuth client the broker alone holds (`BROKER_APPROVAL_CLIENT_ID` and its secret), whose one redirect URI is `<BROKER_PUBLIC_URL>/approve/callback`. The broker reads the issuer's discovery document at startup and refuses to start if it cannot, and needs outbound HTTPS to its authorization, token and key endpoints. Every approving person must be in `BROKER_APPROVAL_DOMAIN` and able to reach `BROKER_PUBLIC_URL` in a browser. |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
 
@@ -211,11 +246,30 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   terminate TLS without setting `X-Forwarded-Proto`, and a client that sends those headers itself
   changes nothing. That holds for the machine login's token endpoint (`POST /v1/oauth/token`)
   too, whose DPoP proofs name `BROKER_PUBLIC_URL/v1/oauth/token`.
-- A listed caller's ServiceAccount token is an approval credential: the broker records whichever
-  approver its caller names, so whoever holds a listed account's token can approve as anyone.
-  List Dispatch's own account and nothing else, never one an agent's pod runs as.
-- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint
-  and secret-reread rate limiters see each caller's address rather than the proxy's. The token
+- A listed caller's ServiceAccount token lists, reads, denies and revokes, and opens an approval
+  nobody but the person it names can complete: with the `BROKER_APPROVAL_*` group set, an
+  approval is applied only by that person's own sign-in on the broker's own page, so holding a
+  listed account's token approves nothing. With the group unset it is an approval credential —
+  the broker records whichever approver its caller names, so whoever holds that token can approve
+  as anyone. Either way, list Dispatch's own account and nothing else, never one an agent's pod
+  runs as: a deny and a revoke travel on that caller's word under any configuration.
+- The approval pages (`GET /approve/{id}`, `POST /approve/{id}/start`, `GET /approve/callback`)
+  take no credential, since a person's browser has none to give until it has signed in. They are
+  reached at `BROKER_PUBLIC_URL`, so a person approving must be able to reach the broker in a
+  browser, and they share a per-address bucket of their own, a burst of 30 refilled one every two
+  seconds, answered `429 RATE_LIMITED` with `Retry-After`. Each page carries
+  `Content-Security-Policy: default-src 'none'` (the approval page's `form-action` names the
+  issuer's authorization origin beside `'self'`, since a browser checks it on the redirect the
+  button's answer makes), `X-Frame-Options: DENY` and `Cache-Control: no-store`, and loads nothing
+  at all. `/approve/{id}/start` answers `403` unless the request says it came from the broker's own
+  page (`Sec-Fetch-Site: same-origin`, or an `Origin` that is `BROKER_PUBLIC_URL`'s), and sets a
+  binding cookie named for that approval: on an https `BROKER_PUBLIC_URL` a `__Host-` cookie
+  (`Secure`, `Path=/`, no `Domain`), so no other host of your domain can plant one; on a local
+  http broker a plain cookie with no such protection.
+- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint,
+  secret-reread and approval-page rate limiters see each caller's address rather than the proxy's;
+  with the `BROKER_APPROVAL_*` group set it is required, since without it every person approving
+  shares one bucket. The token
   endpoint (`POST /v1/oauth/token`) has its own per-address bucket in each process, a burst of 60
   refilled at two a second, far above a machine's poll every five seconds and refresh about once a
   day; a refused request is `429` `invalid_request` (`RATE_LIMITED: …`) with `Retry-After`.

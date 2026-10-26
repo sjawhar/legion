@@ -261,3 +261,9 @@ a key it holds in memory and mints the two token files, each bound to a pod of i
 fake secrets file (`BROKER_FAKE_SECRETS_FILE`: each secret's name, key, tags and value, as JSON)
 plays Secrets Manager and KMS. The broker reads that file again on every call it makes to it, so
 editing it is how you write a secret here.
+
+One thing is left out rather than stood in for: the stack sets no `BROKER_APPROVAL_*` group, so
+this broker serves no approval page and takes every approval on its listed caller's word, which
+is what lets `agent-secrets-devrelay approve` decide at all. A deployment sets that group, and
+there an approval is applied only by the approving person's own sign-in
+([Approvals](/legion/broker/concepts/#approvals)).

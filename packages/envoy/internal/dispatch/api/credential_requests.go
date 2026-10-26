@@ -3,9 +3,17 @@
 // require a human caller, require the broker to be configured, resolve or read its input, call
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
 // broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
-// The one thing Dispatch supplies is who decides: approve, deny, revoke and the machine-login list
-// send the login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver,
-// and never forward the browser's body, so nothing a browser sends can name the approver.
+// The one thing Dispatch supplies is who decides: the approval, deny, revoke and the
+// machine-login list send the login requireHuman resolved, in Dispatch's canonical lowercase form,
+// as the approver, and never forward the browser's body, so nothing a browser sends can name the
+// approver.
+//
+// An approval goes one step further: Dispatch asks the broker to open one and hands the browser
+// the broker's own page, where the person approves with their own Google sign-in for a client only
+// the broker holds. So what Dispatch's own credential can do to a pending request is list it, read
+// it, deny it and open an approval nobody but the named person can complete — on a broker that
+// takes sign-ins. A broker that takes none says so (503 APPROVAL_SIGN_IN_OFF) and still decides on
+// its caller's word, and there alone Dispatch approves through that broker's approve route.
 package api
 
 import (
@@ -146,6 +154,19 @@ func (s *server) getCredentialRecord(w http.ResponseWriter, r *http.Request) {
 
 // --- POST .../{id}/approve, .../{id}/deny, .../machine-lookup ---
 
+// approveCredentialRecord opens an approval the caller completes with their own sign-in on the
+// broker's own page, and answers the broker's reply as it stands ({"url", "expires_at"}), which
+// the browser then goes to. It decides nothing: the broker applies the decision when that sign-in
+// comes back to it, for the person whose email it verified. So Dispatch's word about who is
+// approving opens an approval and does not make one.
+//
+// On exactly one refusal it decides instead: a broker whose BROKER_APPROVAL_* group is unset
+// answers 503 APPROVAL_SIGN_IN_OFF, and that broker takes an approval on its listed caller's
+// word anyway, so Dispatch sends the same decision to its approve route and relays that answer
+// ({"state": "approved", ...}), which the browser reads as decided. Nothing is weakened by it: the
+// fallback reaches only a broker that would accept the caller's word whatever Dispatch did, and
+// a broker that takes sign-ins refuses that route outright. It is what lets a deployment ship this
+// Dispatch before it sets the broker's group.
 func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -159,7 +180,10 @@ func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	body, err := client.Approve(r.Context(), r.PathValue("id"), decision)
+	body, err := client.Approval(r.Context(), r.PathValue("id"), decision)
+	if agentsecrets.ApprovalSignInOff(err) {
+		body, err = client.Approve(r.Context(), r.PathValue("id"), decision)
+	}
 	relayBrokerResponse(w, body, err)
 }
 

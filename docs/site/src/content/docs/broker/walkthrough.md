@@ -71,6 +71,12 @@ She approves it, and the page records the decision.
 
 ![The same request after approval, reading Approved just now](/legion/media/broker/credential-request-approved.png)
 
+The recording is of a broker whose `BROKER_APPROVAL_*` group is unset, where **Approve** decides
+there and then. A deployment that sets that group adds one step at exactly this point: **Approve**
+hands the browser to a page the broker serves itself, where alice signs in with her own Google
+account, and the broker records the decision only when that sign-in comes back as her
+([Approvals](/legion/broker/concepts/#approvals)). Everything before and after it is the same.
+
 ## 5. The command runs
 
 The waiting command checks the broker every few seconds, so it carries on within a few seconds of

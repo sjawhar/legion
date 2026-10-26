@@ -66,9 +66,12 @@ func Reason(err error) string {
 // Providers names the providers of its `identities`, and Nonce is the sign-in's
 // nonce; a token that carries none of them leaves them empty. For a Google ID
 // token a domain-mode CodeFlow reads, Email is `email`, EmailVerified is
-// `email_verified` (true only for the JSON true or the string "true"), and
-// HostedDomain is `hd`, the account's Workspace domain; Verify never reads
-// these three, so it leaves them empty.
+// `email_verified` (true only for the JSON true or the string "true"),
+// HostedDomain is `hd`, the account's Workspace domain, and AuthTime is
+// `auth_time`, when the person last authenticated to the issuer, which an
+// issuer returns for a request whose claims parameter asks for it
+// (CodeFlow.ConfirmURL) and which is zero for a token that carries none; Verify
+// never reads these four, so it leaves them empty.
 type Claims struct {
 	Subject       string
 	Issuer        string
@@ -81,6 +84,7 @@ type Claims struct {
 	Email         string
 	EmailVerified bool
 	HostedDomain  string
+	AuthTime      time.Time
 }
 
 // cognitoClaims are the claims beyond the standard ones that Claims carries.

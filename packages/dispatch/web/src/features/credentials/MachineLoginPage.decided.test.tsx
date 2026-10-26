@@ -41,39 +41,78 @@ async function lookUp() {
   expect(await screen.findByText("worker-7.example.com")).toBeDefined();
 }
 
-// Once the broker records the decision the page must say so and stop offering it: the looked-up
+// Once the broker records a denial the page must say so and stop offering it: the looked-up
 // record is still the pending one, so the page showed the same Approve and Deny buttons after a
-// successful click, and a second Approve reached the broker's already-decided path.
-for (const [button, word] of [
-  ["Approve", /approved/i],
-  ["Deny", /denied/i],
-] as const) {
-  test(`after ${button} succeeds the machine-login page shows the decision and no decision buttons`, async () => {
-    const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue(machineRecord());
-    const approve = spyOn(api, "approveCredentialRecord").mockResolvedValue({
-      credential_id: "cred-9",
-      grant_id: null,
-      state: "approved",
-    });
-    const deny = spyOn(api, "denyCredentialRecord").mockResolvedValue({ state: "denied" });
-    try {
-      await lookUp();
-      fireEvent.click(screen.getByRole("button", { name: button }));
-      await waitFor(() =>
-        expect((button === "Approve" ? approve : deny).mock.calls.length).toBe(1)
-      );
-      await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
-      expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
-      expect(screen.getByText(word)).toBeDefined();
-      expect(screen.queryByText(/^Approving lets/)).toBeNull();
-    } finally {
-      cleanup();
-      lookup.mockRestore();
-      approve.mockRestore();
-      deny.mockRestore();
-    }
+// successful click, and a second click reached the broker's already-decided path.
+test("after Deny succeeds the machine-login page shows the decision and no decision buttons", async () => {
+  const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue(machineRecord());
+  const deny = spyOn(api, "denyCredentialRecord").mockResolvedValue({ state: "denied" });
+  try {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(deny.mock.calls.length).toBe(1));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.getByText(/denied/i)).toBeDefined();
+    expect(screen.queryByText(/^Approving lets/)).toBeNull();
+  } finally {
+    cleanup();
+    lookup.mockRestore();
+    deny.mockRestore();
+  }
+});
+
+// On a broker that takes the approver's own sign-in, Approve decides nothing here, so the page
+// shows no decision: it hands the browser to the broker's own page, where the approver signs in
+// and the broker mints the credential.
+test("Approve sends the browser to the broker's page and records no decision here", async () => {
+  const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue(machineRecord());
+  const approval = spyOn(api, "approveCredentialRecord").mockResolvedValue({
+    expires_at: "2026-09-27T00:10:00Z",
+    url: "https://broker.example/approve/challenge-3",
   });
-}
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
+  try {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith("https://broker.example/approve/challenge-3")
+    );
+    expect(screen.queryByText(/^approved/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDefined();
+  } finally {
+    cleanup();
+    lookup.mockRestore();
+    approval.mockRestore();
+    assign.mockRestore();
+  }
+});
+
+// On a broker whose BROKER_APPROVAL_* group is unset, Approve answers the decision itself: the
+// page shows it, with the credential it minted, in place of the buttons, and goes nowhere.
+test("on a broker that takes no sign-in, Approve shows its decision and no decision buttons", async () => {
+  const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue(machineRecord());
+  const approval = spyOn(api, "approveCredentialRecord").mockResolvedValue({
+    credential_id: "cred-9",
+    grant_id: null,
+    state: "approved",
+  });
+  const assign = spyOn(window.location, "assign").mockImplementation(() => {});
+  try {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.getByText(/approved/i)).toBeDefined();
+    expect(screen.getByText("Credential cred-9")).toBeDefined();
+    expect(assign).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    lookup.mockRestore();
+    approval.mockRestore();
+    assign.mockRestore();
+  }
+});
 
 // A code looked up again after its login was decided shows what was decided, as the page does
 // right after the click, and no longer says what approving would do.
