@@ -2,59 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T20:06:29Z",
-  "round": 2,
+  "completed": "2026-10-26T20:47:40Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2269",
   "answersTesterFailures": [
-    "Daemon login: a token login answered any 5xx (the broker's 500 INTERNAL while its database is away, or the HTTPS front door's 502 while no broker serves) now takes the short schedule (2 s doubling to 10 s) with the no-HTTP-answer case; 4xx (429 included) and local failures keep 30 s doubling to 5 min. Fixed in 18abf099; the tester's two red tests in 8502875f pass unmodified.",
-    "No CI / CONFLICTING: forward merge of main@origin b4bea385 as 18f76f3c, resolving docs/site/src/content/docs/broker/operate.md; fingerprint 250fca96… unchanged before and after (PR comment 6425899340); GitHub now reports MERGEABLE."
+    "Token login spent the per-account bucket before a 500: POST /v1/launcher-credentials/token now gives back the account's and the address's rate-limit tokens when the login fails server-side (5xx), as the tree's architect decided (envoy message 4121df28): any 4xx still spends every bucket it reached. Fixed in 6df6138d; the tester's red test bcf37482 passes unmodified."
   ],
   "proof": [
     {
-      "criterion": "After a broker outage longer than a pod's lease, a Legion pod fetches a secret again within one renewal interval of the broker serving again, with no relaunch and no person acting",
-      "surface": "the real broker binary run twice on one real Postgres 16.4 database, the real agent-secrets binary (keygen, renew --pod-token-file, NAME -- cmd) as the worker shim runs it, a test-owned TCP forwarder holding one address across the restart; lease 45 s, sweep 1 s, drain 0",
+      "criterion": "The daemon logs in again within about 10 s of the broker answering, also when the broker answers 500 while its database is away, for an outage of minutes",
+      "surface": "the tester's throwaway rig: the daemon's agentsecrets.Client with its default schedules against the real broker binary built at the head, behind a real httputil.ReverseProxy front door, on real Postgres 16.4 stopped with pg_ctl -m fast",
+      "command": "cd packages/daemon && ZZ_BROKER_BIN=$TMPDIR/bin/broker ZZ_DB_URL=postgres://postgres@127.0.0.1:54487/zzrig?sslmode=disable ZZ_PGCTL=$TMPDIR/pgctl-wrap.sh ZZ_OUTAGE=240s go test -count=1 -v -run 'TestZZDaemonLoginWhileBrokerDatabaseDown|TestZZDaemonLoginRefusedKeepsLongSchedule' ./internal/agentsecrets (rig file copied in from $TMPDIR/zz_tester_daemon_test.go.keep and removed after)",
+      "observed": "answers while the database was down map[500:26], no 429; login issued 3.807s after Postgres was back; an unlisted account's 403 made one attempt in 25 s (long schedule)",
+      "headSha": "6df6138d5af1599caf80ec2a5c947163b0a4cdfc",
+      "negativeControl": "the same rig against the broker built at 18abf099 (before the fix), 40 s outage: map[429:1 500:5], login issued 23.806s after Postgres was back"
+    },
+    {
+      "criterion": "A refused credential still spends its bucket and reaches 429; a login the broker could not complete spends neither bucket",
+      "surface": "the broker's HTTP API in-process on real Postgres (newTestServerWith, store closed for the 5xx cases)",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v ./internal/broker/api ./internal/broker/ratelimit ./internal/broker/machine",
+      "observed": "all ok, 0 SKIP; TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket (tester's, unmodified), TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket, TestARefusedTokenLoginStillSpendsItsAccountBucket (five 403 ACCOUNT_NOT_LISTED then 429 RATE_LIMITED), TestAGivenBackRequestCanBeTakenAgain, TestARefusedTakeSpendsNothing PASS",
+      "headSha": "6df6138d5af1599caf80ec2a5c947163b0a4cdfc",
+      "negativeControl": "at 89a29f14 (before the fix) the tester's test fails: the daemon's login 2 with the database away = 429 RATE_LIMITED"
+    },
+    {
+      "criterion": "After a broker outage longer than a pod's lease, a Legion pod fetches a secret again within one renewal interval of the broker serving again, with no relaunch and no person acting; ended enrollments stay ended",
+      "surface": "the real broker binary run twice on one real Postgres database, the real agent-secrets binary as the worker shim runs it, a test-owned forwarder holding one address across the restart; lease 45 s, sweep 1 s",
       "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
-      "observed": "survivor held 39.948s at the stop; second broker listened 58.085s after the first exited; survivor's first CLI fetch served 86ms after listening; its renewer (never exited) renewed to 44.984s past now 5.908s after listening; broker logged 'INFO broker: gave back the time no broker was serving ... gap=58.218528s ... enrollments=2'; --- PASS (83.41s); 0 '--- SKIP'",
-      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
-      "negativeControl": "the same outage_test.go in a git-archive export of eee16056's packages/envoy, GOWORK=off: --- FAIL (77.75s) at step (1), 'agent-secrets: proof invalid: not live (PROOF_INVALID)', 0 skips"
-    },
-    {
-      "criterion": "An enrollment that was really ended stays ended: revoked, lapsed while a broker served, or renewed with another pod's or service account's token",
-      "surface": "the same real-binary run after the restart",
-      "command": "the same command, steps (3) and (4)",
-      "observed": "revoked pod (launcher DELETE) and lapsed pod (ended by the first broker's sweeper) each refused fetch 401 PROOF_INVALID 'not live' and renew 401 ENROLLMENT_NOT_LIVE; the mismatch pod's renewal with a token naming another pod UID and with another service account each refused 403 POD_IDENTITY_MISMATCH, its lease_expires_at unchanged",
-      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
-      "negativeControl": "renewing the survivor with its own pod token after the restart succeeds (step 2), so the refusals are identity- and state-specific, not a broker that refuses everything"
-    },
-    {
-      "criterion": "The guard holds for a database outage while the broker process keeps running, and under concurrent beats",
-      "surface": "in-process broker services on real Postgres",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v ./internal/broker/enroll ./internal/broker/api ./internal/broker/requests ./internal/broker/config",
-      "observed": "all ok, 395 PASS, 0 SKIP at 18abf099 (after the forward merge of main); includes TestAPodWhoseLeaseRanOutWhileNoBrokerServedRenewsAndReadsItsGrant and TestTwoBeatsAtOnceGiveTheTimeBackOnce",
-      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
-      "negativeControl": "in the same api test, a pod whose lease ran out before the last beat is refused renew 401 ENROLLMENT_NOT_LIVE; TestBeforeAnyBeatALapsedLeaseIsLapsed shows the guard off with no threshold recorded"
-    },
-    {
-      "criterion": "The daemon logs in again within about 10 s of the broker answering, also when its front door answers 502 for a down broker or the broker answers 500 while its database is away",
-      "surface": "the daemon's broker client over real HTTP: a real httputil.ReverseProxy (as Tailscale serve runs it) in front of a dead port, then forwarding to the fake broker; a broker answering 500 INTERNAL 'token login failed' (the real broker binary's answer with its Postgres stopped); a broker that hijacks and closes the connection",
-      "command": "cd packages/daemon && go test -count=3 -v -run TestTokenLoginRetries ./internal/agentsecrets && go test -count=1 ./internal/agentsecrets",
-      "observed": "TestTokenLoginRetriesQuicklyWhileTheFrontDoorAnswersForADownBroker, TestTokenLoginRetriesQuicklyWhileTheBrokerCannotReachItsDatabase (the tester's, unmodified), TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer and TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses PASS 3/3; the whole package ok",
-      "headSha": "18abf099005608d7e4cff99df46943c040010c71",
-      "negativeControl": "at 8502875f (before the fix) the tester's two tests both FAIL after 5 s 'timed out waiting: a login to succeed'; a broker answering 401 keeps the long schedule (TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses)"
+      "observed": "survivor held 39.949s at the stop; restart 58.109s after exit; first CLI fetch served 185ms after listening; renewer (never exited) renewed to 44.964s past now 5.904s after; revoked and lapsed pods refused PROOF_INVALID not live / ENROLLMENT_NOT_LIVE; mismatch renewals 403 POD_IDENTITY_MISMATCH, lease unmoved; 'gave back ... gap=58.36837s ... enrollments=2'; --- PASS (86.52s), 0 SKIP",
+      "headSha": "6df6138d5af1599caf80ec2a5c947163b0a4cdfc",
+      "negativeControl": "the same outage_test.go in a git-archive export of eee16056's packages/envoy, GOWORK=off: --- FAIL at step (1), 'agent-secrets: proof invalid: not live (PROOF_INVALID)', 0 skips"
     }
   ],
   "filesChanged": [
-    "round 2: packages/daemon/internal/agentsecrets/client.go (5xx joins the short schedule; unansweredError -> brokerUnavailableError, unavailableRetry* vars), client_test.go (renames outside the tester's tests; three long-schedule tests that used a 503 refusal now use 429 RATE_LIMITED, which stays on the long schedule)",
-    "round 2: docs/kubernetes.md, docs/site/src/content/docs/legion/troubleshooting.md (short schedule covers 5xx from the broker or its front door)",
-    "round 2: merge commit 18f76f3c resolving docs/site/src/content/docs/broker/operate.md against main",
-    "round 1 (unchanged): migration 0019, enroll.go, serving.go, requests machine_read/machine_state/sweeper, config, cmd/broker main and outage_test, api renew_liveness_test, shim comment, broker docs, envoy AGENTS.md and CHANGELOG"
+    "round 3: packages/envoy/internal/broker/ratelimit/ratelimit.go (Keyed.TakeAt with a give-back), ratelimit_test.go",
+    "round 3: packages/envoy/internal/broker/api/limits.go (refuseAddress/refuseAccount return the give-back; used only by tokenLogin), handlers_launcher.go (give back both on a 5xx), token_login_test.go (two tests beside the tester's)",
+    "round 3: docs/site/src/content/docs/broker/concepts.md, operate.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md",
+    "rounds 1-2 (unchanged): broker serving clock and guard, outage acceptance test, daemon login short schedule for no answer and 5xx, docs, merge of main"
   ],
   "trickyParts": [
-    "The 5xx error wraps the existing *APIError (Unwrap), so errors.As(err, &api) on Start's error still finds the status the tester's tests assert.",
-    "Three existing tests used a 503 refusal to exercise the long schedule; a 503 now means the broker is unavailable, so they use 429, keeping what each tests."
+    "The address bucket is given back too, not only the account bucket the tester's test names: with the daemon retrying every 10 s, the address bucket (burst 10, two a minute) drains after about two and a half minutes of a database outage, and its 429 then sends the daemon to its long schedule. Both are given back only on a 5xx after the bucket was spent; a 4xx spends both, as the architect's constraint requires.",
+    "TakeAt checks the bucket before reserving and the give-back cancels the reservation at the time of the take, since rate.Reservation.CancelAt restores nothing when called after the reservation's time."
   ],
   "deviations": [
-    "Local runs skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken by name (the pod's Postgres trusts every password); internal/broker/helper and cmd/agent-secrets fail locally on SO_PEERPIDFD and terminal job control under gVisor, identically on eee16056, and are untouched; CI runs them now that the PR is mergeable."
+    "Beyond the architect's message: the address bucket is given back on a 5xx as well as the account bucket (reason in trickyParts); told to the architect."
   ],
   "openQuestions": []
 }
