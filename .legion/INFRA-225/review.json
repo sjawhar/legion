@@ -2,28 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-225",
-  "completed": "2026-10-26T07:03:47Z",
-  "round": 6,
+  "completed": "2026-10-26T08:07:04Z",
+  "round": 7,
   "decision": "approved",
-  "reviewedCodeHead": "24d58a97d324210c84faf24a5d70ad6d8d330348",
-  "scope": "The corrective delta since round 5 (code head b2be8c44): 24d58a97, skill prose (park rule scoped to a child parked for good; a park followed by rerun_child keeps its dependents' links; 'the blocker's own merge'; 'a person or you taking its blocked-by links off') and comment-only edits in blockers.go, effects.go and controller_wake_test.go. No merge of main since round 4.",
-  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title; branch protection none. CI head 24d58a97 (newest pull_request run; compare 24d58a97...7c94db10 is .legion/ only). Tests run 40279753303 completed success (lint, typecheck, test success) at 06:56Z; pr-title success in PR Title runs 40279854802, 40279753149 and 40279753897 (40279753194 cancelled, superseded). Docs 40279753207 and Worker Image 40279753172 success; Legion Envoy and Contracts 40279753279 still queued (not required).",
+  "reviewedCodeHead": "8a3143c0c4d44d80bb6a6559b2852226110da6fe",
+  "scope": "The forward merge 8a3143c0 of main@origin 63cd684a (#2223, #2222, #2227) into the head approved in round 6 (38c3ebd4). The fingerprint changed, so this is a new round with the thermonuclear pair, not a confirmation.",
+  "fingerprint": "38c3ebd4 (round 6 approval): 1ac866f4cb14d599; d7558d78: f5600f4176c5089b. The only per-file difference is the pr-blocked row of skills/legion-architect/references/wake-routing.md (and its claude-envoy copy): the head's row is main's row (its new 'settled head whose base branch requires no check and no workflow' attempt boundary) plus exactly the branch's change ('Release it now with release_children: Legion holds it on that --blocked-by link until this issue closes, and starts it then'). Mirror byte-identical.",
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title; branch protection none. CI head 8a3143c0 (newest pull_request run; compare 8a3143c0...d7558d78 is .legion/ only). Tests run 40286479309 completed success (lint, typecheck, test success) at 08:06Z; PR Title 40286539888 success (40286479315 cancelled, superseded); Docs 40286479252 and Worker Image 40286479210 success; Legion Envoy and Contracts 40286479313 queued (not required).",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
   "verifiedThisRound": [
-    "SKILL.md:37's park-then-rerun sentence holds: park_child writes backlog (api/architect.go:881), rerun_child requires phase done and writes todo (:896-909), blockers.Unfinished counts any status but done as unfinished (blockers.go:24-26,79), so dependents stay held until the rerun's merge writes done (workflow/table.go:75) and StartUnblockedChildren (engine.go:977-1011) starts them.",
-    "'For good' matches the skill's other park uses: made unneeded (SKILL.md:36) and parked so the tree can finish (sign_off's SIGNOFF_CHILD_IN_WORKFLOW, acceptance.md:142); the restart rows of wake-routing.md:31,39 are covered by the rerun sentence.",
-    "The Go diff is comments only (no non-comment line added or removed); the new Blocked and ChildUnblockedNotice docs match engine.go:982 and effects.go:353.",
-    "The five changed skill files are byte-identical to their packages/claude-envoy/legion/ copies (thermonuclear pair, cmp and sha256).",
-    "Thread PRRT_kwDORFy7ds6wJ58k (round 5's finding) resolved by the implementer and answered by the reviewer as accepted; all nine threads resolved, each of the reviewer's carrying its answer. No bot threads.",
-    "Tester round 9 at 24d58a97: implementerProof verified, failures empty, drives the park-then-rerun sentence on the booted daemon."
+    "Auto-merged overlaps: record/record.go (main edited only PullRequest.HeadCounted/Required comments; the branch's TakenBack, CarriesRun, DispatchIssueRow and Store methods intact) and pi-legion/package.json (daemonApiVersion 37 kept). DaemonAPIVersion 37 on the branch, 36 on main; main's migrations still end at 0050, the branch adds 0051 and 0052.",
+    "No branch code reads main's changed CI verdict (classify.HeadVerdict, nothingRequired): the branch's workflow paths act only on issues at phase.Admitted, which carry no pull request (thermonuclear-deep-review).",
+    "Main's new e2e live tests compile against the branch's types: go vet ./... and go vet -tags e2e ./... in packages/daemon exit 0; their Dispatch stand-in receives no new call from the branch (boot Reconcile reuses the listing; the tick re-read asks nothing when nothing is blocked) (thermonuclear pair).",
+    "Tester round 10 at 8a3143c0: full driven battery passes, implementerProof verified, failures empty; PR body's E2E (implementer) and E2E (tester) lines name 8a3143c0.",
+    "All nine review threads resolved, each of the reviewer's carrying its answer; no new thread since round 6."
   ],
-  "notADefect": [
-    "ChildUnblockedNotice names its waited list as done when the architect re-sets a sibling's list without a parked child and the remaining blockers are already done; the reason ('every issue it waited on (X) is done') is literally true, and the architect made the edit itself.",
-    "'(a person's close, or the blocker's own merge)' does not name close_root's done write (workflow/close_root.go:32), which records a human's decision that no change is needed; the controller takes nothing either way."
-  ],
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality once at 24d58a97: both APPROVE; the quality pass's two minor wording notes judged not defects above. Provider not verified: the subagent transcripts render without provider or model, and the sql session store is not readable from this pod (no psql).",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality once at 8a3143c0: both APPROVE, no findings. Provider not verified: the subagent transcripts render without provider or model, and the sql session store is not readable from this pod (no psql).",
   "acceptedRisks": "The two event-lag windows and the whole-mirror read stay on the PR's Not proven / risk line, as the architect ruled."
 }
