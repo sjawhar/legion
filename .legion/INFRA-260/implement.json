@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-260",
+  "completed": "2026-10-26T00:53:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2217",
+  "codeHead": "1caf0c2404148adf74f3c9fb7220ea3efa581fd5",
+  "rig": "PostgreSQL 17.11 + pgvector 0.8.0 rootless under /legion/scratch/tmp/infra260/pg (root/, data/, sock/, server.log), listening 127.0.0.1:5434 with max_connections=600, template1 recreated under ICU (select 'a' < 'B' -> t) with the vector extension. Still running. DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable'. For psql/pg_ctl: PATH=/legion/scratch/tmp/infra260/pg/root/usr/lib/postgresql/17/bin:$PATH LD_LIBRARY_PATH=/legion/scratch/tmp/infra260/pg/root/usr/lib/x86_64-linux-gnu:/legion/scratch/tmp/infra260/pg/root/usr/lib/postgresql/17/lib. AC2 outputs: /legion/scratch/tmp/infra260/copy{1,2,3}.json; before-measurement: before{1,2,3}.txt; controls: nc-a.txt, nc-b.txt, nc-c.txt.",
+  "proof": [
+    {
+      "criterion": "Neither test asserts elapsed wall-clock time against a fixed bound; each sets suggestionTimeout on its own server and asserts a non-nil result with Missing set, reached while its query waits behind the lock.",
+      "surface": "go test of internal/dispatch/api against a real PostgreSQL 17.11 + pgvector (storetest.Open, every migration) in the issue pod",
+      "command": "cd packages/envoy && grep -nE 'time\\.(Since|Now|After|Until)|elapsed|writeSuggestionTimeout' internal/dispatch/api/suggestions_test.go; grep -n 'suggestionTimeout = lockedSuggestionAllowance' internal/dispatch/api/suggestions_test.go; DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5434/postgres?sslmode=disable go test ./internal/dispatch/api/ -run 'TestComputeAndPersistSuggestionsRespectsDeadline|TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound' -count=5 -v -timeout 10m",
+      "observed": "first grep prints nothing; second prints one line (270: srv.suggestionTimeout = lockedSuggestionAllowance, inside suggestionsBehindLock); go test: 5x --- PASS for each of the two lock tests and the pin, 0 FAIL, 0 SKIP, ok",
+      "headSha": "1caf0c2404148adf74f3c9fb7220ea3efa581fd5",
+      "negativeControl": "(a) lockedSuggestionAllowance = time.Nanosecond -> both fail: 'computeAndPersistSuggestions answered &{Related:[] Decision:<nil> Missing:the search behind it did not answer within 1ns} before its query waited behind the lock on asks, want the 1ns allowance to end while it waits' and the same for 'project lookup ... on issues'. (b) computeSuggestions given ctx instead of bounded -> test 1 alone with -timeout 2m: 'panic: test timed out after 2m0s ... running tests: TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock (2m0s)' with (*server).runFusedSearchQuery on the stack; test 2 passes under that mutation. (c) resolveSuggestionProject given ctx -> test 2 alone panics the same way naming TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked with (*server).resolveSuggestionProject on the stack; test 1 passes. Each mutation restored; jj diff empty after."
+    },
+    {
+      "criterion": "Both pass, reported as passed and not skipped, in each of three concurrent uncached copies of the package's suite run against the test Postgres on one machine.",
+      "surface": "three concurrent whole-package go test runs of internal/dispatch/api against one PostgreSQL in the issue pod (2 CPUs)",
+      "command": "cd packages/envoy && for i in 1 2 3; do go test -count=1 -timeout 240m -json ./internal/dispatch/api/ > $TMPDIR/infra260/copy$i.json 2> $TMPDIR/infra260/copy$i.err & done; then per copy jq -r 'select(.Action==\"pass\" or .Action==\"fail\" or .Action==\"skip\") | select(.Test==\"TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock\" or .Test==\"TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked\") | \"\\(.Test) \\(.Action)\"'",
+      "observed": "copy1: both pass (6.11 s, 6.02 s), package pass 2379.358 s; copy2: both pass (5.78 s, 5.63 s), package pass 2362.6 s; copy3: both pass (6.22 s, 6.22 s), package pass 2374.64 s. Each copy 1886 pass, 0 fail, 12 skip (the 12 are environment-gated tests outside this change: secrets-broker-through-Dispatch tests, TestSearchLatencyOnCorpus, TestGrowsLinearlyRejectsQuadraticFinalRungHelper); stderr empty.",
+      "headSha": "1caf0c2404148adf74f3c9fb7220ea3efa581fd5",
+      "negativeControl": "The same tests under load fail by their own guard rather than a stopwatch: with the allowance at time.Nanosecond both fail with the helper's 'answered ... before its query waited behind the lock' message (control a above), so a pass in the three copies is the waiting path, not an early answer."
+    },
+    {
+      "criterion": "The comment at register says a zero-Deps call must stay cheap and must not dial.",
+      "surface": "server.go source and the pin test TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound, which calls register(http.NewServeMux(), Deps{})",
+      "command": "cd packages/envoy && grep -n -B6 '^func register(' internal/dispatch/api/server.go; go test ./internal/dispatch/api/ -run TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound -count=5 -v (within the AC1 command)",
+      "observed": "lines 329-332: 'It is also called with a zero Deps, as TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and must not dial or read the nil Store: whatever reaches the database or the network starts later, from a handler or the relay's first subscriber.' Pin: 5x --- PASS.",
+      "headSha": "1caf0c2404148adf74f3c9fb7220ea3efa581fd5",
+      "negativeControl": "Before the change, grep -n -B6 '^func register(' at 94bcae2ee88c shows only 'register is Register, answering the server it mounted, whose delivery hub and event stream relay a test waits out before its database closes.' (no zero Deps / cheap / must not dial)."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/suggestions_test.go",
+    "packages/envoy/internal/dispatch/api/server.go",
+    "docs/solutions/testing/a-test-only-knob-widens-the-value-production-runs-pin-it-at-the-construction-a-deployment-reaches-INFRA-56.md"
+  ],
+  "trickyParts": [
+    "suggestionsBehindLock checks the answer channel before every pg_locks poll, so an answer that arrives before any backend queues behind the holder fails at once; once a waiter is seen it receives the answer with no timer (plan decision 2).",
+    "The waiter query runs through the holder transaction (pg_backend_pid() = any(pg_blocking_pids(pid))), so it needs no pool connection and counts only backends blocked by the test's own lock.",
+    "Test 1 no longer seeds an answered ask: with asks locked the fused search waits first, so the decision lookup is never reached (sjawhar/legion#2158).",
+    "t.Fatalf in the helper reports at the caller's line because of t.Helper()."
+  ],
+  "deviations": [
+    "Before-measurement (plan task 2): three concurrent -count=20 copies at 94bcae2ee88c passed 120/120; -v durations are whole-test (database clone included), 1.01-5.35 s, so the old stopwatch's own elapsed value is not printed. Recorded as context, as the plan says.",
+    "-race not run in the pod (no C compiler); CI envoy-go-race is success at 1caf0c240414 (run 40248157537)."
+  ],
+  "openQuestions": []
+}
