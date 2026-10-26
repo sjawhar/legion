@@ -17,9 +17,10 @@ import (
 // The periodic turn's own re-read of Dispatch rides on the controller tick
 // (intake.ControllerTick.Observed), and is written here through the very same fenced write, so a
 // blocker whose closing event never arrived is repaired before those handlers judge. Each issue's
-// Dispatch claim is mirrored on the same row behind a fence of its own: from an issue event or a
-// view that shows it, and from Dispatch's issue.claimed and issue.released events
-// (intake.DispatchClaim), which say nothing else of the issue.
+// Dispatch claim is mirrored beside its row, behind a fence of its own (record.PutDispatchClaim):
+// from an issue event or a view that shows it, and from Dispatch's issue.claimed and
+// issue.released events (intake.DispatchClaim), which say nothing else of the issue and are kept
+// even when they arrive before the issue's first row.
 //
 // One path it never sees: an intake.ObservedIssue of an issue already recorded whose event was
 // prepared in place of none applies no handler at all (intake.settleObserved sets handlers to

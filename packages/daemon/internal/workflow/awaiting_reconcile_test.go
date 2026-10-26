@@ -71,9 +71,15 @@ func TestDecideAwaitsTable(t *testing.T) {
 		{"a person who already acted after the hand-back", func(v *awaitView) { v.Asks[0].PersonSeq = 7 }, actTellInPlace, "already acted"},
 		{"a person who acted before it", func(v *awaitView) { v.Asks[0].PersonSeq = 4 }, actEnter, "awaiting an answer"},
 		{"a person's answer of the gate's approval request after it", func(v *awaitView) {
-			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Seq: 7,
-				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, GateRequest: true, PersonAnswerSeq: 7})
+			v.GateArtifact = gateDoc
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Artifact: gateDoc, Seq: 7,
+				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
 		}, actEnter, "awaiting an answer"},
+		{"a person's answer of another document's approval request after it", func(v *awaitView) {
+			v.GateArtifact = gateDoc
+			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-plan", Kind: record.AskApproval, Artifact: "artifact-plan", Seq: 7,
+				WaitingOn: "human", WaitingOnSeq: 4, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, PersonAnswerSeq: 7})
+		}, actTellInPlace, "already acted"},
 		{"a wait on the oldest question still with the person", func(v *awaitView) {
 			v.Asks = append(v.Asks, record.RootAsk{Issue: "LEGION-208", Ask: "ask-older", Kind: record.AskQuestion,
 				Open: true, Seq: 3, WaitingOn: "human", WaitingOnSeq: 3, ByTree: true})

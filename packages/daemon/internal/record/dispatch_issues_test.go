@@ -147,21 +147,28 @@ func TestTheMirrorsClaimHasAFenceOfItsOwn(t *testing.T) {
 	})
 }
 
-// A claim event for a key the mirror has no row of writes nothing: the row needs a status and the
-// blockers, which only an issue's own observation carries. Nor does a claim with no sequence.
-func TestAClaimEventWritesNoRowOfItsOwn(t *testing.T) {
+// A claim event for a key the mirror has no row of yet is kept, but makes no row: the row needs a
+// status and the blockers, which only an issue's own observation carries, so the mirror lists
+// nothing for the key until then. The issue's first observation, an older event delivered after the
+// claim (one nak'd and redelivered), then shows the claim the newer event set, not its own. A claim
+// with no sequence writes nothing.
+func TestAClaimDeliveredBeforeItsIssuesFirstEventIsKept(t *testing.T) {
 	st := migratedStore(t)
 	records := NewStore()
 	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-901", "user:alice", 4))
+		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-901", "session:s-1", 2))
 		rows, err := records.DispatchIssues(t.Context(), tx, "LEGION")
 		if err != nil || len(rows) != 0 {
 			t.Fatalf("the mirror after a claim of an unmirrored key = %#v, %v; want no row", rows, err)
 		}
-		must(t, records.PutDispatchIssue(t.Context(), tx, DispatchIssueRow{Key: "LEGION-901", Project: "LEGION", Status: "todo", Seq: 2}))
+		must(t, records.PutDispatchIssue(t.Context(), tx, DispatchIssueRow{Key: "LEGION-901", Project: "LEGION", Status: "todo", Seq: 1, ClaimSeq: 1}))
+		rows, err = records.DispatchIssues(t.Context(), tx, "LEGION")
+		if want := []DispatchIssueRow{{Key: "LEGION-901", Project: "LEGION", Status: "todo", Blockers: []string{}, Seq: 1, ClaimedBy: "session:s-1", ClaimSeq: 2}}; err != nil || !reflect.DeepEqual(rows, want) {
+			t.Fatalf("the mirror after the issue's older first event = %#v, %v; want %#v", rows, err, want)
+		}
 		must(t, records.PutDispatchClaim(t.Context(), tx, "LEGION-901", "user:alice", 0))
-		if rows, err = records.DispatchIssues(t.Context(), tx, "LEGION"); err != nil || rows[0].ClaimSeq != 0 || rows[0].ClaimedBy != "" {
-			t.Fatalf("the mirror after a claim with no sequence = %#v, %v; want no claim", rows, err)
+		if rows, err = records.DispatchIssues(t.Context(), tx, "LEGION"); err != nil || rows[0].ClaimSeq != 2 || rows[0].ClaimedBy != "session:s-1" {
+			t.Fatalf("the mirror after a claim with no sequence = %#v, %v; want the claim at 2 kept", rows, err)
 		}
 	})
 }

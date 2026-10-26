@@ -25,8 +25,8 @@ func TestAWaitRoundTripsAndOnlyItsOwnWritersMoveTheSequences(t *testing.T) {
 		must(t, records.PutRootAsk(ctx, tx, RootAsk{Issue: "LEGION-1", Ask: "ask-q", Kind: AskQuestion, Open: true, Seq: 11,
 			WaitingOn: "human", WaitingOnSeq: 11, ByTree: true}))
 		// A gate's request only a version's turn reached holds its highest sequence in its turn.
-		must(t, records.PutRootAsk(ctx, tx, RootAsk{Issue: "LEGION-1", Ask: "ask-approval", Kind: AskApproval, WaitingOn: "agent",
-			WaitingOnSeq: 12, GateRequest: true}))
+		must(t, records.PutRootAsk(ctx, tx, RootAsk{Issue: "LEGION-1", Ask: "ask-approval", Kind: AskApproval, Artifact: "artifact-1",
+			WaitingOn: "agent", WaitingOnSeq: 12}))
 
 		must(t, records.Declare(ctx, tx, "LEGION-1", 11))
 		must(t, records.Declare(ctx, tx, "LEGION-1", 7))
@@ -68,6 +68,18 @@ func TestAWaitRoundTripsAndOnlyItsOwnWritersMoveTheSequences(t *testing.T) {
 		must(t, err)
 		if kept.HandoutSeq != 12 || kept.DeclaredSeq != 0 {
 			t.Fatalf("handout_seq = %d, declared_seq = %d after a stale copy, want them kept", kept.HandoutSeq, kept.DeclaredSeq)
+		}
+		// A newer claim the claims mirror holds is the highest the record holds at the next handout.
+		must(t, records.PutDispatchClaim(ctx, tx, "LEGION-1", "user:alice", 15))
+		must(t, records.StartHandout(ctx, tx, "LEGION-1"))
+		if claimed, err := records.Issue(ctx, tx, "LEGION-1"); err != nil || claimed.HandoutSeq != 15 {
+			t.Fatalf("handout after a claim at 15 = %+v, %v; want 15", claimed, err)
+		}
+		// The claim Unresumable reads is the claims mirror's, a claim seen before the issue's first
+		// mirrored row included.
+		must(t, records.PutDispatchClaim(ctx, tx, "LEGION-2", "user:alice", 4))
+		if holder, err := records.DispatchClaim(ctx, tx, "LEGION-2"); err != nil || holder != "user:alice" {
+			t.Fatalf("claim of an issue with no mirrored row = %q, %v; want user:alice", holder, err)
 		}
 
 		must(t, records.Declare(ctx, tx, "LEGION-1", 13))

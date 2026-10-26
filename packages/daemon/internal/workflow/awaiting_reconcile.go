@@ -78,7 +78,11 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 		if err != nil {
 			return nil, err
 		}
-		view := awaitView{Root: root, Slotted: true, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key]}
+		gateArtifact, err := e.gateArtifact(ctx, tx, root)
+		if err != nil {
+			return nil, err
+		}
+		view := awaitView{Root: root, Slotted: true, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key], GateArtifact: gateArtifact}
 		for _, member := range issues {
 			if member.Tree == root.Key && member.Key != root.Key {
 				view.Members = append(view.Members, member)
@@ -128,14 +132,17 @@ const (
 
 // awaitView is what decideAwait reads of one root: its record, whether it holds a slot, the other
 // members of its tree, why it could not resume (Unresumable, "" when it could), its architect's run
-// at the root's generation, and its asks' mirror rows.
+// at the root's generation, its asks' mirror rows, and the document its design gate is registered
+// on (GateArtifact, "" for no gate), whose approval request's answer is a review rather than a
+// person's act on an ask (RootAsk.PersonActSeq).
 type awaitView struct {
-	Root        record.Issue
-	Slotted     bool
-	Members     []record.Issue
-	Unresumable string
-	Run         record.RoleRun
-	Asks        []record.RootAsk
+	Root         record.Issue
+	Slotted      bool
+	Members      []record.Issue
+	Unresumable  string
+	Run          record.RoleRun
+	Asks         []record.RootAsk
+	GateArtifact string
 }
 
 // awaitDecision is decideAwait's answer: the act, why, the wait the root enters or is told of
@@ -186,7 +193,7 @@ func decideAwait(v awaitView) awaitDecision {
 	if why, ok := owed(v.Run); ok {
 		return awaitDecision{Why: "its architect " + why}
 	}
-	if answer, detail, ok := answeredSince(waiting, v.Asks); ok {
+	if answer, detail, ok := answeredSince(waiting, v.Asks, v.GateArtifact); ok {
 		return awaitDecision{Act: actTellInPlace, Why: "a person already acted after its hand-back", Waiting: waiting, Answer: answer, Detail: detail}
 	}
 	return awaitDecision{Act: actEnter, Why: fmt.Sprintf("question %s is awaiting an answer", waiting.Ask), Waiting: waiting}
@@ -243,19 +250,19 @@ func owed(run record.RoleRun) (string, bool) {
 
 // answeredSince names a person's act the record already holds that Dispatch recorded after waiting
 // began: their act on the subject question, or on any other ask of the root the mirror recorded one
-// on (record.RootAsk.PersonActSeq, read from the acts the ask handlers record under one rule,
-// personAct). A review of the root's spec is not read here: the architect it would resume is
-// running, and the daemon's own design-changes-requested notice is the work that reaches it (a
-// handout of its own).
-func answeredSince(waiting record.Awaiting, asks []record.RootAsk) (record.Answer, string, bool) {
+// on (record.RootAsk.PersonActSeq against the gate's document, read from the acts the ask handlers
+// record under one rule, personAct). A review of the root's spec is not read here: the architect it
+// would resume is running, and the daemon's own design-changes-requested notice is the work that
+// reaches it (a handout of its own).
+func answeredSince(waiting record.Awaiting, asks []record.RootAsk, gateArtifact string) (record.Answer, string, bool) {
 	since := waiting.Since.Seq
 	for _, ask := range asks {
-		if ask.Ask == waiting.Ask && ask.PersonActSeq() > since {
+		if ask.Ask == waiting.Ask && ask.PersonActSeq(gateArtifact) > since {
 			return record.AnsweredByAsk, ask.Ask, true
 		}
 	}
 	for _, ask := range asks {
-		if ask.PersonActSeq() > since {
+		if ask.PersonActSeq(gateArtifact) > since {
 			return record.AnsweredByReply, ask.Ask, true
 		}
 	}

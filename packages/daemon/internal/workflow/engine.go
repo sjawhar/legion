@@ -115,6 +115,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.dispatchAskClosed(ctx, tx, fact)
 	case intake.DispatchAskReply:
 		return e.dispatchAskReply(ctx, tx, fact)
+	case intake.DispatchApprovalMoved:
+		return e.dispatchApprovalMoved(ctx, tx, fact)
 	case intake.DispatchAskRestored:
 		return e.dispatchAskRestored(ctx, tx, fact)
 	case intake.HandoffComplete:
