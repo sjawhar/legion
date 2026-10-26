@@ -796,7 +796,7 @@ LEGION_E2E_MODEL_ROUTE=key-file \
 LEGION_E2E_DAEMON_PORT=<port> LEGION_E2E_WORKER_STREAM_PORT=<port> \
 LEGION_E2E_DISPATCH_PORT=<port> LEGION_E2E_ENVOY_PORT=<port> LEGION_E2E_NATS_PORT=<port> \
 LEGION_E2E_SESSION_DB_PORT=<port> \
-  bash scripts/e2e/claude-backend-sandbox.sh     # the same, through the bridge; needs passwordless sudo
+  bash scripts/e2e/claude-backend-sandbox.sh     # the same, through the bridge; needs docker
 ```
 
 **Devbox only; CI does not run this script.** It proves `worker_backends` under the Kubernetes
@@ -911,7 +911,9 @@ it: under `gateway`, `{pod,models}.yml` with `LEGION_E2E_MODEL_GATEWAY_URL` and
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` (both required then); under `key-file`,
 `{pod,models}-key-file.yml`, which carry no projected token and read the same Secret's
 `ANTHROPIC_API_KEY`. `LEGION_E2E_POD_REACHABILITY` (required, `aws-private-ip` or `bridge`) is how
-the pods reach the run's services on the devbox ([Pod reachability](#pod-reachability), below).
+the pods reach the run's services on the devbox ([Pod reachability](#pod-reachability), below), and
+`LEGION_E2E_DAEMON_CONTAINER_MOUNTS` (optional, `bridge` only) the extra read-only mounts of the
+daemon's container there.
 The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name another deployment's two
 role Apps; a run here sets none and takes this deployment's own. `prerequisites` refuses a
 malformed one by name, never printing it, and proves each key is its id's App
@@ -964,8 +966,8 @@ Stage 4a's does ([The bridge](#the-bridge-legion_e2e_pod_reachabilitybridge)):
 - **`aws-private-ip`**: the pods reach the devbox at its private address, which `prerequisites`
   reads from instance metadata, refusing the run when it is unreachable or holds no `local-ipv4`.
   The six services bind that address, each on a port the devbox's security group admits from the
-  Legion nodes ([Port admission](#port-admission)). This mode needs no bridge, no sudo and no
-  private mount namespace.
+  Legion nodes ([Port admission](#port-admission)). This mode needs no bridge, and the daemon runs
+  on the devbox as a plain process.
 - **`bridge`**: for a cluster whose pods cannot reach the devbox at all (no tailnet, no routable
   private address — GKE's shape). The six services bind the devbox's loopback, each on a port
   that need only be free on the devbox, and `begin bridge`, right after `begin snapshot`, stands up
@@ -976,24 +978,51 @@ Stage 4a's does ([The bridge](#the-bridge-legion_e2e_pod_reachabilitybridge)):
   `bridge-<label>.legion.svc.cluster.local`.
 
 The daemon and the pods read one `legion.yaml`, so under `bridge` its URLs name that Service, which
-the devbox cannot resolve. The daemon alone runs in a private mount namespace whose `/etc/hosts` is
-the devbox's own plus `127.0.0.1 <that name>`. The devbox refuses unprivileged user namespaces, so
-root makes it: `sudo -n unshare --mount --propagation private` runs a root `bash` that bind-mounts
-that file over `/etc/hosts`, and `setpriv --reuid --regid --init-groups` drops back to the devbox
-user and that user's groups before the daemon runs. sudo resets the environment, so the daemon's
-own — the one it has under `aws-private-ip`, the caller's less the NATS seeds, the App keys, the
-public-repository token and `ANTHROPIC_API_KEY` — travels NUL-separated in an owner-only file the
-root `bash` reads and removes, never an argument. Every link after sudo execs rather than forks, so
-the pid the wrapper records is the daemon's own. This mode needs passwordless sudo (`sudo -n true`,
-refused by name when it asks for a password), and `sudo`, `setpriv`, `unshare` and `getent` beside
-the tools both modes need (`sha256sum` among them, which also holds the session table's copy of the
-transcript to the pod's).
+the devbox cannot resolve. The daemon alone runs in a container on the devbox's own network:
+`docker run --network host --add-host <that name>:127.0.0.1`, so the services it dials on loopback
+and the API and worker stream it binds are the devbox's, and that name maps to loopback in the
+container's `/etc/hosts` alone. Production runs this daemon in a pod, so a static binary in a
+container is close to how operators run it; the mode needs docker, which both modes need anyway,
+and no root. The container:
 
-`prerequisites` proves that namespace before the run creates anything. A probe runs in it exactly as
-the daemon will and must print the pid the wrapper recorded, the devbox user's own uid and gid, and
-`127.0.0.1` from `getent hosts <that name>`; outside it, `getent hosts` of the same name must
-resolve nothing; and the devbox's `/etc/hosts` must hold the same sha256 after the probe as before
-it. Nothing outside the daemon's process changes.
+- runs the run's own `legion`, built static (`CGO_ENABLED=0`), in
+  `mirror.gcr.io/library/busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e`,
+  pinned by digest: the daemon needs nothing of an image, and busybox carries the `sh`, `tr` and
+  `base64` each App's `private_key_command` runs ([`lib/github-apps.sh`](#libgithub-appssh));
+- runs as the devbox user (`--user <uid>:<gid>`), with `--init`, whose reaper at pid 1 hands the
+  daemon the TERM docker delivers and reaps whatever a key command or auth plugin leaves orphaned;
+- mounts every path at its own path, so every path `legion.yaml` names works unchanged: the run's
+  scratch directory read-write (the binary, `legion.yaml`, the state directory, the token files);
+  read-only, the runtime kubeconfig, the auth plugin its context's user execs (if it names one), the
+  App key runner (`secrets` unless `LEGION_E2E_APP_KEY_RUNNER` names another), each resolved on the
+  devbox as the daemon resolves it, the devbox's `/etc/ssl/certs`, the file
+  `GOOGLE_APPLICATION_CREDENTIALS` names (if it names one), each existing absolute path a passed
+  variable below names (the key runner's key directory, a gcloud configuration directory), and each
+  path of
+  `LEGION_E2E_DAEMON_CONTAINER_MOUNTS` (optional), a colon-separated list of absolute host paths for
+  what the auth plugin or the key runner reads beyond its own binary (a gcloud configuration
+  directory, say), refused by name with the other inputs when an entry is not an existing absolute
+  path or holds a comma;
+- has `HOME` a directory of the scratch directory's (0700) and `PATH` the image's `/bin` followed by
+  the two binaries' directories, and takes from the caller's environment only the variables whose
+  names start with `AGENT_SECRETS_` or `CLOUDSDK_`, `GOOGLE_APPLICATION_CREDENTIALS` and
+  `KUBECACHEDIR`, each by name (`-e NAME`, never a value on an argv); nothing else of the caller's
+  enters it, so neither the App keys nor the NATS seeds nor `ANTHROPIC_API_KEY` can.
+
+The docker client runs attached in the background, its output appended to the daemon's log, and is
+the pid the run stops: its default `--sig-proxy` hands the container the TERM, and the `EXIT` trap
+then removes the container by name (`legion-e2eccs-daemon-<pid>`, which `refuse_leftovers` reads
+like the run's other containers) before the bridge and the teardown. The bridge's watchdog stops
+the daemon with `docker kill --signal TERM` on that name.
+
+`prerequisites` proves the container before the run creates anything: `getent hosts <that name>`
+must resolve nothing on the devbox; the auth plugin and the key runner must each resolve to a
+regular executable; and a probe container run with exactly the daemon's `docker run` arguments,
+which one helper builds for both, must print the devbox user's own uid and gid, an `/etc/hosts` line
+mapping the name to `127.0.0.1`, and the key runner and the auth plugin, looked up by name, at the
+paths the devbox resolves them to. Each observed value is printed. `getent` is required beside the
+tools both modes need (`sha256sum` among them, which holds the session table's copy of the
+transcript to the pod's).
 
 ### The runtime identity on GKE
 

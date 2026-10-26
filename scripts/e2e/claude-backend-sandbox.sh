@@ -56,12 +56,13 @@
 #     (bridge-<the run's label>) whose reverse tunnel forwards each of the six ports back to it;
 #     the pods dial the Service's cluster-DNS name. The daemon and the pods read one legion.yaml,
 #     so its URLs name that Service, which the devbox cannot resolve: the daemon alone runs in a
-#     private mount namespace whose /etc/hosts is the devbox's plus `127.0.0.1 <that name>`. Root
-#     makes it (`sudo -n unshare --mount`, since the devbox refuses unprivileged user namespaces)
-#     and drops back to the devbox user and its groups (`setpriv`) before the daemon runs, handing
-#     it the environment it would have had (through an owner-only file, never an argument); nothing
-#     outside that process changes, which prerequisites proves before the run creates anything. This
-#     mode needs passwordless sudo.
+#     container on the devbox's own network (`docker run --network host --add-host <that
+#     name>:127.0.0.1`), a static build of it in a minimal image pinned by digest, as the devbox
+#     user, with every file legion.yaml names mounted at its own path and none of the caller's
+#     environment but what the runtime kubeconfig's auth plugin and the App key runner read, passed
+#     by name. Production runs this daemon in a pod, so a static binary in a container is close to
+#     how operators run it. Prerequisites proves that container before the run creates anything.
+#     This mode needs docker, which both modes need anyway, and no root.
 # Nothing is defaulted: every port, the reachability, the cluster, the image and the model route are
 # the operator's to name, and an unset one is refused by name before the run creates anything.
 #
@@ -97,6 +98,11 @@
 #   and read the same providers Secret's ANTHROPIC_API_KEY that the Claude lane uses.
 # - LEGION_E2E_POD_REACHABILITY (required, `aws-private-ip` or `bridge`, above) is how the pods
 #   reach the devbox's services.
+# - LEGION_E2E_DAEMON_CONTAINER_MOUNTS (optional, bridge only) is a colon-separated list of absolute
+#   host paths the daemon's container mounts read-only at their own paths, for what the runtime
+#   kubeconfig's auth plugin or the App key runner reads beyond its own binary (a gcloud
+#   configuration directory, say). An entry that is not an existing absolute path, or that holds a
+#   comma, is refused by name with the other inputs.
 # - LEGION_E2E_DAEMON_PORT, LEGION_E2E_WORKER_STREAM_PORT, LEGION_E2E_DISPATCH_PORT,
 #   LEGION_E2E_ENVOY_PORT, LEGION_E2E_NATS_PORT and LEGION_E2E_SESSION_DB_PORT (all required, all
 #   distinct, in both modes) are the ports the daemon's API, its worker stream, the scratch
@@ -173,6 +179,7 @@ port_dispatch=${LEGION_E2E_DISPATCH_PORT:-}
 port_listener=${LEGION_E2E_ENVOY_PORT:-}
 port_nats=${LEGION_E2E_NATS_PORT:-}
 port_session_db=${LEGION_E2E_SESSION_DB_PORT:-}
+daemon_container_mounts=${LEGION_E2E_DAEMON_CONTAINER_MOUNTS:-}
 operator_route=$root/deploy/kubernetes/operator-route
 route_configmap=legion-operator-route-$run_label
 providers_secret=legion-$run_label-providers
@@ -189,6 +196,13 @@ session_db_container="legion-e2eccs-db-$$"
 session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
 session_dsn_key=SESSION_DSN
 daemon_log=$evidence/logs/daemon.log
+# The daemon's container under bridge (daemon_run_args): its name, whose prefix and trailing pid
+# refuse_leftovers reads as it reads the other containers', and its image, busybox pinned by digest
+# and pulled through the mirror (AGENTS.md). The daemon is a static binary and needs nothing of an
+# image; the image is there for the `sh`, `tr` and `base64` each App's private_key_command runs
+# (lib/github-apps.sh's app_key_command).
+daemon_container="legion-e2eccs-daemon-$$"
+daemon_image=mirror.gcr.io/library/busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
 # How long a planner the driver has told to plan gets to finish, as Stage 4b's plan_seconds: before
 # its handoff it runs its two model-backed plan checks, the gap analyst and up to three plan-review
 # rounds (each a subagent call), so planning takes a whole loop of its own (wait_for_phase). The
@@ -198,8 +212,8 @@ plan_seconds=2700
 # services bind and the devbox itself dials them on, both set in prerequisites: under aws-private-ip
 # both are the devbox's private address, read from instance metadata; under bridge host is the
 # bridge Service's cluster-DNS name and bind_host loopback. legion.yaml carries host alone — under
-# bridge the daemon reads it through its private /etc/hosts — and pod_dispatch_url is Dispatch at
-# host, as the pods are handed it.
+# bridge the daemon reads it through its container's /etc/hosts (daemon_run_args) — and
+# pod_dispatch_url is Dispatch at host, as the pods are handed it.
 host=
 bind_host=
 pod_dispatch_url=
@@ -666,82 +680,186 @@ EOF
 }
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$bind_host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300 | tr '\n' '|')"; }
-# The daemon runs with the caller's environment less these, under either reachability, and less
-# every App key (app_key_unsets), which prerequisites adds once require_app_inputs has read the Apps.
+# Under aws-private-ip the daemon runs with the caller's environment less these, and less every App
+# key (app_key_unsets), which prerequisites adds once require_app_inputs has read the Apps. Under
+# bridge its container carries none of the caller's environment but the names daemon_run_args
+# passes, so none of these can reach it.
 daemon_env_unset=(-u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE
   -u GH_PUBLIC_REPO_PAT -u ANTHROPIC_API_KEY)
-# private_hosts_run PIDFILE COMMAND... runs COMMAND as the daemon runs under bridge: in a private
-# mount namespace root makes (the devbox refuses unprivileged user namespaces) whose /etc/hosts is
-# $work/hosts — the devbox's own plus `127.0.0.1 $host` — as the devbox user with that user's
-# groups, and with the environment the daemon has under aws-private-ip, the caller's less
-# daemon_env_unset. sudo resets the environment, so it travels NUL-separated in an owner-only file,
-# never on an argv (any user can read another process's /proc/<pid>/cmdline): the namespace's root
-# bash reads the file's well-formed NAME=value entries (an exported bash function's name is not
-# one), removes it, clears its own environment and exports those entries alone, which setpriv keeps.
-# The paths and ids reach that bash as arguments, never as script text. sudo forks once; from there
-# every link execs — unshare (no --fork), bash, setpriv — so the pid the bash writes to PIDFILE is
-# COMMAND's own. It execs sudo itself, so it is called in a subshell: a command substitution or a
-# background job.
-# shellcheck disable=SC2016  # expanded by the namespace's bash
-private_hosts_sh='
-  set -eu
-  env_file=$1 hosts=$2 pid_file=$3 uid=$4 gid=$5
-  shift 5
-  entries=()
-  while IFS= read -r -d "" entry; do
-    if [[ $entry == *=* && ${entry%%=*} =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then entries+=("$entry"); fi
-  done <"$env_file"
-  rm -f "$env_file"
-  mount --bind "$hosts" /etc/hosts
-  setpriv=$(command -v setpriv)
-  for name in $(compgen -e); do unset "$name" 2>/dev/null || true; done
-  # A name bash holds read-only (UID, SHELLOPTS) cannot be imported, and no daemon reads one.
-  for entry in "${entries[@]}"; do export "$entry" 2>/dev/null || true; done
-  echo "$$" >"$pid_file"
-  exec "$setpriv" --reuid="$uid" --regid="$gid" --init-groups -- "$@"'
-private_hosts_run() {
-  local pid_file=$1
-  shift
-  (umask 077 && env "${daemon_env_unset[@]}" -0 >"$work/private-hosts-env") &&
-    exec sudo -n unshare --mount --propagation private -- bash -c "$private_hosts_sh" bash \
-      "$work/private-hosts-env" "$work/hosts" "$pid_file" "$(id -u)" "$(id -g)" "$@" </dev/null
+# mountable PATH: PATH can be bind-mounted into the daemon's container at its own path — absolute,
+# existing, and holding no ',' (the separator of docker's --mount) and no ':' (the separator of
+# LEGION_E2E_DAEMON_CONTAINER_MOUNTS and of PATH).
+mountable() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in *[:,]*) return 1 ;; esac
+  [ -e "$1" ]
 }
-# daemon_started_or_gone LAUNCHER: the daemon's pid file names a process this user can signal — its
-# private mount namespace has dropped to the devbox user and execed the daemon — or LAUNCHER, the
-# background sudo, has exited. sudo runs as root, so its own end is read from /proc, not kill -0.
-daemon_started_or_gone() {
-  local pid
-  pid=$(cat "$work/daemon.pid" 2>/dev/null) && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
-  [ ! -e "/proc/$1" ]
+# daemon_mounts holds the host paths the daemon's container mounts read-only at their own paths,
+# and daemon_path its PATH, both filled by prerequisites under bridge; daemon_mount_add PATH adds
+# PATH to daemon_mounts once, since docker refuses two mounts at one path.
+daemon_mounts=()
+daemon_path=/bin
+daemon_mount_add() {
+  local mount
+  for mount in "${daemon_mounts[@]}"; do [ "$mount" != "$1" ] || return 0; done
+  daemon_mounts+=("$1")
+}
+# daemon_run_args sets daemon_run to every argument of the daemon's `docker run` under bridge, up to
+# and including its image, and daemon_passed to the names of the caller's variables it passes.
+# prerequisites' probe and start_daemon both run that one array, so the probe proves the very
+# container the daemon gets. It shares the devbox's network, so the services it dials on loopback
+# and the API and worker stream it binds are the devbox's own, and --add-host maps host, the bridge
+# Service's name legion.yaml carries, to loopback in its own /etc/hosts alone. It runs as the devbox
+# user, so what it writes under $work is that user's. --init puts docker's reaper at its pid 1,
+# which hands the daemon the TERM docker delivers and reaps whatever a key command or an auth
+# plugin run leaves orphaned, which the daemon at pid 1 would leave as zombies. $work is mounted
+# read-write at its own path — the static binary, legion.yaml, its state_dir and token files, every
+# path legion.yaml names but the kubeconfig — and each path of daemon_mounts read-only at its own;
+# --mount refuses a source that does not exist rather than making an empty directory of it. Its
+# environment is HOME, a directory of $work's, PATH, and the caller's variables the auth plugin and
+# the key runner read, passed by name alone (`-e NAME`, whose value docker takes from its own
+# environment), so no value is on an argv and nothing else of the caller's — the App keys, the NATS
+# seeds, ANTHROPIC_API_KEY — enters it.
+daemon_run=()
+daemon_passed=()
+daemon_run_args() {
+  local mount name
+  daemon_run=(--rm --name "$daemon_container" --network host --add-host "$host:127.0.0.1"
+    --user "$(id -u):$(id -g)" --init --workdir "$work"
+    --mount "type=bind,source=$work,target=$work")
+  for mount in "${daemon_mounts[@]}"; do
+    daemon_run+=(--mount "type=bind,source=$mount,target=$mount,readonly")
+  done
+  daemon_run+=(-e "HOME=$work/daemon-home" -e "PATH=$daemon_path")
+  daemon_passed=()
+  while IFS= read -r name; do
+    case "$name" in
+      AGENT_SECRETS_* | CLOUDSDK_* | GOOGLE_APPLICATION_CREDENTIALS | KUBECACHEDIR)
+        daemon_run+=(-e "$name")
+        daemon_passed+=("$name")
+        ;;
+    esac
+  done < <(compgen -e)
+  daemon_run+=("$daemon_image")
+}
+# prove_daemon_container is prerequisites' proof of the daemon's container under bridge, before the
+# run creates anything. It resolves what the container mounts beside $work, refusing by name each
+# path it cannot mount: the runtime kubeconfig; the auth plugin that kubeconfig's context's user
+# execs, if it names one, and the App key runner, each a regular executable found as the daemon
+# finds it (by PATH for a bare name, as client-go and the key command's shell look it up); the
+# devbox's /etc/ssl/certs, for the daemon's HTTPS calls to GitHub; the file
+# GOOGLE_APPLICATION_CREDENTIALS names, if it names one; and LEGION_E2E_DAEMON_CONTAINER_MOUNTS. The
+# container's PATH is the image's /bin, so its `sh`, `tr` and `base64` win, then the two binaries'
+# directories. A probe then runs with the daemon's own arguments (daemon_run_args) and must print
+# the devbox user's uid and gid, an /etc/hosts line mapping host to 127.0.0.1, and the runner and
+# the auth plugin resolved by name at the paths the devbox resolves them to.
+prove_daemon_container() {
+  local runner= plugin= plugin_word gac mount bin inside got_uid got_gid got_hosts got_runner got_plugin plugin_said
+  mountable "$runtime_kubeconfig" ||
+    fail "LEGION_E2E_RUNTIME_KUBECONFIG names $runtime_kubeconfig, which the daemon's container cannot mount at its own path: it must be an existing absolute path holding no ',' or ':'"
+  runner=$(command -v "$app_key_runner") && [ -f "$runner" ] && [ -x "$runner" ] && mountable "$runner" ||
+    fail "the App key runner $app_key_runner (LEGION_E2E_APP_KEY_RUNNER) resolves to '${runner:-nothing}', not a regular executable the daemon's container can mount at its own path (absolute, holding no ',' or ':')"
+  plugin_word=$(kubectl config view --raw --minify --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" \
+    -o jsonpath='{.users[0].user.exec.command}') ||
+    fail "kubectl cannot read context $runtime_context's user from the runtime kubeconfig $runtime_kubeconfig"
+  case "$plugin_word" in
+    '') ;;
+    */*) plugin=$plugin_word ;;
+    *) plugin=$(command -v "$plugin_word") || plugin= ;;
+  esac
+  if [ -n "$plugin_word" ]; then
+    [ -n "$plugin" ] && [ -f "$plugin" ] && [ -x "$plugin" ] && mountable "$plugin" ||
+      fail "context $runtime_context's user in $runtime_kubeconfig execs the auth plugin $plugin_word, which resolves to '${plugin:-nothing}', not a regular executable the daemon's container can mount at its own path (absolute, holding no ',' or ':')"
+  fi
+  gac=${GOOGLE_APPLICATION_CREDENTIALS:-}
+  if [ -f "$gac" ]; then
+    mountable "$gac" ||
+      fail "GOOGLE_APPLICATION_CREDENTIALS names $gac, which the daemon's container cannot mount at its own path: it must be absolute and hold no ',' or ':'"
+  else
+    gac=
+  fi
+  daemon_mounts=()
+  for mount in "$runtime_kubeconfig" "$plugin" "$runner" /etc/ssl/certs "$gac" "${daemon_extra_mounts[@]}"; do
+    [ -z "$mount" ] || daemon_mount_add "$mount"
+  done
+  # A variable the container is passed by name whose value is a path (the key runner's key directory,
+  # the gcloud config) is useless inside without that path, so each one naming an existing absolute
+  # path is mounted read-only at it too.
+  local name value
+  while IFS= read -r name; do
+    case "$name" in AGENT_SECRETS_* | CLOUDSDK_* | KUBECACHEDIR) ;; *) continue ;; esac
+    value=${!name}
+    case "$value" in /*) ;; *) continue ;; esac
+    [ -e "$value" ] || continue
+    mountable "$value" ||
+      fail "$name names $value, which the daemon's container cannot mount at its own path: it must hold no ',' or ':'"
+    daemon_mount_add "$value"
+  done < <(compgen -e)
+  daemon_path=/bin
+  for bin in "$runner" "$plugin"; do
+    [ -n "$bin" ] || continue
+    case ":$daemon_path:" in
+      *":$(dirname "$bin"):"*) ;;
+      *) daemon_path+=":$(dirname "$bin")" ;;
+    esac
+  done
+  mkdir -p "$work/daemon-home"
+  chmod 0700 "$work/daemon-home"
+  daemon_run_args
+  # shellcheck disable=SC2016  # expanded by the probe's shell
+  inside=$(docker run "${daemon_run[@]}" sh -c '
+    printf "uid %s\n" "$(id -u)"
+    printf "gid %s\n" "$(id -g)"
+    printf "hosts %s\n" "$(awk -v host="$1" "!/^#/ { for (i = 2; i <= NF; i++) if (\$i == host) { print; exit } }" /etc/hosts)"
+    printf "runner %s\n" "$(command -v "$2")"
+    [ -z "$3" ] || printf "plugin %s\n" "$(command -v "$3")"' sh "$host" "$app_key_runner" "$plugin_word" 2>&1) ||
+    fail "the daemon's container ($daemon_image) could not run its probe: $(tr '\n' ' ' <<<"$inside" | cut -c1-300)"
+  got_uid=$(sed -n 's/^uid //p' <<<"$inside")
+  got_gid=$(sed -n 's/^gid //p' <<<"$inside")
+  got_hosts=$(sed -n 's/^hosts //p' <<<"$inside")
+  got_runner=$(sed -n 's/^runner //p' <<<"$inside")
+  got_plugin=$(sed -n 's/^plugin //p' <<<"$inside")
+  [ "$got_uid $got_gid" = "$(id -u) $(id -g)" ] ||
+    fail "the daemon's container ran its probe as uid ${got_uid:-<none>} gid ${got_gid:-<none>}, want $(id -u) $(id -g), the devbox user's own"
+  awk -v host="$host" '$1 == "127.0.0.1" { for (i = 2; i <= NF; i++) if ($i == host) found = 1 } END { exit !found }' <<<"$got_hosts" ||
+    fail "the daemon's container's /etc/hosts names $host as '$got_hosts', want 127.0.0.1 (--add-host)"
+  [ "$got_runner" = "$runner" ] ||
+    fail "inside the daemon's container the App key runner $app_key_runner resolves to '${got_runner:-nothing}', want $runner, the devbox's"
+  plugin_said="the runtime kubeconfig's user execs no auth plugin"
+  if [ -n "$plugin" ]; then
+    [ "$got_plugin" = "$plugin" ] ||
+      fail "inside the daemon's container the auth plugin $plugin_word resolves to '${got_plugin:-nothing}', want $plugin, the devbox's"
+    plugin_said="the auth plugin $plugin_word is $got_plugin"
+  fi
+  note "the daemon's container ($daemon_image, docker run --network host --add-host $host:127.0.0.1 --init): its probe ran as uid $got_uid gid $got_gid, the devbox user's; its /etc/hosts: $got_hosts"
+  note "inside it the App key runner $app_key_runner is $got_runner, and $plugin_said; its PATH is $daemon_path"
+  note "mounted at their own paths: $work read-write; read-only ${daemon_mounts[*]}"
+  note "passed by name from the caller's environment: ${daemon_passed[*]:-nothing}"
 }
 # kill_harness is lib/bridge-tunnel.sh's: its watchdog stops the daemon before it ends the run. The
-# watchdog forked before the daemon started, so its own daemon_pid is empty and the daemon's pid
-# file names it. The watchdog runs under errexit, so nothing here may fail.
+# watchdog forked before the daemon started, so its own daemon_pid is empty; the container's name
+# was fixed before then, and docker signals it whoever asks. The watchdog runs under errexit, so
+# nothing here may fail.
 kill_harness() {
-  local pid=$daemon_pid
-  if [ -s "$work/daemon.pid" ]; then pid=$(cat "$work/daemon.pid" 2>/dev/null) || pid=; fi
-  if [ -n "$pid" ] && signalable "$pid" 2>/dev/null; then kill -TERM "$pid" 2>/dev/null || true; fi
+  if ! docker kill --signal TERM "$daemon_container" >/dev/null 2>&1 &&
+    [ -n "$daemon_pid" ] && signalable "$daemon_pid" 2>/dev/null; then
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+  fi
   return 0
 }
 start_daemon() {
-  local launcher
   # The daemon's own two ports alone: the run's NATS, Envoy listener, Dispatch and session database
   # hold the other four by now.
   ports_free "$port_daemon" "$port_worker_stream"
+  # Under bridge daemon_pid is the docker client, attached, so the container's output reaches the
+  # log as the daemon's own does, the client exits with the container, and its default --sig-proxy
+  # hands the container the TERM stop_pid sends; cleanup removes the container after it.
   if [ "$pod_reachability" = bridge ]; then
-    private_hosts_run "$work/daemon.pid" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 7>&- &
-    launcher=$!
-    until_true 30 "the daemon's private mount namespace to start it as $(id -un)" daemon_started_or_gone "$launcher"
-    daemon_pid=$(cat "$work/daemon.pid" 2>/dev/null) || daemon_pid=
-    case "$daemon_pid" in
-      '' | *[!0-9]*)
-        fail "the daemon's private mount namespace exited before it started the daemon: $(tail -3 "$daemon_log" | cut -c1-300 | tr '\n' '|')"
-        ;;
-    esac
+    docker run "${daemon_run[@]}" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 7>&- &
   else
     env "${daemon_env_unset[@]}" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 7>&- &
-    daemon_pid=$!
   fi
+  daemon_pid=$!
   timeout_hook=report_boot
   # The boot runs the worker image's probe pod, so the bound is the cluster's, not a local process's.
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
@@ -792,12 +910,15 @@ cleanup() {
   # Teardown is best effort: a failing command here is a warning about the teardown, never a check's
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
-  # The daemon's environment file is its private mount namespace's to remove; a start that failed
-  # before it read the file leaves it here.
-  rm -f "$work/claude-model-key" "$work/claude-key-header" "$work/private-hosts-env"
+  rm -f "$work/claude-model-key" "$work/claude-key-header"
   # The daemon goes first: a live one would launch the Sandboxes the teardown is deleting.
   collect_transcripts
   stop_pid "$daemon_pid"
+  # Under bridge that stopped the daemon's docker client; a client stop_pid had to KILL leaves its
+  # container running, so the container is removed here too, before the teardown deletes the
+  # Sandboxes. Nothing to remove under aws-private-ip. A driver killed outright leaves it for the
+  # next run's refuse_leftovers, which names it.
+  docker rm -f "$daemon_container" >/dev/null 2>&1 || true
   # The bridge next, before the sweep below kills its chisel client, which its watchdog would read as
   # a dead tunnel; a no-op when bridge_start never ran.
   bridge_stop
@@ -871,16 +992,27 @@ for named in "LEGION_E2E_DAEMON_PORT:$port_daemon" "LEGION_E2E_WORKER_STREAM_POR
 done
 [ "$(printf '%s\n' "$port_daemon" "$port_worker_stream" "$port_dispatch" "$port_listener" "$port_nats" "$port_session_db" | sort -u | wc -l)" = 6 ] ||
   fail "the six ports must differ: daemon $port_daemon, worker stream $port_worker_stream, Dispatch $port_dispatch, Envoy $port_listener, NATS $port_nats, session database $port_session_db"
+# The daemon's container's extra mounts, under bridge alone (prove_daemon_container): each entry
+# must be one docker can mount at its own path.
+daemon_extra_mounts=()
+if [ "$pod_reachability" = bridge ] && [ -n "$daemon_container_mounts" ]; then
+  IFS=: read -r -a daemon_extra_mounts <<<"$daemon_container_mounts"
+  for mount in "${daemon_extra_mounts[@]}"; do
+    mountable "$mount" ||
+      fail "LEGION_E2E_DAEMON_CONTAINER_MOUNTS names '$mount', which is not an existing absolute path holding no ',': each of its colon-separated entries is a host path the daemon's container mounts read-only at its own path"
+  done
+fi
 # The run's two role Apps, this deployment's own unless the App inputs name another's
 # (lib/github-apps.sh); a malformed input is refused here by name, never printed. No process the run
-# starts inherits an App key: the listener and Dispatch run less app_key_unsets, and the daemon less
-# daemon_env_unset, which takes the same list here, before the bridge's probe runs as the daemon will.
+# starts inherits an App key: the listener and Dispatch run less app_key_unsets, the daemon under
+# aws-private-ip less daemon_env_unset, which takes the same list here, and the daemon's container
+# under bridge carries none of the caller's environment but the names daemon_run_args passes.
 require_app_inputs implement review
 daemon_env_unset+=("${app_key_unsets[@]}")
 # sha256sum holds the session table's copy of the transcript to the pod's (pod-deleted-resumes-…).
 tools=(go docker jq curl ss kubectl bun secrets gh sha256sum)
-# Under bridge the daemon runs in a root-made private mount namespace (private_hosts_run), proven below.
-[ "$pod_reachability" != bridge ] || tools+=(sudo setpriv unshare getent)
+# getent holds the bridge Service's name to resolving nowhere on the devbox (prerequisites, below).
+[ "$pod_reachability" != bridge ] || tools+=(getent)
 for tool in "${tools[@]}"; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 refuse_leftovers legion-e2eccs
@@ -918,36 +1050,17 @@ case "$pod_reachability" in
   bridge)
     # The devbox binds loopback; the reverse-tunnel bridge (begin bridge, below) is what makes host —
     # the bridge's own ClusterIP Service, deterministic from bridge_name — dialable from inside the
-    # namespace. The daemon dials it too, through its private /etc/hosts, which this proves before
-    # the run creates anything: the wrapper runs its command as the devbox user under the pid it
-    # records, the name resolves to loopback inside it and nowhere outside it, and the devbox's own
-    # /etc/hosts is unchanged.
+    # namespace. The daemon dials it too, from its container, whose own /etc/hosts maps it to
+    # loopback: the name must resolve nowhere on the devbox itself, and prove_daemon_container
+    # proves the container before the run creates anything.
     bind_host=127.0.0.1
     host="$bridge_name.$namespace.svc.cluster.local"
-    sudo_said=$(sudo -n true 2>&1) ||
-      fail "passwordless sudo is required under LEGION_E2E_POD_REACHABILITY=bridge: the daemon alone runs in a private mount namespace whose /etc/hosts resolves $host, which only root can make on a devbox that refuses unprivileged user namespaces; sudo -n true said: $sudo_said"
-    hosts_sha=$(sha256sum /etc/hosts | cut -d' ' -f1)
-    { cat /etc/hosts && printf '\n127.0.0.1 %s\n' "$host"; } >"$work/hosts"
-    # shellcheck disable=SC2016  # expanded by the probe's shell
-    inside=$(private_hosts_run "$work/probe.pid" sh -c 'echo "$$"; id -u; id -g; getent hosts "$1"' sh "$host" 2>&1) ||
-      fail "the daemon's private mount namespace could not run its probe: $(tr '\n' ' ' <<<"$inside" | cut -c1-300)"
-    probe_pid=$(cat "$work/probe.pid" 2>/dev/null) || probe_pid=
-    rm -f "$work/probe.pid"
-    [ "$(sed -n 1p <<<"$inside")" = "$probe_pid" ] ||
-      fail "the daemon's private mount namespace recorded pid ${probe_pid:-<none>}, but its command ran as pid $(sed -n 1p <<<"$inside"): a link of the wrapper forks, so the pid it records for the daemon would not be the daemon's"
-    [ "$(sed -n 2,3p <<<"$inside" | tr '\n' ' ')" = "$(id -u) $(id -g) " ] ||
-      fail "the daemon's private mount namespace ran its command as uid and gid $(sed -n 2,3p <<<"$inside" | tr '\n' ' '), want $(id -u) $(id -g), the devbox user's own"
-    inside_hosts=$(sed -n 4p <<<"$inside")
-    awk -v host="$host" '$1 == "127.0.0.1" { for (i = 2; i <= NF; i++) if ($i == host) found = 1 } END { exit !found }' <<<"$inside_hosts" ||
-      fail "inside the daemon's private mount namespace, getent hosts $host printed '$inside_hosts', want 127.0.0.1"
     outside_status=0
     outside=$(getent hosts "$host") || outside_status=$?
     [ "$outside_status" != 0 ] ||
-      fail "$host resolves outside the daemon's private mount namespace ($outside): the name must be the daemon's alone"
-    [ "$(sha256sum /etc/hosts | cut -d' ' -f1)" = "$hosts_sha" ] ||
-      fail "the devbox's /etc/hosts changed across the private mount namespace's probe: sha256 $hosts_sha before, $(sha256sum /etc/hosts | cut -d' ' -f1) after"
-    note "the daemon's private mount namespace (sudo -n unshare --mount, setpriv): its probe ran as pid $probe_pid, the pid it recorded, uid $(id -u) gid $(id -g); inside it, getent hosts $host: $inside_hosts"
-    note "outside it, getent hosts $host resolves nothing (exit $outside_status); the devbox's /etc/hosts sha256 $hosts_sha before and after"
+      fail "$host resolves on the devbox ($outside): the name must be the daemon's container's alone, which maps it to loopback"
+    note "on the devbox, getent hosts $host resolves nothing (exit $outside_status)"
+    prove_daemon_container
     ;;
 esac
 pod_dispatch_url="http://$host:$port_dispatch"
@@ -978,7 +1091,10 @@ begin rig
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
-(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
+# The daemon is built static (CGO_ENABLED=0), so under bridge it runs in its container's minimal
+# image (daemon_run_args); the devbox runs the same binary under aws-private-ip and for the run's own
+# `legion` calls.
+(cd "$root/packages/daemon" && CGO_ENABLED=0 go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") ||
   fail "lib/built-from.sh could not say what the run built"
@@ -1066,7 +1182,7 @@ note "image probe: $(jq -c '{image, model, sandbox}' <<<"$probe")"
 if [ "$pod_reachability" = aws-private-ip ]; then
   note "the Go daemon answers http://$bind_host:$port_daemon/healthz and hosts its worker stream on tcp://$host:$port_worker_stream"
 else
-  note "the Go daemon (pid $daemon_pid, in its private mount namespace) answers http://$bind_host:$port_daemon/healthz and hosts its worker stream on the devbox, advertised to pods as http://$host:$port_daemon and tcp://$host:$port_worker_stream"
+  note "the Go daemon (container $daemon_container, its docker client pid $daemon_pid) answers http://$bind_host:$port_daemon/healthz and hosts its worker stream on the devbox's network, advertised to pods as http://$host:$port_daemon and tcp://$host:$port_worker_stream"
 fi
 pass
 
