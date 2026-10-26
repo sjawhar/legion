@@ -2,32 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T05:44:59Z",
-  "round": "generation 3, review 5647844063 at 23c91195: four false statements, text only (architect: change no code); no merge of main",
+  "completed": "2026-10-26T07:57:47Z",
+  "round": "generation 3, sent back from retro by the implementer at the architect's ruling: unbounded interest reads on GET /v1/sessions, /v1/registry/<id> and /v1/interests/<id>; no merge of main",
   "proof": [
     {
-      "criterion": "The four statements review 5647844063 names are true of the code: the core publish's context check is publishConfirmed's alone (cancel and spent deadline), and the role routes' claim read and release are bounded by store.Registry, not withinContext; no other mention in packages/envoy or docs/solutions is left stale",
-      "surface": "the repository text against the code at dfe43f43 (unchanged by this round)",
-      "command": "grep -rn -e withinContext -e 'reading it at entry' -e 'entry read' -e 'reads of ctx' -e \"publishCoreTo's read\" -e 'publishCoreTo refuses' -e 'handed only the deadline' -e 'deadline alone cannot' packages/envoy docs/solutions --include=*.go --include=*.md; grep -rn publishCoreTo packages/envoy docs/solutions; read internal/bus/nats.go publishCoreTo and internal/bus/confirm.go publishConfirmed",
-      "observed": "No mention of withinContext remains; the only grep hit is an unrelated 'entry read back' in send_route_acceptance_test.go:144; every remaining publishCoreTo mention (nats.go:917-927 comment, publish_ended_context_test.go:16 historical, :125 corrected, publish_cancel_reconnect_test.go:147/216 publishBound) is true of the code. The CHANGELOG's INFRA-141 sentence that said a core publish reads its context 'once more after any wait for a reconnect' was false the same way and is corrected too. gofmt and go vet ./internal/bus clean; go test ./internal/bus -run '^TestAPublishConfirmedWithASpentDeadlinePublishesNothing$' ok; check-private-names.sh clean. The test file's diff is comment lines only.",
-      "headSha": "954e9d1849419594a3488e45ba5fd0f533b040f3",
-      "negativeControl": "At 23c91195 the same grep finds withinContext in packages/envoy/AGENTS.md:1893, and AGENTS.md:1954, docs/architecture.md:122-127 and CHANGELOG.md:656-659 credit publishCoreTo with reads of the context that nats.go no longer makes"
+      "criterion": "On a cache miss with a bus that is connected but silent, GET /v1/sessions, GET /v1/registry/<id> and GET /v1/interests/<id> answer 503 with Retry-After: 1 and the busUnansweredPrefix body inside the 3.5 s budget, never an empty-topics row",
+      "surface": "the real envoy-listener binary built at this head, connected to a real NATS (internal/testnats/cmd/natsd) through a TCP relay that is then frozen; a session ses_bare registered through /v1/interests/subscribe and its interest record removed through DELETE /v1/interests/ses_bare, so the interest cache misses; driven with curl",
+      "command": "bash smoke.sh listener-new: GET /v1/registry/ses_bare and GET /v1/interests/ses_never (bus up); freeze the relay; GET /v1/sessions, GET /v1/registry/ses_bare, GET /v1/interests/ses_never",
+      "observed": "bus up: registry 200 (topics null), interests 404; frozen: sessions 503 in 1.002319 s, registry 503 in 1.003191 s, both {\"error\":\"envoy: the message bus did not answer: read ses_bare's interest record: context deadline exceeded\"}; interests 503 in 3.503507 s {\"error\":\"envoy: the message bus did not answer: read ses_never's interest record: context deadline exceeded\"}; each Retry-After: 1",
+      "headSha": "dc06110db7c75743ccba166df881760d810e0a8b",
+      "negativeControl": "The same rig with the listener built from the accepted head 0cfb5c6c: all three frozen requests got no answer, 'curl: (52) Empty reply from server' at 10.004 s, 10.002 s and 10.003 s"
     },
     {
-      "criterion": "The behaviour the corrected text describes is unchanged and proven at the code head",
-      "surface": "the real envoy-listener binary at dfe43f43 against a real NATS, frozen relay and a malformed claim (previous round's proof; no code changed since)",
-      "command": "previous round's smoke.sh and scripts/e2e-local.sh at dfe43f43 (implement.json at 2d63edbb)",
-      "observed": "malformed claim: lookup and role publish 500, no Retry-After, recorded role_claim_unreadable; frozen bus: send, publish and lookup 503 with Retry-After: 1 in 3.50 s; e2e-local exit 0",
-      "headSha": "dfe43f43f471a98e93d1888da21e8c36beb48d34",
-      "negativeControl": "the binary from 57d8d3bb answered the malformed claim 503 'envoy: the message bus did not answer' with Retry-After: 1 and recorded bus_unavailable"
+      "criterion": "Pinned by a test that fails before the fix; the rest of the suite stays green",
+      "surface": "go test of ./cmd/listener against the in-process NATS behind the listener test relay (relay.arm freezes it); scripts/e2e-local.sh against the real binary",
+      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip '^(TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills)$' -timeout 20m; go test ./internal/integration -count=1; bash scripts/e2e-local.sh",
+      "observed": "cmd/listener ok 269.432s, no --- FAIL; --- PASS TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget (sessions 1.00 s, registry 1.00 s, interests 3.50 s; stable at -count=3), and both tester's red tests still pass; internal/integration ok 97.569s; e2e-local exit 0, both PASS lines, bus-down send 503 in 3.503728 s, client EnvoyApiError 503; go build ./..., go vet, gofmt and check-private-names.sh clean",
+      "headSha": "dc06110db7c75743ccba166df881760d810e0a8b",
+      "negativeControl": "go test -overlay with the pre-fix api.go: 'GET /v1/sessions answered after 10.001209178s (status 200 …) want inside 4s' and 'GET /v1/registry/ses_interest_routes_subscribed_to_nothing answered after 10.000746867s (status 200 …)'; the test's own control answers 200/404 before the freeze"
     }
   ],
   "filesChanged": [
-    "packages/envoy/AGENTS.md — the role-ownership bullet names store.Registry's bound; the /v1/messages/publish row credits publishConfirmed's one check",
-    "packages/envoy/docs/architecture.md — the ended-context paragraph",
-    "packages/envoy/CHANGELOG.md — the same sentence in the INFRA-141 bullet",
-    "packages/envoy/internal/bus/publish_ended_context_test.go — the reason comment only"
+    "packages/envoy/cmd/listener/api.go — sessionInfoFor takes ctx, caps its interest read at sessionInterestReadTimeout (1 s) and returns a read that did not answer; sessionsHandler, sessionEntryHandler and adminInterestsHandler's GET take sendRequestBudget from the request and answer such a read through writeBusUnavailable",
+    "packages/envoy/cmd/listener/interest_read_routes_test.go (new)",
+    "packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, packages/envoy/CHANGELOG.md — the three routes' answers"
   ],
-  "deviations": [],
+  "trickyParts": [
+    "GET /v1/sessions refuses the whole list with the 503 on the first interest read that does not answer, rather than returning a row with empty topics: a read NATS did not serve must not read as 'subscribed to nothing'. The whole list shares one request deadline, so N cache misses cannot add up past it.",
+    "GET /v1/registry/<id>'s session read still goes through roleHolderSession (2 s cap); with the 1 s interest cap the route's worst case is 3 s, inside the budget."
+  ],
+  "deviations": [
+    "The retro notes drafted before the send-back are held outside the workspace and will be committed by the next retro, at the architect's instruction."
+  ],
   "openQuestions": []
 }
