@@ -2,71 +2,52 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T08:45:00Z",
+  "completed": "2026-10-26T09:20:00Z",
+  "round": "the implementing round after tester round 6 (verdict fail at a3fc5c94)",
   "proof": [
     {
-      "criterion": "A2 — a no-change dispatch ask is refused in a Legion pod, naming the rule and what to do, in warn and in block; the same ask with --advisor-rebuttal opens.",
-      "surface": "Nested headless Oh My Pi sessions on this branch's build (packages/pi-envoy built at the head) in this Legion pod, model anthropic/claude-opus-5-5 (52 of 52 assistant turns and every ruleModel), production Dispatch, scratch issue INFRA-465.",
-      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE -u LEGION_BOOT_TOKEN_FILE -u LEGION_TREE -u LEGION_GENERATION -u LEGION_DAEMON_URL -u LEGION_STATE_DIR LEGION_ISSUE=INFRA-465 OMP_SESSION_STORAGE=file OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <run dir> -p '<case 1 or case 2 prompt: one-line dispatch ask whose recommendation is to keep 02:00>' at 08:30Z-08:32Z; read back with bun packages/pi-envoy/scripts/askgate-report.ts --sessions <run dirs> --since 2026-10-26T08:30:00Z --sample 0 --out <dir>",
-      "observed": "Case 1 refused in both modes: 'AskGate did not send this call: a rule refuses a new ask in it. The ask matches the rule \"no change\": \"I recommend keeping it at 02:00 as it is.\".' plus the fix and the --advisor-rebuttal hint; entries decision revise, rule no_change, ruleOutcome match. Case 2 opened in both modes (8f2599d5-d081-4bf4-a40f-91a64aea2b2c block, 6f41679d-876d-4693-b3c0-43a77576553d warn), each retracted in its run; entries outcome rebuttal carrying the rebuttal line. The report: 12 gated calls, 6 refusals, 2 unreviewed sends (the rebuttals), rules outcomes match 6, none 2, 0 errors.",
-      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
-      "negativeControl": "Case 2, the rebuttal, is the call the gate must let through: it opened in both modes, so the case-1 refusal is the rule's and not a gate refusing every ask."
+      "criterion": "A2's override: after an --advisor-rebuttal pass, the agent's record of its own call still shows the flag it sent, so it does not report a rebuttal it never wrote (tester round 6 failure 1; red test cf8b4bb3).",
+      "surface": "Nested headless Oh My Pi sessions on this branch's build in this Legion pod, every assistant turn anthropic/claude-opus-5-5, production Dispatch, scratch issue INFRA-465.",
+      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE -u LEGION_BOOT_TOKEN_FILE -u LEGION_TREE -u LEGION_GENERATION -u LEGION_DAEMON_URL -u LEGION_STATE_DIR LEGION_ISSUE=INFRA-465 OMP_SESSION_STORAGE=file OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <run dir> -p \"$(cat <prompt>)\", with the tester's prompt /legion/scratch/tmp/t6/p/b5.txt twice per mode and the case-2 rebuttal prompt once per mode (runs b6r5, b6r6, c2r8 under /legion/scratch/tmp/g4); then grep for report_issue and jq of each session's toolCall commands.",
+      "observed": "0 of 6 sessions wrote xd://report_issue or said they had left the flag out. Each of the six recorded bash commands ends its first line with '# --advisor-rebuttal '<line>''. Both case-2 agents reported that AskGate turned the flag into a shell comment so dispatch never saw it. The four tester-prompt sessions each opened one ask after one no_change refusal and one rebuttal, with no retry. All six asks opened are retracted (72f87dc3, 1216e25c, 626ccadd, 97689011, b29d0249, 2af38ea5).",
+      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
+      "negativeControl": "At 23f42a77, which changed only the acknowledgement (quoting the flag as sent and saying AskGate removed it), the same six sessions (b6r1, b6r2, c2r7) gave 4 of 6 agents saying the flag was never in their command, and 2 wrote xd://report_issue; so the shell-comment change, not the wording, is what fixed it."
     },
     {
-      "criterion": "A3 — a dispatch doc-edit inserting a no-change ask block is refused, naming that block.",
-      "surface": "The same nested sessions and Dispatch.",
-      "command": "The same invocation with the case 3 prompt: one dispatch doc-edit --issue INFRA-465 with --ops-json-file - and a quoted here-document inserting ':::ask{#export-time urgency=\"med\"}' whose recommendation is to keep 02:00, in warn and in block.",
-      "observed": "Refused in both modes: 'The ask block #export-time that starts 'Keep the nightly export at 02:00 UTC, or move it to 04:00 UT' matches the rule \"no change\"'; entries rule no_change, ruleOutcome match; the scratch spec is unchanged (dispatch doc-read --issue INFRA-465).",
-      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
-      "negativeControl": "Case 0, a dispatch comment that opens no ask, was allowed in both modes with no rules call (ruleOutcome null), so the doc-edit refusal comes from the block it adds."
+      "criterion": "A5's session reader refuses a flag given twice rather than reading only its last value (tester round 6 failure 2; red test b4f74b8b).",
+      "surface": "scripts/askgate-report.ts run against the real session files of this round's runs.",
+      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --sessions $TMPDIR/g4/sessions/c2r8-warn --sessions $TMPDIR/g4/sessions/c2r8-block --since 2026-10-26T09:00:00Z --sample 0 --out $TMPDIR/g4/s2",
+      "observed": "exit 2, stderr 'askgate-report: --sessions is given more than once; give it once', nothing on stdout.",
+      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
+      "negativeControl": "The parent directory given once, --sessions $TMPDIR/g4/sessions, reads every run: gated calls 20, refusals 8, unreviewed sends 12."
     },
     {
-      "criterion": "A4 — an ask for a read the agent did not try is refused; with the agent's own error it opens.",
-      "surface": "The same nested sessions and Dispatch.",
-      "command": "The same invocation with the case 4 prompt (ask the person to run gh api orgs/example-org/settings/billing/actions, not run by the agent) and the case 5 prompt (run it first, then ask quoting its error), in warn and in block.",
-      "observed": "Case 4 refused in both modes, 'The ask matches the rule \"untried access\"'. Case 5: the agent's gh call failed with 'legion gh: \"example-org\" is not an owner of this project: /var/run/legion/gh holds no gh directory for it'; the ask quoting it was allowed in both modes, ruleOutcome none (9c670a23-e8f7-4514-a778-80f60d04d6f8 block, 680cf135-db59-46c3-8439-631021dc286a warn), each retracted in its run.",
-      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
-      "negativeControl": "Case 5 is the control that must pass, and it opened in both modes."
-    },
-    {
-      "criterion": "A5 (the session half and the Dispatch half, day 2) — the runs' decisions are listed and counted through Dispatch alone, and the census prints the day's counts.",
-      "surface": "Production Dispatch, read from this pod with no access to the nested sessions' files.",
-      "command": "dispatch read --project INFRA --artifact askgate-decisions-01a17755-1173-7517-bf3d-82483fdbdd5c-md; bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-26T08:30:00Z --json; bun scripts/dispatch/ask-census.ts --project INFRA --from 2026-10-26T00:00:00Z --to 2026-10-26T08:33:15Z --json",
-      "observed": "The per-session document exists (version 1). The reader: 84 documents, 10 sessions, 0 unreadable, 0 unparsed; total calls 8, refusals 6, byRule no_change 4 and untried_access 2, overrides 0, errors 0, all pod and none machine. The census: 51 asks on 28 issues (27 standalone, 18 decision blocks, 6 approval requests). Recorded as Day 2 in dispatch://INFRA-168/artifact/askcheck-outcome-md (version 4).",
-      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
-      "negativeControl": "The two rebuttal sessions write no rules call, and the reader counts 8 calls for the 8 sessions that ran the rules check, not 10: a session's document is counted by its rules entries, not by its existence."
-    },
-    {
-      "criterion": "The merge of sjawhar/legion#2159 at 0aa47421c keeps the ten invariants of plan rev 10, and A1's pin holds with its bytes unedited.",
-      "surface": "pi-envoy's own suite, the real Oh My Pi binary, and a deliberate break of each invariant's code.",
-      "command": "cd packages/pi-envoy && bun test (1421 pass, 0 fail) && bunx tsc --noEmit && bun test extensions/askgate/askgate.test.ts -t 'byte for byte' && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/askgate/askgate-omp.test.ts",
-      "observed": "All green: the pin passes unedited; the omp end-to-end file passes 3 of 3 against /opt/omp/bin/omp. Each new invariant test (commit 1a3739f4) and each G3 regression (commit b23a7a02) failed when its code was broken on purpose and passed when restored.",
-      "headSha": "a3fc5c940e4fa6c3f907bc7245bea47a0e449226",
-      "negativeControl": "Restoring the old NUL-joined breakerKey makes 'a target value holding a NUL cannot take another target's refusals' fail (0 pass, 1 fail); setting CEILING_MARGIN_MS back to 5_000 makes the record-inside-the-ceiling test return at 32,000 ms, past the 30,000 ms ceiling."
+      "criterion": "The notice after three rules failures in a row states what happened (those calls' asks went unchecked) and that the check still runs (architect, 08:53Z, from the tester's observation).",
+      "surface": "pi-envoy's own suite: the gate bound through envoy.ts with a stand-in model whose answers are no rules verdict.",
+      "command": "cd packages/pi-envoy && bun test (1425 pass, 0 fail), including envoy.test.ts 'three rules-check failures in a row raise the rules notice, and a new session start does not show it again' and askgate.test.ts's RULES_NOTICE tests.",
+      "observed": "The notice reads 'AskGate's rule check failed 3 times in a row, so the new asks of those 3 calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.', in the UI notice and the third call's result, and not at the next session start.",
+      "headSha": "2b7369f4928821781445af6d7ea998462737c949",
+      "negativeControl": "The old text in either test makes it fail on the exact-match assertion; no live session can force three rules failures in a row on purpose, so this one is unit-pinned and said so in the PR body."
     }
   ],
   "filesChanged": [
-    "Merge 42e29fcb (sjawhar/legion#2159 at 0aa47421c): packages/pi-envoy/extensions/askgate/{askgate-core.ts,askgate.ts,askgate.test.ts,askgate-omp.test.ts}, packages/pi-envoy/extensions/{envoy.ts,envoy.test.ts}, packages/pi-envoy/scripts/{askgate-report.ts,askgate-report.test.ts}, packages/pi-envoy/{README.md,AGENTS.md,CHANGELOG.md}, packages/envoy-client/CHANGELOG.md, packages/pi-legion/CHANGELOG.md, packages/pi-legion/scripts/skill-scenarios/{rig.sh,score.ts,score.test.ts}.",
-    "Merges 28ee86af and a3fc5c94 (main): packages/pi-envoy/CHANGELOG.md in the second.",
-    "b23a7a02: askgate-core.ts (askIdentity and breakerKey as JSON arrays), askgate.test.ts (rules test 14j and the target-forgery test), scripts/askgate-report.ts and its test (--sessions '' refused by name).",
-    "1a3739f4: askgate.test.ts and envoy.test.ts, the invariant tests."
+    "packages/pi-envoy/extensions/askgate/askgate-core.ts — Rebuttal {line, sent}; splitRebuttal and extractRebuttal keep the override as sent; keepOverrideVisible puts a command's flag back as a shell comment at the end of its first line; renderRebuttalAck per path; the rules notice text; header comment.",
+    "packages/pi-envoy/extensions/askgate/askgate.test.ts — rebuttal tests brought to the new form, a device-path ack test, a test that runs the rewritten command in bash with a here-document and checks the CLI's arguments lack the flag, the notice text.",
+    "packages/pi-envoy/extensions/envoy.test.ts — the notice text.",
+    "packages/pi-envoy/scripts/askgate-report.ts — a flag given twice is refused by name.",
+    "packages/pi-envoy/README.md, packages/pi-envoy/CHANGELOG.md — the rebuttal comment, the repeated-flag refusal, the notice."
   ],
   "trickyParts": [
-    "jj's auto-merge took hunks of #2159 outside the conflict markers that broke the invariants (each model call and each dry-run script with its own inflight entry), so askgate-core.ts was audited whole, not marker by marker.",
-    "The rules notice after three rules failures now goes to the plain log (a new runtimeLogger on AskGateHost and Deps), the UI notice and that third call's own result, never through gateLogger, which feeds the session-start notices.",
-    "score.test.ts had no markers but no longer ran: #2159 renamed its helper refused to gateRefused because main added a const refused.",
-    "main moved during the turn and conflicted again in packages/pi-envoy/CHANGELOG.md, so a second forward merge of main (a3fc5c94) was needed; the fingerprint is the same at both merged heads."
+    "Oh My Pi records a bash call as the tool_call hook returns it, so any input rewrite is what the agent reads back. A note explaining the rewrite did not move the agents (4 of 6 still disbelieved it); keeping the flag visible in the command they read did (0 of 6).",
+    "The comment goes on the first line only, so a quoted here-document's body is never touched; an override whose raw text spans lines is not put back."
   ],
   "deviations": [
-    "breakerKey, #2159's target key, joined its parts with NUL as askIdentity did, so a target value holding a NUL could take another target's refusals; it is fixed in b23a7a02 with askIdentity, under the stream rule that a defect in code this change depends on is fixed here. targetLabel prints the same label as before.",
-    "23 test titles of H are absent at the new head; every one is a #2159 test that #2159 itself removed or renamed between 92ad70863 and 0aa47421c (absent at P, present at a814c2cc). No test this change added is missing.",
-    "ce-simplify-code was not run again: skill://legion-worker/references/pr-body.md allows one pass per pull request, run at e4a3db74.",
-    "13 tests of packages/pi-legion/scripts/skill-scenarios (rig.test.ts judge-omp, rig-isolation.test.ts) fail in this pod for want of docker and because its ephemeral port range starts at 16000; the same 13 fail at #2159's head 0aa47421c here."
+    "The device path cannot keep the field (the device validates its JSON), so its acknowledgement says AskGate removed it. No Legion pod mounts a dispatch device, so that path is unit-covered only."
   ],
   "openQuestions": [
-    "sjawhar/legion#2159 is still open at 0aa47421c (REVIEW_REQUIRED). Plan rev 10: the architect holds sign-off until it merges; this branch re-merges it only when it merges or its owner asks."
+    "sjawhar/legion#2159 is still open at 0aa47421c; sign-off waits on its merge per plan rev 10."
   ],
   "discoveredComplexity": [
-    "A --advisor-rebuttal call is run and recorded with the flag removed, so in both live rebuttal runs the agent read its own call as having left the flag out and reported the gate's notice as wrong; the entry's rebuttal text proves the flag was sent. Recorded in the PR body's risk list."
+    "The tester's charter-only 20,000 ms timeout under 22 parallel sessions is load on the shared model route; nothing in this change's code adds to the charter call's time (its request is #2159's, unchanged here)."
   ]
 }
