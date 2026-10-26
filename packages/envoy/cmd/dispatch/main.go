@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 const (
@@ -93,9 +94,13 @@ type bootConfig struct {
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
 	// Empty keeps them in Postgres.
 	FileStoreBucket string
-	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
-	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
+	// ListenAddr is the address the server serves on: the inherited socket's own address with
+	// DISPATCH_LISTEN_FD, else the one main binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what serves.
 	ListenAddr string
+	// ListenSocket is the listening socket DISPATCH_LISTEN_FD names, inspected but not yet
+	// adopted: main serves on it in place of binding ListenAddr. Nil when the variable is unset.
+	ListenSocket *listenfd.Socket
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process.
 	DevSignIn bool
@@ -445,14 +450,20 @@ func main() {
 		IdleTimeout:       idleTimeout,
 		// WriteTimeout remains zero because the event stream is long-lived.
 	}
-	// Bound before serving, so an address that cannot be taken ends the process with 1: a
-	// supervisor must not read a port clash as a clean stop.
-	listener, err := net.Listen("tcp", boot.ListenAddr)
+	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
+	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
+	// the process with 1: a supervisor must not read a port clash as a clean stop.
+	var listener net.Listener
+	if boot.ListenSocket != nil {
+		listener, err = listenfd.Adopt(*boot.ListenSocket)
+	} else {
+		listener, err = net.Listen("tcp", boot.ListenAddr)
+	}
 	if err != nil {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
@@ -584,11 +595,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
 	}
 	boot.AgentTokens = tokens
-	listenAddr, err := listenAddress(env)
+	boot.ListenAddr, boot.ListenSocket, err = resolveListen(env)
 	if err != nil {
 		return bootConfig{}, err
 	}
-	boot.ListenAddr = listenAddr
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
@@ -682,6 +692,9 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in issuer, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
+		if boot.ListenSocket != nil {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: %s, must be on 127.0.0.1 or [::1]", boot.ListenSocket)
+		}
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
 	}
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
@@ -1010,6 +1023,31 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			SchemaVersion *int    `json:"schema_version"`
 		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
 	}
+}
+
+// resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket
+// that names, at the socket's own address, and DISPATCH_LISTEN_HOST and DISPATCH_PORT, each only
+// when set, must name that address: no default stands in for one that is unset. Without it, it is
+// the address listenAddress builds, for main to bind. It only inspects the socket; main adopts it,
+// so nothing a caller of resolveBootConfig gets owns a descriptor.
+func resolveListen(env settingValues) (string, *listenfd.Socket, error) {
+	descriptor, set := env.lookup("DISPATCH_LISTEN_FD")
+	if !set {
+		address, err := listenAddress(env)
+		return address, nil, err
+	}
+	socket, err := listenfd.Inspect("DISPATCH_LISTEN_FD", descriptor)
+	if err != nil {
+		return "", nil, err
+	}
+	setting := func(name string) listenfd.Setting {
+		value, set := env.lookup(name)
+		return listenfd.Setting{Name: name, Value: strings.TrimSpace(value), Set: set}
+	}
+	if err := socket.CheckAgainst(setting("DISPATCH_LISTEN_HOST"), setting("DISPATCH_PORT")); err != nil {
+		return "", nil, err
+	}
+	return socket.Addr().String(), &socket, nil
 }
 
 // listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT

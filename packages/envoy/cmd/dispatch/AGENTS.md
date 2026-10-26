@@ -277,7 +277,8 @@ write identity errors with `identity.WriteError`.
   run by `resolveBootConfig`) refuses it unless identity is cookie, every
   `DISPATCH_SIGNIN_*` setting is unset (a loopback server holds no sign-in
   client secret, and has no membership to confirm), the host of
-  `boot.ListenAddr` (the one address `main` binds) is a loopback IP literal
+  `boot.ListenAddr` (the one address the server serves on: the address `main`
+  binds, or the address of the socket `DISPATCH_LISTEN_FD` names) is a loopback IP literal
   (`routes.LoopbackHostPort`, which the route's peer check also uses), every
   `DATABASE_URL` host `pgx.ParseConfig` finds is loopback or a unix socket
   (`routes.LoopbackName`), `DISPATCH_SIGNING_KEY` is unset,

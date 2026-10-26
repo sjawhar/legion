@@ -77,10 +77,11 @@ func newPair(t *testing.T) *dispatchPair {
 	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t)}
 }
 
-// start starts both processes on the pair's database and NATS, each on a free port and in a home
-// of its own, both carrying multiprocessSigningKey, and returns once each answers /healthz. The
-// two are started together rather than one after the other: several rows are about what the two
-// do when their loops fire at the same moment, which a staggered start would hide.
+// start starts both processes on the pair's database and NATS, each on a port held for it from the
+// moment the kernel chose it (startDispatchProcessWith) and in a home of its own, both carrying
+// multiprocessSigningKey, and returns once each answers /healthz. The two are started together
+// rather than one after the other: several rows are about what the two do when their loops fire at
+// the same moment, which a staggered start would hide.
 func (p *dispatchPair) start(t *testing.T, env map[string]string) {
 	t.Helper()
 	options := dispatchOptions{NATSURL: p.nats, SigningKey: multiprocessSigningKey, Env: env}

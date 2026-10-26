@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,6 +25,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -113,16 +113,13 @@ type memoryServer struct {
 	idle    int64
 }
 
+// start starts a Dispatch server on a loopback port the kernel chose and the test holds from that
+// moment, which the server inherits as DISPATCH_LISTEN_FD and serves on, so no other program can
+// take the port before it serves.
 func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("free the port: %v", err)
-	}
+	held := cmdtest.HoldPort(t)
+	port := strconv.Itoa(held.Port)
 	command := exec.Command(os.Args[0])
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -139,9 +136,16 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
 	}
 	command.Env = append(command.Env, h.env...)
+	held.Pass(command, "DISPATCH_LISTEN_FD")
 	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
 	command.Stdout, command.Stderr = server.output, server.output
-	if err := command.Start(); err != nil {
+	err := command.Start()
+	// The server holds its own copy of the socket from here on, so it releases the port when it
+	// exits.
+	for _, file := range command.ExtraFiles {
+		_ = file.Close()
+	}
+	if err != nil {
 		t.Fatalf("start a Dispatch server: %v", err)
 	}
 	go func() {
@@ -150,8 +154,16 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	}()
 	t.Cleanup(func() { server.stop(t) })
 	deadline := time.Now().Add(time.Minute)
+	// The kernel queues a request on the held socket until the server serves it, so each one is
+	// bounded by the start's own deadline.
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
 	for {
-		if response, err := http.Get(server.base + "/healthz"); err == nil {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.base+"/healthz", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := http.DefaultClient.Do(request); err == nil {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				break

@@ -51,13 +51,15 @@ const silentProbes = 3
 // probes it runs every pass.
 const drainPollInterval = 250 * time.Millisecond
 
-// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It returns
-// the error that ended serving when serving failed, which cancels ctx.
+// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It logs the
+// address listener is bound to, whether main bound it or inherited it (DISPATCH_LISTEN_FD), so the
+// line names the port a kernel chose. It returns the error that ended serving when serving failed,
+// which cancels ctx.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery func()) error {
+	documentService *docs.Service, pool *store.Pool, waitDelivery func()) error {
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("dispatch: listening", "addr", addr)
+		slog.Info("dispatch: listening", "addr", listener.Addr().String())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 			cancel()
