@@ -2,45 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-440",
-  "completed": "2026-10-26T15:44:00Z",
-  "round": 3,
+  "completed": "2026-10-26T16:33:00Z",
+  "round": 4,
+  "scope": "The INFRA-278 architect's round-limit decision (2026-10-26 16:01Z): verify only review round 2's three fixes (Inbox asker tooltip, credential lines read once, the main merge) and the bare gates.",
   "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
-  "headTested": "1c08eb908fced3f754e88c058f221d6f8cd60829 (code head; 898338dc adds only .legion/INFRA-440/implement.json)",
+  "headTested": "8e8a07df30562494388bae76c999ea7abfa8dbcb (code head; f32daa2b adds only .legion/INFRA-440/implement.json)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command on my own lane (real Go Dispatch server via e2e/run-server.sh, Postgres 17.11/pgvector database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243; env /legion/scratch/tmp/infra440-test/env.sh) after rebuilding web/dist at 1c08eb90: `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts` -> 14 passed, 2 skipped (phone-only rows on chromium). Its new iphone row fails when the phone layout is forced back onto one line by injected CSS (expected <= 38, received 144). The credential proof was a throwaway spec; I drove the same surface independently (below) with a spec of my own."
+    "how": "Re-ran the browser part of the implementer's command on my own lane (real Go Dispatch server, Postgres 17.11/pgvector database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243; web/dist rebuilt at 8e8a07df): agent-name.e2e.ts and claim.e2e.ts on chromium and iphone -> 14 passed, 2 skipped. Recomputed its merge fingerprint independently: 8540279c... at 1c08eb90 (my round-3 head) and at the merge c3671e43, the same as the implementer's."
   },
   "failures": [],
   "failed": 0,
+  "fingerprint": {
+    "1c08eb908fced3f754e88c058f221d6f8cd60829": "8540279c86e82f008537abe14e696254460db5a04fcef5a9bcd7535c3efb78c4",
+    "c3671e430ddea0c48798f536c94e22dbfa4afc74 (merge of main)": "8540279c86e82f008537abe14e696254460db5a04fcef5a9bcd7535c3efb78c4",
+    "8e8a07df30562494388bae76c999ea7abfa8dbcb (fix commit)": "c33616354548966e888e281cfde2a9ef411d4ce995e43094de982be9f5109abd",
+    "reading": "the merge left the branch's diff unchanged; the diff changed only by the fix commit 8e8a07df (AskCard.tsx, session.ts, CredentialSessionLines.tsx and their tests), which this round drove on the real surface"
+  },
   "proof": [
     {
-      "criterion": "Review finding 1: the Inbox ask card's asker stays readable at 390 px beside the copy-handles button and the live link",
-      "surface": "real Go Dispatch server + Postgres 17.11/pgvector + Playwright Chromium 1243, iphone (390) and chromium (1280) projects, tester lane",
-      "command": "cd packages/dispatch && source /legion/scratch/tmp/infra440-test/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts; plus scratch spec /legion/scratch/tmp/infra440-test/zz-tester-r3.e2e.ts (ask card row)",
-      "observed": "the new row passes on iphone. My probe: at 390 px 'Waiting on you' takes a line of its own and the asker and time share the next (tops 468/484/498); a 68-character title reads 'Legion implementer f…' (about 20 characters, the full name in its tooltip) where round 2 read 'Le…'; 'Short (for alice)' is whole. At 1280 the turn, asker and time stay on one line (tops 676/676/676) with the 68-character title uncut. No page wider than its viewport.",
-      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
-      "negativeControl": "the new row with injected CSS restoring one row ([data-testid^=turn-]{flex-basis:auto} and its group nowrap) -> fails 'the asker's name is not cut short': Expected <= 38, Received 144"
+      "criterion": "Round 2 fix 1: the Inbox asker's tooltip carries the full session id, not the short form",
+      "surface": "real Go Dispatch server + Postgres 17.11/pgvector + Playwright Chromium 1243, chromium and iphone projects at 390 and 1280 px, tester lane",
+      "command": "scratch spec /legion/scratch/tmp/infra440-test/zz-tester-r4.e2e.ts 'ask card asker tooltip' (not committed): a titled session ask written with a personal token, an untitled session ask, then the Inbox",
+      "observed": "the asker button's name element has title 'Titled agent (for alice) · 019a2b3c-titled-0001' for the titled session and 'session:019a2b3c… · 019a2b3c-untitled-0002' for the untitled one, at 390 and 1280 on both projects; no element inside it carries a second title, so that title is the one a hover shows; agent-name.e2e.ts's phone asker row (which finds the name by that tooltip) passes",
+      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
+      "negativeControl": "the implementer's unit test against the previous AskCard.tsx fails (no element with title 'session:01234567… · 0123456789abcdef-untitled'); round 3's head showed only the short form there"
     },
     {
-      "criterion": "Review finding 2 (Security, untrusted input): a credential approval line shows the full session id and says in words when it isn't running or could not be checked",
-      "surface": "same harness; fake broker pending credential request in the Inbox and its record page /credentials/record-probe, iphone and chromium",
-      "command": "scratch spec /legion/scratch/tmp/infra440-test/zz-tester-r3.e2e.ts 'credential line, forged request id beside a real enrollment': live session 019a2b3c-real-session-0001 enrolled, request names forged 019a2b3c-forged-claim-9999; then page.route 503 on /api/v1/agents",
-      "observed": "Inbox and record page read 'The session that enrolled: Real agent · 019a2b3c-real-session-0001 · /home/alice/legion · devbox-alice' then 'session:019a2b3c… · 019a2b3c-forged-claim-9999 isn't running.'; with the agents list failing both lines read 'session:019a2b3c… · couldn't check whether <full id> is running.'; the full id wraps inside the record grid at 390 (scrollWidth 390); inbox.e2e.ts -g credential 8 passed on both projects",
-      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
-      "negativeControl": "the agents list routed to 503 -> the line says 'couldn't check', never 'isn't running' or a running place"
+      "criterion": "Round 2 fix 2: the credential lines read the agent list once and still say running / isn't running / couldn't check with the full id",
+      "surface": "same harness; fake broker pending credential request in the Inbox and on /credentials/record-probe, chromium and iphone",
+      "command": "scratch spec zz-tester-r4.e2e.ts 'credential lines': live enrolled 019a2b3c-real-session-0001, forged request id 019a2b3c-forged-claim-9999; then page.route 503 on /api/v1/agents",
+      "observed": "agent list up: 'Real agent · 019a2b3c-real-session-0001 · /home/alice/legion · devbox-alice' (mark running) and 'session:019a2b3c… · 019a2b3c-forged-claim-9999 isn't running.' (mark not-running), in the Inbox and on the record page; the words and the mark agree on every line",
+      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
+      "negativeControl": "agent list routed to 503 -> both lines read 'couldn't check whether <full id> is running.', the marks read unknown, and the page shows neither 'isn't running' nor the cached machine 'devbox-alice'"
     },
     {
-      "criterion": "Review findings 3-9 on their reader surface: attribution read once, full id behind the short form, a margin thread's composer names its root author",
-      "surface": "same harness, chromium and iphone",
-      "command": "scratch specs zz-tester-r3.e2e.ts (accessibility snapshots, same-prefix ids) and zz-tester-r3b.e2e.ts (margin composer)",
-      "observed": "claim chip and Conversation byline with an owner: img 'Running', link 'Short', text '(for alice)' (the attribution once, the link named by its visible name); the ask card's live link 'Open live conversation with Short (for alice)'; two untitled sessions 019a2b3c-aaaa-… and 019a2b3c-bbbb-… both read 'session:019a2b3c…' and each carries its own full id as title, state not-running; an expanded margin thread's composer reads 'Replying to' + img 'Running' + link 'Margin agent' (/agents/e2e-agent-aaaa/live) for an agent root and 'Replying to alice' for a person's root",
-      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
-      "negativeControl": "the round-2 head read the margin composer chip as 'Replying to ' with no author (review finding, reproduced in the implementer's negative control); the base build f1ea47ae fails agent-name.e2e.ts 9 rows on behaviour assertions (round 1)"
+      "criterion": "Round 2 fix 3 and the bare gates: the main merge for the CHANGELOG conflict leaves the change as tested; the acceptance spec passes at the new head",
+      "surface": "fingerprint per conflicts-and-rewrites.md; same browser harness",
+      "command": "fingerprint of 1c08eb90, c3671e43 and 8e8a07df against fork_point(\"main\"@origin | <head>) over '~(.legion | docs/solutions)'; `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts`",
+      "observed": "8540279c... before and after the merge (unchanged); 14 passed, 2 skipped at 8e8a07df; GitHub reports the pull request MERGEABLE",
+      "headSha": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
+      "negativeControl": "the fix commit's fingerprint differs (c3361635...), which is why fixes 1 and 2 were driven above rather than taken as a bare re-check"
     }
   ],
-  "observations": [
-    "Credential line with no source prefix: the request's own id line has no lead-in ('' in SOURCE_PREFIX.request), as before this pull request; the enrollment line keeps 'The session that enrolled:'.",
-    "At 390 px the ask card's live link keeps its 44 px touch box, which leaves a visible gap before '· just now'; layout only, no overlap."
-  ],
-  "ci": "At 1c08eb90 when read: Tests 40349942940 queued, Legion Envoy and Contracts 40349942860 (lint, typecheck, unit, browser suite) pending, Docs 40349942800 queued, Worker Image 40349943083 queued, PR Title queued (24 runs from thread activity)."
+  "ci": "At 8e8a07df when read: Tests 40358657351 queued, Legion Envoy and Contracts 40358657261 (lint, typecheck, unit, browser suite) queued, Docs 40358657264 pending, Worker Image 40358667408 queued, PR Title 40358875098 queued; mergeStateStatus BLOCKED (checks not yet run)."
 }
