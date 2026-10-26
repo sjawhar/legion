@@ -2,24 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-248",
-  "completed": "2026-10-26T05:21:25Z",
+  "completed": "2026-10-26T16:49:26Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2219",
-  "codeHead": "8951bec20fe967dc0105c26651c148b207585fb6",
+  "codeHead": "4209950d91931087e4e4913f42972076274f80f1",
   "proof": [
     {
       "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion",
       "surface": "the staged plugin partitions and the real Oh My Pi (/opt/omp/bin/omp) loading both plugins packed from the branch",
       "command": "bun test packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/scripts/prepack.test.ts packages/pi-shared/test/skills-partition.test.ts packages/pi-envoy/src/skills-guard.test.ts; LEGION_TEST_OMP=/opt/omp/bin/omp bun test packages/pi-envoy/src/skills-guard.test.ts; cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test ./internal/daemon -run 'TestTheRealPluginsOnTheRealOhMyPi|TestThePromptReferenceProbeOnTheRealOhMyPi' -count=1; and `legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models` inside the head's image (Job in namespace <namespace>, gVisor, uid 1000)",
-      "observed": "At 8951bec2: skills guards 26 pass 1 skip 0 fail; claude-envoy build --check 'dist/ and legion/ match a fresh build'; ok github.com/sjawhar/legion/daemon/internal/daemon 64.268s (TestTheRealPluginsOnTheRealOhMyPi, skill://ce-dogfood resolves without disable-model-invocation); ok internal/prompts; in the head's image (sha256:6c9d08a89e024538d2a40efcde0420ec8aa6036c2560dfd04551433e65305da2) legion probe-image 'OK … daemon-api-version=36', rc 0. CI at 8951bec2: Tests 40269794430 success.",
-      "headSha": "8951bec20fe967dc0105c26651c148b207585fb6",
+      "observed": "At 4209950d: skills guards 0 fail (28 tests); claude-envoy build --check 'dist/ and legion/ match a fresh build'; ok github.com/sjawhar/legion/daemon/internal/daemon 94.018s; in the head's image (sha256:de6098dd11e1e12a039d931671862c89cea89f71f54205f3414be20d45db5975) legion probe-image 'OK … daemon-api-version=38', rc 0. CI at 4209950d: Tests 40350573001 success.",
+      "headSha": "4209950d91931087e4e4913f42972076274f80f1",
       "negativeControl": "Scratch copy with legion-worker linking skill://ce-dogfood-missing: TestTheRealPluginsOnTheRealOhMyPi/both FAIL 'finds no skill ce-dogfood-missing (loaded by dist/skills/legion-worker/SKILL.md)'; with skill://ce-dogfood/references/missing.md: skills-guard.test.ts 1 fail '… names no file'."
     },
     {
+      "criterion": "A Legion phase worker on Claude Code can load every skill Legion's prompts name (the tester's red test 0459804d; the reviewer's finding 1)",
+      "surface": "real Claude Code 2.1.310 (npm @anthropic-ai/claude-code under $TMPDIR/claude-cc) loading the generated packages/claude-envoy/legion plugin",
+      "command": "claude -p --plugin-dir packages/claude-envoy/legion --output-format stream-json --allowedTools Skill --max-turns 4 'Use the Skill tool to load the skill legion:<name>. Then reply with only its first heading line, or the exact error the Skill tool returned.' for thermonuclear-deep-review, thermonuclear-code-quality, ce-dogfood; cd packages/claude-envoy && bun test tests/legion-plugin-fresh.test.ts && bun run typecheck",
+      "observed": "each tool_result 'Launching skill: legion:<name>' (no error), results '# Thermonuclear Deep Review', '# Thermonuclear Code Quality', '# Dogfood'; red test 5 pass; typecheck clean",
+      "headSha": "4209950d91931087e4e4913f42972076274f80f1",
+      "negativeControl": "a scratch copy of the plugin with disable-model-invocation: true put back on thermonuclear-deep-review: the Skill tool refuses it, 'cannot be used with Skill tool due to disable-model-invocation'"
+    },
+    {
       "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
-      "surface": "Worker Image run 40269794333 on the head, and a Job in namespace <namespace> (runtimeClassName gvisor, runAsUser 1000, compute class <compute class>) on its digest",
-      "command": "/legion/scratch/tmp/infra-248-job/run-job3.sh ghcr.io/sjawhar/legion-worker@sha256:6c9d08a89e024538d2a40efcde0420ec8aa6036c2560dfd04551433e65305da2 branch-8951bec20fe9 (id -u; agent-browser --version; open https://example.com; get title; close; sha256sum of the three shipped skill files; legion probe-image; grep the dashboard notices section; head of ce-dogfood's frontmatter)",
-      "observed": "pod runtimeClassName=gvisor imageID=…@sha256:6c9d08a89e024538d2a40efcde0420ec8aa6036c2560dfd04551433e65305da2; 1000; 4.19.0-gvisor; agent-browser 0.39.2; [agent-browser] launched browser / ✓ Example Domain; get title → Example Domain; ✓ Browser closed; skill hashes 87126167…, afc5e29d…, 563735f2… equal to the branch files; probe-image OK rc 0; THIRD_PARTY_NOTICES:50179 'agent-browser: the npm packages of the dashboard it embeds'; ce-dogfood frontmatter carries no disable-model-invocation; Job deleted by its trap, sequence: exit 0.",
-      "headSha": "8951bec20fe967dc0105c26651c148b207585fb6",
+      "surface": "Worker Image run 40350572969 on the head, and a Job in namespace <namespace> (runtimeClassName gvisor, runAsUser 1000, compute class <compute class>) on its digest",
+      "command": "/legion/scratch/tmp/infra-248-job/run-job3.sh ghcr.io/sjawhar/legion-worker@sha256:de6098dd11e1e12a039d931671862c89cea89f71f54205f3414be20d45db5975 branch-4209950d9193",
+      "observed": "pod runtimeClassName=gvisor imageID=…@sha256:de6098dd11e1e12a039d931671862c89cea89f71f54205f3414be20d45db5975; 1000; 4.19.0-gvisor; agent-browser 0.39.2; [agent-browser] launched browser / ✓ Example Domain; get title → Example Domain; ✓ Browser closed; skill hashes 87126167…, afc5e29d…, 563735f2… equal to the branch files; probe-image OK rc 0; THIRD_PARTY_NOTICES carries 'agent-browser: the npm packages of the dashboard it embeds'; Job deleted by its trap, sequence: exit 0.",
+      "headSha": "4209950d91931087e4e4913f42972076274f80f1",
       "negativeControl": "Same Job on main's image sha256:60562f59… (sha-a9c9542fb738): 'sh: agent-browser: not found', ce-dogfood/SKILL.md and dogfood.md absent. The Dockerfile's download/check/install lines with a wrong AGENT_BROWSER_SHA256: 'FAILED … 1 computed checksum did NOT match', exit 1."
     },
     {
@@ -89,7 +97,7 @@
   ],
   "resultsArtifact": "dispatch://INFRA-248/artifact/experiment-results-md",
   "openQuestions": [],
-  "round": 4,
+  "round": 5,
   "round2": {
     "tester failure answered": "PR #2219 was CONFLICTING against main@origin 167e30b9 (INFRA-140's asd-ste100 in pi-envoy's partition). Forward merge 600bb549 (jj new legion/INFRA-248 main@origin), conflicts in .github/workflows/release.yaml, docs/kubernetes.md, packages/pi-legion/CHANGELOG.md and skills/AGENTS.md resolved keeping both sides; GitHub now MERGEABLE.",
     "fingerprint": "b145300cb0d6d344a260836a410d8d97da7ca13f0491a247aaea54a1e70b510c -> 9ae5ce5ebdbddf768bfac7529bcf547d59c1df57faad073b32a52d4d077a9bd7, changed only in the two skills/AGENTS.md lines where the branch's edit now applies to main's new text (asd-ste100 beside ce-dogfood; Envoy five, Legion nine); posted https://github.com/sjawhar/legion/pull/2219#issuecomment-6406793017"
@@ -102,5 +110,11 @@
     "review answered": "Review round 1 (changes_requested, 4 Important, 4 Minor) at 68231a48. Fixes: 7a171b69 (ce-dogfood without disable-model-invocation; dogfood.md scope from the PR base, intended contradictions to the architect, screenshot upload, absent agent-browser step; changelogs narrowed), 475e6472 (notices name agent-browser's embedded dashboard npm packages via pnpm-lock.yaml), 8951bec2 (pr-body.md's tester rule names the dogfood step after main slimmed SKILL.md). All 7 threads answered 'Fixed in <commit>' and resolved one by one; finding 8 fixed in the PR body (namespace and compute class elided).",
     "merge": "GitHub reported CONFLICTING after 475e6472: forward merge 9124c280 of main c8974e2e, taking main's slimmed skills/legion-worker/SKILL.md plus this branch's References row; fingerprint 0d7ddffb… -> 208d7692…, changed only in that tester sentence; https://github.com/sjawhar/legion/pull/2219#issuecomment-6408319336",
     "ci": "Tests 40269794430, PR Title 40269794345, Docs 40269794493, Worker Image 40269794333 success; Legion Envoy and Contracts 40269794534 green but envoy-smoke, which failed pulling mirror.gcr.io/library/nats:2.10 ('unknown blob' x3) before any test; its failed job re-run once."
+  },
+  "round5": {
+    "tester failure answered": "The tester's red test 0459804d (every skill of the Legion plugin loads through Claude Code's Skill tool) failed on thermonuclear-deep-review and thermonuclear-code-quality. 6335ac62 drops their disable-model-invocation (skills/AGENTS.md and both changelogs record it); the red test passes unmodified.",
+    "deviation": "a7f72b00 changes the tester's test by one type-only fallback (`?? \"\"` on line 82) because CI's claude-envoy typecheck failed on it (TS2345, run 40275058329); what the test reads and asserts is unchanged. The tester accepted it (Envoy 06:47Z).",
+    "merge": "GitHub reported CONFLICTING: forward merge 4209950d of main 0587774a (#2222 added gcc to the worker image; changelogs gained entries). Both sides kept; fingerprint 3f6145b7… -> 8e53a11e…, changed only in the Dockerfile header, the docs/kubernetes.md image check and running-legion.md's image paragraph; https://github.com/sjawhar/legion/pull/2219#issuecomment-6420083021",
+    "ci": "Tests 40350573001, PR Title 40350572892, Docs 40350572820, Worker Image 40350572969 success; Legion Envoy and Contracts 40350572891 queued."
   }
 }
