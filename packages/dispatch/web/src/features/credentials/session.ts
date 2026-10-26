@@ -1,13 +1,10 @@
 import type { Agent, CredentialSession } from "../../api/types";
-import { sessionLabel } from "../refs/actor";
 
-/** One id a credential request names, resolved against the live agents list. */
-export type CredentialSessionStatus =
-  | { kind: "running"; id: string; label: string; dir: string; machineId: string }
-  | { kind: "not-running"; id: string }
-  // Envoy unavailable or not configured - the agents list itself never answered, so an id that
-  // is not in it proves nothing.
-  | { kind: "unknown"; id: string };
+/** Where a running session runs, as the live agents list lists it. */
+export interface CredentialSessionPlace {
+  dir: string;
+  machineId: string;
+}
 
 /** Where a `CredentialSessionLine`'s id came from: the session that enrolled, or the session the
  *  request itself names. The broker verifies the enrollment, not the request's override, which is
@@ -16,31 +13,32 @@ export type CredentialSessionStatus =
 export type CredentialSessionSource = "enrollment" | "request";
 
 /** One line the Inbox row and the record page both render: one of a credential request's ids,
- *  resolved to a `CredentialSessionStatus`, and where it came from. `source` is null only when
- *  both ids agree (or only the enrollment's was ever set); every request-sourced line is
- *  `"request"`, except when it equals a present enrollment id, where the two collapse into one
- *  line. */
+ *  where it came from, and, while the agents list lists it, where it runs. The renderer names
+ *  the id through `AgentName`, whose state mark says whether it is running, not running, or
+ *  could not be checked. `source` is null only when both ids agree (or only the enrollment's was
+ *  ever set); every request-sourced line is `"request"`, except when it equals a present
+ *  enrollment id, where the two collapse into one line. */
 export interface CredentialSessionLine {
+  id: string;
+  place: CredentialSessionPlace | null;
   source: CredentialSessionSource | null;
-  status: CredentialSessionStatus;
 }
 
-function resolveStatus(
+/** One id's line. Its place is set only while the agents list answered and lists it: a list
+ *  that never loaded, or whose latest read failed, proves nothing, and `AgentName` then shows
+ *  the state unknown. */
+function resolveLine(
   id: string,
+  source: CredentialSessionSource | null,
   agents: readonly Agent[],
   unresolved: boolean
-): CredentialSessionStatus {
-  const agent = agents.find((candidate) => candidate.session_id === id);
-  if (agent !== undefined) {
-    return {
-      dir: agent.dir,
-      id,
-      kind: "running",
-      label: sessionLabel(id, agent.title),
-      machineId: agent.host,
-    };
-  }
-  return { id, kind: unresolved ? "unknown" : "not-running" };
+): CredentialSessionLine {
+  const agent = unresolved ? undefined : agents.find((candidate) => candidate.session_id === id);
+  return {
+    id,
+    place: agent === undefined ? null : { dir: agent.dir, machineId: agent.host },
+    source,
+  };
 }
 
 /** Whether `session` names any id at all. An older broker's response, with no `session` field,
@@ -57,8 +55,8 @@ export function credentialSessionNamesAnyone(session: CredentialSession | undefi
  *  names an id. Two lines, one per source, when both are set and differ; the renderer prefixes
  *  the enrollment's so a reader can tell which one the broker verified. `unresolved` is true
  *  while the agents list hasn't answered yet or answered with an error (Envoy unavailable or not
- *  configured): every id that isn't a live agent then reads "couldn't check" rather than "not
- *  running", since a quiet agents list proves nothing when the list itself never loaded. */
+ *  configured): no line then carries a place, since a quiet agents list proves nothing when the
+ *  list itself never loaded. */
 export function credentialSessionLines(
   session: CredentialSession | undefined,
   agents: readonly Agent[],
@@ -72,9 +70,9 @@ export function credentialSessionLines(
   if (request !== null && request !== enrollment) {
     const lines: CredentialSessionLine[] = [];
     if (enrollment !== null) {
-      lines.push({ source: "enrollment", status: resolveStatus(enrollment, agents, unresolved) });
+      lines.push(resolveLine(enrollment, "enrollment", agents, unresolved));
     }
-    lines.push({ source: "request", status: resolveStatus(request, agents, unresolved) });
+    lines.push(resolveLine(request, "request", agents, unresolved));
     return lines;
   }
   // Either the enrollment's id alone, or both set and equal: one unlabeled line.
@@ -82,5 +80,5 @@ export function credentialSessionLines(
   if (id === null) {
     return [];
   }
-  return [{ source: null, status: resolveStatus(id, agents, unresolved) }];
+  return [resolveLine(id, null, agents, unresolved)];
 }

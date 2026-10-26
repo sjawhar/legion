@@ -105,8 +105,14 @@ test("a record whose two session ids differ shows both, the enrollment's labeled
   try {
     const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
     expect(link.getAttribute("href")).toBe("/agents/sess-enrollment/live");
-    expect(screen.getByText(/The session that enrolled:/)).toBeDefined();
-    expect(screen.getByText("sess-request isn't running.")).toBeDefined();
+    expect(link.closest("[data-agent-name]")?.parentElement?.textContent).toBe(
+      "The session that enrolled: Reviewing LEGION-587 · /home/sami/legion · devbox-alice"
+    );
+    const request = await screen.findByRole("link", { name: "session:sess-req…" });
+    expect(request.getAttribute("href")).toBe("/agents/sess-request/live");
+    const requestAgent = request.closest("[data-agent-name]");
+    expect(requestAgent?.getAttribute("data-agent-state")).toBe("not-running");
+    expect(requestAgent?.parentElement?.textContent).toBe("session:sess-req…");
     expect(screen.queryByText(/says it came from/)).toBeNull();
   } finally {
     cleanup();
@@ -127,7 +133,11 @@ test("a record's request-only session id is shown with no preamble", async () =>
   try {
     const link = await screen.findByRole("link", { name: "Reviewing LEGION-587" });
     expect(link.getAttribute("href")).toBe("/agents/sess-1/live");
-    expect(link.parentElement?.textContent?.startsWith("Reviewing LEGION-587")).toBe(true);
+    expect(
+      link
+        .closest("[data-agent-name]")
+        ?.parentElement?.textContent?.startsWith("Reviewing LEGION-587")
+    ).toBe(true);
     expect(screen.queryByText(/says it came from/)).toBeNull();
   } finally {
     cleanup();

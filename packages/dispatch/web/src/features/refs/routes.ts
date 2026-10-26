@@ -3,13 +3,13 @@ import {
   isSessionId,
   itemFromSearch,
   SESSION_ID_PATTERN,
+  shortSessionId,
 } from "@legion/contracts";
 import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
-import { shortSessionId } from "./actor";
 
 export type IssueRoute =
   | { key: string; kind: "issue" }

@@ -534,18 +534,16 @@ export const connectionDotConnecting = "bg-amber-500 dark:bg-amber-400";
 export const connectionDotOffline = "bg-slate-400 dark:bg-slate-500";
 export const connectionDotFailed = "bg-rose-500 dark:bg-rose-400";
 
-/** A small circular status dot inline next to a subscribed session's name — unlike the
- * `STATUS_CONNECTED_BG`/`STATUS_OFFLINE_BG` pill palettes above, it has no label text of its own,
- * so it uses a bolder, more saturated fill to stay legible at that size. Purely decorative — no
- * contrast check applies. */
+/** A small circular status dot inline next to an agent's name (the agent state mark's filled
+ * dot for a running session) — unlike the `STATUS_CONNECTED_BG`/`STATUS_OFFLINE_BG` pill
+ * palettes above, it has no label text of its own, so it uses a bolder, more saturated fill to
+ * stay legible at that size. Purely decorative — no contrast check applies. */
 export const liveDotBg = "bg-emerald-500 dark:bg-emerald-400";
-export const offlineDotBg = "bg-slate-400 dark:bg-slate-600";
 /** The agent state mark's rings (`features/refs/AgentName.tsx`), beside `liveDotBg`'s filled dot
- * for a running session: a session the registry no longer lists is a hollow ring in
- * `offlineDotBg`'s own shades, and one whose state is unknown (no successful registry read yet,
- * or the latest failed) a dashed neutral ring. Filled, hollow and dashed are the distinction that
- * does not rest on colour. Decorative — the mark's own `aria-label` names the state, so no
- * contrast check applies. */
+ * for a running session: a session the registry no longer lists is a hollow slate ring, and one
+ * whose state is unknown (no successful registry read yet, or the latest failed) a dashed
+ * neutral ring. Filled, hollow and dashed are the distinction that does not rest on colour.
+ * Decorative — the mark's own `aria-label` names the state, so no contrast check applies. */
 export const offlineDotBorder = "border-slate-400 dark:border-slate-600";
 export const unknownDotBorder = "border-slate-400 dark:border-slate-500";
 // ---------------------------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { AgentName } from "../refs/AgentName";
 import { buildIssuePath } from "../refs/routes";
 import { useDialog } from "../shell/useDialog";
 import { NO_COMPONENT, NO_ISSUE, NO_PRIORITY, NO_SESSION, PLACEHOLDER_LABELS } from "./lib/facets";
@@ -43,10 +44,12 @@ function PRDetail({
   pr,
   components,
   sessionGroups,
+  sessionTitles,
 }: {
   pr: DeliveryPR;
   components: Readonly<Record<string, DeliveryComponent>>;
   sessionGroups: readonly DeliverySessionGroup[];
+  sessionTitles: Readonly<Record<string, string>>;
 }): ReactNode {
   const leadTime = leadTimeMinutes(pr);
   let componentText = PLACEHOLDER_LABELS[NO_ISSUE];
@@ -100,8 +103,21 @@ function PRDetail({
             : parentAgentLabel(pr.parent_agent, sessionGroups)}
         </dd>
         <dt className={textMutedOnSurface}>Sessions</dt>
-        <dd className="truncate" title={pr.sessions.join(", ")}>
-          {pr.sessions.length === 0 ? "\u2014" : pr.sessions.join(", ")}
+        {/* Each session wraps onto its own line rather than being cut, so every one stays
+            reachable; the delivery read's titles hold a session's id when it has no title. */}
+        <dd className="flex min-w-0 flex-col items-start break-words">
+          {pr.sessions.length === 0
+            ? "\u2014"
+            : pr.sessions.map((session) => (
+                <AgentName
+                  className="max-w-full"
+                  key={session}
+                  sessionId={session}
+                  storedTitle={
+                    sessionTitles[session] === session ? undefined : sessionTitles[session]
+                  }
+                />
+              ))}
         </dd>
         <dt className={textMutedOnSurface}>Merged</dt>
         <dd>{fmt(pr.merged_at)}</dd>
@@ -209,6 +225,7 @@ export function DrillDown({
   runs,
   components,
   sessionGroups,
+  sessionTitles,
   selection,
   onClose,
 }: {
@@ -216,6 +233,8 @@ export function DrillDown({
   runs: readonly DeliveryRun[];
   components: Readonly<Record<string, DeliveryComponent>>;
   sessionGroups: readonly DeliverySessionGroup[];
+  /** The delivery read's session titles: each session's stored title, or its id when none. */
+  sessionTitles: Readonly<Record<string, string>>;
   selection: TimelineSelection | null;
   onClose: () => void;
 }): ReactNode {
@@ -234,7 +253,12 @@ export function DrillDown({
       pr === undefined ? (
         <div>PR {selection.id} not found.</div>
       ) : (
-        <PRDetail components={components} pr={pr} sessionGroups={sessionGroups} />
+        <PRDetail
+          components={components}
+          pr={pr}
+          sessionGroups={sessionGroups}
+          sessionTitles={sessionTitles}
+        />
       );
   } else {
     const run = runs.find((candidate) => candidate.id === selection.id);
