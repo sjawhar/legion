@@ -2,26 +2,26 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-141",
-  "completed": "2026-10-25T23:50:44Z",
-  "plan": "dispatch://INFRA-141/artifact/plan-md (version 2; its last section, 'The head this plan is carried by (generation 3, 2026-10-25)', replaces the acceptance table and the T6/T7 rig lists above it)",
+  "completed": "2026-10-26T19:14:33Z",
+  "plan": "dispatch://INFRA-141/artifact/plan-md (version 3; its last section, \"Generation 4 (2026-10-26): roles from the role claims\", replaces the generation-3 sections \"What this generation must not change\" and \"Checked against current main\" and adds acceptance rows A7-A9 to the generation-3 table)",
   "head": {
     "pullRequest": "https://github.com/sjawhar/legion/pull/2167",
-    "headSha": "8be80926726bcf3ae2d372731f3902b0c019f712",
-    "approvedCodeSha": "bc2283ee8f1dd340b2db8ecf23827f05b32829c8",
-    "aboveApproved": "02388734294d (docs/solutions, retro) and 8be80926726b (retro's removal of .legion/INFRA-141/)",
-    "mustNotChange": "The code is the tree of 8be80926 outside .legion/. Pushes by the planner, implementer, tester and reviewer in this generation touch only .legion/INFRA-141/ and carry the skip-checks trailer; the reviewer approves the new head by SHA after checking that the diff from 8be80926 touches only .legion/; retro's push (optional docs/solutions/, then the removal of .legion/INFRA-141/) carries no trailer. Merge main forward only if GitHub reports CONFLICTING, per conflicts-and-rewrites.md, which then needs a new review."
+    "headSha": "0c227469286b2639973baa09b54aa87c71a5d0d3",
+    "state": "MERGEABLE, BLOCKED by CHANGES_REQUESTED (review handoff at 0c227469, code commit 74318aa8)",
+    "implementerStart": "wip/INFRA-141-roles-from-claims at 5e1733612997 (parent 0c227469; 15 files +696 -703; committed by the architect before the contract-37 drain; unreviewed). Bring it over without moving or rewriting it: cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" new legion/INFRA-141@origin && jj -R \"$LEGION_WORKSPACE\" restore --from 5e173361 'root:\"packages/envoy\"', then commit under the implementer's App; do not push to or delete the side branch.",
+    "pushRules": "Only the planner's push is handoff-only (plan.json, skip-checks trailer). The implementer's push is a code push with no trailer; the reviewer reviews the whole diff from 0c227469 to the new code head. Merge main forward only if GitHub reports CONFLICTING."
   },
   "mainCheck": {
-    "mainAtCheck": "81a3b5ef7b47, then a9c9542fb738 (#2202)",
-    "github": "MERGEABLE / CLEAN at 8be80926; 16 checks SUCCESS, 9 SKIPPED",
-    "mergeTree": "git merge-tree --write-tree: 899b946f (main 81a3b5ef) and 315c9b4c (main a9c9542f), no conflict; the only file both sides change is packages/envoy/CHANGELOG.md, in different subsections of [Unreleased]",
-    "mergedTreeRuns": "On an export of tree 899b946f in this pod: go build ./... and go vet of cmd/listener, internal/{session,bus,integration,contracts} OK; go test -count=1: ok cmd/listener 234.352s (with -skip of the four #2191 Postgres-container tests TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled, TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer, TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills, which panic without a container runtime), ok internal/bus 214.639s, ok internal/session 8.014s, ok internal/integration 97.793s, ok internal/contracts 0.416s; bash scripts/e2e-local.sh exit 0, both PASS lines, bus-down send HTTP 503 in 3.503475 s, real client EnvoyApiError 503. On tree 315c9b4c: go build ./... and go vet incl. internal/dispatch/... OK."
+    "mainAtCheck": "6cdb99959fa1 (#2257), 2026-10-26 18:55Z",
+    "mergeTree": "git merge-tree --write-tree with main: clean for the PR head 0c227469 and for the wip commit 5e173361",
+    "wipTreeRuns": "On an export of 5e173361: go build ./... and go vet ./cmd/listener ./internal/store OK; the five new tests pass (store TestRolesHeldByFollowsTheRoleClaims, TestRolesHeldByRefusesWhenItsViewCannotAnswer, TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure; listener TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics, TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes). Full suites not run."
   },
   "requiredSkills": {
     "implement": [
-      "skill://legion-worker — the phase contract: nothing is built this generation unless a finding requires it; any push before retro touches only .legion/INFRA-141/ and carries the skip-checks trailer, per plan.md's 'What this generation must not change'.",
-      "skill://legion-worker/references/pr-body.md — the PR body's E2E (implementer) line and proof array: the proof at this head is the existing one re-run on the code tree of 8be80926 (S1 go test, S2 bash scripts/e2e-local.sh), recorded against the new head SHA.",
-      "skill://legion-worker/references/conflicts-and-rewrites.md — only if GitHub reports the pull request CONFLICTING: the forward merge, never a rebase, and the unchanged-diff fingerprint.",
+      "skill://legion-worker — the phase contract; generation 4 starts from wip 5e173361 brought over with jj restore, committed under the implementer's App, pushed as a code head with no skip-checks line, per plan.md's generation-4 section.",
+      "skill://legion-worker/references/pr-body.md — the E2E (implementer) line and proof array at the new head: A1-A9 on S1 and S2.",
+      "skill://legion-worker/references/review-threads.md — the seven open threads, one disposition reply and one resolution each, at the new code head.",
+      "skill://ce-simplify-code — the simplify pass over the settled roles-from-claims diff, which deletes a subsystem and adds a watcher.",
       "skill://dispatch-first and skill://dispatch — any post on INFRA-141 and any finding outside the issue."
     ],
     "test": [
@@ -38,6 +38,42 @@
   },
   "gapAnalysis": {
     "findings": [
+      {
+        "finding": "G4-1..6: each decision point's coverage in 5e173361 (roles via RolesHeldBy; reaper and detached cleanup removed; best-effort cleanup now returns 200 where main errored; unanswered view gives 503/no roles; stale-topic test; false WARN now INFO).",
+        "answer": "plan.md generation-4 'What 5e173361 already does' lists each as done, names the 200-vs-main change as the decision's best-effort, and A7-A9 carry the commands and negative controls."
+      },
+      {
+        "finding": "G4-7: RolesHeldBy can answer from a partial view with no error (idle-timed-out first scan, recreated bucket refill).",
+        "answer": "Decided, not left open: document the limit in AGENTS.md and the PR body's Not proven list; flagged to the architect to overrule."
+      },
+      {
+        "finding": "G4-8: AGENTS.md watcher text and the CHANGELOG do not name the new role-claim watcher or its /healthz and self-health effect.",
+        "answer": "Listed as left for the implementer."
+      },
+      {
+        "finding": "G4-9: seven open threads, not two; XxEi not obviously closed by the decision.",
+        "answer": "Each thread is named with how it closes; XxEi answered as no longer a wrong answer because the claim decides."
+      },
+      {
+        "finding": "G4-10: the generation-3 'must not change' rules, head and mainCheck are stale.",
+        "answer": "Replaced in plan.md and in plan.json head/mainCheck with 0c227469, main 6cdb9995 and generation-4 push rules."
+      },
+      {
+        "finding": "G4-11: the generation-3 table has no rows for the new behaviour.",
+        "answer": "A7-A9 added; A1-A6' kept (all names exist on 5e173361)."
+      },
+      {
+        "finding": "G4-12: three narrowed assertions and a Rewatch change in 5e173361 are unreviewed.",
+        "answer": "Named; kept only with a reason stated in the PR body."
+      },
+      {
+        "finding": "G4-13: fast-forwarding or rebasing onto the wip commit would put an architect-session commit marked unreviewed into the PR history.",
+        "answer": "The implementer brings the work over with jj restore onto a new commit and does not move, rewrite, push to or delete the side branch."
+      },
+      {
+        "finding": "G4-14: the roles work is outside the spec's six points.",
+        "answer": "Cited the architect's decision as authority; recorded as no new spec departure (the spec does not address role reporting; D10's list read is unchanged). The three generation-3 departures stay recorded."
+      },
       {
         "finding": "G1 — plan.md said nothing departs from the spec while the head answers a grant-denied publish 403 where spec bullet 4 says 503.",
         "answer": "plan.md v2 amends that sentence and lists the 403 as head difference 1; specDepartures[0] records it with outcome changed (acceptance, spec bullet 4); named in the completion summary for the architect to rule on a spec change."
@@ -90,7 +126,7 @@
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 2
+    "rounds": 1
   },
   "specDepartures": [
     {
@@ -119,5 +155,22 @@
         "kind": "unchanged"
       }
     }
-  ]
+  ],
+  "generation4": {
+    "decision": "dispatch://INFRA-141/comment/04a5215e-6d68-4da1-b0ef-c039e778f9a5 — senderStamp and sessionInfoFor take roles from the role claims, not topics; the role-topic reaper and last round's extra cleanup are removed; post-claim cleanup stays best-effort; an unanswered claims read gives the session routes 503 and the sender stamp no roles; the false WARN and the false text in AGENTS.md, docs/architecture.md and CHANGELOG are corrected.",
+    "scope": "Outside the spec's six acceptance points; the architect's decision on the twelfth round-cap notice is the authority. D10's cache-only list read is unchanged; only where its roles come from changes.",
+    "leftForImplementer": [
+      "Partial view: RolesHeldBy can answer with no error from an incomplete view after an idle-timed-out first scan or during a recreated bucket's refill. Planner's decision: document the limit in packages/envoy/AGENTS.md and the PR body's Not proven / risk list, no fix; the architect may overrule.",
+      "AGENTS.md's watcher text (\"a stopped interest, session or CI KV watcher\"; \"All three watchers share one lifecycle\") must name the new role-claim watcher, and the CHANGELOG must name its /healthz and self-health effect.",
+      "Justify in the PR body or restore: TestARewatchThatCannotOpenTheRoleBucketMovesNothing narrowed to the interest watcher; TestWatcherEvictsMalformedValue on watcher.WaitReady; Rewatch rewatching the role-claim watcher when the interest rewatch fails.",
+      "Full verification at its own head: go build ./... && go vet ./... && go test ./cmd/listener ./internal/store ./internal/session ./internal/bus ./internal/integration -count=1 (the four #2191 Postgres tests skipped in a pod), then bash scripts/e2e-local.sh.",
+      "Answer and resolve the seven open threads one by one: PRRT_kwDORFy7ds6wV7Ar, PRRT_kwDORFy7ds6wXxER, PRRT_kwDORFy7ds6wXxEZ (reaper removed, roles from claims); PRRT_kwDORFy7ds6wV7A1, PRRT_kwDORFy7ds6wXxEr (corrected text); PRRT_kwDORFy7ds6wXxE2 (INFO branch and test); PRRT_kwDORFy7ds6wXxEi (can still happen, no longer a wrong answer: the claim decides).",
+      "Rewrite the PR body's thread lines and round summary to the pushed code."
+    ],
+    "acceptanceAdded": {
+      "A7": "cd packages/envoy && go test ./cmd/listener -run '^(TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics|TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes)$' -count=1 -v; go test ./internal/store -run '^(TestRolesHeldByFollowsTheRoleClaims|TestRolesHeldByRefusesWhenItsViewCannotAnswer)$' -count=1 -v. Controls: roleNames (with its sort import) put back in senderStamp and sessionInfoFor fails the first; ignoring the RolesHeldBy error in sessionInfoFor gives 200, not 503.",
+      "A8": "cd packages/envoy && go test ./internal/store -run '^(TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure|TestSetRoleSucceedsWhenOldHolderCleanupFails)$' -count=1 -v. Control: deleting the ctx.Err() != nil branch of the old holder's cleanup fails the first on the WARN.",
+      "A9": "cd packages/envoy && git grep -n -E 'reapRoleTopics|removeStaleRoleTopics|detachedCleanup|roleCleanupBudget|staleRoleTopics' -- . prints nothing. Control: on 0c227469 it prints matches."
+    }
+  }
 }
