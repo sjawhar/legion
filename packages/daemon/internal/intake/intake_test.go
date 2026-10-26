@@ -25,6 +25,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -255,6 +256,56 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			file:    "dispatch/artifact-changes-requested.json",
 			want: DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason",
 				Mark: mark(7, "2026-09-23T00:45:50.37209Z")},
+		},
+		// The ask and claim envelopes below are built by hand from Dispatch's own types
+		// (model.AskEventPayload, model.CommentEventPayload with ask_state and ask_waiting_on, and
+		// the issue payload with claim and previous_claim), not captured from a running Dispatch as
+		// the envelopes above were; ask_events_decode_test.go covers the fields they leave out.
+		{
+			name:    "Dispatch ask opened (hand-built)",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.opened",
+			file:    "dispatch/ask-opened.json",
+			want:    DispatchAskOpened{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "question", AuthorSession: "session-architect", Mark: mark(6, "2026-09-23T00:46:31Z")},
+		},
+		{
+			name:    "Dispatch ask answered (hand-built)",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.answered",
+			file:    "dispatch/ask-answered.json",
+			want: DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "question", State: "answered", Actor: dispatch.Actor{Kind: "user", ID: "human"},
+				Mark: mark(9, "2026-09-23T00:46:34Z")},
+		},
+		{
+			name:    "Dispatch ask resolved (hand-built)",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.resolved",
+			file:    "dispatch/ask-resolved.json",
+			want: DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "question", State: "resolved", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
+				Mark: mark(10, "2026-09-23T00:46:35Z")},
+		},
+		{
+			name:    "Dispatch ask reply returning the turn to the agent (hand-built)",
+			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
+			file:    "dispatch/comment-ask-agent.json",
+			want: DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent", Actor: dispatch.Actor{Kind: "user", ID: "human"},
+				Mark: mark(7, "2026-09-23T00:46:32Z")},
+		},
+		{
+			name:    "Dispatch ask reply leaving the turn with the human (hand-built)",
+			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
+			file:    "dispatch/comment-ask-human.json",
+			want: DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
+				Mark: mark(8, "2026-09-23T00:46:33Z")},
+		},
+		{
+			name:    "Dispatch issue claimed (hand-built)",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.claimed",
+			file:    "dispatch/issue-claimed.json",
+			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 11, ClaimedBy: "user:human"},
+		},
+		{
+			name:    "Dispatch issue released (hand-built)",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.released",
+			file:    "dispatch/issue-released.json",
+			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 12},
 		},
 		{
 			name:    "pull request opened",
