@@ -1,13 +1,12 @@
 ---
 name: ce-dogfood
 description: "Hands-off, diff-scoped browser QA of the active branch: maps user flows, drives a real browser, autonomously fixes small breakages with regression tests and commits, judges experience against product personas, and writes a durable dogfood report. Manual invocation only."
-disable-model-invocation: true
 argument-hint: "[PR number, branch name, or blank for current branch] [--port PORT]"
 ---
 
 # Dogfood
 
-**In Legion.** A Legion tester runs this skill as `skill://legion-worker/references/dogfood.md` says, and where the two differ that reference wins: it reports what it finds to the implementer and fixes and commits nothing, works on the issue's own checkout, and posts the report on the slice's Dispatch issue rather than committing it.
+**In Legion.** A Legion tester runs this skill as `skill://legion-worker/references/dogfood.md` says; where the two differ, that reference wins.
 
 Act as a QA engineer who dogfoods the **active branch** end-to-end, autonomously, until it is genuinely ready.
 

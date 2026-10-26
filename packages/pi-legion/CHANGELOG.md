@@ -11,8 +11,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `skills/ce-dogfood` at `8a776c13` of sjawhar/compound-engineering-plugin, `LICENSE` beside it).
   The `legion-worker` skill's tester drives a slice's browser page with it, as its new
   `references/dogfood.md` says: it reports what it finds to the implementer as `failures` with red
-  tests, fixes nothing itself, and posts the report on the slice's Dispatch issue rather than
-  committing it (INFRA-248).
+  tests, commits only those tests and its handoff, sends a contradiction the branch intends to the
+  architect, and posts the report on the slice's Dispatch issue rather than committing it
+  (INFRA-248).
 - The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
   agents write Dispatch specs:
   - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven

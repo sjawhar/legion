@@ -13,16 +13,17 @@ in addition to your other checks. A slice whose diff changes no such page gets n
 
 Dogfood the issue's own checkout in `$LEGION_WORKSPACE`. Create no worktree, use no other
 checkout, and skip ce-dogfood's isolation step and `ce-worktree`. The diff scope is the issue
-branch against its fork point from the issue's default branch, with `$default` read as
-`skill://legion-worker/references/default-branch-check.md` says:
+branch against its fork point from `base`, read from the pull request as
+`skill://legion-worker/references/conflicts-and-rewrites.md` does:
 
 ```bash
-jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${default}@origin | @-)" --to @-
+base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && \
+  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | @-)" --to @-
 ```
 
-Never diff from `${default}@origin` itself: once the default branch has moved past the fork point,
-that diff shows the default branch's newer commits as deletions. In a git worktree of the clone,
-`git diff origin/<default>...HEAD` gives the same diff.
+`base` is the pull request's base branch, which on a stacked pull request is not the default
+branch. Diff from the fork point, not from `${base}@origin`, which shows the base's newer commits
+as deletions.
 
 ## Data and persona
 
@@ -32,13 +33,18 @@ another production-like stack. Walk the flows as the person the issue is for, na
 ## What replaces the fix loop
 
 Fix nothing: ce-dogfood's Phase 5 is not yours. Your only commits are your red tests and your
-handoff, as in any testing round. Each failing scenario, contradicted criterion or sharp paper cut
-becomes a `failures` entry in `.legion/<issue>/test.json`, pinned by a red test in the repository's
-own suite. Use its browser suite where it has one (Legion's own is `packages/dispatch/e2e/`).
-Where no automated test can assert a defect, such as a pure copy or spacing defect, its entry
-carries the `agent-browser` commands that replay it and a screenshot path, and says why no test is
-meaningful. Complete the phase with `verdict: "fail"`, as for any defect; the resumed implementer
-fixes it. Your next testing round replays each failed scenario in the browser.
+handoff, as in any testing round. Only an incidental failure becomes a `failures` entry in
+`.legion/<issue>/test.json`: a failing scenario, a criterion the slice contradicts by accident, or
+a sharp paper cut. Pin each one with a red test in the repository's own suite. Use its browser suite
+where it has one (Legion's own is `packages/dispatch/e2e/`). Where no automated test can assert a
+defect, such as a pure copy or spacing defect, its entry carries the `agent-browser` commands that
+replay it and a screenshot path, and says why no test is meaningful. Complete the phase with
+`verdict: "fail"`, as for any defect; the resumed implementer fixes it. Your next testing round
+replays each failed scenario in the browser.
+
+A pack rule or documented convention that the branch contradicts on purpose, because the issue or
+its spec asks for it, is not a defect. It is no `failures` entry and does not fail the phase: send
+it to the tree's architect alone, as *Decisions for a person* says.
 
 ## What replaces the committed report
 
@@ -50,14 +56,18 @@ slice's Dispatch issue as an artifact, a new version each round:
 dispatch artifact --issue <KEY> --name dogfood-report.md --content-file "$TMPDIR/<report>.md"
 ```
 
-Your `E2E (tester)` line links it as `dispatch://<KEY>/artifact/dogfood-report-md`. Screenshots
-stay under `$TMPDIR` unless the report embeds one.
+Your `E2E (tester)` line links it as `dispatch://<KEY>/artifact/dogfood-report-md`. Upload a
+screenshot the report needs with
+`dispatch artifact --issue <KEY> --name <file>.png --path <file>` and link it from the report as
+`dispatch://<KEY>/artifact/<slug>`, with the slug the upload printed; a plain link to an image
+shows a thumbnail. Keep every other screenshot under `$TMPDIR`.
 
 ## Decisions for a person
 
 Send each entry of the report's "Decisions for a Human", each `Blocked (needs human verify)` leg
-and each stale pack rule to the tree's architect, with `envoy_publish` to its role topic. The
-architect writes any decision block. Never ask the person directly.
+and each pack rule or documented convention the branch contradicts on purpose to the tree's
+architect alone, with `envoy_publish` to its role topic. A contradiction on purpose fails nothing.
+The architect writes any decision block. Never ask the person directly.
 
 ## The suite
 
@@ -72,9 +82,14 @@ yourself or leave it out. List what ce-dogfood would hand to `ce-compound` under
 ## Caches
 
 Set `CE_PACKS_CACHE_ROOT="$TMPDIR/ce-packs"` before you run ce-dogfood's `scripts/packs-resolve.py`;
-without it the script tries `/tmp` first. Keep screenshots under `$TMPDIR` too.
+without it the script tries `/tmp` first.
 
 ## Browser
 
-`agent-browser` is on `PATH` in the worker image, from the release that ships this reference on.
-It launches the image's `chromium` with no extra flags (measured under gVisor, as uid 1000).
+`agent-browser` is on `PATH` in the worker image. It drives the image's `chromium` with no extra
+flags.
+
+When `agent-browser` is not on `PATH` (a tmux pane, or an image older than this change), tell the
+tree's architect with `envoy_publish`, as `skill://legion-worker/references/tools.md` says. Install
+nothing, and still do your other checks. ce-dogfood's "stop and run `/ce-setup`" does not apply:
+Legion ships no `ce-setup`.

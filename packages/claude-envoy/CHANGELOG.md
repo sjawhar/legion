@@ -4,9 +4,11 @@
 
 ### Added
 
-- The generated `legion/` plugin carries the new `ce-dogfood` skill and `legion-worker`'s
-  `references/dogfood.md`, by which a tester on Claude Code drives a slice's browser page and
-  reports what it finds to the implementer (see `packages/pi-legion/CHANGELOG.md`, INFRA-248).
+- The generated `legion/` plugin carries the new `ce-dogfood` skill, loadable through Claude Code's
+  Skill tool (upstream's `disable-model-invocation` line removed), and `legion-worker`'s
+  `references/dogfood.md`. A tester on Claude Code runs under `runtime: tmux`, where nothing
+  installs `agent-browser`, so the reference tells it to report the missing browser to its
+  architect (see `packages/pi-legion/CHANGELOG.md`, INFRA-248).
 - The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:
   `dispatch issue-update --issue <KEY> --before <OTHER>` puts it above that issue,
   `--after <OTHER>` below, and both together land it between them, printed as `rank -> before KEY`
