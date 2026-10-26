@@ -357,6 +357,19 @@ func (s *Server) Reload(t testing.TB, config string) error {
 	return nil
 }
 
+// Restart stops the server, makes config its whole configuration and starts it again on the same
+// store and URL, as an operator restarts a server after changing a grant, and returns once it
+// accepts connections. Unlike Reload, every connection drops: each client reconnects to the server
+// config governs and sends its subscriptions again, which that server accepts or refuses afresh.
+func (s *Server) Restart(t testing.TB, config string) {
+	t.Helper()
+	s.stop()
+	if err := os.WriteFile(s.configPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("write the new configuration: %v", err)
+	}
+	s.launch(t)
+}
+
 // Log is everything the server has logged so far, the debug and protocol trace among it when the
 // server was started with -DV.
 func (s *Server) Log() string { return s.log.String() }
@@ -826,12 +839,26 @@ func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
 }
 
 func publishGrantConfig(user string, allow []string) string {
+	return grantConfig(user, "publish", allow)
+}
+
+// SubscribeGrantConfig is the configuration of a server with JetStream whose one user, the nkey user
+// whose public key is user, may subscribe only to the subjects allow names, in any queue group, and
+// publish to anything: a subscription to any other subject is the server's permissions violation,
+// as a per-client grant makes it. StartConfig takes it, and Restart or Reload a changed one.
+func SubscribeGrantConfig(user string, allow ...string) string {
+	return grantConfig(user, "subscribe", allow)
+}
+
+// grantConfig is the configuration of a server with JetStream whose one nkey user may use direction
+// (publish or subscribe) only on the subjects allow names.
+func grantConfig(user, direction string, allow []string) string {
 	quoted := make([]string, len(allow))
 	for index, subject := range allow {
 		quoted[index] = fmt.Sprintf("%q", subject)
 	}
-	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { publish: { allow: [%s] } } }",
-		user, strings.Join(quoted, ", ")))
+	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { %s: { allow: [%s] } } }",
+		user, direction, strings.Join(quoted, ", ")))
 }
 
 func nkeyConfig(entry string) string {
