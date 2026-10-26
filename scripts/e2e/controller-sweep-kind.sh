@@ -65,7 +65,7 @@ trap cleanup EXIT
 # network's gateway. It reads the cluster through kind's internal kubeconfig, whose server is the
 # node's address on that network, and the store by the Postgres container's name there.
 drive() {
-  docker run --rm --name "$driver" --network kind --user "$(id -u):$(id -g)" \
+  docker run --rm --name "$driver" --cpus 2 --memory 2g --network kind --user "$(id -u):$(id -g)" \
     -v "$work:$work" -e HOME=/tmp \
     -e LEGION_E2E_KUBECONFIG="$work/kubeconfig-internal" -e LEGION_E2E_KUBE_CONTEXT="$kind_context" \
     -e LEGION_E2E_IMAGE="$image" -e LEGION_E2E_WORK="$work" -e LEGION_E2E_EXPECT="$1" \
@@ -126,7 +126,7 @@ kind_sandbox_internal_kubeconfig "$work/kubeconfig-internal"
 pass
 
 begin store
-docker run -d --name "$pg" --network kind --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=p "$pg_image" >/dev/null
+docker run -d --name "$pg" --cpus 2 --memory 2g --network kind --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=p "$pg_image" >/dev/null
 for _ in $(seq 1 60); do
   docker exec "$pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1 && break
   sleep 1

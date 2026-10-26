@@ -9,6 +9,16 @@ the stage scripts share: standalone helpers they run, and the files they source
 [`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
+Every container these scripts start carries a CPU and a memory limit, set inline on its
+`docker run`, and is removed when the run ends (an `EXIT` trap's `docker rm -f`, or `--rm`): the
+proofs run on a shared devbox, where an unbounded container takes cores and memory from every other
+run there. A scratch Postgres (Stage 1, 2, 3, 4a's and 4b's session databases, the pgvector stores)
+gets `--cpus 2 --memory 2g`, which also holds its `tmpfs` data directory, since tmpfs is charged to
+the container's memory; NATS gets `--cpus 1 --memory 512m`, enough for its JetStream streams of a
+single run; a kind proof's driver, a static Go test binary that runs the daemon against the kind
+cluster, gets `--cpus 2 --memory 2g`. The kind cluster's own node container is kind's, not a
+`docker run` of these scripts.
+
 | script | proves |
 | :--- | :--- |
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state` with the 20-row capability report on it (`resource-limits` open under tmux, carrying the `capabilities.decided` line to write; `pool-capacity` present, since tmux runs no probe pod), registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
