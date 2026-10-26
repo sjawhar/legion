@@ -419,6 +419,9 @@ func publishDestinations(ctx context.Context, deps Deps, event model.Event, item
 				return err
 			}
 		}
+		if err := publishClaimantRoute(ctx, deps, event.ID, item, event, a); err != nil {
+			return err
+		}
 		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, a); err != nil {
 			return err
 		}
@@ -494,7 +497,10 @@ func payloadPreviousClaimSession(payload any) string {
 // who otherwise learn of it only by subscribing to the whole issue. A quiet ask.edited (a version
 // move of an approval request that an earlier version already moved since it was opened or last
 // handed back, model.AskEditEventPayload.Quiet) reaches no follower. The event's own actor is
-// skipped, and a topic the route already reached is not published twice.
+// skipped, and so is a follower a new reply's mentions resolved to (payloadMentionedSessions):
+// the mention delivers that reply to the session already. Only the reply's creation is left to
+// the mention; its edit, resolution and reopening reach every follower. A topic the route
+// already reached is not published twice.
 func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	var askID string
 	switch event.Type {
@@ -514,13 +520,72 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 	if err != nil {
 		return err
 	}
+	var mentioned map[string]struct{}
+	if event.Type == "comment.created" {
+		mentioned = payloadMentionedSessions(event.Payload)
+	}
 	var sessionIDs []string
 	for _, follower := range followers {
-		if !event.Actor.SameAs(model.Actor{Kind: "session", ID: follower.SessionID}) {
-			sessionIDs = append(sessionIDs, follower.SessionID)
+		if event.Actor.SameAs(model.Actor{Kind: "session", ID: follower.SessionID}) {
+			continue
 		}
+		if _, ok := mentioned[follower.SessionID]; ok {
+			continue
+		}
+		sessionIDs = append(sessionIDs, follower.SessionID)
 	}
 	return publishSessionRoutes(ctx, deps, eventID, item, a, sessionIDs, "publish follower route to")
+}
+
+// publishClaimantRoute delivers a person's answer, comment or untargeted message on an issue to
+// the session that holds the issue's claim, on its own topic. Otherwise it reaches the claimant
+// only when the claimant subscribed to the whole issue, or happens to be the route, a follower
+// of the ask, or an author the thread or document names, and the session working the issue
+// misses what a person told it there. Only a person's event qualifies (Actor.Kind "user"): an
+// agent's events reach nobody new through here, even the ones that notify. A new comment whose
+// mentions resolved to the claimant is left to the mention, which delivers it already; its edit,
+// resolution and reopening are not. The claim is read when the event is published, not when it
+// was written, so a retry after the claim moved reaches the new claimant. A claimant that is
+// also the route, a follower or an author gets one copy: publishDestination publishes a topic
+// once per event.
+func publishClaimantRoute(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
+	// A project document's event names no issue, so there is no claim to read.
+	if event.IssueKey == nil || event.Actor.Kind != "user" {
+		return nil
+	}
+	switch event.Type {
+	case "ask.answered", "ask.handed_back", "ask.resolved",
+		"comment.created", "comment.edited", "comment.resolved", "comment.reopened",
+		"message.created", "message.answered":
+	default:
+		return nil
+	}
+	claimant, err := loadSessionClaimant(ctx, deps, *event.IssueKey)
+	if err != nil || claimant == "" {
+		return err
+	}
+	if event.Type == "comment.created" {
+		if _, mentioned := payloadMentionedSessions(event.Payload)[claimant]; mentioned {
+			return nil
+		}
+	}
+	return publishSessionRoutes(ctx, deps, eventID, item, a, []string{claimant}, "publish claimant route to")
+}
+
+// loadSessionClaimant returns the id of the session holding issueKey's claim, or "" when the
+// issue is unclaimed or a person holds it: a person has no Envoy topic.
+func loadSessionClaimant(ctx context.Context, deps Deps, issueKey string) (string, error) {
+	var sessionID string
+	if err := deps.Store.Pool.QueryRow(ctx, `
+		select coalesce(claimed_by ->> 'id', '') from issues
+		where key = $1 and claimed_by ->> 'kind' = 'session'
+	`, issueKey).Scan(&sessionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("load claimant of issue %q: %w", issueKey, err)
+	}
+	return sessionID, nil
 }
 
 // publishAuthorRoutes delivers a human comment-thread action directly to the involved
@@ -915,6 +980,25 @@ func payloadStringSet(payload any, key string) map[string]struct{} {
 			if value, ok := entry.(string); ok {
 				result[value] = struct{}{}
 			}
+		}
+	}
+	return result
+}
+
+// payloadMentionedSessions reads the sessions a comment payload's mentions resolved to (each
+// mentions[].session_id), as the scan decodes the payload from JSON. A mention that resolved to no
+// session (session_id null) names none.
+func payloadMentionedSessions(payload any) map[string]struct{} {
+	values, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	mentions, _ := values["mentions"].([]any)
+	result := map[string]struct{}{}
+	for _, entry := range mentions {
+		mention, _ := entry.(map[string]any)
+		if sessionID, _ := mention["session_id"].(string); sessionID != "" {
+			result[sessionID] = struct{}{}
 		}
 	}
 	return result
