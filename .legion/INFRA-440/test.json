@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-440",
+  "completed": "2026-10-26T12:47:00Z",
+  "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
+  "headTested": "09b5058b80484916d82fba44be4bd0050b208d26 (code head; 32312f32 adds only .legion/INFRA-440/implement.json)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command on my own harness lane (real Go Dispatch server via e2e/run-server.sh, Postgres 17.11/pgvector database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243; env /legion/scratch/tmp/infra440-test/env.sh) after rebuilding web/dist at 09b5058b: `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts` -> 9 passed, 1 skipped (2.5 min). Re-ran the same spec against the kept base build /legion/scratch/tmp/infra440/dist-base served unchanged -> 9 failed, each on a behaviour assertion ([data-agent-name] not found at agent-name.e2e.ts:150, live link not found :271, data-agent-state missing :357/:403, asker not found :305). Lint guard re-probed with a scratch file (named import of actorLabel, AGENT_LIVE_PATH from ../features/refs/routes, re-export of shortSessionId) -> 3 noRestrictedImports errors, exit 1; the namespace import is not caught, as the PR says. The plan's rg audit at the head hits only the files the PR lists."
+  },
+  "failures": [
+    {
+      "criterion": "Every place shows the agent with the one component without breaking the page; the suite's own rule is that a session title is free text of any length and must not widen the page (e2e/claim.e2e.ts:12-14), and the plan's layout row requires the page never widens at 390 px.",
+      "evidence": "Red test committed in dc657f64: packages/dispatch/e2e/agent-name.e2e.ts, test 'a long agent name with no space never widens the Conversation tab'. Command: `cd packages/dispatch && source <env> && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts -g \"never widens\"` -> 2 failed, both at agent-name.e2e.ts:476 'page width at 390px' Expected 390, Received 530. A registry title of 40 characters with no space (INFRA_440_implementer_round_2_resumed_ok) on a Conversation turn and reply widens the page at 390 px; 32 characters (a hex id) already widens it to 411 px, 56 to 609 px. The cause: the turn byline renders `<AgentName className=\"font-semibold\" inline />` as a flex item of `p.flex items-baseline gap-2` (conversation/ConversationTab.tsx:361-362, conversation/ReplyTurn.tsx:104) with no min-width:0 and no overflow-wrap, so the name cannot shrink. Every other page I loaded with the same title at 390 and 1280 (issue page, Activity, Inbox, Agents, Broadcasts, project List and Board, Replies, live page) keeps its width. The base build widens the same way (pre-existing in this exact place, which this PR rewrites); under the architect's standing rule a defect in code the PR touches is fixed here. The test is satisfiable: the same test with `[data-agent-name]{min-width:0;overflow-wrap:anywhere}` injected passes on both projects (scratch probe, not committed)."
+    }
+  ],
+  "failed": 1,
+  "exploration": [
+    "Session id that needs encoding ('e2e odd/id#1?x%'): claim link href /agents/e2e%20odd%2Fid%231%3Fx%25/live, click opens the live page with h1 'Odd agent' (its registry title) on chromium and iphone: pass.",
+    "Agent list failing (page.route 503 on /api/v1/agents): state 'unknown' with img 'Running state unknown', name falls back to the stamped title, no 'not running' text anywhere; on recovery 'running' with the registry title; a later failure goes back to 'unknown' keeping the cached title: pass on both projects.",
+    "Ten pages with up to 10 agent names each: no agent link nested inside another link, button or option; no /api/v1/agents/<id> request outside the live page itself; 3 reads of /api/v1/agents in 50 s on the issue page (cadence 15 s, one poller): pass.",
+    "Width with a 40-character unbroken title: only the Conversation tab widens (recorded failure)."
+  ],
+  "ci": "At 09b5058b: Tests 40315955492 success, PR Title 40315955526 success, Docs 40315955474 success, Worker Image 40315955476 success, Legion Envoy and Contracts 40315955519 (lint, typecheck, unit, browser suite) queued when read.",
+  "harnessNote": "Running /legion/scratch/harness/setup.sh from this container stopped the implementer container's Postgres: pg_ctl status cannot see a postmaster in another container's PID namespace, so it started a second one, which rewrote and then removed postmaster.pid, and the first server shut down on the invalid lock file. Postgres now runs from the tester container on 127.0.0.1:55432 with both databases; nothing else was lost (test data only)."
+}
