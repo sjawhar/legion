@@ -140,9 +140,8 @@ func endListenerKVWatchers(ctx context.Context, caches []listenerCache) {
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop. A
-// missing bucket is terminal too: no watcher notices envoy_roles going, and a
-// rebuild cannot create a bucket, so its failed rebuilds end in a restart,
-// whose store Open creates it again.
+// missing bucket is terminal too: a rebuild cannot create a bucket, so its
+// failed rebuilds end in a restart, whose store Open creates it again.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
 	if err == nil || !client.Connected() {
 		return false

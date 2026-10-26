@@ -64,6 +64,10 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		[]string{contracts.AgentSubject(ordinary), topic}); err != nil {
 		t.Fatalf("write %s's interest record: %v", ordinary, err)
 	}
+	if _, err := registry.SetRole(ordinary, "test-machine", "reviewer", false); err != nil {
+		t.Fatalf("claim reviewer for %s: %v", ordinary, err)
+	}
+	waitForRegistry(t, registry)
 
 	// The keys this listener refuses to write go in as an earlier listener or another writer put
 	// them: the legacy ids through nats.go's own KV put, and `ses:bad`, which nats.go refuses as a

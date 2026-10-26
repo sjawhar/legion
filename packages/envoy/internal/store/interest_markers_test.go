@@ -586,9 +586,12 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 	registry := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
 	handle := bus.KeyValue{KeyValue: kvwatchtest.TimingOut(kv, 2)}
 	registry.watcher = kvwatch.New("interest registry", handle, registry.applyWatched, registry.resetCache)
+	registry.roleWatcher = kvwatch.New("role claims", bus.KeyValue{KeyValue: roleKV}, registry.applyRoleClaim, registry.resetRoleHolders)
 	t.Cleanup(registry.StopWatch)
 	registry.watcher.Start()
+	registry.roleWatcher.Start()
 	waitFor(t, 30*time.Second, registry.watcher.Ready)
+	waitFor(t, 30*time.Second, registry.roleWatcher.Ready)
 
 	purged, err := collectorOf(registry).pass(js, nil)
 	if err != nil {

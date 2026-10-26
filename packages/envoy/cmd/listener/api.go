@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -373,26 +372,17 @@ func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelo
 	}
 }
 
-func roleNames(topics []string) []string {
-	roles := make([]string, 0)
-	for _, topic := range topics {
-		if role, ok := strings.CutPrefix(topic, contracts.RoleTopicPrefix); ok && role != "" {
-			roles = append(roles, role)
-		}
-	}
-	sort.Strings(roles)
-	return roles
-}
-
 // senderStamp is the sender a send or a publish carries: the session, the machine and directory it
-// runs in and the roles it subscribes to (its interest record), and its title (its session entry).
-// It only enriches the envelope, so no read it makes may cost the message. The interest record is
-// read from the cache, and a miss - a sender that subscribed to nothing, or any sender while the
-// cache refills after a reconnect - is read through to the bucket within senderStampReadTimeout of
-// ctx, the route's own (store.Registry.Get bounds that read alone). A read that does not answer
-// leaves the stamp with what is already known, the session id and the title the session cache
-// holds, and leaves the rest of the budget to the publish that follows, which meets the same silent
-// bus itself and is answered as the named 503.
+// runs in (its interest record), the roles whose claims name it (store.Registry.RolesHeldBy), and
+// its title (its session entry). It only enriches the envelope, so no read it makes may cost the
+// message. The interest record is read from the cache, and a miss - a sender that subscribed to
+// nothing, or any sender while the cache refills after a reconnect - is read through to the bucket
+// within senderStampReadTimeout of ctx, the route's own (store.Registry.Get bounds that read
+// alone). A read that does not answer leaves the stamp with what is already known, the session id
+// and the title the session cache holds, and leaves the rest of the budget to the publish that
+// follows, which meets the same silent bus itself and is answered as the named 503. The roles come
+// from the registry's watched view of the claims, with no bucket call, and a view that is not
+// complete (store.ErrRoleViewNotReady) leaves them out rather than refusing the send.
 func senderStamp(ctx context.Context, registry *store.Registry, sessions *session.SessionRegistry, sourceSession string) *contracts.EnvelopeSender {
 	if sourceSession == "" {
 		return nil
@@ -403,7 +393,9 @@ func senderStamp(ctx context.Context, registry *store.Registry, sessions *sessio
 	if interest, err := registry.Get(readCtx, sourceSession); err == nil {
 		sender.Machine = interest.MachineID
 		sender.Cwd = interest.Dir
-		sender.Roles = roleNames(interest.Topics)
+	}
+	if roles, err := registry.RolesHeldBy(sourceSession); err == nil {
+		sender.Roles = roles
 	}
 	if entry, err := sessions.Get(sourceSession); err == nil {
 		sender.Title = entry.Title
@@ -710,15 +702,24 @@ type sessionInfo struct {
 // roleHolderReadTimeout (2 s), still answers inside that budget.
 const sessionInterestReadTimeout = 1 * time.Second
 
-// sessionInfoFor joins one session entry with its interests (its topics, and the roles those topics
-// name), so a row of GET /v1/sessions and the single answer of GET /v1/registry/<session_id> are
-// one shape built one way. A session the interest registry holds no key for keeps its empty topics
-// and roles: a session that registered and subscribed to nothing is not an error here. The other
+// sessionInfoFor joins one session entry with its interest record's topics and the roles whose
+// claims name it (store.Registry.RolesHeldBy), so a row of GET /v1/sessions and the single answer
+// of GET /v1/registry/<session_id> are one shape built one way. A session holds a role exactly
+// when the role's claim names it: a role topic its record keeps from a claim it lost gives it no
+// role, and a claim it holds is reported whatever its record's topics are, or with no record at
+// all. A claims view that is not complete (store.ErrRoleViewNotReady: still scanning, refilling a
+// recreated bucket, or its watcher ended) is returned alone, as a read that did not answer, never
+// as a session holding no roles. A session the interest registry holds no key for keeps its empty
+// topics: a session that registered and subscribed to nothing is not an error here. The other
 // answers about the record (interestReadAnswered) are returned with the session's info, its topics
-// and roles empty, so the caller can still show the session and name what the read answered.
-// Every other error is a read that did not answer and is returned alone: a caller answers it as
-// the bus-unavailable 503, never as a session with no topics.
+// empty, so the caller can still show the session and name what the read answered. Every other
+// error is a read that did not answer and is returned alone: a caller answers it as the
+// bus-unavailable 503, never as a session with no topics or roles.
 func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID string, entry session.SessionEntry) (sessionInfo, error) {
+	roles, err := registry.RolesHeldBy(sessionID)
+	if err != nil {
+		return sessionInfo{}, err
+	}
 	info := sessionInfo{
 		SessionID:      sessionID,
 		MachineID:      entry.MachineID,
@@ -728,6 +729,7 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		Title:          entry.Title,
 		Capabilities:   append([]string{}, entry.Capabilities...),
 		SelfSubscribed: entry.SelfSubscribed,
+		Roles:          roles,
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
 	}
@@ -743,7 +745,6 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		return sessionInfo{}, err
 	}
 	info.Topics = interest.Topics
-	info.Roles = roleNames(interest.Topics)
 	return info, nil
 }
 
@@ -779,12 +780,13 @@ func writeInterestRecordUnreadable(w http.ResponseWriter, sessionID string, err 
 // (envoy_sessions, 5-min TTL — only live sessions) and enriching each with
 // topic data from the interests registry (envoy_interests). Every interest read shares one
 // sendRequestBudget deadline, so however many rows miss the interest cache the list answers
-// inside it. A session whose interest read answered with no topics to give - a record this build
-// cannot decode or a key the bucket refuses (interestReadAnswered) - is listed with no topics and
-// roles rather than refusing the list (sessionInfoFor); any other error is a read that did not
-// answer and ends the request with the bus-unavailable 503. The registry logs a record this build
-// cannot decode at WARN itself; a key the bucket refuses is logged here at WARN, once per listed
-// session, through the registry's logger, the listener's own.
+// inside it. Each row's roles are those whose claims name the session (sessionInfoFor). A session
+// whose interest read answered with no topics to give - a record this build cannot decode or a key
+// the bucket refuses (interestReadAnswered) - is listed with no topics rather than refusing the
+// list; any other error, a claims view that cannot answer among them, is a read that did not answer
+// and ends the request with the bus-unavailable 503. The registry logs a record this build cannot
+// decode at WARN itself; a key the bucket refuses is logged here at WARN, once per listed session,
+// through the registry's logger, the listener's own.
 func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -832,12 +834,12 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 // 404 writes it. An id the session bucket refuses as a key is the caller's to fix, the 413 or 400
 // writeBusUnavailable writes. A live session whose id only the interest bucket refuses (a legacy id
 // past envoy_interests' get bound that envoy_sessions still serves, or one outside nats.go's key
-// alphabet) is answered 200 with no topics and roles, as GET /v1/sessions lists it, and logged at
-// WARN as the list logs it: Dispatch reads a 413 or 400 here as a session that cannot exist. A read
-// that did not answer — the session's, or its interest record's (sessionInfoFor), both within
-// sendRequestBudget — is a 503 to retry: never a session a caller may take for ended, nor one with
-// no topics. An interest record this build cannot decode is the 500 writeInterestRecordUnreadable
-// writes: the bus answered it.
+// alphabet) is answered 200 with no topics, as GET /v1/sessions lists it, and logged at WARN as the
+// list logs it: Dispatch reads a 413 or 400 here as a session that cannot exist. A read that did
+// not answer — the session's, its interest record's, or the claims view's (sessionInfoFor), all
+// within sendRequestBudget — is a 503 to retry: never a session a caller may take for ended, nor
+// one with no topics or roles. An interest record this build cannot decode is the 500
+// writeInterestRecordUnreadable writes: the bus answered it.
 func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

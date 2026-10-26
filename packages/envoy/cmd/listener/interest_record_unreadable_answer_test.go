@@ -52,6 +52,10 @@ func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
 		[]string{contracts.AgentSubject(readable), topic}); err != nil {
 		t.Fatalf("write %s's interest record: %v", readable, err)
 	}
+	if _, err := registry.SetRole(readable, "test-machine", "reviewer", false); err != nil {
+		t.Fatalf("claim reviewer for %s: %v", readable, err)
+	}
+	waitForRegistry(t, registry)
 	interestBucket, err := client.JS().KeyValue(bus.InterestBucket)
 	if err != nil {
 		t.Fatalf("open the interest bucket: %v", err)

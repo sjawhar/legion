@@ -819,13 +819,32 @@
   naming the dependency and `context deadline exceeded`, so the container health check (`curl
   -sf`) still fails and replaces the task, as it did when the 10 s wait outran it. A check that
   answered with a failure keeps its answer.
-- `POST /v1/roles/set`'s cleanups - the rollback of a claim that did not land and the old holder's
-  loss of the role's topic - run under their own 3.5 s bound detached from the request, so a
-  request whose budget ended still starts them (INFRA-141). The role reaper removes a role topic
-  whose claim names another session or none, once two consecutive passes find it so on the same
-  revision of the record, logging `role reaper removed a role topic whose claim names another
-  session or none` at INFO. A claim whose lost compare-and-swap is joined with a store call that
-  did not answer is the bus-unavailable 503 with `Retry-After: 1`, not the store's answer.
+- A session holds a role exactly when the role's claim in `envoy_roles` names it, and every
+  answer that names a role's holder reads the claim (INFRA-141). `GET /v1/sessions` rows and `GET
+  /v1/registry/<session_id>` (which Dispatch's route roster reads) report `roles` from the claims,
+  and so does the `sender.roles` a send or a publish stamps, where both took them from the
+  `notifications.role.<role>` topics on the session's interest record: a session whose record kept
+  a role's topic after another session claimed the role was reported holding it, and a holder
+  whose record lacked the topic was not. The listener keeps a watched view of the role bucket
+  (`store.Registry.RolesHeldBy`), so no answer pays a store read per role; a claim it cannot decode
+  gives its role to nobody and is logged at WARN once. The view answers only while it is complete:
+  its watcher's first scan delivered every claim, and after a recreated role bucket's reset only
+  once the refill's scan has. Until then (still loading, a scan nats.go's idle timer ended, a
+  refill still running, or its watcher ended) it is `store.ErrRoleViewNotReady`, a read that did
+  not answer: the bus-unavailable 503 with `Retry-After: 1` on the two session routes, never a
+  holder listed without its role, and a send's `sender.roles` left out without refusing it. A
+  first scan the idle timer ended is scanned again a second later until one completes
+  (`kvwatch.WithRescan`). The role claim watcher is the interest registry's second, so `/healthz`
+  now answers `503 unhealthy`, under the `interest KV` dependency, when it stops or the role bucket
+  is recreated under it (`role claims watcher stopped`, `role claims bucket envoy_roles was
+  recreated under its watcher`), where a ping of the role bucket's status was all it read before,
+  and the self-health monitor counts either as a terminal failure and rebuilds it, which refills
+  the view. `POST /v1/roles/set`'s rollback of a claim that did not land and its removal of the
+  role's topic from the old holder are best-effort tidying within the request's budget: a claim
+  that landed answers 200 whatever that cleanup did, a cleanup that failed is logged at WARN, and
+  one the budget's end cut short at INFO. A claim whose lost compare-and-swap is joined with a
+  store call that did not answer is the bus-unavailable 503 with `Retry-After: 1`, not the store's
+  answer.
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is

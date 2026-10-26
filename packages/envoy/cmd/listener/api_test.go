@@ -84,14 +84,12 @@ func (f stalledStreamInfo) StreamInfo(_ string, opts ...nats.JSOpt) (*nats.Strea
 func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, map[string][]string{
-		"ses_source": {
-			"notifications.role.reviewer",
-			"notifications.role.maintainer",
-		},
+		"ses_source": nil,
 	}, map[string]int{
 		"ses_source": 1,
 		"ses_target": 1,
 	})
+	claimRoles(t, registry, "ses_source", "reviewer", "maintainer")
 	if err := sessions.Put("ses_source", session.SessionEntry{
 		Port:      1,
 		MachineID: "test-machine",
@@ -1741,12 +1739,14 @@ func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
 
 func TestSessionsHandlerFiltersAndReportsRoles(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, map[string][]string{
-		"ses_match": {"notifications.role.reviewer", "notifications.role.maintainer"},
-		"ses_other": {"notifications.role.observer"},
+		"ses_match": nil,
+		"ses_other": nil,
 	}, map[string]int{
 		"ses_match": 1,
 		"ses_other": 1,
 	})
+	claimRoles(t, registry, "ses_match", "reviewer", "maintainer")
+	claimRoles(t, registry, "ses_other", "observer")
 	if err := sessions.Put("ses_match", session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/work/example", Title: "Release work"}); err != nil {
 		t.Fatalf("set matching session: %v", err)
 	}
@@ -1824,11 +1824,9 @@ func TestSessionsHandlerReportsHostWithFallbackToMachineID(t *testing.T) {
 func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, map[string][]string{
-		"ses_source": {
-			"notifications.role.reviewer",
-			"notifications.role.maintainer",
-		},
+		"ses_source": nil,
 	}, map[string]int{"ses_target": 1})
+	claimRoles(t, registry, "ses_source", "reviewer", "maintainer")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	recorder := httptest.NewRecorder()
@@ -1858,11 +1856,12 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 }
 
 // The sender stamp reads an interest record its cache misses through to the bucket - any sender's,
-// while the cache refills after a reconnect - and, with the bus answering, stamps the machine,
-// directory and roles from it as a cache hit would: bounding that read (senderStampReadTimeout) so
-// a silent bus cannot hold a send or a publish past its budget must not cost a healthy bus the
-// stamp. The cache is kept from the record by ending its watcher before another listener writes
-// it, so nothing but the read-through can find it.
+// while the cache refills after a reconnect - and, with the bus answering, stamps the machine and
+// directory from it as a cache hit would: bounding that read (senderStampReadTimeout) so a silent
+// bus cannot hold a send or a publish past its budget must not cost a healthy bus the stamp. The
+// cache is kept from the record by ending its watcher before another listener writes it, so nothing
+// but the read-through can find it. The roles come from the claims, not the record
+// (TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics).
 func TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket(t *testing.T) {
 	const (
 		target = "ses_stamp_target"
@@ -1899,7 +1898,7 @@ func TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket(t *testin
 			}
 			if _, err := writer.Upsert(store.Interest{
 				SessionID: sender, MachineID: "test-machine", Dir: "/test/" + sender,
-			}, []string{contracts.AgentSubject(sender), "notifications.role.reviewer", "notifications.role.maintainer"}); err != nil {
+			}, []string{contracts.AgentSubject(sender)}); err != nil {
 				t.Fatalf("write %s's interest record: %v", sender, err)
 			}
 			for _, cached := range registry.List() {
@@ -1920,9 +1919,6 @@ func TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket(t *testin
 			}
 			if response.Sender == nil || response.Sender.SessionID != sender || response.Sender.Machine != "test-machine" || response.Sender.Cwd != "/test/"+sender {
 				t.Fatalf("sender = %+v, want %s on test-machine in /test/%s", response.Sender, sender, sender)
-			}
-			if got := strings.Join(response.Sender.Roles, ","); got != "maintainer,reviewer" {
-				t.Fatalf("sender roles = %q, want maintainer,reviewer", got)
 			}
 		})
 	}
@@ -2625,8 +2621,9 @@ func TestSessionEntryRouteAnswersServiceUnavailableWhenTheStoreReadDoesNotAnswer
 // sees exactly the row the list would have given it, joined interests and all.
 func TestSessionEntryRouteAnswersTheSameBodyAsTheSessionsRow(t *testing.T) {
 	registry, sessions := setupSessionsTest(t,
-		map[string][]string{"ses_listed": {"notifications.role.reviewer"}},
+		map[string][]string{"ses_listed": nil},
 		map[string]int{"ses_listed": 4242})
+	claimRoles(t, registry, "ses_listed", "reviewer")
 	state := &listenerDeps{registry: registry, sessions: sessions}
 
 	list := httptest.NewRecorder()

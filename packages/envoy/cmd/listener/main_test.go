@@ -1389,6 +1389,7 @@ func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[st
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
 	}
+	waitForRegistry(t, registry)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create session registry: %v", err)
@@ -1415,6 +1416,27 @@ func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[st
 	// Allow watcher to propagate interest events to cache
 	time.Sleep(500 * time.Millisecond)
 	return registry, sessions
+}
+
+// claimRoles makes sessionID the holder of each role's claim, as POST /v1/roles/set does: a session
+// holds a role exactly when the role's claim names it.
+func claimRoles(t *testing.T, registry *store.Registry, sessionID string, roles ...string) {
+	t.Helper()
+	for _, role := range roles {
+		if _, err := registry.SetRole(sessionID, "test-machine", role, false); err != nil {
+			t.Fatalf("claim %s for %s: %v", role, sessionID, err)
+		}
+	}
+}
+
+// waitForRegistry waits for the registry's interest and role claim caches to load the buckets.
+func waitForRegistry(t *testing.T, registry *store.Registry) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := registry.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the registry's caches: %v", err)
+	}
 }
 
 func TestSessionsHandler_JoinsRegistries(t *testing.T) {

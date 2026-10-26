@@ -169,3 +169,129 @@ func TestATimedOutWarmUpSaysSoAndLeavesTheWatcherHealthy(t *testing.T) {
 		t.Fatalf("Err() = %v while the watcher is still delivering", err)
 	}
 }
+
+// Complete says whether the current watcher's first scan delivered every key, and unlike Ready it
+// is the current generation's alone: a Rewatch moves the generation, and the new watcher is complete
+// only once its own scan is, and a Stop leaves nothing complete.
+func TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey(t *testing.T) {
+	uri := testnats.URL(t)
+	conn, kv := bucket(t, uri)
+	if _, err := kv.Put("before-start", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	into := newSeen()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset)
+	t.Cleanup(w.Stop)
+	if _, complete := w.Complete(); complete {
+		t.Fatal("Complete before Start answered true")
+	}
+	w.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	first, complete := w.Complete()
+	if !complete || !into.has("before-start") {
+		t.Fatalf("after a complete first scan: Complete %v with the key applied %v, want both", complete, into.has("before-start"))
+	}
+
+	if err := w.Rewatch(conn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	if again, _ := w.Complete(); again == first {
+		t.Fatalf("a Rewatch left Complete naming generation %d, the watcher it replaced", first)
+	}
+	eventually(t, "the replacement's own scan to complete", func() bool {
+		_, complete := w.Complete()
+		return complete
+	})
+
+	w.Stop()
+	if _, complete := w.Complete(); complete {
+		t.Fatal("Complete after Stop answered true")
+	}
+}
+
+// A first scan nats.go's idle timer ended releases readiness but is not complete, and without
+// WithRescan it stays so: nothing scans the bucket again until a Rewatch.
+func TestAFirstScanTheIdleTimerEndedIsNotComplete(t *testing.T) {
+	uri := testnats.URL(t)
+	_, kv := bucket(t, uri)
+	for _, key := range []string{"one", "two", "three"} {
+		if _, err := kv.Put(key, []byte("1")); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+	into := newSeen()
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(kv, 1)}, into.apply, into.reset)
+	t.Cleanup(w.Stop)
+	w.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	// Longer than a WithRescan watcher waits before it scans again.
+	time.Sleep(1500 * time.Millisecond)
+	if _, complete := w.Complete(); complete {
+		t.Fatal("a first scan the idle timer ended reads as complete")
+	}
+	if into.has("three") {
+		t.Fatal("a watcher without WithRescan scanned the bucket again on its own")
+	}
+}
+
+// WithRescan ends the wait a timed-out first scan leaves: the watcher scans the bucket again on the
+// same handle, and once that scan delivers every key the cache is complete and holds them all.
+func TestWithRescanCompletesAFirstScanTheIdleTimerEnded(t *testing.T) {
+	uri := testnats.URL(t)
+	_, kv := bucket(t, uri)
+	for _, key := range []string{"one", "two", "three"} {
+		if _, err := kv.Put(key, []byte("1")); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+	logger, records := jsonLogger(t)
+	into := newSeen()
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(kv, 1)}, into.apply, into.reset,
+		kvwatch.WithLogger(logger), kvwatch.WithRescan())
+	t.Cleanup(w.Stop)
+	w.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	first, complete := w.Complete()
+	if complete {
+		t.Fatal("the timed-out first scan reads as complete")
+	}
+	eventually(t, "the rescan to complete", func() bool {
+		_, complete := w.Complete()
+		return complete
+	})
+	if again, _ := w.Complete(); again == first {
+		t.Fatalf("the cache is complete under generation %d, the timed-out scan's", first)
+	}
+	for _, key := range []string{"one", "two", "three"} {
+		if !into.has(key) {
+			t.Fatalf("the rescan completed without delivering %s", key)
+		}
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err() = %v after the rescan", err)
+	}
+	if into.resetCount() != 0 {
+		t.Fatalf("a rescan of the same bucket reset the cache %d times, want none", into.resetCount())
+	}
+	var outcomes []any
+	for _, line := range records() {
+		if line["msg"] == "test cache cache warm-up" {
+			outcomes = append(outcomes, line["outcome"])
+		}
+	}
+	if fmt.Sprint(outcomes) != "[timed out completed]" {
+		t.Fatalf("warm-up outcomes %v, want the timed-out scan and then the completed rescan", outcomes)
+	}
+}

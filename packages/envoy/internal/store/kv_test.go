@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1678,7 +1679,10 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 	assertInterestMissing(t, reg, sessionID)
 }
 
-func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
+// A claim that landed is the success: the old holder's role topic a failed cleanup leaves gives it
+// no role, since the claim alone says who holds one, so the failure is logged at WARN and not
+// returned.
+func TestSetRoleSucceedsWhenOldHolderCleanupFails(t *testing.T) {
 	logs := captureRegistryLogs(t)
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1704,8 +1708,8 @@ func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
 		failPutAt: 2,
 		err:       errors.New("injected old-holder cleanup failure"),
 	})
-	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
-		t.Fatal("SetRole must return the failed old-holder cleanup")
+	if _, err := reg.SetRole(newSession, "example-host", role, false); err != nil {
+		t.Fatalf("SetRole returned %v after its claim landed, want success", err)
 	}
 
 	assertRoleHolder(t, reg, role, newSession)
@@ -1774,7 +1778,7 @@ func useKV(t *testing.T, r *Registry, kv natsgo.KeyValue) {
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := r.WaitForCacheReady(ctx); err != nil {
+	if err := r.watcher.WaitReady(ctx); err != nil {
 		t.Fatalf("wait for the rebuilt watcher: %v", err)
 	}
 }
@@ -2280,6 +2284,8 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if err := js.DeleteKeyValue(bus.RoleClaimBucket); err != nil {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
+	roles, roleWatch := reg.roles(), reg.roleWatcher.KV()
+	roleGeneration, _ := reg.roleWatcher.Complete()
 	second, closeSecond := connectNATS(t)
 	if err := reg.Rewatch(second); err == nil {
 		t.Fatal("Rewatch onto a connection without the role bucket succeeded")
@@ -2288,8 +2294,63 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if _, err := reg.Upsert(Interest{SessionID: "ses_still_first", MachineID: "m1"}, []string{"notifications.agent.x"}); err != nil {
 		t.Fatalf("Upsert after the failed Rewatch: %v; the interest handle moved to the closed connection", err)
 	}
-	if err := reg.WatchErr(); err != nil {
-		t.Fatalf("WatchErr after the failed Rewatch: %v; the interest watcher moved to the closed connection", err)
+	// WatchErr was the interest watcher's error alone when this test was written. It now joins the
+	// role claim watcher's, which ends on its own here because the test deleted its bucket, so the
+	// interest watcher's is read directly, and the role side is held to moving nothing too.
+	if err := reg.watcher.Err(); err != nil {
+		t.Fatalf("the interest watcher's error after the failed Rewatch: %v; it moved to the closed connection", err)
+	}
+	if reg.roles() != roles || reg.roleWatcher.KV() != roleWatch {
+		t.Fatal("a Rewatch that could not open the role bucket moved a role bucket handle")
+	}
+	if generation, _ := reg.roleWatcher.Complete(); generation != roleGeneration {
+		t.Fatal("a Rewatch that could not open the role bucket replaced the role claim watcher")
+	}
+}
+
+// A Rewatch whose interest watcher cannot move moves nothing either: the role handle and the role
+// claim watcher stay on the connection they were on, so the registry does not read and write the
+// two buckets through different connections, and the role claim view still answers there.
+func TestARewatchWhoseInterestWatcherCannotMoveMovesNothing(t *testing.T) {
+	first, closeFirst := connectNATS(t)
+	defer closeFirst()
+	reg, err := Open(first, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	if _, err := reg.SetRole("ses_role_holder", "m1", "reviewer", false); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		roles, err := reg.RolesHeldBy("ses_role_holder")
+		return err == nil && slices.Equal(roles, []string{"reviewer"})
+	})
+	js, err := first.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
+		t.Fatalf("delete the interest bucket: %v", err)
+	}
+	roles, roleWatch := reg.roles(), reg.roleWatcher.KV()
+	roleGeneration, _ := reg.roleWatcher.Complete()
+	second, closeSecond := connectNATS(t)
+	if err := reg.Rewatch(second); err == nil {
+		t.Fatal("Rewatch onto a connection without the interest bucket succeeded")
+	}
+	closeSecond()
+	if reg.roles() != roles || reg.roleWatcher.KV() != roleWatch {
+		t.Fatal("a Rewatch whose interest watcher could not move moved a role bucket handle")
+	}
+	if generation, _ := reg.roleWatcher.Complete(); generation != roleGeneration {
+		t.Fatal("a Rewatch whose interest watcher could not move replaced the role claim watcher")
+	}
+	if got, err := reg.RolesHeldBy("ses_role_holder"); err != nil || !slices.Equal(got, []string{"reviewer"}) {
+		t.Fatalf("after the failed Rewatch RolesHeldBy = %v, %v; want [reviewer] from the view on the first connection", got, err)
+	}
+	if _, err := reg.RoleClaim(context.Background(), "reviewer"); err != nil {
+		t.Fatalf("a role claim read after the failed Rewatch: %v; the role handle moved to the closed connection", err)
 	}
 }
 
