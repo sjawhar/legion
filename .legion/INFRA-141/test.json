@@ -2,55 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T15:45:00Z",
+  "completed": "2026-10-26T17:20:00Z",
   "generation": 3,
-  "round": "the round retro sent back for R1 and R2: fixes acafc88f (write routes bounded; registry answers a live session whose interest key is refused) and 7093f375 (GitHub CI record, webhook publishes, /healthz); head 1d7b96f0",
+  "round": "review 5655062345's round: fix 74318aa8 (detached role-claim cleanups, role-topic reaper, joined store errors, /healthz on an unanswered JetStream check), head 0a48e1d2",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove its write-route case on my own rig (real binary, real natsd behind a python relay that can freeze and thaw a live connection, curl) and its negative control with the listener built from git archive of 69fdd6bc. Extended it to the webhook routes, to a thaw after the freeze (do abandoned writes leave half-done state; is a redelivered webhook deduplicated), and to R1 on the real binary. Re-ran its named tests, including the /healthz JetStream-stall test that my rig cannot reproduce."
+    "how": "Its proof is three go-test entries plus e2e-local. I drove items (1) on the real binary myself: a role claim over a bus slowed by a relay that delays each reply (0.45 to 0.9 s), against the listener built from git archive of cc183a6f; and the role reaper over two real 5-minute passes. Re-ran its named store and listener tests. Items (2) and (4) cannot be produced from outside the process and rest on its tests, which pass."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "R2: every write route answers a bus that is connected but silent with the named 503 and Retry-After: 1 inside the 3.5 s budget",
-      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd) reached through a TCP relay frozen with the connection open; sessions ses_a and ses_b registered, ses_a subscribed and holding role r10",
-      "command": "after the freeze: POST /v1/interests/subscribe (ses_new), POST /v1/roles/set (ses_a r10b), POST /v1/roles/set soft (ses_b r10), POST /v1/interests/unsubscribe (ses_a one topic), DELETE /v1/interests/ses_a, DELETE /v1/sessions/ses_a, 20 concurrent subscribes",
-      "observed": "each 503 in 3.502-3.504 s with Retry-After: 1 and a body naming the call ('read ses_new's interest record', 'refresh role claimant registration: write session ses_a to the bucket', 'read role r10a's claim', 'read role r10's claim', 'delete session ses_a from the bucket', each ': context deadline exceeded'); 20 concurrent subscribes all 503, slowest 3.519 s",
-      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
-      "negativeControl": "the listener built from 69fdd6bc on the same rig: all six write routes 'curl: (52) Empty reply from server' at ~10.0 s, and the 20 concurrent subscribes timed out the same way"
+      "criterion": "(1) A role claim's old-holder cleanup still lands when the request's budget ends before it",
+      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd) behind a python relay that delays every server reply by a set time; ses_old holding role r, ses_new registered",
+      "command": "POST /v1/roles/set {ses_new, r} with each reply delayed 0.45, 0.5, 0.55, 0.6, 0.9 s; return the bus to full speed; read ses_old's and ses_new's interest records and the claim of r",
+      "observed": "every claim 503 with Retry-After: 1 in 3.50 s. 0.55 s (run with the reaper wait): 'remove role r's topic from its old holder ses_old: context deadline exceeded', and afterwards ses_old has no topics, ses_new has notifications.role.r, claim r names ses_new: the detached cleanup landed after the 503. 0.5/0.6 s: the claim write was abandoned and landed late; ses_new holds r with its topic; ses_old keeps notifications.role.r (the claim step never reported success, so no old-holder cleanup is due); the detached rollback correctly left ses_new's topic. 0.9 s: the claimant's own read timed out first; nothing changed. 0 'cleanup failed after its request ended' lines",
+      "headSha": "0a48e1d2ce6023332816b2818cd9f84467343a17",
+      "negativeControl": "the listener built from cc183a6f on the same rig at 0.55 s left ses_old with notifications.role.r beside the new holder's, and still had it after 10.8 minutes (it has no role-topic reaper)"
     },
     {
-      "criterion": "R2 sweep: a GitHub webhook answers a frozen bus inside its caller's wait, and an abandoned write leaves no half-done state once the bus returns",
-      "surface": "the same real binary with ENVOY_WEBHOOKS=github and a signing secret; the relay frozen and then thawed; a core NATS subscriber on notifications.github.> straight on NATS; StreamInfo of ENVOY_NOTIFICATIONS",
-      "command": "frozen: signed pull_request (pull-request-opened.json) and check_run (check-run-first.json); thaw; redeliver both with the same X-GitHub-Delivery; count stream messages per subject. Separately, after the write-route freeze: thaw and read the interest, session and role records and GET /v1/roles/<role>",
-      "observed": "frozen: check_run 503 in 4.0 s (69fdd6bc: 10.0 s), pull_request 503 in 5.0 s (unchanged); redelivered after thaw: both 200. The core subscriber saw the pr.42 envelope twice (the 503'd publish landed late), but the stream holds exactly 1 message on pr.42 and 1 on pr.42.checks, so the durable sessions read from sees one. After the write-route thaw: role r10b unclaimed (its claim failed), role r10 still held by ses_a, ses_a's interest and session records unchanged, ses_new never written; a repeated subscribe and a repeated claim then got 200",
-      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
-      "negativeControl": "the same webhook deliveries answered 200 before the freeze"
+      "criterion": "(1) The role reaper removes a role topic no claim backs, after two passes on the same revision, and leaves backed and wildcard role topics",
+      "surface": "the same real binary with its production 5-minute role reaper; ses_holder claimed role held; ses_squatter subscribed straight to notifications.role.held and notifications.role.nobody; ses_wild subscribed to notifications.role.>",
+      "command": "read the three interest records at t=0, after one pass (5.5 min) and after two (10.5 min); jq the reaper log lines",
+      "observed": "after pass 1 all unchanged. After pass 2: ses_squatter's two role topics removed (two INFO 'role reaper removed a role topic whose claim names another session or none' lines, holder shown), its github topic kept; ses_holder's notifications.role.held and ses_wild's notifications.role.> kept. In the same pass the claim reaper released held, since my rig's sessions do not heartbeat and outlived the 5-minute session TTL (existing behaviour), and the topic reaper then logged the squatter's removal with holder \"\"",
+      "headSha": "0a48e1d2ce6023332816b2818cd9f84467343a17",
+      "negativeControl": "after one pass nothing was removed, so the removal is the two-pass rule and not a reaper that strips every role topic; the holder's backed topic and the wildcard subscription survived both passes"
     },
     {
-      "criterion": "R1: GET /v1/registry/<id> answers a live session whose key only the interest bucket refuses as live (200, no topics)",
-      "surface": "the same real binary; a 3,987-byte legacy session id written into envoy_sessions",
-      "command": "GET /v1/registry/<3987-byte id>; GET /v1/registry/ses_absent",
-      "observed": "200 with topics null and its title; ses_absent 404 'no live session ses_absent'",
-      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
-      "negativeControl": "the listener built from 69fdd6bc answered the same request 413 'too large to publish whole: a key of 3987 bytes, past 3974'"
-    },
-    {
-      "criterion": "Earlier behaviour unchanged (A1-A6, A6', frozen send/publish/lookup, unreadable role claims, unplaceable delivery)",
-      "surface": "the real binary on the frozen-relay and deferral rigs; scripts/e2e-local.sh; go test of the named tests",
-      "command": "the round-four roles and defer drivers; bash scripts/e2e-local.sh and the A6' jq; go test ./cmd/listener of the implementer's seven new tests, my tests and the cold-cache tests; go test ./internal/cistore ./internal/webhook/...",
-      "observed": "frozen sends, publishes and lookups 503 within 3.52 s, 20 concurrent sends and 20 concurrent lookups all 503; unreadable role claims 500; no_push_target 12 deferrals and a give-up at 61 s, push_failed once; e2e exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (15:27:12.251Z, 15:27:16.157Z, 15:27:19.915Z) after 'Initiating Shutdown...' at 15:27:08.709Z; every named test --- PASS (ok 46.599 s), cistore ok, webhook ok. My test files have no diff since 43a5a5eb",
-      "headSha": "1d7b96f0049166f3b27f8f320d07ca669cfe8bbb",
-      "negativeControl": "the e2e send answered 200 before NATS was stopped; the frozen-rig requests answered before the freeze"
+      "criterion": "Earlier behaviour unchanged (frozen write routes, webhooks, send/publish/lookup, A1-A6, A6')",
+      "surface": "the real binary on the frozen-relay rigs; scripts/e2e-local.sh; go test of the named tests",
+      "command": "the round-four roles driver and round-ten write-route driver; bash scripts/e2e-local.sh with the A6' jq; go test ./cmd/listener of the implementer's joined-error, healthz, write-route and claim tests, my tests and the cold-cache tests; go test ./internal/store of the three new tests",
+      "observed": "frozen: subscribe, claims, unsubscribe and both deletes 503 in 3.50 s, 20 concurrent subscribes all 503 (slowest 3.536 s), check_run 503 in 4.0 s, push 503 in 5.0 s, sends/publishes/lookups 503 within 3.52 s; e2e exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (16:50:50.063Z, 16:50:53.891Z, 16:50:57.648Z) after 'Initiating Shutdown...' at 16:50:46.522Z; every named test --- PASS. My test files have no diff since c95e2fec",
+      "headSha": "0a48e1d2ce6023332816b2818cd9f84467343a17",
+      "negativeControl": "every frozen-rig request was answered before the freeze; the e2e send answered 200 before NATS was stopped"
     }
   ],
   "notes": [
-    "/healthz on my frozen relay answers 503 unhealthy in 3.0 s at both heads (the flush already had a 3 s bound). The case this round adds, a JetStream that stops answering while the connection still flushes, cannot be made from outside the process; it rests on TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget, which passes.",
-    "A GitHub delivery answered 503 can still publish once the bus returns; JetStream's duplicate window keeps it to one stream message when GitHub redelivers with the same delivery id, as observed. A core subscriber sees both copies.",
-    "PR body is 59,193 characters, close to GitHub's 65,536 limit; later rounds must replace evidence rather than add to it."
+    "A claim can answer 503 although it landed (the 0.55 s run: the route timed out in the old holder's cleanup after the claim write succeeded). The client retries on 503, and a retried claim of a role the session already holds is idempotent.",
+    "Between a late-landing claim and the reaper's second pass (up to ~10 minutes), the old holder's interest record still lists the role topic, so GET /v1/sessions reports that role on it. Role delivery reads the claim, not the topic.",
+    "A session subscribed straight to notifications.role.<role> without holding its claim now loses that topic after two reaper passes; no client in this repository subscribes that way (envoy-client's topic guide says role topics are publish-to, claimed through envoy_role_set).",
+    "PR body is 61,980 characters (GitHub's limit 65,536)."
   ],
-  "ci": "At 1d7b96f0: Tests 40348211149, Docs 40348211618, Worker Image 40348211751 and Legion Envoy and Contracts 40348211642 queued when read, cited unsettled and not waited for.",
+  "ci": "At 0a48e1d2: Tests 40361597010, Docs 40361597170, Legion Envoy and Contracts 40361597214 and Worker Image 40361597002 queued when read, cited unsettled and not waited for.",
   "regressionLocksAdded": []
 }
