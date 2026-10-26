@@ -2,7 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-256",
-  "completed": "2026-10-26T17:35:00Z",
+  "completed": "2026-10-26T18:58:00Z",
+  "generation": 4,
+  "regeneration": "Generation 4 restart after a daemon upgrade: no code change. The head still carries the code commit 9bb73cab40630765aeb55fccef6f1cd7cb34acf8 unchanged (only .legion/ differs above it); its CI is green there (Tests 40343447424, PR Title 40343447459, Legion Envoy and Contracts 40343447519, Docs 40343447584, all success). Re-checked 2026-10-26T18:57Z: actionlint v1.7.7 exits 0 on pr-title.yaml, the group is pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }} as plan amendment 2 states, acceptance grep A prints nothing. The proof below is the generation 3 proof on scratch sjawhar/legion#2255 and is recorded in sjawhar/legion#2247's E2E (implementer) line.",
   "proof": [
     {
       "criterion": "E1: a body edit starts a pull_request run whose pr-title is in the pull request's rollup, SUCCESS; a newer pull_request run cancels the older one",
@@ -60,7 +62,7 @@
     "An inline comment posted alone also fires pull_request_review submitted, so it still starts exactly one PR Title run; the header never says an inline comment starts no run."
   ],
   "deviations": [
-    "The architect's concurrency addition asked for group pr-title-${{ github.event.pull_request.number }}; the head uses pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }} for the per-event check listing above (reported to the architect with evidence). At most one running and one pending run per event, so at most four per pull request.",
+    "The architect's first concurrency addition asked for group pr-title-${{ github.event.pull_request.number }}; the head uses pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }} for the per-event check listing above (reported to the architect with evidence, and now plan amendment 2 in the generation 4 plan handoff 23e66cc4). At most one running and one pending run per event, so at most four per pull request.",
     "ce-simplify-code applied one change: as_event became as_review_event (no argument)."
   ],
   "openQuestions": []
