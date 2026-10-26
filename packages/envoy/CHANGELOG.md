@@ -7,10 +7,13 @@
 - The ask reads name who besides the followers a person's answer and replies reach:
   `GET /api/v1/asks/{id}` and every ask thread (the Inbox rows and an issue's
   `GET /api/v1/issues/{key}/asks?thread=1`) carry `claimant`, the session holding the claim on the
-  ask's issue, and `route`, the issue's route (`session:<id>` or `role:<name>`), each null when
-  absent and on a project document's ask. The Inbox ask card's `Reaches N` panel lists the
-  claimant (`via claim`) and the route (`via route`) beside the followers and subscribers, each
-  session listed and counted once (INFRA-278).
+  ask's issue, `route`, the issue's route (`session:<id>` or `role:<name>`), and `route_holder`,
+  the live session that route reaches (the routed session while the listener lists it, or the
+  role's holder), resolved per read like the issue reads' `route_holder`; each is null when absent
+  and on a project document's ask. The Inbox ask card's `Reaches N` panel lists the claimant
+  (`via claim`) and the route (`via route`) beside the followers and subscribers, and counts each
+  session once: a session that is the claimant, the route's holder, a follower or a subscriber at
+  once is one row and one in `N` (INFRA-278).
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -573,15 +576,24 @@
   document. A person's `ask.answered`, `ask.handed_back`, `ask.resolved`, `comment.created`,
   `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created` and
   `message.answered` take this claimant route; a message a person sends to one session still
-  reaches only that session, and a new comment whose mentions resolved to the claimant arrives
-  once, as the mention. The claim is read when the event is published, so a retry after the claim
-  changed hands reaches the new holder, and a claimant that is also the route, a follower or an
-  author gets one copy. An agent's events, and every other event (an issue update, a document
+  reaches only that session. The claim is read when the event is published, so a retry after the
+  claim changed hands reaches the new holder, and a claimant that is also the route, a follower or
+  an author gets one copy. An agent's events, and every other event (an issue update, a document
   version, a person opening or editing an ask), still reach a claimant only through a subscription
   to the issue or as its route (INFRA-278).
-- The ask follower route skips a follower that a new comment's (`comment.created`) mentions
-  resolved to, since the mention delivers that comment already; the comment's edit, resolution
-  and reopening still reach every follower (INFRA-278).
+- A new comment (`comment.created`) is left to its mention only once the mention delivered it: the
+  route, claimant, author and ask follower copies skip a session the comment's mentions resolved
+  to only when `comment_deliveries` records the mention `sent` to that session, so such a comment
+  arrives once, as the mention. While the mention's send is still pending (under a minute old),
+  the outbox publishes every other destination, holds that session's copy back and tries the
+  event again a few seconds later without counting an attempt; when the send failed, was
+  abandoned or was never recorded, the session gets its own-topic copy as if it had not been
+  mentioned. This changes the route and author copies too: before, a mention resolved to the
+  route's session or a document's author suppressed that copy even when the mention's send failed,
+  so the comment reached that session directly by no path. The ask follower route, which before
+  reached every follower, now skips a follower the mention delivered the comment to, by the same
+  rule. A comment's edit, resolution and reopening are never left to a mention and reach every one
+  of these sessions (INFRA-278).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A

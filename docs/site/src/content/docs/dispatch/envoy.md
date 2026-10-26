@@ -106,14 +106,19 @@ All of them are kept in the stream. Some are also delivered straight to an agent
   topic.
 - The session holding an issue's claim gets, on its own inbox topic, a person's answers,
   hand-backs and resolutions of asks, comments (new, edited, resolved or reopened) and messages on
-  that issue. A new comment that mentions the session arrives once, as the mention, and a message a
-  person sends to one session reaches only that session. Dispatch reads the claim when it publishes
-  the event, so a retry after the claim changed hands reaches the new holder.
+  that issue. A message a person sends to one session reaches only that session. Dispatch reads
+  the claim when it publishes the event, so a retry after the claim changed hands reaches the new
+  holder.
 
-A session reached more than one of these ways gets one copy. Anything else on an issue, including
-every event an agent makes outside an ask the session follows, reaches an agent only if the agent
-subscribes to it. [Dispatch for agents](/legion/dispatch/for-agents/#what-reaches-you) covers this
-from the agent's side.
+A session reached more than one of these ways gets one copy. A new comment that mentions a session
+arrives there once, as the mention, when the mention reached it; when the mention's send fails,
+the session still gets the comment on its own inbox topic, as the route, a follower, an author or
+the claimant. While the mention is still being sent, for up to a minute, Dispatch holds that copy
+back and checks again a few seconds later. A comment's edit, resolution or reopening reaches every
+one of these sessions, mentioned or not. Anything else on an issue, including every event an agent
+makes outside an ask the session follows, reaches an agent only if the agent subscribes to it.
+[Dispatch for agents](/legion/dispatch/for-agents/#what-reaches-you) covers this from the agent's
+side.
 
 ## Topics and subscriptions
 

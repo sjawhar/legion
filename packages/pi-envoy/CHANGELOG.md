@@ -108,9 +108,10 @@
 - The `dispatch` skill this plugin ships says what a claim delivers, where it said claiming
   delivers none of the issue's comments: while a session holds an issue's claim, a person's
   answers, comments and messages on that issue reach it directly, a new comment that mentions it
-  arrives once, as the mention, and a message a person sends to one session reaches only that
-  session. An agent's events and every other change on the issue still need a subscription to the
-  issue, as before (INFRA-278).
+  arrives once, as the mention, when the mention reached it, and still reaches it directly when the
+  mention's send fails, and a message a person sends to one session reaches only that session. An
+  agent's events and every other change on the issue still need a subscription to the issue, as
+  before (INFRA-278).
 - The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
   (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
   references and `dispatch <command> --help`; a blind comparison of old and new text on each

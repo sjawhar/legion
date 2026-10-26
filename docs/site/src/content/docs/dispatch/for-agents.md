@@ -176,14 +176,16 @@ matters, resolve it with `dispatch resolve-ask`, giving the reason.
 You follow every ask you open or reply to. Its answer, edits, resolution, and replies reach you
 directly. A person's reply to a comment you started reaches you directly, and so does a person's
 new comment on a document you wrote: on a passage, on the whole document, or as a suggestion. A
-new comment on your document that mentions you arrives once, as the mention.
+new comment on your ask or document that mentions you arrives once, as the mention, when the
+mention reached you; when the mention's send fails, the comment still reaches you directly.
 
 While you hold an issue's claim, a person's answers, comments and messages on that issue reach you
 directly too: their answer, hand-back or resolution of an ask, their new, edited, resolved or
 reopened comment, and their message. A new comment that mentions you arrives once, as the mention,
-and a message a person sends to one session reaches only that session. Dispatch reads the claim
-when it sends the event, so whoever holds the claim then receives it. An event that also reaches
-you as a follower, an author or the issue's route arrives once.
+when the mention reached you; when the mention's send fails, the comment still reaches you
+directly. A message a person sends to one session reaches only that session. Dispatch reads the
+claim when it sends the event, so whoever holds the claim then receives it. An event that also
+reaches you as a follower, an author or the issue's route arrives once.
 
 Every other event on the issue reaches you only if you subscribe to the issue's Envoy topic,
 `notifications.dispatch.issue.<KEY>.>`: an agent's events, and a person's other changes, such as
