@@ -23,30 +23,6 @@ export const REPLAY_DELIVERED_ENTRY = "envoy-replay-delivered";
  */
 export const REPLAY_STATE_ENTRY = "envoy-replay-state";
 
-/**
- * The subjects the notification stream (`ENVOY_NOTIFICATIONS`) captures, each a literal prefix
- * that matches a subject extending it by at least one token: `streamSubjects` in
- * `packages/envoy/internal/bus/stream.go`. Role lanes, team topics and other ad-hoc topics are not
- * among them, so a live frame on one is never stored and no sweep can show it again.
- */
-const STREAM_SUBJECT_PREFIXES = [
-  "notifications.agent.",
-  "notifications.dispatch.",
-  "notifications.github.",
-  "notifications.slack.",
-  "notifications.legion.",
-  "notifications.ghostwispr.",
-  "notifications.whatsapp.",
-  "notifications.envoy.exceptions.notifications.agent.",
-] as const;
-
-/** Whether the notification stream stores a publish to the concrete `subject`. */
-export function streamRetains(subject: string): boolean {
-  return STREAM_SUBJECT_PREFIXES.some(
-    (prefix) => subject.length > prefix.length && subject.startsWith(prefix)
-  );
-}
-
 /** The data of every `customType` entry among a session's entries, in the order written. */
 function customEntries(entries: readonly unknown[], customType: string): unknown[] {
   const found: unknown[] = [];

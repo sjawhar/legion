@@ -134,7 +134,6 @@ import {
   replayedCard,
   replayNoticeCard,
   replaySnapshot,
-  streamRetains,
 } from "../src/missed-messages";
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
@@ -1266,10 +1265,10 @@ export default function envoyExtension(pi: PiApi): void {
           `[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`,
           error
         );
-        // A frame no sweep can show again (a role forward, already acknowledged; a subject the
-        // stream does not keep, or one this session does not follow) gets its notice at once. The
-        // stream's copy of any other is left to the next sweep.
-        if (envelope !== undefined && !sweepRetries(topic, subject, envelope)) {
+        // A frame no sweep will show again (a role forward, already acknowledged; one on a
+        // subscription the replay does not read: refused, not started, or the listener's replay
+        // failing) gets its notice at once. The stream's copy of any other waits for a sweep.
+        if (envelope !== undefined && !sweepRetries(topic, envelope)) {
           void replay?.reportLiveFailure(envelope, error);
         }
         throw error;
@@ -1441,15 +1440,12 @@ export default function envoyExtension(pi: PiApi): void {
     return [...new Set([agentSubject(sessionID), ...topics])];
   };
 
-  // Whether a sweep can still show a frame the live path failed to: the stream keeps the subject
-  // it was published to, this session follows the subscription it came on, and it is no role
-  // forward, which stays live only.
+  // Whether a sweep will still show a frame the live path failed to: it is no role forward, which
+  // stays live only, and the replay reads the subscription it came on now.
   const sweepRetries = (
     topic: string,
-    subject: string,
     envelope: NonNullable<RenderInboundResult["envelope"]>
-  ): boolean =>
-    !isRoleForward(envelope) && streamRetains(subject) && followedSubjects().includes(topic);
+  ): boolean => !isRoleForward(envelope) && replay?.retries(topic) === true;
 
   // Replays a stored frame: a card and nothing else. A targeted frame (BTW, Aside, Steer, a
   // person's Send) runs no side turn, asks Dispatch to accept no user turn and posts no reply:

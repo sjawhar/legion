@@ -240,10 +240,20 @@ export interface ReplayEngine {
   /** Records a frame the live path's host took, so no sweep shows it again. */
   recordDelivered(frame: DedupeIdentity): Promise<void>;
   /**
-   * Shows the failure notice at once for a live frame no sweep can retry (a role forward after
-   * its receipt, a team or ad-hoc topic the stream does not keep), and records it when shown.
+   * Shows the failure notice at once for a live frame no sweep will retry (a role forward after
+   * its receipt, a subject the stream does not keep, or one `retries` says no sweep will read),
+   * and records it when shown.
    */
   reportLiveFailure(envelope: ReplayNoticeEnvelope, error: unknown): Promise<void>;
+  /**
+   * Whether a sweep will show a frame on the followed subject `followed` that the host failed to
+   * show live: the latest replay call succeeded, a call since the last failed one answered
+   * `followed` without refusing it, and `followed` has a cursor. A host's live path asks this when
+   * a frame fails, so a frame no sweep will show (the listener does not replay or refuses the
+   * subject, or the subject has no cursor yet) gets its failure notice at once instead of being
+   * dropped silently.
+   */
+  retries(followed: string): boolean;
   /**
    * Replaces everything the engine holds with what a host persisted for the session it is on now.
    * Ledger entries recorded 72 hours ago or more are dropped; the state is kept at any age, so a
@@ -296,6 +306,8 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   let epoch = 0;
   // The listener outcome the session was last told of, until a replay call succeeds.
   let listenerNoticed: string | undefined;
+  // The subjects the replay calls answered without refusing, since the latest one that failed.
+  const answered = new Set<string>();
   let running: Promise<void> | undefined;
   let rerun: Promise<void> | undefined;
 
@@ -553,11 +565,18 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
           ...(options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }),
         });
       } catch (error) {
-        if (alive()) listenerFailed(error);
+        if (alive()) {
+          answered.clear();
+          listenerFailed(error);
+        }
         return;
       }
       if (!alive()) return;
       listenerNoticed = undefined;
+      for (const result of response.subjects) {
+        if (result.refused === undefined) answered.add(result.subject);
+        else answered.delete(result.subject);
+      }
 
       const { stream } = response;
       if (streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated) {
@@ -701,6 +720,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         log("replay: could not report a failed live frame", thrown);
       }
     },
+    retries: (followed) => answered.has(followed) && cursors.get(followed)?.after !== undefined,
     restore(snapshot) {
       epoch += 1;
       ledger.restore(snapshot.ledger);
@@ -713,6 +733,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       unwritten = [];
       failures.clear();
       listenerNoticed = undefined;
+      answered.clear();
     },
     state: () => JSON.parse(stateJSON()) as ReplayState,
   };

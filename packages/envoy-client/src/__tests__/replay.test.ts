@@ -665,6 +665,28 @@ describe("failed frames", () => {
       { event_id: frame.event_id, dedupe_key: frame.dedupe_key, at: T0 },
     ]);
   });
+
+  test("a failed live frame is left to a sweep only on a subject a sweep answered and started", async () => {
+    const OTHER = "notifications.dispatch.issue.INFRA-2.>";
+    const { stream, host, engine } = setup([AGENT, ISSUE]);
+
+    expect(engine.retries(AGENT)).toBe(false);
+
+    stream.refused.set(ISSUE, "not_retained");
+    await engine.sweep();
+
+    expect(engine.retries(AGENT)).toBe(true);
+    expect(engine.retries(ISSUE)).toBe(false);
+    expect(engine.retries(OTHER)).toBe(false);
+
+    // Followed again after an unfollow, the subject has no cursor until the next sweep starts one.
+    host.followed = [ISSUE];
+    await engine.followedChanged();
+    host.followed = [AGENT, ISSUE];
+    await engine.followedChanged();
+
+    expect(engine.retries(AGENT)).toBe(false);
+  });
 });
 
 describe("the ledger", () => {
@@ -838,5 +860,21 @@ describe("listener outcomes", () => {
     await engine.sweep();
 
     expect(ids(host.shown)).toEqual([frame.event_id]);
+  });
+
+  test("no failed live frame is left to a sweep while the listener's replay fails", async () => {
+    const { engine, answers } = setupListener();
+    await engine.sweep();
+
+    expect(engine.retries(AGENT)).toBe(true);
+
+    answers.push(Response.json({ error: "not found" }, { status: 404 }));
+    await engine.sweep();
+
+    expect(engine.retries(AGENT)).toBe(false);
+
+    await engine.sweep();
+
+    expect(engine.retries(AGENT)).toBe(true);
   });
 });

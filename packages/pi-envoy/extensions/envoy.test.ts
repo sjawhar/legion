@@ -14386,6 +14386,28 @@ describe("messages missed while the subscription was down", () => {
       expect(session.cards("evt-role-forward")).toHaveLength(0);
     });
 
+    test("a live frame on the session's own topic that fails while the listener does not replay gets the notice at once", async () => {
+      const model = new StreamModel();
+      model.served = false;
+      const session = await bootReplay("replay-fail-not-served", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-live-not-served") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const frame = peerMessage("ses_replay", "live-not-served");
+      model.store(session.agentSubject, frame);
+
+      session.live(session.agentSubject).push(frame);
+      await until(() => session.notices("evt-live-not-served").length > 0, "the notice");
+
+      expect(session.notices("evt-live-not-served")[0]?.content).toContain("host refuses the card");
+      await session.tick();
+      expect(session.notices("evt-live-not-served")).toHaveLength(1);
+      expect(session.cards("evt-live-not-served")).toHaveLength(0);
+    });
+
     test("a live frame still pending while its stored copy is swept, then failing, is shown once later", async () => {
       process.env.DISPATCH_URL = "http://dispatch.test";
       process.env.DISPATCH_TOKEN = "dispatch-token";
