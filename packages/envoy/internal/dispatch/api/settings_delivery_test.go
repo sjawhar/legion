@@ -36,7 +36,7 @@ func TestPutDeliverySettingsRejectsIncompleteInput(t *testing.T) {
 // (no event is appended: delivery_settings has no project/issue/artifact to own one -- see the
 // handler's own doc comment).
 func TestPutDeliverySettingsWritesSettings(t *testing.T) {
-	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}}
 	handler, database := newArchitectureSourceServer(t, fake)
 
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
@@ -69,7 +69,7 @@ func TestPutDeliverySettingsWritesSettings(t *testing.T) {
 // TestPutDeliverySettingsTrimsTheProductionJobNamesAndApplyStep checks that each production-job
 // name and the optional apply step are trimmed, and that the GET preserves the names' order.
 func TestPutDeliverySettingsTrimsTheProductionJobNamesAndApplyStep(t *testing.T) {
-	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}}
 	handler, _ := newArchitectureSourceServer(t, fake)
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
 		"deploy_repo":                "acme/widgets",
@@ -108,7 +108,7 @@ func TestPutDeliverySettingsRefusesABadProductionJobList(t *testing.T) {
 		"duplicate": {[]string{"release / release", " release / release"}, `production_job_names names "release / release" twice`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+			fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}}
 			handler, database := newArchitectureSourceServer(t, fake)
 			body := map[string]any{
 				"deploy_repo":             "acme/widgets",
@@ -156,7 +156,7 @@ func TestPutDeliverySettingsRefusesWithoutGitHubAccess(t *testing.T) {
 // TestPutDeliverySettingsRoundTripsThePipelineJobNames proves the three optional job names the
 // Pipeline page follows are stored as sent and read back through the GET.
 func TestPutDeliverySettingsRoundTripsThePipelineJobNames(t *testing.T) {
-	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}}
 	handler, _ := newArchitectureSourceServer(t, fake)
 
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
@@ -193,7 +193,7 @@ func TestPutDeliverySettingsRoundTripsThePipelineJobNames(t *testing.T) {
 // TestPutDeliverySettingsWithoutThePipelineJobNamesStoresNull proves the three job names are
 // optional: a PUT that leaves them out, or sends one empty, stores null, and the GET answers null.
 func TestPutDeliverySettingsWithoutThePipelineJobNamesStoresNull(t *testing.T) {
-	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}}
 	handler, database := newArchitectureSourceServer(t, fake)
 
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
@@ -231,7 +231,7 @@ func TestPutDeliverySettingsWithoutThePipelineJobNamesStoresNull(t *testing.T) {
 }
 
 func TestAgentPutsDeliverySettingsWithItsActor(t *testing.T) {
-	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}}
 	handler, database := newArchitectureSourceServer(t, fake)
 
 	response := agentRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{

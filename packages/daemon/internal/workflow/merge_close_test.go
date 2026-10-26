@@ -156,8 +156,8 @@ func TestARootsCloseLingersItsTreeAndOpensItsCheckBehindTheLingersRows(t *testin
 			t.Fatalf("supervise row %d of the root is newer than the check's start row %d: %s", row.id, start.id, row.payload)
 		}
 	}
-	if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 1 || got[0].Release {
-		t.Fatalf("the root's issue suspensions = %+v, want the linger's one keeping row", got)
+	if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 1 {
+		t.Fatalf("the root's issue suspensions = %+v, want the linger's one row", got)
 	}
 	if check := productionCheck(t, pool, "LEGION-208"); check == nil || !check.Open() || check.Looks != 1 || !check.LookOpen || check.MergeSHA != "merge" {
 		t.Fatalf("the root's production check = %+v, want it open at look 1 on merge", check)
@@ -212,8 +212,8 @@ func TestALingeringMembersMergeClosesItAndWakesItsCheck(t *testing.T) {
 }
 
 // A child closed as done with no pull request — a human's done on an issue short of its merge —
-// has nothing to check in production: today's close, every claim closed and the Sandbox released
-// with its volume, and no check, no look and no bound.
+// has nothing to check in production: today's close, every claim closed and the Sandbox deleted
+// with the pod and the disk that pod owns, and no check, no look and no bound.
 func TestAChildClosedAsDoneWithNoPullRequestOpensNoCheck(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
@@ -230,8 +230,8 @@ func TestAChildClosedAsDoneWithNoPullRequestOpensNoCheck(t *testing.T) {
 			t.Fatalf("issue_close rows = %v, want one for every role", closed)
 		}
 	}
-	if got := issueSuspensions(t, pool, "LEGION-209"); len(got) != 1 || !got[0].Release {
-		t.Fatalf("issue suspensions = %+v, want one releasing row", got)
+	if got := issueSuspensions(t, pool, "LEGION-209"); len(got) != 1 {
+		t.Fatalf("issue suspensions = %+v, want one row", got)
 	}
 	if check := productionCheck(t, pool, "LEGION-209"); check != nil {
 		t.Fatalf("production check = %+v, want none for a child with no pull request", check)

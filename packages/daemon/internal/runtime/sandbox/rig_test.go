@@ -37,6 +37,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -47,6 +48,10 @@ const (
 	testProject   = "legion"
 	testImage     = "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef"
 	testTree      = "LEGION-208"
+	// testSessionDSNKey is the providers Secret's key holding the session database's URL under the
+	// postgres store (Options.SessionStore), which every runtime a test configures carries as a
+	// postgres deployment's does.
+	testSessionDSNKey = "SESSION_DSN"
 )
 
 var (
@@ -57,9 +62,10 @@ var (
 	childToken = claim.Token("legion-legion-legion-209-implementer")
 )
 
-// testOptions are the options every test starts from: production's shape, every role's reservation
-// at the daemon's defaults (reservations), with budgets short enough that a wait the test expects
-// to end never slows the suite.
+// testOptions are the options every test starts from: production's shape — a store that keeps
+// sessions in a database included, which configure requires, here the postgres one with its URL key
+// — every role's reservation at the daemon's defaults (reservations), with budgets short enough
+// that a wait the test expects to end never slows the suite.
 func testOptions() Options {
 	return Options{
 		Namespace:    testNamespace,
@@ -69,6 +75,7 @@ func testOptions() Options {
 		StorageClass: "gp2",
 		IssueVolume:  resource.MustParse("20Gi"),
 		Resources:    reservations(),
+		SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: testSessionDSNKey},
 		StreamURL:    "tcp://192.0.2.250:13371",
 		DaemonURL:    "http://192.0.2.250:13370",
 		EnvoyURL:     "http://192.0.2.250:9020",
@@ -151,17 +158,16 @@ func launchOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) launch {
 }
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
-// unless closed says its cleanup confirmed, an issue recorded sessions only when sessions says
-// so, a claim of an issue runs a process only when running names it, in the tree it names, an
-// issue's Sandbox belongs to a tree only when homes names it (to none otherwise), and a claim is
-// stored unretired only when unretired names it. The store's own rule for a Sandbox's home is held
-// by its tests (store.IssueSandboxHome); here a test sets it.
+// unless closed says its cleanup confirmed, a claim of an issue runs a process only when running
+// names it, in the tree it names, an issue's Sandbox belongs to a tree only when homes names it
+// (to none otherwise), and a claim is stored unretired only when unretired names it. The store's
+// own rule for a Sandbox's home is held by its tests (store.IssueSandboxHome); here a test sets it.
 type fakeStore struct {
-	mu               sync.Mutex
-	closed, sessions map[string]bool
-	running          map[string]runningClaim
-	homes            map[string]string
-	unretired        map[claim.Token]bool
+	mu        sync.Mutex
+	closed    map[string]bool
+	running   map[string]runningClaim
+	homes     map[string]string
+	unretired map[claim.Token]bool
 }
 
 // runningClaim is a claim of an issue that runs a process (token:state), in tree.
@@ -169,7 +175,7 @@ type runningClaim struct{ tree, claim string }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{},
+		closed: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{},
 		unretired: map[claim.Token]bool{},
 	}
 }
@@ -199,12 +205,6 @@ func (s *fakeStore) IssueSandboxHome(_ context.Context, _, issue string) (string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.homes[issue], nil
-}
-
-func (s *fakeStore) IssueHasSessions(_ context.Context, _, issue string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessions[issue], nil
 }
 
 func (s *fakeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {
@@ -751,6 +751,19 @@ func (g *rig) sandbox(name string) *sandbox {
 	return s
 }
 
+// initFailed is the classification of loc's verdict that only this package reads: whether a failed
+// init container of its pod is what ended the process there (observation.initFailed). No
+// runtime.Observation carries it, so a test reads it from the mapping itself, over the same stores
+// a Probe reads.
+func (g *rig) initFailed(loc runtime.Locator) bool {
+	g.t.Helper()
+	v, err := g.r.view(loc.Sandbox.Name)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	return g.r.verdict(g.ctx, loc, v).initFailed
+}
+
 // secret is the Secret named name in the tracker, or nil.
 func (g *rig) secret(name string) *corev1.Secret {
 	object, err := g.kube.Tracker().Get(corev1.SchemeGroupVersion.WithResource("secrets"), testNamespace, name)
@@ -883,10 +896,14 @@ func (g *rig) sent(token claim.Token) []shimwire.Frame {
 	return slices.Clone(g.commands[token])
 }
 
-// sandboxObject is a Sandbox as the API would hold it, for a test's starting state: one the runtime
-// made, so it owns its volume (the `issue` claim template), and carrying a resourceVersion, as every
-// object the API serves does. A test that needs the tree-volume layout, a Sandbox owning no volume,
-// drops the template itself (withoutVolume).
+// sandboxObject is a Sandbox as the API would hold it, for a test's starting state: an issue
+// Sandbox as this runtime makes it, owning no claim template, since its disk is its own pod's
+// generic ephemeral volume (issuePod.disk), and carrying a resourceVersion, as every object
+// the API serves does. The project controller's Sandbox, which this runtime does give the `issue`
+// template its working root is on, no test starts from: a test that needs one launches it
+// (controllerSpec). A test of the cutover from the release before the pod-owned disk opts into
+// that release's issue Sandbox by name (withSupersededDisk); one of the tree-volume layout's root
+// or controller, into that layout's template (withTreeVolume).
 func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]string, conditions ...metav1.Condition) *unstructured.Unstructured {
 	t.Helper()
 	s := sandbox{
@@ -895,10 +912,7 @@ func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]strin
 			Name: name, Namespace: testNamespace, UID: types.UID(uid), Labels: labels, Generation: 2, ResourceVersion: "1",
 			CreationTimestamp: metav1.NewTime(time.Date(2026, 9, 23, 11, 0, 0, 0, time.UTC)),
 		},
-		Spec: sandboxSpec{
-			OperatingMode: mode, PodTemplate: podTemplate{Metadata: podMetadata{Labels: labels}},
-			VolumeClaimTemplates: []volumeClaimTemplate{{Metadata: volumeClaimMetadata{Name: issueVolume, Labels: labels}}},
-		},
+		Spec:   sandboxSpec{OperatingMode: mode, PodTemplate: podTemplate{Metadata: podMetadata{Labels: labels}}},
 		Status: sandboxStatus{Conditions: conditions},
 	}
 	u, err := encodeSandbox(s)
@@ -908,18 +922,45 @@ func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]strin
 	return u
 }
 
-// withoutVolume is u in the tree-volume layout: a Sandbox that mounted its tree root's volume and
-// owns none of its own.
-func withoutVolume(u *unstructured.Unstructured) *unstructured.Unstructured {
-	unstructured.RemoveNestedField(u.Object, "spec", "volumeClaimTemplates")
+// withSupersededDisk is u as the release before the pod-owned disk made an issue's Sandbox: owning
+// the one `issue` claim template, so the claim outlived every pod of the issue. It exists for the
+// cutover alone — the boot census that names such a Sandbox rather than refusing it
+// (treeVolumeLayout) and the issue's next launch that replaces it, Sandbox and claim together
+// (supersededDisk, replaceSupersededSandbox) — and nothing else starts from this shape.
+func withSupersededDisk(t *testing.T, u *unstructured.Unstructured) *unstructured.Unstructured {
+	t.Helper()
+	return withClaimTemplate(t, u, issueVolume)
+}
+
+// withClaimTemplate is u owning one volume claim template, named name and carrying u's labels.
+func withClaimTemplate(t *testing.T, u *unstructured.Unstructured, name string) *unstructured.Unstructured {
+	t.Helper()
+	labels := map[string]any{}
+	for key, value := range u.GetLabels() {
+		labels[key] = value
+	}
+	template := map[string]any{"metadata": map[string]any{"name": name, "labels": labels}}
+	if err := unstructured.SetNestedSlice(u.Object, []any{template}, "spec", "volumeClaimTemplates"); err != nil {
+		t.Fatal(err)
+	}
 	return u
 }
 
-// podObject is a pod the Sandbox with ownerUID owns ("" for none), as the API would hold it.
+// podObject is a pod the Sandbox with ownerUID owns ("" for none), as the API would hold it. Its
+// spec carries the one piece every pod the runtime creates has and the mapping compares, the
+// providers volume projecting the session database's URL key (providers, movedSessionStore): a
+// stand-in without it holds a moved address, and every observation of it would be StaleAddress.
 func podObject(name, uid, ownerUID string, labels map[string]string, status corev1.PodStatus) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, UID: types.UID(uid), Labels: labels},
-		Status:     status,
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: providersVolume,
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: ProvidersSecretName(testProject),
+				Items:      []corev1.KeyToPath{{Key: testSessionDSNKey, Path: ompsessions.DSNFileName}},
+			}},
+		}}},
+		Status: status,
 	}
 	if ownerUID != "" {
 		pod.OwnerReferences = []metav1.OwnerReference{{
@@ -928,6 +969,10 @@ func podObject(name, uid, ownerUID string, labels map[string]string, status core
 	}
 	return pod
 }
+
+// issueDiskName is the name Kubernetes gives the claim of an issue pod's own disk: the pod's name
+// and the volume's (issueVolume), the pod being the claim's Sandbox name (SandboxName).
+func issueDiskName(t claim.Token) string { return SandboxName(t) + "-" + issueVolume }
 
 // claimLabels are the labels an issue's shared Sandbox carries.
 func claimLabels(_ claim.Role) map[string]string {

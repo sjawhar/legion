@@ -127,8 +127,9 @@ The merge closes the issue: when GitHub reports the pull request merged while th
   `pr-merged` notice names what it waits for and none follows as they depart, so read the pull
   request on GitHub.
 - A child's close reaches you as `child-closed`. The daemon retires five of its six claims and
-  suspends its implementer, session and volume kept, because it still owes the production check
-  (`skill://legion-worker/references/merge-gate.md`, *The production check after the close*).
+  leaves the implementer running, because it still owes the production check. When the issue's
+  pod and Sandbox go is in `skill://legion-worker/references/merge-gate.md`, *The production check
+  after the close*.
 - A root's close writes `done`, frees the tree's admission slot and lingers the tree for
   `linger_hours` with every member suspended. The linger's end, the tree's last step, waits until
   every member's open production check has closed.

@@ -159,8 +159,8 @@ export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): A
   if ((state.applied[key] ?? 0) >= frame.seq) return state;
   // A settled message is final, whatever sequence number a later snapshot carries. The host
   // hands the extension a message's last few `message_update`s after its `message_end`, so the
-  // late streaming snapshot is the one with the higher number; letting it win leaves a finished
-  // turn rendered as running, and assistant-ui then disables the composer.
+  // late streaming snapshot is the one with the higher number; letting it win would leave a
+  // finished turn rendered as still streaming.
   const settled = state.messages.find(
     (message) => message.id === frame.message.id && !message.streaming
   );
@@ -250,11 +250,6 @@ export function currentModel(state: AgentConversation): string | undefined {
     if (message?.role === "assistant") return message.model;
   }
   return undefined;
-}
-
-/** Whether the session is mid-turn, which is what shows the composer a running thread. */
-export function isRunning(state: AgentConversation): boolean {
-  return state.messages.some((message) => message.streaming);
 }
 
 /** The slash commands the composer completes: the session's newest list, or undefined for a
