@@ -89,7 +89,10 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 37's pod-owned issue disk
+number is the one `DaemonAPIVersion` declares, last bumped by contract 38's blocked issues on
+`GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every root and child Legion is waiting
+to start behind an unfinished Dispatch issue, and `release_children` answers `started` and `held`
+beside `released`), after contract 37's pod-owned issue disk
 (INFRA-80: an issue's disk is a generic ephemeral volume its pod owns, created with the pod and
 deleted with it, so the init container above is no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the
 lost-disk machinery that variable drove — `workspace-init`'s exit code 3, its recovery marker, the

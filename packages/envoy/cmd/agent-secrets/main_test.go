@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
@@ -70,6 +71,7 @@ type brokerCounters struct {
 	mu            sync.Mutex
 	lastSessionID string
 	pendingPoll   chan struct{}
+	noSettings    bool
 }
 
 func (c *brokerCounters) sessionID() string {
@@ -83,6 +85,20 @@ func (c *brokerCounters) holdPendingPolls(gate chan struct{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pendingPoll = gate
+}
+
+// hideSettings makes GET /v1/settings answer 404, as a broker too old to serve it does: the CLI
+// then names the broker alone as its source.
+func (c *brokerCounters) hideSettings() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.noSettings = true
+}
+
+func (c *brokerCounters) settingsHidden() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.noSettings
 }
 
 // fakePending are fakeBroker's never-resolving pending requests, keyed by the name that asks for
@@ -244,9 +260,34 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 			"lease_expires_at": time.Now().Add(time.Hour), "grants": []any{},
 		})
 	})
+	mux.HandleFunc("GET /v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		if counters.settingsHidden() {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeJSON(w, fakeSettings)
+	})
 	srv := httptest.NewServer(mux)
 	audience = srv.URL
 	return srv, counters
+}
+
+// fakeSettings is the store GET /v1/settings describes for these tests: a GCP broker, named by a
+// placeholder project, so every line that names a source carries a store as a deployed broker's
+// would.
+var fakeSettings = Settings{
+	Store:         secrets.StoreGCP,
+	SecretsPrefix: "projects/000000000000/secrets/agent-secrets-",
+	KMSKeyName:    "projects/000000000000/locations/global/keyRings/example/cryptoKeys/agent-secrets",
+	GCPProject:    "000000000000",
+}
+
+// fakeSourceText is the source the CLI names for a line about a secret from this fake broker: its
+// host and the store fakeSettings describes. It is built with the CLI's own renderer, because
+// what each of these lines must carry is the source, not one spelling of it; source_test.go pins
+// what the renderer puts in a source.
+func fakeSourceText(broker *httptest.Server) string {
+	return brokerSource(broker.URL).withSettings(fakeSettings).String()
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -440,7 +481,7 @@ func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 					second, _ := stderr.ReadString('\n')
 					lines <- first + second
 				}()
-				want := "agent-secrets: request " + requestID + " is waiting for approval; waiting up to 200ms\n" +
+				want := "agent-secrets: request " + requestID + " to " + fakeSourceText(broker) + " is waiting for approval; waiting up to 200ms\n" +
 					"agent-secrets: " + sentence + "\n"
 				select {
 				case got := <-lines:
@@ -486,11 +527,11 @@ func TestRequestAndStatusNameWhomAPendingRequestWaitsOn(t *testing.T) {
 				env := []string{"AGENT_SECRETS_APPROVE_URL=" + approveURL}
 				requestID := fakePending[name].requestID
 				stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, env, "request", name)
-				if want := "request_id: " + requestID + "\nstate: pending\n" + sentence + "\n"; exit != exitPending || stdout != want {
+				if want := "request_id: " + requestID + "\nstate: pending\nsource: " + fakeSourceText(broker) + "\n" + sentence + "\n"; exit != exitPending || stdout != want {
 					t.Errorf("request %s = exit %d stdout %q (stderr %q); want exit %d stdout %q", name, exit, stdout, stderr, exitPending, want)
 				}
 				stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir, env, "status", requestID)
-				if want := "state: pending\n" + sentence + "\n"; exit != 0 || stdout != want {
+				if want := "state: pending\nsource: " + fakeSourceText(broker) + "\n" + sentence + "\n"; exit != 0 || stdout != want {
 					t.Errorf("status %s = exit %d stdout %q (stderr %q); want exit 0 stdout %q", requestID, exit, stdout, stderr, want)
 				}
 			})
@@ -512,11 +553,11 @@ func TestADecidedRequestSaysNothingOfWaiting(t *testing.T) {
 	for _, approveURL := range []string{"", "https://dispatch.example/"} {
 		env := []string{"AGENT_SECRETS_APPROVE_URL=" + approveURL}
 		stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, env, "request", "APPROVED_ME")
-		if want := "request_id: req-approved\nstate: granted\n"; exit != 0 || stdout != want {
+		if want := "request_id: req-approved\nstate: granted\nsource: " + fakeSourceText(broker) + "\n"; exit != 0 || stdout != want {
 			t.Errorf("request APPROVED_ME (approve URL %q) = exit %d stdout %q (stderr %q); want exit 0 stdout %q", approveURL, exit, stdout, stderr, want)
 		}
 		stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir, env, "status", "req-approved")
-		if want := "state: granted\ngrant_id: grant-approved\ndecided_by: ada@example.com\n"; exit != 0 || stdout != want {
+		if want := "state: granted\nsource: " + fakeSourceText(broker) + "\ngrant_id: grant-approved\ndecided_by: ada@example.com\n"; exit != 0 || stdout != want {
 			t.Errorf("status req-approved (approve URL %q) = exit %d stdout %q (stderr %q); want exit 0 stdout %q", approveURL, exit, stdout, stderr, want)
 		}
 	}
@@ -541,8 +582,11 @@ func TestExecFormDeniedExitsSeventySevenWithNoChild(t *testing.T) {
 	if strings.Contains(stdout, "ran-the-child") {
 		t.Fatalf("child ran for a denied request: stdout=%q", stdout)
 	}
-	if !strings.Contains(stderr, "req-denied was denied") {
+	if !strings.Contains(stderr, "req-denied") || !strings.Contains(stderr, "was denied") {
 		t.Fatalf("stderr = %q, want it to name the denied request", stderr)
+	}
+	if !strings.Contains(stderr, fakeSourceText(broker)) {
+		t.Fatalf("stderr = %q, want the refusal to name %s", stderr, fakeSourceText(broker))
 	}
 }
 
