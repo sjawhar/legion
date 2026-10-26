@@ -439,3 +439,44 @@ test("a claimed List row and Board card open their issue by keyboard, and the cl
     await alice.close();
   }
 });
+
+// A session title is free text (claim.e2e.ts), and a title with no space in it - an id, a
+// snake_case name - is common. Where the component draws the author of a Conversation turn or
+// reply, such a name must wrap or shorten inside the turn and never widen the page, as the claim
+// chip, the Inbox ask card and the margin already hold at both widths.
+test("a long agent name with no space never widens the Conversation tab", async ({ browser }) => {
+  const title = "INFRA_440_implementer_round_2_resumed_ok";
+  await createProject({ key: "AGT", name: "Agents" });
+  const issue = await createIssue({ project: "AGT", title: "Long agent name" });
+  await setLiveSessions([{ session_id: runId, title }]);
+  const root = await createMessage(issue.key, { body: "Root turn" }, writer(runId, title));
+  const reply = await createMessage(
+    issue.key,
+    { body: "Reply turn", in_reply_to: root.id },
+    writer(runId, title)
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    for (const { height, width } of [
+      { height: 844, width: 390 },
+      { height: 900, width: 1280 },
+    ]) {
+      await page.setViewportSize({ height, width });
+      await page.goto(`/issues/${issue.key}/conversation`);
+      for (const id of [root.id, reply.id]) {
+        const agent = agentIn(messageTurn(page, id), runId);
+        await expect(agent).toHaveAttribute("data-agent-state", "running");
+        await expect(agent.getByRole("link", { name: title })).toBeVisible();
+      }
+      const widths = await page.evaluate(() => ({
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      }));
+      expect(widths.scrollWidth, `page width at ${width}px`).toBe(widths.clientWidth);
+      expect(widths.clientWidth, `layout viewport at ${width}px`).toBeLessThanOrEqual(width);
+    }
+  } finally {
+    await alice.close();
+  }
+});
