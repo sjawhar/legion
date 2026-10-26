@@ -2,32 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-440",
-  "completed": "2026-10-26T16:42:27Z",
-  "round": 3,
-  "scope": "Architect's ruling (16:01Z): judge only the asker tooltip, the credential lines' single status, the forward merge of main, and defects in code they change.",
-  "reviewedCodeHead": "8e8a07df30562494388bae76c999ea7abfa8dbcb",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T17:47:38Z",
+  "round": 4,
+  "scope": "Architect's ruling (16:50Z): judge only the two round-3 items (phone.e2e.ts:849 assertion, the CredentialSessionLines doc block); approve if they are right.",
+  "reviewedCodeHead": "7609748a15dd7501a4ccbcbd37175cc9750f5d9e",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
+  "important": 0,
+  "minor": 0,
   "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
-  "ci": "At 8e8a07df when read: lint, typecheck, test queued; pr-title queued; compare 8e8a07df...843da0b4 touches only .legion/. GitHub reports the pull request MERGEABLE. A request for changes does not wait on CI.",
-  "merge": "Forward merge c3671e43 (parents abb4fcf4, main c79379d9): unchanged-diff fingerprint 8540279c86e82f008537abe14e696254460db5a04fcef5a9bcd7535c3efb78c4 at both abb4fcf4 and c3671e43; the CHANGELOG resolution keeps the INFRA-440 actorAttribution entry and main's INFRA-393 SearchCoverage entry whole.",
-  "thermonuclear": "Round 3 at 8e8a07df: deep review CHANGES (phone.e2e.ts title assertion), code quality APPROVE with minors (doc comment placement; duplicated running rule; test key order). Per deep review: bun test credentials/ask-card/inbox 247 pass, doc/margin/conversation/answers 433 pass, tsc and biome clean.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/inbox/AskCard.tsx:286",
-      "description": "The asker tooltip is now '<label> · <id>' for a session asker, but packages/dispatch/e2e/phone.e2e.ts:847-849 (unchanged, runs on chromium and iphone, part of CI's dispatch job) still asserts the author chip's text element has title exactly longTitle; with session e2e-long-title it now reads '<longTitle> · e2e-long-title', so that test fails. Update the assertion and run phone.e2e.ts on both projects."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx:19",
-      "description": "The component's doc block (the agent, its full id, the grid it never widens) now sits on the string helper statusText; CredentialSessionLineText has none. Move it to the component and give statusText one line."
-    }
-  ],
+  "ci": "CI head 7609748a (newest pull_request run): required lint, typecheck, test completed success; pr-title completed success (one earlier pr-title run cancelled by a later one). Compare 7609748a...83f227a5 touches only .legion/ (2 files). Not required: the Legion Envoy and Contracts run 40364103740 (dispatch browser job) was still queued when read; the tester's E2E line records phone.e2e.ts passing at 7609748a on chromium and iphone.",
+  "thermonuclear": "Round 4 at 7609748a: deep review APPROVE (no findings; biome and tsc clean; the expected title equals AskCard's for the seeded token-less ask), code quality APPROVE (one non-blocking wording nit).",
+  "keyFindings": [],
   "judgedNotDefects": [
-    "resolveLine repeats the registry's three-state rule instead of sharing a function: both read the same [\"agents\"] query with the same isPending/isError rule, and the switch is exhaustive; the AGENTS.md parenthetical stays true in effect.",
-    "session.test.ts literals list keys in two orders: toEqual ignores order."
+    "statusText's one-line doc does not mention that the words start with the full id: wording only; the component doc above it says the full id follows the name."
   ]
 }
