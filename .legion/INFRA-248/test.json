@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-248",
+  "completed": "2026-10-26T02:12:03Z",
+  "round": 1,
+  "testedHead": "a8a963219106c464ca64034e37578d224fbc5fb0",
+  "prHead": "8d4ca132f49e0f7212b1b1442ff10c3af88406b8",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "A1 and A2 driven independently: my own Job (/legion/scratch/tmp/infra-248-test/job.sh) in namespace builds, runtimeClassName gvisor, uid 1000, on the same digest sha256:1110a7b7bcb6e5badec167e274643e74ec005c3f44fc079a48836b3026010664 (Worker Image run 40249977303 pushed it as sha-a8a963219106); A1 through `legion probe-image` inside that image rather than the Go test, which CI's Tests run 40249977273 ran with LEGION_TEST_OMP set. Main's image reproduced the implementer's negative control. A3-A6 are the experiment records the architect ruled settled (INFRA-441 closed, decision at dispatch://INFRA-245/comment/0c252bba-d40e-4954-8f08-78f5c4c1bec7); I read that dispatch://INFRA-441/artifact/dogfood-report-md exists with 2 versions."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "The worker image builds, and the change can merge: the head that merges is the head proven (A2, and the merge gate)",
+      "evidence": "`gh pr view 2219 --repo sjawhar/legion --json mergeable,mergeStateStatus` -> CONFLICTING DIRTY. A local `git merge --no-commit 167e30b9c674` (main@origin) on 8d4ca132f49e conflicts in .github/workflows/release.yaml, docs/kubernetes.md, packages/pi-legion/CHANGELOG.md and skills/AGENTS.md: main gained INFRA-140's asd-ste100 skill in pi-envoy's partition (fc379b99147a: scripts/pi-plugin-prepack.sh, skills/AGENTS.md 'Envoy plugin's five') and a new Oh My Pi pin (356d642dfea1, which also touches worker.Dockerfile). GitHub runs no pull_request workflow on a conflicting head, so the merged head's Tests and Worker Image are not built. Remedy: the implementer's forward merge of main@origin (skill://legion-worker/references/conflicts-and-rewrites.md), keeping both partitions (pi-envoy five with asd-ste100, pi-legion nine with ce-dogfood), then a new Worker Image digest for the tester's re-check. No red test can pin a merge conflict; GitHub's mergeable state is the check."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
+      "surface": "Job infra-248-tester-branch-m7xvr in namespace builds, runtimeClassName gvisor, runAsUser 1000, compute class build, image ghcr.io/sjawhar/legion-worker@sha256:1110a7b7bcb6e5badec167e274643e74ec005c3f44fc079a48836b3026010664; and this live tester pod (gVisor, uid 1000) with the same pinned binary",
+      "command": "bash /legion/scratch/tmp/infra-248-test/job.sh ghcr.io/sjawhar/legion-worker@sha256:1110a7b7bcb6e5badec167e274643e74ec005c3f44fc079a48836b3026010664 branch (log /legion/scratch/tmp/infra-248-test/branch-job.log)",
+      "observed": "pod phase Succeeded, runtimeClassName=gvisor, imageID the digest; uid=1000, 4.19.0-gvisor; /usr/local/bin/agent-browser root-owned 0755, sha256 0f68e74e…638e = the pin = GitHub's asset digest; agent-browser --version -> 'agent-browser 0.39.2'; open https://example.com -> '✓ Example Domain'; get title -> 'Example Domain'; snapshot -i -> link 'Learn more'; screenshot -> 57 KB PNG; a second --session on a local http.server page read a clipped element (scrollWidth 108 > clientWidth 20) and followed a dead link to its 404 while the default session kept example.com; both closed; THIRD_PARTY_NOTICES carries the agent-browser LICENSE, crates, axe-core and axe-core third-party sections. In this tester pod the same binary ran two concurrent sessions, a click (title -> 'clicked') and a screenshot, with 0 chromium processes after close.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "Main's image sha256:60562f59a87e423f27607d92afeabce8caf225ab5e32cf43c5013fc56077a5c9 in the same Job -> 'bash: agent-browser: command not found' rc 127 and no ce-dogfood in /opt/legion/pi-legion/dist/skills; pinned SHA-256 with its last hex digit changed -> 'sha256sum: WARNING: 1 computed checksum(s) did NOT match' rc 1; agent-browser open http://127.0.0.1:1/ -> '✗ Navigation failed: net::ERR_UNSAFE_PORT' rc 1."
+    },
+    {
+      "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion",
+      "surface": "the branch worker image under gVisor (Job infra-248-tester-probe-dsk55, namespace builds, uid 1000): the real Oh My Pi loading the image's packed pi-legion and pi-envoy as a pod does",
+      "command": "legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models (job-probe.sh, log /legion/scratch/tmp/infra-248-test/probe-job.log); CI Tests run 40249977273 and Legion Envoy and Contracts run 40249977360 success at a8a963219106 for the skills guards and TestTheRealPluginsOnTheRealOhMyPi",
+      "observed": "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=36, rc 0",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "probe-image with --plugin-root at a copy lacking dist/skills/ce-dogfood -> 'finds no skill ce-dogfood (loaded by dist/skills/legion-worker/SKILL.md, dist/skills/legion-worker/references/dogfood.md)', rc 1. A copy lacking only references/dogfood.md passes probe-image (it resolves skills by name, not reference files); that file is held by the skills guard, whose missing-file refusal the implementer's negative control shows."
+    },
+    {
+      "criterion": "The shipped skill text matches the approved spec v4; no person's name in any skill",
+      "surface": "the branch's skills/, packages/claude-envoy/legion/, the image's dist/skills, upstream sjawhar/compound-engineering-plugin at 8a776c13a08eea0d6485c26c9bc96ea84d5a6cc6",
+      "command": "dispatch doc-read --issue INFRA-248 --artifact spec; python3 substring check of the approved step (Sami -> the person, he picks -> the person picks) in skills/dispatch-brainstorming/SKILL.md:16 and equality with plan.md Task 4; diff of each skills/ce-dogfood file against upstream via gh api contents ?ref=8a776c13; diff -r against the claude-envoy mirror; grep -rnE 'Sami|Jawhar|sami@' skills/ packages/claude-envoy/legion/ packages/daemon/internal/prompts/; sha256sum of the four skill files in the image and the branch",
+      "observed": "approved text present verbatim with the two substitutions, bullet equal to plan.md Task 4; upstream diff is only the added 'In Legion' paragraph (references, packs-resolve.py and LICENSE identical, agents/openai.yaml dropped); mirror identical; no name found; image hashes caee76a6…, 89f56440…, ad64591b…, 563735f2… equal the branch. dogfood.md's commands checked live: `dispatch artifact --issue … --name dogfood-report.md --content-file …` accepted by --dry-run, the artifact versions in place on INFRA-441 (2); `jj diff --from \"fork_point(\\\"main\\\"@origin | @-)\" --to @-` -> 34 files = the PR, the naive --from main@origin -> 113 files with 13264 deletions as the reference warns; `git diff origin/main...HEAD` in the worktree -> the same 34; packs-resolve.py with CE_PACKS_CACHE_ROOT -> roots [] errors [].",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "The approved text with 'Sami' left in is not a substring of the shipped bullet (the check is sensitive to the substitution); upstream SKILL.md differs from the vendored one by exactly the Legion paragraph."
+    }
+  ],
+  "notes": [
+    "Nothing in CI launches the browser: the image build smoke-tests only `agent-browser --version` and `chromium --version`, so a later chromium or agent-browser bump that breaks `open` would build green. Recorded, not a failure: it works at this head.",
+    "Re-check after the forward merge: a new Worker Image digest, the A2 Job and probe-image on it (job.sh and job-probe.sh under /legion/scratch/tmp/infra-248-test/), and the conflict resolution in skills/AGENTS.md and release.yaml keeping both partitions."
+  ]
+}
