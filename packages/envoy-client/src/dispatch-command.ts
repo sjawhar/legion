@@ -357,12 +357,10 @@ export function parseCommand(
   for (let index = 0; index < rest.length; index++) {
     const token = rest[index] as string;
     if (!token.startsWith("--")) {
+      // `dispatch read ACME-12` names an issue as plainly as `--issue ACME-12` does, so a bare
+      // key is that command's --issue, once, when the command takes one and nothing else set it.
       if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
-        const corrected = [command, ...rest.slice(0, index), "--issue", token];
-        corrected.push(...rest.slice(index + 1));
-        problems.push(
-          `unexpected argument ${token}: use --issue <KEY>, as in: dispatch ${corrected.map(quoteWord).join(" ")}`
-        );
+        if (claim("issue", "--issue", false)) args.issue = token;
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
