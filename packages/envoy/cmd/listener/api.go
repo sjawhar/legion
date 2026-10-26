@@ -230,9 +230,9 @@ const busUnansweredPrefix = "envoy: the message bus did not answer"
 // subject.
 const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
 
-// writeBusUnavailable answers a send or a publish the bus did not serve, in the one place that
-// writes that 503, so the body's prefix and the hint never drift apart. Retry-After is set only
-// where retrying can help: bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy
+// writeBusUnavailable answers a send, a publish or a role lookup the bus did not serve, in the one
+// place that writes that 503, so the body's prefix and the hint never drift apart. Retry-After is
+// set only where retrying can help: bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy
 // errors.Is(err, bus.ErrRefused) - a refusal NATS repeats however often the same bytes are sent -
 // and writeNATSError answers those as the 413 and the 400 they are, so this one guard keeps the
 // header off exactly those two and off nothing else. The status writeNATSError settled on is
@@ -335,12 +335,24 @@ func roleNames(topics []string) []string {
 	return roles
 }
 
-func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, sourceSession string) *contracts.EnvelopeSender {
+// senderStamp is the sender a send or a publish carries: the session, the machine and directory it
+// runs in and the roles it subscribes to (its interest record), and its title (its session entry).
+// It only enriches the envelope, so no read it makes may cost the message. The interest record is
+// read from the cache, and a miss - a sender that subscribed to nothing, or any sender while the
+// cache refills after a reconnect - is read through to the bucket within senderStampReadTimeout of
+// ctx, the route's own. A read that does not answer leaves the stamp with what is already known,
+// the session id and the title the session cache holds, and leaves the rest of the budget to the
+// publish that follows, which meets the same silent bus itself and is answered as the named 503.
+func senderStamp(ctx context.Context, registry *store.Registry, sessions *session.SessionRegistry, sourceSession string) *contracts.EnvelopeSender {
 	if sourceSession == "" {
 		return nil
 	}
 	sender := &contracts.EnvelopeSender{SessionID: sourceSession}
-	if interest, err := registry.Get(sourceSession); err == nil {
+	readCtx, cancel := context.WithTimeout(ctx, senderStampReadTimeout)
+	defer cancel()
+	if interest, err := withinContext(readCtx, "read the sender's interest record", func() (store.Interest, error) {
+		return registry.Get(sourceSession)
+	}); err == nil {
 		sender.Machine = interest.MachineID
 		sender.Cwd = interest.Dir
 		sender.Roles = roleNames(interest.Topics)
@@ -353,8 +365,9 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 
 // sendRequestBudget is the bus work a send, a publish or a role lookup does under the request's own
 // context: the send route's read of the target session, the publish route's resolution of a role
-// lane's holder (resolveLiveRoleHolder, every attempt of it) and both routes' publish share it, and
-// GET /v1/roles/<role> resolves its holder within it too. The HTTP client gives each attempt 5 s
+// lane's holder (resolveLiveRoleHolder, every attempt of it), both routes' read of the sender's
+// interest record (senderStamp) and both routes' publish share it, and GET /v1/roles/<role>
+// resolves its holder within it too. The HTTP client gives each attempt 5 s
 // (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is 10 s
 // (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a sender
 // whose bus cannot be reached reads the 503 that names the reason, in time to act on it, instead
@@ -362,9 +375,17 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 const sendRequestBudget = 3500 * time.Millisecond
 
 // sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a
-// bucket that does not answer still leaves the publish most of sendRequestBudget (~2.5 s). The role
-// paths keep roleHolderReadTimeout as their per-read cap instead.
+// bucket that does not answer still leaves most of sendRequestBudget (~2.5 s) to the sender stamp's
+// read (senderStampReadTimeout) and the publish. The role paths keep roleHolderReadTimeout as their
+// per-read cap instead.
 const sendSessionReadTimeout = 1 * time.Second
+
+// senderStampReadTimeout bounds senderStamp's read of the sender's interest record from the bucket.
+// nats.go's KV read takes no context and waits out the JetStream MaxWait (10 s), and the stamp is
+// only enrichment, so on a bus that does not answer it gets no more of sendRequestBudget than the
+// send route's own read of its target (sendSessionReadTimeout): a send whose two reads both go
+// unanswered still leaves its publish 1.5 s, and the publish is what answers the named 503.
+const senderStampReadTimeout = 1 * time.Second
 
 // sendHandler publishes a direct message only while the session store itself, not merely this
 // listener's cache of it, holds the target's entry: a 404 here is a sender's cue to route around
@@ -449,7 +470,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			))
 			return
 		}
-		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
+		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
 		duplicate, err := d.client.PublishReportingDuplicateWithin(ctx, item)
 		if err != nil {
 			record.refuseBusUnavailable(w, err)
@@ -589,7 +610,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			// on, which nothing else in the line names.
 			record.holder = result.holder
 		}
-		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
+		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
 		if err := d.client.PublishWithin(ctx, item); err != nil {
 			record.refuseBusUnavailable(w, err)
 			return
@@ -851,8 +872,10 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 // does not answer is reported inside the caller's attempt. A resolution that lost the race for the
 // role's claim (errRoleHolderChanged) is the publish route's 503 with Retry-After: 1, worded for a
 // lookup, since every read answered and a fresh lookup wins the race once the replacement claim
-// settles. Any other failure, a read that did not answer within its cap or that budget among them,
-// keeps this route's 500 (or the 413 and 400 writeNATSError gives a refused key).
+// settles. Any other failure is a role store call that did not answer within its cap or that
+// budget - the claim read, the holder's session read or the conditional release - and is answered
+// as the publish route answers it (writeBusUnavailable): the 503 with Retry-After: 1 whose body
+// begins busUnansweredPrefix and names the call, or the 413 and 400 a refused key gets.
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -872,7 +895,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
+			writeBusUnavailable(w, err)
 			return
 		}
 		if result.state != roleHolderLive {

@@ -964,7 +964,7 @@ func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
 
 // When the session bucket cannot be read, every path that could take a role from its holder takes
 // nothing, and answers inside its bound (roleHolderReadTimeout, well under the 10 s HTTP write
-// timeout): a lookup answers 500, a soft claim 503, a role delivery reports delivery_failed, and the
+// timeout): a lookup and a soft claim answer 503, a role delivery reports delivery_failed, and the
 // reaper keeps the claim.
 func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 	const bound = 5 * time.Second
@@ -983,8 +983,8 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		started := time.Now()
 		recorder := httptest.NewRecorder()
 		roleGetHandler(observer).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/unread", nil))
-		if elapsed := time.Since(started); recorder.Code != http.StatusInternalServerError || elapsed > bound {
-			t.Fatalf("GET /v1/roles/unread while the session bucket cannot be read: status %d %s after %s, want 500 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
+		if elapsed := time.Since(started); recorder.Code != http.StatusServiceUnavailable || elapsed > bound {
+			t.Fatalf("GET /v1/roles/unread while the session bucket cannot be read: status %d %s after %s, want 503 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
 		}
 		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
 			t.Fatalf("the claim after the lookup is held by %q, want ses_holder", holder)
@@ -1845,6 +1845,77 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 	}
 	if got := strings.Join(response.Sender.Roles, ","); got != "maintainer,reviewer" {
 		t.Fatalf("roles = %q, want maintainer,reviewer", got)
+	}
+}
+
+// The sender stamp reads an interest record its cache misses through to the bucket - any sender's,
+// while the cache refills after a reconnect - and, with the bus answering, stamps the machine,
+// directory and roles from it as a cache hit would: bounding that read (senderStampReadTimeout) so
+// a silent bus cannot hold a send or a publish past its budget must not cost a healthy bus the
+// stamp. The cache is kept from the record by ending its watcher before another listener writes
+// it, so nothing but the read-through can find it.
+func TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket(t *testing.T) {
+	const (
+		target = "ses_stamp_target"
+		sender = "ses_stamp_sender_the_cache_missed"
+	)
+	for _, route := range []struct {
+		name    string
+		handler func(*listenerDeps) http.HandlerFunc
+		path    string
+		body    map[string]any
+	}{
+		{
+			name:    "send",
+			handler: func(d *listenerDeps) http.HandlerFunc { return sendHandler(d, logging.New("test")) },
+			path:    "/v1/messages/send",
+			body:    map[string]any{"target_session": target, "source": "agent", "source_session": sender, "message": "who sent this?"},
+		},
+		{
+			name:    "publish",
+			handler: func(d *listenerDeps) http.HandlerFunc { return publishHandler(d, logging.New("test")) },
+			path:    "/v1/messages/publish",
+			body:    map[string]any{"topic": "notifications.github.example-org.example-repo.pr.2", "source": "agent", "source_session": sender, "message": "who sent this?"},
+		},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			client := setupPublishTestClient(t)
+			registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1})
+			endCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			registry.EndWatch(endCtx)
+			cancel()
+			writer, err := store.Open(setupPublishTestClient(t).Conn, store.WithReplicas(1))
+			if err != nil {
+				t.Fatalf("open the writing listener's registry: %v", err)
+			}
+			if _, err := writer.Upsert(store.Interest{
+				SessionID: sender, MachineID: "test-machine", Dir: "/test/" + sender,
+			}, []string{contracts.AgentSubject(sender), "notifications.role.reviewer", "notifications.role.maintainer"}); err != nil {
+				t.Fatalf("write %s's interest record: %v", sender, err)
+			}
+			for _, cached := range registry.List() {
+				if cached.SessionID == sender {
+					t.Fatalf("the listener's interest cache holds %s: the stamp could be read from the cache", sender)
+				}
+			}
+			state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+
+			recorder := httptest.NewRecorder()
+			route.handler(state).ServeHTTP(recorder, postJSON(route.path, sendBody(route.body)))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("%s: status %d, body %s; want 200", route.name, recorder.Code, recorder.Body.String())
+			}
+			var response contracts.Envelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode the %s response %s: %v", route.name, recorder.Body.String(), err)
+			}
+			if response.Sender == nil || response.Sender.SessionID != sender || response.Sender.Machine != "test-machine" || response.Sender.Cwd != "/test/"+sender {
+				t.Fatalf("sender = %+v, want %s on test-machine in /test/%s", response.Sender, sender, sender)
+			}
+			if got := strings.Join(response.Sender.Roles, ","); got != "maintainer,reviewer" {
+				t.Fatalf("sender roles = %q, want maintainer,reviewer", got)
+			}
+		})
 	}
 }
 

@@ -638,20 +638,24 @@
   `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`.
   `GET /v1/roles/<role>` resolves its holder within the same 3.5 s budget, and answers that race,
   which it answered 500, with the same 503 and `Retry-After: 1`, worded
-  `{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; its
-  other failures, a role store that did not answer within the budget among them, stay a 500. The
-  413 for a message NATS cannot take whole and the 400 for a subject or key it refuses are
-  unchanged. A publish on either route whose request context has already ended — its budget
-  spent, which a role-holder resolution that answers just as the budget ends can leave it, or the
-  request cancelled — puts nothing on the wire and is answered that 503: a core subject has no
-  duplicate window and the client retries every 5xx, so a message emitted behind a failure answer
-  would reach its subscriber twice. A core publish checks its deadline immediately before it
-  publishes and its context's cancellation before that, once more after any wait for a reconnect,
-  so one cancelled while NATS reconnects sends nothing; a cancel after that last check cannot be
-  undone, and the publish goes ahead. A JetStream publish relies on nats.go, whose request sends
-  nothing under an ended context. A send resolves its target from the session store itself rather
-  than from this listener's cache of it — a cache miss is read through to the `envoy_sessions`
-  bucket within a second, the same direct get the role paths already make — so
+  `{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; a
+  role store that did not answer within its cap or the budget, which it also answered 500, is the
+  bus-unavailable 503 with `Retry-After: 1`, as on the publish route. Both message routes read the
+  sender's interest record for the envelope's `sender` within a second of that budget
+  (`senderStampReadTimeout`): a read that does not answer stamps the session id and the title this
+  listener's cache holds, and the publish goes on to meet the silent bus itself and answer the
+  503 inside the attempt. The 413 for a message NATS cannot take whole and the 400 for a subject
+  or key it refuses are unchanged. A publish on either route whose request context has already
+  ended — its budget spent, which a role-holder resolution that answers just as the budget ends
+  can leave it, or the request cancelled — puts nothing on the wire and is answered that 503: a
+  core subject has no duplicate window and the client retries every 5xx, so a message emitted
+  behind a failure answer would reach its subscriber twice. A core publish checks its deadline
+  immediately before it publishes and its context's cancellation before that, once more after any
+  wait for a reconnect, so one cancelled while NATS reconnects sends nothing; a cancel after that
+  last check cannot be undone, and the publish goes ahead. A JetStream publish relies on nats.go,
+  whose request sends nothing under an ended context. A send resolves its target from the session
+  store itself rather than from this listener's cache of it — a cache miss is read through to the
+  `envoy_sessions` bucket within a second, the same direct get the role paths already make — so
   `404 {"error":"no live session <id>"}` is now only the store's own word that the key is gone,
   and an agent delivery reads that same store before it pushes. A delivery this listener cannot
   place — no session record, a record naming nothing to push to, or a push that failed — is NAK'd

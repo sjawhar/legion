@@ -177,8 +177,8 @@ func (kv stalledRoleKV) Delete(key string, opts ...nats.DeleteOpt) error {
 // context, so a role-bucket call that does not answer - the claim read, or the conditional release
 // of a claim whose holder is gone, neither of which takes a context in nats.go - is reported inside
 // the caller's attempt (the client gives each 5 s, packages/envoy-client/src/transport.ts) rather
-// than after it: a role-lane publish answers the bus-unavailable 503 with Retry-After: 1, a lookup
-// its 500, each naming the call that did not answer. Each must answer at its budget and before
+// than after it: a role-lane publish and a lookup both answer the bus-unavailable 503 with
+// Retry-After: 1, naming the call that did not answer. Each must answer at its budget and before
 // stalledRoleKV's stall: answering before the budget would mean something other than the stalled
 // call ended the request, and answering after it that the resolution waited the call out.
 func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *testing.T) {
@@ -264,16 +264,19 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 			recorder := httptest.NewRecorder()
 			roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
 			elapsed := time.Since(started)
-			if recorder.Code != http.StatusInternalServerError {
-				t.Fatalf("lookup whose role bucket did not answer: status %d, body %s; want 500", recorder.Code, recorder.Body.String())
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("lookup whose role bucket did not answer: status %d, body %s; want 503", recorder.Code, recorder.Body.String())
 			}
 			answeredInTime(t, elapsed)
+			if got := recorder.Header().Get("Retry-After"); got != "1" {
+				t.Fatalf("Retry-After = %q, want 1", got)
+			}
 			var refusal apiError
 			if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
 				t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
 			}
-			if !strings.Contains(refusal.Error, tc.unanswered) {
-				t.Fatalf("the refusal reads %q, want it to name %q", refusal.Error, tc.unanswered)
+			if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) || !strings.Contains(refusal.Error, tc.unanswered) {
+				t.Fatalf("the refusal reads %q, want it to begin %q and name %q", refusal.Error, busUnansweredPrefix, tc.unanswered)
 			}
 		})
 	}

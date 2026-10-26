@@ -174,8 +174,8 @@ func releaseExpiredRoleClaim(ctx context.Context, registry roleClaimResolver, ro
 // session that ended from one it has not caught up with. nats.ErrKeyNotFound is the bucket's word
 // that the session is gone or fails live; any other error is a read that did not answer, on which
 // nothing is taken from a holder and no send is refused as unaddressed. The bucket read gets bound,
-// derived from ctx, so a lookup that cannot read the bucket answers its 500, a soft claim, a
-// role-lane publish and a send their 503, inside the deadline their own caller holds.
+// derived from ctx, so a lookup, a soft claim, a role-lane publish and a send that cannot read the
+// bucket answer their 503 inside the deadline their own caller holds.
 func liveSessionEntry(
 	ctx context.Context,
 	sessions *session.SessionRegistry,

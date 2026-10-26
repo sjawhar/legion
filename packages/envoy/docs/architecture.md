@@ -102,8 +102,15 @@ settles, but answers its own body,
 recorded `role_holder_changed`: every bus read answered, so no bus was unavailable.
 `GET /v1/roles/<role>` resolves its holder the same way, within the same budget, and answers that
 race with the same 503 and `Retry-After: 1`, worded
-`{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; its
-other failures, a read that did not answer among them, stay a 500.
+`{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; a read
+that did not answer, within its cap or that budget, is the bus-unavailable 503 above with
+`Retry-After: 1`, naming the call, and a key NATS refuses keeps its 413 or 400.
+
+A send and a publish stamp the envelope's `sender` from the sender's interest record (`senderStamp`,
+`cmd/listener/api.go`), which a cache miss reads through to the bucket within one second of the
+same budget (`senderStampReadTimeout`). The stamp is only enrichment: a read that does not answer
+leaves it the session id and the title this listener's cache holds, and the publish that follows
+meets the same silent bus and answers the 503 above inside the caller's attempt.
 
 A publish whose caller's context has already ended puts nothing on the wire; on these two routes it
 is answered the 503 above. A core publish (a role lane or an ad-hoc topic) checks its deadline
