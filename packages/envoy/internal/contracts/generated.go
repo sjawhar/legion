@@ -252,7 +252,7 @@ const IdempotencyKeyPattern = "^[A-Za-z0-9._:-]{1,128}$"
 const IdempotencyKeyReused = "KEY_REUSED"
 const IdempotencyKeyInFlight = "KEY_IN_FLIGHT"
 const IdempotencyKeyCommitted = "KEY_COMMITTED"
-const IdempotencyKeyInvalid = "IDEMPOTENCY_KEY_INVALID"
+const IdempotencyKeyInvalid = "KEY_INVALID"
 const IdempotencyAnswerNotKept = "ANSWER_NOT_KEPT"
 
 // IdempotencyKeyTTL is how long Dispatch keeps a key's answer, and IdempotencyLease how long a
@@ -261,6 +261,13 @@ const IdempotencyAnswerNotKept = "ANSWER_NOT_KEPT"
 // the clients' account of them cannot drift apart.
 const IdempotencyKeyTTL = 86400000 * time.Millisecond
 const IdempotencyLease = 60000 * time.Millisecond
+
+// DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
+// of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
+// is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in
+// packages/contracts so the server's check and the page's header cannot drift apart.
+const DispatchLoginHeader = "Dispatch-Login"
+const DispatchLoginChanged = "LOGIN_CHANGED"
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

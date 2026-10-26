@@ -5,6 +5,8 @@ import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  DISPATCH_LOGIN_CHANGED,
+  DISPATCH_LOGIN_HEADER,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
   IDEMPOTENCY_ANSWER_NOT_KEPT,
@@ -235,6 +237,13 @@ const IdempotencyAnswerNotKept = ${JSON.stringify(IDEMPOTENCY_ANSWER_NOT_KEPT)}
 // the clients' account of them cannot drift apart.
 const IdempotencyKeyTTL = ${IDEMPOTENCY_KEY_TTL_MS} * time.Millisecond
 const IdempotencyLease = ${IDEMPOTENCY_LEASE_MS} * time.Millisecond
+
+// DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
+// of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
+// is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in
+// packages/contracts so the server's check and the page's header cannot drift apart.
+const DispatchLoginHeader = ${JSON.stringify(DISPATCH_LOGIN_HEADER)}
+const DispatchLoginChanged = ${JSON.stringify(DISPATCH_LOGIN_CHANGED)}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

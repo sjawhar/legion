@@ -1223,7 +1223,7 @@ export const IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
 export const IDEMPOTENCY_KEY_MAX = 128;
 
 /** A whole `IDEMPOTENCY_KEY_HEADER` value: letters, digits, `.`, `_`, `:` and `-`, from one to
- *  `IDEMPOTENCY_KEY_MAX` characters. Any other is `400 IDEMPOTENCY_KEY_INVALID`. */
+ *  `IDEMPOTENCY_KEY_MAX` characters. Any other is `400 KEY_INVALID` (`IDEMPOTENCY_KEY_INVALID`). */
 export const IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
 
 /** The code of the `422` for a key already used for a different request (another method,
@@ -1240,8 +1240,9 @@ export const IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
 export const IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
 
 /** The code of the `400` for an `IDEMPOTENCY_KEY_HEADER` that does not match
- *  `IDEMPOTENCY_KEY_PATTERN`. */
-export const IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID";
+ *  `IDEMPOTENCY_KEY_PATTERN`, or is sent twice: named as `KEY_REUSED`, `KEY_IN_FLIGHT` and
+ *  `KEY_COMMITTED` are. */
+export const IDEMPOTENCY_KEY_INVALID = "KEY_INVALID";
 
 /** The code a replay's body carries when the first answer was larger than Dispatch keeps (1 MiB):
  *  the replay has the first answer's status and this body instead of the first's. A 2xx with it

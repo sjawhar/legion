@@ -326,7 +326,9 @@ type queryer interface {
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
 // Every POST and PATCH route takes an Idempotency-Key, and a repeat under one is answered from the
-// key rather than run again (keyedWrites, request_keys.go).
+// key rather than run again (keyedWrites, request_keys.go). Every write route - a POST, PATCH, PUT
+// or DELETE - that names its presser in Dispatch-Login runs only as that person
+// (refuseChangedLogin).
 //
 // With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
 // the first subscription and runs them until Lifetime ends, and mounts GET /ws/live beside the
@@ -454,6 +456,9 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		handler := route.Handler
 		if keyedMethod(route.Method) {
 			handler = s.keyedWrites(route.Method, route.Pattern, handler, replays[route.Method+" "+route.Pattern])
+		}
+		if route.Method != http.MethodGet {
+			handler = s.refuseChangedLogin(handler)
 		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, handler)))
 	}
@@ -729,6 +734,40 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 		"code":       "TARGET_AMBIGUOUS",
 		"candidates": candidates,
 	})
+}
+
+// refuseChangedLogin runs a write route's handler only for the person who pressed the write, when
+// the request names one in DispatchLoginHeader: the page sends the login of whoever was signed in
+// at the press with every write, retries included, and another tab may sign someone else in in
+// place, so a retry goes out on the new cookie before this tab knows. A request whose caller is
+// another person, or no person at all (a bearer), is answered 409 LOGIN_CHANGED before anything
+// runs - before its Idempotency-Key is read, so its key is untouched. A caller that resolves to
+// nobody (a lapsed cookie) is left to the route's own refusal, a 401, so a write a session lapsed
+// under waits for the sign-in that follows. A request without the header - the dispatch command,
+// an agent, a script - is not checked. Logins are compared as model.CanonicalLogin compares them.
+func (s *server) refuseChangedLogin(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pressed := r.Header.Values(contracts.DispatchLoginHeader)
+		if len(pressed) == 0 {
+			handler(w, r)
+			return
+		}
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: the key layer and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		login := strings.TrimSpace(pressed[0])
+		if len(pressed) == 1 && login != "" && human && model.CanonicalLogin(actor.ID) == model.CanonicalLogin(login) {
+			handler(w, r)
+			return
+		}
+		writeError(w, contracts.DispatchLoginChanged, http.StatusConflict, fmt.Sprintf(
+			"this write was pressed by %q and its request is not signed in as them: nothing ran; it goes only as the person who pressed it",
+			login))
+	}
 }
 
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
