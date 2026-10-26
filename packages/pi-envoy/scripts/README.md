@@ -134,6 +134,26 @@ real JetStream NATS, and the session reaches NATS only through a `socat` proxy t
   session has gone idle (`isStreaming: false`, nothing queued), each of the four events has exactly
   one entry (`card=1` each), still one three heartbeats later. A card counts as shown only once
   omp writes it, so the cards the kill dropped come back from the stream.
+- **Leg 4, cards an interrupt withdrew:** in a fresh session (legs 5 and 6 reuse it), three
+  envelopes are published live while a long turn streams, and omp holds their cards
+  (`queuedMessageCount` 3, `card=0` each). RPC `abort_and_restore_queue` (what Escape does at the
+  terminal) withdraws them: omp is idle with nothing queued and has written none of them. The same
+  process shows each once within two heartbeats (the plugin hands a card again once omp is idle,
+  holds no message and the card is still unwritten), still once when the session is idle and three
+  heartbeats later: no restart is needed to get them back.
+- **Leg 5, a plain abort:** the same hold, then RPC `abort`: omp keeps the cards and writes them
+  in the run it starts at once. Each shows once within two heartbeats and still once three
+  heartbeats on, so the plugin hands none of them a second time.
+- **Leg 6, a switch away and back (local mode only):** the same hold, then RPC `new_session`. The
+  new session answers a first prompt (so its file exists) and three heartbeats later holds none of
+  the three cards. The listener is stopped, RPC `switch_session` goes back to the first session
+  (`get_state` confirms it), a long turn starts, and the listener comes back: a heartbeat's sweep
+  hands the cards again, and omp holds all three for the streaming turn, unwritten. omp is
+  SIGKILLed and resumes the same file; once idle each shows once, still once three heartbeats
+  later, and legs 4 and 5's events are still once each. The switch dropped the cards unwritten, so
+  the plugin released them rather than recording them shown. The listener is down across the
+  switch so that the switch's own sweep cannot hand the cards to the idle session before the turn
+  streams; remote mode cannot stop the listener, so it skips this leg and says so.
 - **Negative control, same run:** leg 1 again with a session running the released plugin
   (`SMOKE_REPLAY_CONTROL_PLUGIN`) ends with no entry for its publish, and a frame published live
   afterwards shows once, so that session was connected and writing cards the whole time.
@@ -141,6 +161,10 @@ real JetStream NATS, and the session reaches NATS only through a `socat` proxy t
   envelopes published live while a turn streams, held by omp (`queuedMessageCount` 2), SIGKILLed
   unwritten. Five heartbeats after the resume, once the session is idle, at least one of them has
   no entry: that plugin keeps no record of a card omp holds in memory, so the kill loses it.
+- **Negative control for leg 4, same run:** the released plugin through leg 4: three envelopes
+  published live while a turn streams, held by omp (`queuedMessageCount` 3), then RPC
+  `abort_and_restore_queue`. Five heartbeats on, once the session is idle, none of them has an
+  entry: omp withdrew them unwritten and that plugin never hands them again in the same process.
 
 Each step prints what it observed, and every matched transcript entry is printed as a
 `transcript:` line.
@@ -163,7 +187,8 @@ Env overrides:
   the run also proves the route and its grant there. The script cannot stop a remote NATS or read
   its monitoring endpoint: it breaks the session's connection by killing the local proxy that
   fronts the remote NATS (leg 3 included), and leg 2 SIGKILLs omp, since `/v1/messages/send`
-  needs the registration a clean exit drops. This is the production check after a rollout.
+  needs the registration a clean exit drops. Legs 4 and 5 and their control run as in local mode;
+  leg 6 needs the listener stopped and does not run. This is the production check after a rollout.
 - `SMOKE_REPLAY_ENVOY_TOKEN_FILE` — remote mode only: a file holding the listener's bearer, sent
   from a 0600 header file and handed to the session as `ENVOY_TOKEN_FILE`.
 - `SMOKE_REPLAY_CONTROL_PLUGIN` — the released plugin the control runs (default
@@ -176,8 +201,9 @@ Env overrides:
 Prerequisites, each checked before anything starts: `go` (local mode), `bun` with the checkout's
 dependencies installed, `socat`, `setsid`, `pgrep`, `omp`, `curl`, `jq`, and every variable
 `SMOKE_REPLAY_PROVIDER_ENV` names. Every model call is real and costs tokens: one prompt per
-session start and one turn per card, and leg 3 and its control each add a long answer (about a
-thousand lines), which leg 3's resumed session may write again.
+session start and one turn per card, and legs 3 to 6 and the controls of legs 3 and 4 each start
+a long answer (about a thousand lines, cut short by the kill, interrupt, abort or switch), which a
+resumed session may write again.
 
 No process it starts inherits the caller's environment: each gets `PATH`, the provider variables
 (omp only) and what the script sets — a scratch `HOME` holding the session's `envoy.json` (the
@@ -190,18 +216,20 @@ it, with each session's RPC log and session file, after anything else.
 
 ### Timing
 
-A local run takes about three and a half minutes (measured on omp 18.8.9 with the default model):
-about 10 s to build and start the services, 25 s for leg 1, 20 s for leg 2, 70 s for leg 3 (40 s of
-it the resumed session's answer), 45 s for each control. Each wait is bounded:
-registration 90 s, a replayed card two heartbeats (10 s), the long turn's start 30 s, omp holding
-the live cards two heartbeats and the replayed ones four, and leg 3's resumed session 300 s to
-show every card and 300 s more to go idle.
+A local run takes about six and a half minutes (measured on omp 18.8.9 with the default model):
+about 10 s to build and start the services, 25 s for leg 1, 20 s for leg 2, 65 s for leg 3 (35 s of
+it the resumed session's answer), 30 s for leg 4, 20 s for leg 5, 90 s for leg 6 (45 s of it the
+resumed session's answer), 45 s for each control. Each wait is bounded: registration 90 s, a
+replayed card two heartbeats (10 s), the long turn's start 30 s, omp holding the live cards two
+heartbeats and the replayed ones (leg 3, and leg 6 once the listener is back) four, a card after
+leg 4's interrupt or leg 5's abort two heartbeats, a session going idle after them 300 s, and the
+resumed session of legs 3 and 6 300 s to show every card and 300 s more to go idle.
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | `SMOKE REPLAY PASS:` legs 1 to 3 showed each event exactly once, the control showed none of its missed publish, and the leg 3 control lost at least one of its live cards. |
+| 0 | `SMOKE REPLAY PASS:` legs 1 to 6 showed each event exactly once (leg 6 in local mode only), the control showed none of its missed publish, the leg 3 control lost at least one of its live cards, and the leg 4 control showed none of the cards its interrupt withdrew. |
 | 1 | `SMOKE REPLAY FAIL (<step>):` an observation failed; the line names the step and what was seen. |
 | 2 | Refused: a prerequisite is missing, the configuration is invalid, or the model provider did not answer the session's first prompt (its error is printed). |
 | 129, 130, 143 | Interrupted by SIGHUP, SIGINT or SIGTERM; cleanup still ran. |
