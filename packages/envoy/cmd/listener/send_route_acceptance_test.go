@@ -220,6 +220,104 @@ func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
 	t.Logf("bus unreachable: 503 in %s: %s", elapsed, refusal.Error)
 }
 
+// A bus that goes silent without closing the connection - a partition, or a hub host that stops
+// answering without resetting its sockets - is unreachable too, and a send and a publish answer it
+// with the same named 503 inside the caller's attempt. nats.go cannot tell such a link is dead
+// until its pings go unanswered, minutes later, so every bus call made on it waits: the target's
+// read and the publish are bounded by sendRequestBudget, and so must every other bus call the
+// route makes before it answers, the sender stamp's read of the source session's interest record
+// (senderStamp) among them. That read is the cache's miss read through to the bucket, as it is for
+// any sender whose interest record the cache does not hold: one that subscribed to nothing, or any
+// sender while the cache refills after a reconnect, which is the case this issue began with.
+//
+// The relay freezes the link by discarding everything the client writes from the moment it is
+// armed, keeping the connection open, so the client still reports itself connected. The target is
+// in the warm session cache, so its read is not what is under test. The negative control is the
+// identical request before the freeze, answered 200 on the same rig.
+func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.T) {
+	const (
+		target = "ses_frozen_bus_target"
+		sender = "ses_frozen_bus_sender_with_no_interest_record"
+		within = 4 * time.Second
+	)
+	for _, route := range []struct {
+		name    string
+		handler func(*listenerDeps) http.HandlerFunc
+		path    string
+		body    map[string]any
+	}{
+		{
+			name:    "send",
+			handler: func(d *listenerDeps) http.HandlerFunc { return sendHandler(d, logging.New("test")) },
+			path:    "/v1/messages/send",
+			body:    map[string]any{"target_session": target, "source": "agent", "source_session": sender, "message": "is the bus there?"},
+		},
+		{
+			name:    "publish",
+			handler: func(d *listenerDeps) http.HandlerFunc { return publishHandler(d, logging.New("test")) },
+			path:    "/v1/messages/publish",
+			body:    map[string]any{"topic": "notifications.github.example-org.example-repo.pr.1", "source": "agent", "source_session": sender, "message": "is the bus there?"},
+		},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			relay := startListenerRelay(t, testnats.URL(t))
+			client, err := bus.ConnectOwningStream([]string{relay.relayed}, bus.WithReplicas(1))
+			if err != nil {
+				t.Fatalf("connect the listener's bus through the relay: %v", err)
+			}
+			t.Cleanup(client.Close)
+			registry, err := store.Open(client.Conn, store.WithReplicas(1))
+			if err != nil {
+				t.Fatalf("open the interest registry: %v", err)
+			}
+			sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+			if err != nil {
+				t.Fatalf("open the session registry: %v", err)
+			}
+			if err := sessions.Put(target, session.SessionEntry{
+				Port: 1, MachineID: "test-machine", Dir: "/test/" + target, Title: "frozen target",
+			}); err != nil {
+				t.Fatalf("register %s: %v", target, err)
+			}
+			if _, err := sessions.Get(target); err != nil {
+				t.Fatalf("the listener's cache does not hold %s (%v): the target's read could be what fails", target, err)
+			}
+			state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+			serve := func() (*httptest.ResponseRecorder, time.Duration) {
+				recorder := httptest.NewRecorder()
+				started := time.Now()
+				route.handler(state).ServeHTTP(recorder, postJSON(route.path, sendBody(route.body)))
+				return recorder, time.Since(started)
+			}
+			if reachable, _ := serve(); reachable.Code != http.StatusOK {
+				t.Fatalf("the same %s with the bus answering: status %d, body %s; want 200", route.name, reachable.Code, reachable.Body.String())
+			}
+
+			// The next protocol line the client writes arms the swallow; every byte after it is
+			// discarded and the connection stays open.
+			relay.arm("\r\n", 1)
+			recorder, elapsed := serve()
+			if elapsed >= within {
+				t.Fatalf("the %s answered after %s (status %d, body %s), want inside %s - a bus that stopped answering must be refused inside the caller's 5 s attempt, not left to its timeout",
+					route.name, elapsed, recorder.Code, recorder.Body.String(), within)
+			}
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s with the bus silent: status %d, body %s; want 503", route.name, recorder.Code, recorder.Body.String())
+			}
+			var refusal apiError
+			if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+				t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+			}
+			if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) {
+				t.Fatalf("the refusal reads %q, want it to begin %q", refusal.Error, busUnansweredPrefix)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != "1" {
+				t.Fatalf("Retry-After = %q, want 1", got)
+			}
+		})
+	}
+}
+
 // A bus that is reachable and does not accept the publish is the same 503, carrying the server's
 // own reason: here the notification stream is deleted under the running listener, so the
 // JetStream publish to notifications.agent.<id> is left without a stream to acknowledge it
