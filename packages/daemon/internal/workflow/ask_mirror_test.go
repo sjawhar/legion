@@ -91,8 +91,8 @@ func recordedRoot(t *testing.T, pool *pgxpool.Pool) record.Issue {
 
 // An ask's events are mirrored whatever order they arrive in: its kind and whether the root's tree
 // opened it are kept from its opening, the person's act on it from every event that carries one,
-// and its state is the newest event's. The mirror decides nothing: the root's record and the
-// outbox are as they were.
+// its state and its newest close are the close's, and its turn is the newest turn any event gave
+// it. The mirror decides nothing: the root's record and the outbox are as they were.
 func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 	events := []intake.Fact{
 		intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID, Mark: askSeq(5)},
@@ -100,8 +100,8 @@ func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 		intake.DispatchAskReply{Key: "LEGION-208", Ask: "ask-q", WaitingOn: "human", Actor: askArchitect, Mark: askSeq(7)},
 		intake.DispatchAskClosed{Key: "LEGION-208", Ask: "ask-q", State: "resolved", Actor: askArchitect, Mark: askSeq(8)},
 	}
-	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: false, Seq: 8, ByTree: true, PersonSeq: 6,
-		ClosedSeq: 8, ClosedBy: record.ClosedByTree}
+	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: false, Seq: 8, WaitingOn: "human", WaitingOnSeq: 7,
+		ClosedBy: record.ClosedByTree, ClosedSeq: 8, ByTree: true, PersonSeq: 6}
 	for _, order := range [][]int{{0, 1, 2, 3}, {3, 2, 1, 0}, {1, 3, 0, 2}} {
 		t.Run(fmt.Sprint(order), func(t *testing.T) {
 			pool, apply := askRig(t)
@@ -113,9 +113,6 @@ func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 			if got == nil {
 				t.Fatal("the ask has no mirror row")
 			}
-			// The turn is the newest event's state: a closed row keeps the turn it last had, which
-			// depends on which open events the row saw before its close.
-			got.WaitingOn = ""
 			if *got != want {
 				t.Fatalf("mirror row = %#v, want %#v", *got, want)
 			}
@@ -130,7 +127,8 @@ func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 }
 
 // A closed ask keeps the turn it last had, and settlement's restore reopens it on that turn, or on
-// the person's when no event named one. Nobody acted, so the restore records no person's act.
+// the person's when no event named one, keeping the close it reopened from. Nobody acted, so the
+// restore records no person's act.
 func TestAClosedAskKeepsItsTurnAndARestoredAskReopensOnIt(t *testing.T) {
 	pool, apply := askRig(t)
 	apply("opened", intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID, Mark: askSeq(5)})
@@ -140,7 +138,8 @@ func TestAClosedAskKeepsItsTurnAndARestoredAskReopensOnIt(t *testing.T) {
 		t.Fatalf("retracted ask = %#v, want it closed by settlement on the agent's turn it last had", got)
 	}
 	apply("restored", intake.DispatchAskRestored{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, Mark: askSeq(8)})
-	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, WaitingOn: "agent", Seq: 8, ByTree: true, ClosedSeq: 7}
+	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, Seq: 8, WaitingOn: "agent", WaitingOnSeq: 6,
+		ClosedBy: record.ClosedBySettlement, ClosedSeq: 7, ByTree: true}
 	if got := mirroredAsk(t, pool, "ask-q"); *got != want {
 		t.Fatalf("restored ask = %#v, want %#v", *got, want)
 	}
@@ -148,22 +147,22 @@ func TestAClosedAskKeepsItsTurnAndARestoredAskReopensOnIt(t *testing.T) {
 	// An ask the mirror saw only closed has no turn: restored, it is with the person.
 	apply("closed-only", intake.DispatchAskClosed{Key: "LEGION-208", Ask: "ask-r", State: "resolved", Actor: dispatch.SettlementActor, Mark: askSeq(9)})
 	apply("restored-r", intake.DispatchAskRestored{Key: "LEGION-208", Ask: "ask-r", Open: true, Mark: askSeq(10)})
-	if got := mirroredAsk(t, pool, "ask-r"); !got.WithHuman() || got.PersonSeq != 0 {
+	if got := mirroredAsk(t, pool, "ask-r"); !got.WithHuman() || got.PersonActSeq() != 0 {
 		t.Fatalf("restored ask with no turn = %#v, want it open on the person's turn with no person's act", got)
 	}
 	// A restore of the answer closes it again and keeps the turn.
 	apply("re-answered", intake.DispatchAskRestored{Key: "LEGION-208", Ask: "ask-q", Mark: askSeq(11)})
-	if got := mirroredAsk(t, pool, "ask-q"); got.Open || got.WaitingOn != "agent" || got.ClosedBy != record.ClosedByOther || got.PersonSeq != 0 {
+	if got := mirroredAsk(t, pool, "ask-q"); got.Open || got.WaitingOn != "agent" || got.ClosedBy != record.ClosedByOther || got.PersonActSeq() != 0 {
 		t.Fatalf("ask closed again by a restore = %#v, want it closed on its turn with no person's act", got)
 	}
 }
 
 // Every act of a person that would answer a root waiting on them is recorded on the ask's row, by
-// the one rule (personAnswers): an answer or a resolution, of a question or of an approval ask
-// that is not the gate's request, a resolution of the gate's request, and a reply that does not
-// leave the ask with the person, a comment on a closed ask among them. A person's answer of the
-// gate's request is a review, recorded through its own artifact event; a person's reply on their
-// own turn and a session's act are no person's act.
+// the one rule (personAct): an answer or a resolution, of a question or of an approval ask that is
+// not the gate's request, a resolution of the gate's request, and a reply that does not leave the
+// ask with the person, a comment on a closed ask among them. A person's answer of the gate's
+// request is a review, recorded through its own artifact event; a person's reply on their own turn
+// and a session's act are no person's act.
 func TestAPersonsActIsRecordedWhereverItWouldAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -183,7 +182,8 @@ func TestAPersonsActIsRecordedWhereverItWouldAnswer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, apply := askRig(t)
-			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, RequestAsk: "ask-approval"})
+			apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 2, DispatchVersion: 2,
+				RequestAsk: "ask-approval", Since: askSeq(10)})
 			apply("act", tc.act)
 			ask := "ask-x"
 			if closed, ok := tc.act.(intake.DispatchAskClosed); ok {
@@ -193,8 +193,8 @@ func TestAPersonsActIsRecordedWhereverItWouldAnswer(t *testing.T) {
 			if got == nil {
 				t.Fatal("the act left no mirror row")
 			}
-			if acted := got.PersonSeq == 20; acted != tc.acted {
-				t.Fatalf("%s recorded person_seq %d, want a person's act recorded: %t", tc.name, got.PersonSeq, tc.acted)
+			if acted := got.PersonActSeq() == 20; acted != tc.acted {
+				t.Fatalf("%s left the newest person's act at %d, want a person's act recorded: %t", tc.name, got.PersonActSeq(), tc.acted)
 			}
 		})
 	}
@@ -206,7 +206,8 @@ func TestAnAskOfUnknownKindIsMirroredWithNoKind(t *testing.T) {
 	pool, apply := askRig(t)
 	apply("opened", intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-old", Kind: "action", Mark: askSeq(5)})
 	apply("answered", intake.DispatchAskClosed{Key: "LEGION-208", Ask: "ask-old", Kind: "action", State: "answered", Actor: askPerson, Mark: askSeq(6)})
-	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-old", Seq: 6, PersonSeq: 6, ClosedSeq: 6, ClosedBy: record.ClosedByPerson, WaitingOn: "human"}
+	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-old", Seq: 6, WaitingOn: "human", WaitingOnSeq: 5, ClosedBy: record.ClosedByPerson,
+		ClosedSeq: 6, PersonAnswerSeq: 6}
 	if got := mirroredAsk(t, pool, "ask-old"); got == nil || *got != want {
 		t.Fatalf("ask of an unknown kind = %#v, want %#v", got, want)
 	}
@@ -235,10 +236,11 @@ func TestARegistrationMirrorsTheRequestItReadAtItsSequence(t *testing.T) {
 	pool, apply := askRig(t)
 	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 2, DispatchVersion: 2,
 		RequestAsk: "ask-approval", Since: askSeq(10)})
-	if gate := recordedGate(t, pool); gate == nil || gate.RequestAsk != "ask-approval" {
-		t.Fatalf("gate = %#v, want it bound to ask-approval", gate)
+	if gate := recordedGate(t, pool); gate == nil || gate.RequestAsk != "ask-approval" || gate.RequestArtifact != "artifact-208" {
+		t.Fatalf("gate = %#v, want it bound to ask-approval of artifact-208", gate)
 	}
-	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Open: true, WaitingOn: "human", Seq: 10}
+	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Open: true, Seq: 10, WaitingOn: "human",
+		WaitingOnSeq: 10, GateRequest: true}
 	if got := mirroredAsk(t, pool, "ask-approval"); got == nil || *got != want {
 		t.Fatalf("request row = %#v, want %#v", got, want)
 	}
@@ -247,7 +249,7 @@ func TestARegistrationMirrorsTheRequestItReadAtItsSequence(t *testing.T) {
 		t.Fatalf("request row after an event the read covered = %#v, want %#v", *got, want)
 	}
 	apply("note", intake.DispatchAskReply{Key: "LEGION-208", Ask: "ask-approval", WaitingOn: "agent", Actor: askArchitect, Mark: askSeq(11)})
-	if got := mirroredAsk(t, pool, "ask-approval"); got.WaitingOn != "agent" || got.Seq != 11 {
+	if got := mirroredAsk(t, pool, "ask-approval"); got.WaitingOn != "agent" || got.WaitingOnSeq != 11 || got.Seq != 11 {
 		t.Fatalf("request row after a later note = %#v, want it on the agent's turn at 11", got)
 	}
 
@@ -259,9 +261,9 @@ func TestARegistrationMirrorsTheRequestItReadAtItsSequence(t *testing.T) {
 	}
 }
 
-// A registration whose read found no request open keeps the request the gate names for the same
-// document, since the request may be answered or closed rather than gone; only a registration of
-// another document rebinds it, to that document's open request or to none.
+// A registration whose read found no request open keeps the request the gate names when it is a
+// request of the registered document, since the request may be answered or closed rather than
+// gone; a registration of another document rebinds it, to that document's open request or to none.
 func TestARegistrationThatFindsNoOpenRequestKeepsTheSameDocumentsRequest(t *testing.T) {
 	pool, apply := askRig(t)
 	apply("register-a", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-a", Version: 2, DispatchVersion: 2, RequestAsk: "ask-a", Since: askSeq(10)})
@@ -292,19 +294,19 @@ func TestARegistrationOfAnotherDocumentRebindsTheRequest(t *testing.T) {
 	}
 }
 
-// A new version of the gate's document moves its open request to the agent's turn, as Dispatch
-// does; an older event than the row's, and a version with no sequence, change nothing.
+// A new version of the gate's document moves its request to the agent's turn, as Dispatch does; an
+// older event than the turn the row holds, and a version with no sequence, change nothing.
 func TestAVersionMovesTheRequestToTheAgentsTurn(t *testing.T) {
 	pool, apply := askRig(t)
 	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 2, DispatchVersion: 2, RequestAsk: "ask-approval", Since: askSeq(10)})
 	apply("old-version", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 2, Mark: askSeq(9)})
 	apply("seed-version", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 3})
-	if got := mirroredAsk(t, pool, "ask-approval"); !got.WithHuman() || got.Seq != 10 {
-		t.Fatalf("request row after an older and an unsequenced version = %#v, want it with the person at 10", got)
+	if got := mirroredAsk(t, pool, "ask-approval"); !got.WithHuman() || got.WaitingOnSeq != 10 {
+		t.Fatalf("request row after an older and an unsequenced version = %#v, want it with the person since 10", got)
 	}
 	apply("version", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 4, Mark: askSeq(12)})
-	if got := mirroredAsk(t, pool, "ask-approval"); !got.Open || got.WaitingOn != "agent" || got.Seq != 12 {
-		t.Fatalf("request row after a new version = %#v, want it open on the agent's turn at 12", got)
+	if got := mirroredAsk(t, pool, "ask-approval"); !got.Open || got.Seq != 10 || got.WaitingOn != "agent" || got.WaitingOnSeq != 12 {
+		t.Fatalf("request row after a new version = %#v, want it open since 10 and on the agent's turn since 12", got)
 	}
 }
 
@@ -312,28 +314,140 @@ func TestAVersionMovesTheRequestToTheAgentsTurn(t *testing.T) {
 // is still the same document's gate, so it keeps the approval request its registration bound.
 func TestAGateResetToDispatchsVersionKeepsItsRequest(t *testing.T) {
 	pool, apply := askRig(t)
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 5, RequestAsk: "ask-approval"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 5, RequestAsk: "ask-approval",
+		RequestArtifact: "artifact-208"})
 	apply("reset", intake.GateAboveDispatch{Generation: 1, Above: 5, Read: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208",
 		Kind: intake.DispatchArtifactVersion, Version: 3}})
-	if gate := recordedGate(t, pool); gate == nil || gate.LatestVersion != 3 || gate.RequestAsk != "ask-approval" {
+	if gate := recordedGate(t, pool); gate == nil || gate.LatestVersion != 3 || gate.BoundRequest() != "ask-approval" {
 		t.Fatalf("gate after the reset = %#v, want version 3 still bound to ask-approval", gate)
 	}
 }
 
 // Settlement restoring a retracted question moves its mirror row, and nothing else: the root keeps
-// its phase and record, and nothing is queued.
+// its phase and record, and nothing is queued. The reopened row keeps the close it reopened from.
 func TestARestoredAskIsMirroredButDeclaresNothing(t *testing.T) {
 	pool, apply := askRig(t)
 	seedRecord(t, pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutRootAsk(context.Background(), tx, record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion,
-			WaitingOn: "human", Seq: 6, ByTree: true, ClosedSeq: 6, ClosedBy: record.ClosedBySettlement})
+			Seq: 6, WaitingOn: "human", WaitingOnSeq: 5, ClosedBy: record.ClosedBySettlement, ClosedSeq: 6, ByTree: true})
 	})
 	before := recordedRoot(t, pool)
 	apply("restored", intake.DispatchAskRestored{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, Mark: askSeq(15)})
-	if got := mirroredAsk(t, pool, "ask-q"); !got.WithHuman() || got.Seq != 15 || got.ClosedBy != "" || got.PersonSeq != 0 {
-		t.Fatalf("restored ask = %#v, want it open with the person at 15 and no person's act", got)
+	if got := mirroredAsk(t, pool, "ask-q"); !got.WithHuman() || got.Seq != 15 || got.ClosedBy != record.ClosedBySettlement || got.ClosedSeq != 6 ||
+		got.PersonActSeq() != 0 {
+		t.Fatalf("restored ask = %#v, want it open with the person at 15, its close at 6 kept, and no person's act", got)
 	}
 	if after := recordedRoot(t, pool); !reflect.DeepEqual(after, before) || outboxRows(t, pool) != 0 {
 		t.Fatalf("the restore moved the root (%#v, want %#v) or queued work", after, before)
+	}
+}
+
+// oldBinaryRegisters writes LEGION-208's gate of artifact as the previous release's PutGate does,
+// verbatim: it names no request column, so it moves the document and leaves the request.
+func oldBinaryRegisters(t *testing.T, pool *pgxpool.Pool, artifact string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `insert into design_gates (issue, artifact_id, latest_version, approved_version, approved_seq, approved_at,
+		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at)
+		values ('LEGION-208', $1, 1, null, null, null, null, '', null, null)
+		on conflict (issue) do update set artifact_id = excluded.artifact_id, latest_version = excluded.latest_version,
+		approved_version = excluded.approved_version, approved_seq = excluded.approved_seq, approved_at = excluded.approved_at,
+		told_changes_version = excluded.told_changes_version, told_changes_reason = excluded.told_changes_reason,
+		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at`, artifact); err != nil {
+		t.Fatalf("the previous release's registration of %s: %v", artifact, err)
+	}
+}
+
+// A previous release, rolled back to, registers another document and leaves the request column as
+// it was. Rolled forward, the gate never takes that request for the new document's: a version of
+// the new document moves no request, and a registration of it that finds none open binds none. A
+// registration of the request's own document that finds none open still keeps it.
+func TestARollbackNeverBindsTheGateToAnotherDocumentsRequest(t *testing.T) {
+	pool, apply := askRig(t)
+	apply("register-a", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-a", Version: 2, DispatchVersion: 2, RequestAsk: "ask-a", Since: askSeq(10)})
+	oldBinaryRegisters(t, pool, "artifact-b")
+	apply("version-b", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-b", Kind: intake.DispatchArtifactVersion, Version: 2, Mark: askSeq(12)})
+	if got := mirroredAsk(t, pool, "ask-a"); got == nil || !got.WithHuman() || got.Seq != 10 {
+		t.Errorf("ask-a row after a version of artifact-b = %#v, want it with the person as registered at 10", got)
+	}
+	apply("register-b", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-b", Version: 2, DispatchVersion: 2, ApprovedVersion: 2,
+		ApprovedMark: askSeq(14), Since: askSeq(20)})
+	if gate := recordedGate(t, pool); gate.RequestAsk != "" {
+		t.Errorf("gate of artifact-b = %#v, still bound to document a's request %q", gate, gate.RequestAsk)
+	}
+
+	other, applyOther := askRig(t)
+	applyOther("register-a", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-a", Version: 2, DispatchVersion: 2, RequestAsk: "ask-a", Since: askSeq(10)})
+	oldBinaryRegisters(t, other, "artifact-b")
+	applyOther("register-a-again", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-a", Version: 3, DispatchVersion: 3, Since: askSeq(20)})
+	if gate := recordedGate(t, other); gate.ArtifactID != "artifact-a" || gate.RequestAsk != "ask-a" {
+		t.Errorf("gate of artifact-a registered again = %#v, want it still bound to its own request ask-a", gate)
+	}
+}
+
+// A comment on an ask a person has answered, delivered before the answer, says only that the ask
+// is closed: the answer, delivered after it, still records who closed the ask and where, so every
+// order leaves the same row.
+func TestAReplyDeliveredBeforeItsAsksCloseLeavesTheCloseToIt(t *testing.T) {
+	events := []intake.Fact{
+		intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID, Mark: askSeq(10)},
+		intake.DispatchAskClosed{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, State: "answered", Actor: askPerson, Mark: askSeq(11)},
+		intake.DispatchAskReply{Key: "LEGION-208", Ask: "ask-q", Actor: askArchitect, Mark: askSeq(12)},
+	}
+	rows := map[string]record.RootAsk{}
+	for _, order := range [][]int{{0, 1, 2}, {0, 2, 1}, {2, 1, 0}} {
+		pool, apply := askRig(t)
+		for _, i := range order {
+			apply(fmt.Sprintf("event-%d", i), events[i])
+		}
+		row := mirroredAsk(t, pool, "ask-q")
+		if row.Open || row.ClosedBy != record.ClosedByPerson || row.ClosedSeq != 11 {
+			t.Fatalf("order %v: row = %#v, want it closed by the person at 11", order, *row)
+		}
+		rows[fmt.Sprint(order)] = *row
+	}
+	if rows["[0 1 2]"] != rows["[0 2 1]"] || rows["[0 1 2]"] != rows["[2 1 0]"] {
+		t.Fatalf("the same three events leave different rows: %#v", rows)
+	}
+}
+
+// A restored ask reopens on the newest turn Dispatch gave it, whatever order the turn, the close
+// and the restore arrive in: a reply older than the close but newer than the turn the row holds
+// still sets the turn.
+func TestARestoredAskReopensOnItsNewestTurnWhateverTheOrder(t *testing.T) {
+	events := []intake.Fact{
+		intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID, Mark: askSeq(5)},
+		intake.DispatchAskReply{Key: "LEGION-208", Ask: "ask-q", WaitingOn: "agent", Actor: askPerson, Mark: askSeq(6)},
+		intake.DispatchAskClosed{Key: "LEGION-208", Ask: "ask-q", State: "resolved", Actor: dispatch.SettlementActor, Mark: askSeq(7)},
+		intake.DispatchAskRestored{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: true, Mark: askSeq(8)},
+	}
+	for _, order := range [][]int{{0, 1, 2, 3}, {0, 2, 1, 3}, {2, 3, 0, 1}, {3, 2, 1, 0}} {
+		pool, apply := askRig(t)
+		for _, i := range order {
+			apply(fmt.Sprintf("event-%d", i), events[i])
+		}
+		if row := mirroredAsk(t, pool, "ask-q"); !row.Open || row.WaitingOn != "agent" || row.WithHuman() {
+			t.Fatalf("order %v: restored row = %#v, want it open on the agent's turn", order, *row)
+		}
+	}
+}
+
+// A person's answer of the approval request the gate binds is a review, never a person's act on
+// the ask, whether the registration binding it is applied before the answer or after: a person may
+// approve before the architect registers.
+func TestTheGatesRequestIsNoPersonsActWhateverTheBindingOrder(t *testing.T) {
+	register := intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 2, DispatchVersion: 2, RequestAsk: "ask-approval", Since: askSeq(10)}
+	answer := intake.DispatchAskClosed{Key: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, State: "answered", Actor: askPerson, Mark: askSeq(11)}
+	for name, facts := range map[string][]intake.Fact{"register-first": {register, answer}, "answer-first": {answer, register}} {
+		pool, apply := askRig(t)
+		for i, fact := range facts {
+			apply(fmt.Sprintf("fact-%d", i), fact)
+		}
+		row := mirroredAsk(t, pool, "ask-approval")
+		if gate := recordedGate(t, pool); gate.RequestAsk != "ask-approval" {
+			t.Fatalf("%s: gate %#v not bound", name, gate)
+		}
+		if row.PersonActSeq() != 0 || !row.GateRequest || row.PersonAnswerSeq != 11 {
+			t.Fatalf("%s: the gate's request row = %#v, want its answer at 11 kept and no person's act on it", name, *row)
+		}
 	}
 }
