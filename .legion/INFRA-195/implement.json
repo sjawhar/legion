@@ -2,11 +2,19 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T08:05:00Z",
+  "completed": "2026-10-26T08:19:30Z",
   "generation": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2205",
-  "codeHead": "fbd76fa87d1a71f08d4bd3cceba59b7e3ee5f753",
+  "codeHead": "ecd30b63345bc4e729315aad87f1f20a8f2715ee",
   "proof": [
+    {
+      "criterion": "The pull request merges cleanly again, with its diff unchanged",
+      "surface": "jj forward merge of legion/INFRA-195 with main@origin (8f3d4237), the unchanged-diff fingerprint, and GitHub's mergeable state",
+      "command": "jj new legion/INFRA-195 \"main\"@origin; fingerprint per conflicts-and-rewrites.md at b04b14c9 and at ecd30b63; gh pr view 2205 -R sjawhar/legion --json mergeable",
+      "observed": "packages/envoy/CHANGELOG.md conflicted in Unreleased > Added; both entries kept. contracts and pi-envoy CHANGELOGs and packages/dispatch/AGENTS.md merged cleanly. Fingerprint b635db7bc0a9… at b04b14c9 and b635db7bc0a9… at ecd30b63: unchanged, so the earlier proofs (at fbd76fa8) stand and no rig or browser run is repeated. GitHub: MERGEABLE at ecd30b63. Comment: https://github.com/sjawhar/legion/pull/2205#issuecomment-6411402745",
+      "headSha": "ecd30b63345bc4e729315aad87f1f20a8f2715ee",
+      "negativeControl": "Before the merge GitHub reported CONFLICTING at b04b14c9; a resolution that dropped either side's entry would move the fingerprint, as it did in the previous round before two lost blank lines were restored."
+    },
     {
       "criterion": "Review 5648795710: each reader of the session-settings rig decodes with its own TextDecoder; the shared export is gone",
       "surface": "a scratch probe driving the module's exported decoder as Omp.#read and Services.nextControl use it, and the rig itself in this issue pod (real Oh My Pi --mode rpc on this pi-envoy, Envoy listener, NATS, Dispatch, rootless Postgres, Chromium) on anthropic/claude-haiku-5-5 + anthropic/claude-haiku-4-5, OPENAI_API_KEY unset",
@@ -41,20 +49,14 @@
     }
   ],
   "filesChanged": [
-    "merge 5676d5fb: packages/contracts/CHANGELOG.md, packages/envoy/CHANGELOG.md (conflicts), scripts/e2e/README.md (clean)",
-    "scripts/e2e/README.md (SESSION_SETTINGS_MODELS row: two Anthropic models run every check but fallback, INFRA-309)",
-    "scripts/e2e/lib/session-settings-common.ts",
-    "scripts/e2e/lib/session-settings-omp.ts",
-    "scripts/e2e/lib/session-settings-services.ts"
+    "merge ecd30b63: packages/envoy/CHANGELOG.md (conflict, both entries kept)"
   ],
   "trickyParts": [
     "Rig check 14 step 2's barrier subscribes to agentStreamControlSubject(S) with a bare NATS client (Services.nextControl) and waits for the relay's first watch plus 1 s; without it the RPC change can land before the first watch and be read while nobody watches.",
     "Step 3 relaunches with `--resume <file> --model <other>`, so the resumed process holds settings no one has seen; only publishState on arming gets them to the held page.",
     "keyboard-session-pickers.e2e.ts is self-contained (imports only ./agents, ./api, ./seed, ./users helpers present at the base) so the A5 baseline fails each row on its own assertion."
   ],
-  "deviations": [
-    "The forward merge, the README note, the decoder fix and this handoff go up in one push, as the architect asked; the push carries code, so it has no skip-checks line."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [],
   "reviewRound": 1,
@@ -86,5 +88,5 @@
       "resolvedAt": "ea067bb9830f"
     }
   ],
-  "round": "review round 3 (code head ea067bb9), architect's narrowed scope: the forward merge of main (CONFLICTING at 4eb70128) and review 5648795710's TextDecoder finding; plus the README note on two Anthropic models"
+  "round": "merge-only round: PR #2205 CONFLICTING with main at 8f3d4237; review of code head fbd76fa8 asked for no change"
 }
