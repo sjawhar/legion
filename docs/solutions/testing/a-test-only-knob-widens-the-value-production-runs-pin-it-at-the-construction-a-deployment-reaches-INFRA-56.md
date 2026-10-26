@@ -85,3 +85,9 @@ Still open in that package: `TestComputeAndPersistSuggestionsRespectsDeadlineUnd
 (`suggestions_test.go:290`, `:326`) assert elapsed time against that same
 `writeSuggestionTimeout + 500 ms` ceiling, doing locked-table work on the same Postgres. The
 arithmetic above indicts them; INFRA-56 left them unedited by its own scope and reported them.
+**Note 2026-10-25 (INFRA-260):** both tests now set the allowance on their own server through
+`suggestionsBehindLock` and assert `Missing` reached while the call's own query waits behind the
+lock, with no elapsed-time bound. The waiter counted is the call's own backend: the call runs on a
+one-connection pool of its own, and that connection's pid is read in `pg_locks` through the
+holder's transaction. Counting every backend behind the holder was not enough, because the seeded
+spec's settlement queues behind the same locks (found in review of sjawhar/legion#2217).

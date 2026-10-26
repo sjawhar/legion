@@ -376,11 +376,11 @@ $ grep -rn redis-cli
 $ grep -rn redis-tools
 ```
 
-Two kinds of hit want more than a substitution. The toolchain smoke step in
+One kind of hit wants more than a substitution: the toolchain smoke step in
 `packages/daemon/docker/worker.Dockerfile` runs each tool once, so a new one needs its own
-invocation there (`nc` and `dig` take no `--version`); and the `THIRD_PARTY_NOTICES` intro string
-in the same file is a licence file that hand-lists the Debian packages the image installs,
-assembled into the image at `/usr/share/doc/legion/THIRD_PARTY_NOTICES`.
+invocation there (`nc` and `dig` take no `--version`). The licence file the image carries at
+`/usr/share/doc/legion/THIRD_PARTY_NOTICES` needs no edit: its list of Debian packages is written at
+build time from the image's own dpkg database.
 
 Four of the files the grep finds are in Go, and those four are the gated ones: the `toolchain`
 name list in `packages/daemon/internal/capabilities/image.go` makes the probe require it; that
@@ -391,13 +391,9 @@ the capability and `probe-image` tests fail on an image that does not carry it; 
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
 
 Miss one of those four and the suite is red, which is what makes them easy to find. Nothing holds
-a Dockerfile comment, the notices string or the smoke step to anything today, so a change that
-stops at the gated sites opens green and ships a licence file that does not name the package it
-installs. That is a fact about this build rather than a property: dispatch://INFRA-255 generates
-the package list from `dpkg-query` at build time and drops the hand-kept string, and once it lands
-the notices half of this warning goes with it while the smoke step and the comments stay yours to
-carry. It reaches a role only once a deployment pins the new image digest, as every Legion change
-does — never within your own phase.
+a Dockerfile comment or the smoke step to anything, so a change that stops at the gated sites opens
+green with comments that no longer describe the image and a smoke step that never runs the new
+tool.
 
 So when your work needs such a tool, say so to the architect that owns your issue (`envoy_publish`
 to its role topic), with the tool, what your phase needs it for, and the runner forms you already

@@ -99,11 +99,23 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // lands its credit here instead: the room drops it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
+		// The failed room's update is dropped and its browser resends it to the room that
+		// replaces this one, but its class is taken all the same, so the work the record counts
+		// for it ends here. Left counted, it would be an append no callback can ever finish:
+		// the record - or the one registered in its place, which carries the updates the room's
+		// persistence never took (handOverFailedRoomLocked) - would wait on it for ever, so its
+		// settlement would retry without end, never closing a room behind the head
+		// (reloadRoomBehindHead), and the record would never be released (unusedLocked).
+		class, counted, found := a.service.consumeUpdateClass(room, update)
+		if found && class.durable {
+			a.service.finishDurableAppend(room, counted)
+		}
+		class.credit.landed()
 		return nil
 	}
-	class, found := a.service.consumeUpdateClass(room, update)
+	class, counted, found := a.service.consumeUpdateClass(room, update)
 	if found && class.durable {
-		defer a.service.finishDurableAppend(room)
+		defer a.service.finishDurableAppend(room, counted)
 	}
 	defer class.credit.landed()
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
@@ -420,7 +432,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The load takes no advisory lock, which a durable writer can hold for as long as its
 	// transaction runs: the row it reads is written whole by each writer's transaction, so a
-	// plain read sees one writer's commit or the one before it.
+	// plain read sees one writer's commit or the one before it. What the record has recorded by
+	// then is taken first, so an edit source recorded after the read is told from one before it.
+	mark := s.markEditSource(room)
 	owed, lastActor, err := readOwedSettlement(ctx, rooms, room)
 	if err != nil {
 		return err
@@ -463,9 +477,20 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// edit source the settlement names. A closed room keeps the row; it settles only after its
 	// issue reopens. A room that failed again while this load ran leaves the row for its own
 	// replacement.
-	if owed && open && lastActor != nil {
+	//
+	// The row is that source as the store has it, so it replaces whatever the record held for a
+	// room that has gone (a forced close keeps the record, evictRoom): a row naming none - an edit
+	// any of several connected browsers could have made - leaves the settlement its own actor
+	// rather than the last source an earlier room saw, and no row leaves no source, as on a fresh
+	// record. The record keeps its own when the row may be older than it (rowIsCurrent).
+	switch {
+	case !open || !mark.rowIsCurrent(state):
+	case owed && lastActor != nil:
 		state.lastActor = lastActor
 		state.unsettled = true
+	default:
+		state.lastActor = nil
+		state.unsettled = false
 	}
 	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
@@ -606,7 +631,9 @@ func (s *Service) removeConnection(room string, id uint64) {
 // settleLastPeer runs the settlement a room's last browser leaving owes now rather than when its
 // timer fires. It takes over the timer's settleWG count, so Shutdown joins it as it would the
 // timer's settlement: Shutdown reports which documents settled, and stops ygo, only once it has
-// returned.
+// returned. It counts itself as running (settling) from the moment it takes the timer, as the timer
+// it replaces counted as armed: a write that opens before the settlement reaches its own count
+// then takes the settlement over (openLiveWrite) rather than ending it with nobody to arm it again.
 func (s *Service) settleLastPeer(_ context.Context, room string) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -617,7 +644,13 @@ func (s *Service) settleLastPeer(_ context.Context, room string) {
 		return
 	}
 	generation := state.roomGeneration
+	state.settling++
 	s.unlockState(room, state)
 	defer s.settleWG.Done()
+	defer func() {
+		state.mu.Lock()
+		state.settling--
+		s.unlockState(room, state)
+	}()
 	s.settleRoom(room, generation)
 }

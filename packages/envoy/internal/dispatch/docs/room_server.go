@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -52,6 +53,51 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	gate.Lock()
 	defer gate.Unlock()
 	return r.Server.CloseRoom(room, force)
+}
+
+// closeInstance closes room through ygo's CloseRoom only while room holds doc, answering whether it
+// closed it. It holds the close gate as CloseRoom does, so no other close the service makes, and no
+// repair, comes between its check of the instance and ygo's lookup of the room by name. Its caller
+// keeps ygo's idle sweep, the one retirement that takes no gate, off the room for the same span (a
+// Server.Apply on it, closeRoomInstance), so the room the check found is the room ygo closes.
+func (r *roomServer) closeInstance(room string, doc *crdt.Doc) (bool, error) {
+	gate := r.acquireGate(room)
+	defer r.releaseGate(room, gate)
+	gate.Lock()
+	defer gate.Unlock()
+	if r.GetDoc(room) != doc {
+		return false, nil
+	}
+	if err := r.Server.CloseRoom(room, true); err != nil {
+		if errors.Is(err, websocket.ErrRoomNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// closeOwned is CloseRoom for a room its caller owns: holding the gate exclusively, it asks owns
+// whether the room under that name is still the caller's, and only then closes the room and hands
+// the close's error to after, whose error it returns. CloseRoom closes by name, so two closes
+// queued on one gate for one room, the second of which runs once the first has let go, would
+// close whatever replaced the room in between, a browser's reload among them. owns is what tells
+// the second close that what is there now is not its own. A failed room's eviction is its one
+// caller (evictFailed).
+//
+// The check, the close and after all run holding the gate, so no other close the service makes
+// falls between them, and a close that checks after this one sees what after recorded (the
+// closed room's state handed over, forgetEvicted). owns and after take the room's state lock
+// under the gate, the order CloseRoom's own flush takes them in.
+func (r *roomServer) closeOwned(room string, owns func() bool, after func(error) error) error {
+	gate := r.acquireGate(room)
+	defer r.releaseGate(room, gate)
+	gate.Lock()
+	defer gate.Unlock()
+	if !owns() {
+		return nil
+	}
+	return after(r.Server.CloseRoom(room, true))
 }
 
 // holdOpen holds doc's room open while a repair commits into it, until release. It refuses,

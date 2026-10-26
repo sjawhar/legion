@@ -124,11 +124,18 @@ Bun.serve({
       return Response.json({ message: "fixture has no pull request" }, { status: 500 });
     }
 
+    // As GitHub does: the bare sha for `Accept: application/vnd.github.sha` (what the Go
+    // client's Ref asks for), the commit's JSON otherwise.
     const commit = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)$/);
     if (request.method === "GET" && commit !== null) {
       const repo = repos.get(`${commit[1]}/${commit[2]}`);
       if (repo === undefined) {
         return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      if (request.headers.get("Accept") === "application/vnd.github.sha") {
+        return new Response(commitFor(repo), {
+          headers: { "Content-Type": "application/vnd.github.sha" },
+        });
       }
       return Response.json({ sha: commitFor(repo) });
     }

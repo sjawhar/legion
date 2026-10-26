@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -251,84 +252,124 @@ func TestSuggestionsDecisionIsNotReorderedByOwnerStatus(t *testing.T) {
 	}
 }
 
-// TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock: a reviewer measured the decision
-// lookup alone blocking ~1.2s behind a table lock when it ran on the request's unbounded
-// context. computeAndPersistSuggestions now derives one deadline that covers the search, the
-// decision lookup, and persistence together, so the whole call returns at or near
-// writeSuggestionTimeout even while `asks` is locked, never near the lock's own hold time.
+// lockedSuggestionAllowance bounds only the time from the call's start to its query queuing
+// behind the test's lock: the project lookup's first statement, or one table-free numnode round
+// trip before the search. The worst whole filing on record under load was 737 ms (INFRA-56).
+const lockedSuggestionAllowance = 5 * time.Second
+
+// suggestionsBehindLock locks table in ACCESS EXCLUSIVE mode, runs computeAndPersistSuggestions on
+// a server whose suggestion allowance is lockedSuggestionAllowance, and answers what it returned.
+// The call runs on a one-connection store of its own, so the backend the poll watches in pg_locks
+// is the call's and no other. Counting every backend queued behind the lock is not enough: the
+// issue create the tests seed schedules the spec's settlement, which queues behind the same locks
+// on the shared pool, so that count passed a call that never waited (sjawhar/legion#2217 review).
+// It fails at once when the call answers before its own backend has queued behind that lock, so a
+// passing caller's answer is one the allowance ended while the query waited there. Nothing here
+// times the call: a step run outside the allowance waits behind the lock until go test's
+// -timeout ends the run, naming the test.
+func suggestionsBehindLock(
+	t *testing.T, deps Deps, table, project, text string, source suggestionSource,
+) *model.Suggestions {
+	t.Helper()
+	config := deps.Store.Pool.Config()
+	config.MaxConns = 1
+	config.MinConns = 0
+	config.MinIdleConns = 0
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open the call's one-connection pool: %v", err)
+	}
+	callStore := &store.Store{Pool: store.NewPool(opened)}
+	// Registered before the lock's rollback, so the rollback runs first and this closes after.
+	t.Cleanup(callStore.Pool.Close)
+	conn, err := callStore.Pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire the call's connection: %v", err)
+	}
+	callPID := conn.Conn().PgConn().PID()
+	conn.Release()
+
+	callDeps := deps
+	callDeps.Store = callStore
+	srv := directServer(callDeps)
+	srv.suggestionTimeout = lockedSuggestionAllowance
+
+	lockTx, err := deps.Store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	// The call below ends on its own once its allowance does, so the receive that answers it
+	// returns before this rollback releases the lock.
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	// table is a literal from this file's callers, never input.
+	if _, err := lockTx.Exec(context.Background(), "lock table "+table+" in access exclusive mode"); err != nil {
+		t.Fatalf("lock %s: %v", table, err)
+	}
+
+	answered := make(chan *model.Suggestions, 1)
+	go func() {
+		answered <- srv.computeAndPersistSuggestions(context.Background(), project, text, source)
+	}()
+	for {
+		select {
+		case s := <-answered:
+			t.Fatalf("computeAndPersistSuggestions answered %+v before its query waited behind the lock on %s, want the %s allowance to end while it waits", s, table, lockedSuggestionAllowance)
+		default:
+		}
+		var waiting bool
+		if err := lockTx.QueryRow(context.Background(), `
+			select exists (
+				select 1 from pg_locks
+				where pid = $1 and not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
+			)
+		`, callPID).Scan(&waiting); err != nil {
+			t.Fatalf("read whether the call's backend waits on the lock on %s: %v", table, err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return <-answered
+}
+
+// TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock: a reviewer once measured the decision
+// lookup alone blocking ~1.2s behind a table lock when it ran on the request's unbounded context,
+// so computeAndPersistSuggestions now derives one allowance covering the search, the decision
+// lookup and persistence together. The fused search reads `asks`, so with `asks` locked the search
+// waits behind the lock, and the allowance, not the lock's hold time, ends it and reports the
+// suggestions missing. The decision lookup is not reachable under this lock (sjawhar/legion#2158).
 func TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock(t *testing.T) {
 	handler, _, deps := newTestServer(t, testServerOptions{})
-	srv := directServer(deps)
 	createSuggestionProject(t, handler, "DEADLINE")
 	issue := createSuggestionIssue(t, handler, map[string]any{
 		"project": "DEADLINE", "title": "Should the service use REST or GraphQL?",
 	})
-	asked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue+"/asks", map[string]any{
-		"question": "Should the service use REST or GraphQL for its public API?",
-	}, "alice")
-	askID := decodeBody[testAskWithSuggestions](t, asked).ID
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
-		"text": "REST.",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("answer ask: status=%d body=%s", response.Code, response.Body.String())
-	}
-
-	lockTx, err := srv.deps.Store.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin lock tx: %v", err)
-	}
-	defer func() { _ = lockTx.Rollback(context.Background()) }()
-	if _, err := lockTx.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
-		t.Fatalf("lock asks: %v", err)
-	}
 
 	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
-	started := time.Now()
-	suggestions := srv.computeAndPersistSuggestions(context.Background(), "DEADLINE", "Should the service use REST or GraphQL for its public API?", source)
-	elapsed := time.Since(started)
-
-	const bound = writeSuggestionTimeout + 500*time.Millisecond // headroom for the search leg before the lock is hit
-	if elapsed > bound {
-		t.Fatalf("computeAndPersistSuggestions took %s with asks locked, want at or near %s, well under the lock's own hold time", elapsed, writeSuggestionTimeout)
-	}
-	if suggestions == nil {
-		t.Fatalf("suggestions = nil, want a result (Missing or otherwise) even when the decision lookup is blocked")
+	suggestions := suggestionsBehindLock(t, deps, "asks", "DEADLINE", "Should the service use REST or GraphQL for its public API?", source)
+	if suggestions == nil || suggestions.Missing == "" {
+		t.Fatalf("suggestions = %+v, want Missing set: the allowance ended while the search waited behind the lock on asks", suggestions)
 	}
 }
 
 // TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked: round 3's fix bounded
 // the search and the decision lookup, but asks.go's own project-key lookup still ran before the
 // call, on the request's unbounded context — a reviewer measured it blocking ~2s behind an
-// ACCESS EXCLUSIVE lock on `issues`. computeAndPersistSuggestions now resolves the project
-// itself, under the same deadline, when the caller passes "".
+// ACCESS EXCLUSIVE lock on `issues`. computeAndPersistSuggestions now resolves the project itself
+// when the caller passes "", reading `issues` first under the allowance, so with `issues` locked
+// the allowance ends the lookup while it waits and reports the suggestions missing.
 func TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked(t *testing.T) {
 	handler, _, deps := newTestServer(t, testServerOptions{})
-	srv := directServer(deps)
 	createSuggestionProject(t, handler, "LOCKEDPROJ")
 	issue := createSuggestionIssue(t, handler, map[string]any{
 		"project": "LOCKEDPROJ", "title": "Should the service use REST or GraphQL?",
 	})
 
-	lockTx, err := srv.deps.Store.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin lock tx: %v", err)
-	}
-	defer func() { _ = lockTx.Rollback(context.Background()) }()
-	if _, err := lockTx.Exec(context.Background(), "lock table issues in access exclusive mode"); err != nil {
-		t.Fatalf("lock issues: %v", err)
-	}
-
 	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-project-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
-	started := time.Now()
-	suggestions := srv.computeAndPersistSuggestions(context.Background(), "", "Should the service use REST or GraphQL for its public API?", source)
-	elapsed := time.Since(started)
-
-	const bound = writeSuggestionTimeout + 500*time.Millisecond
-	if elapsed > bound {
-		t.Fatalf("computeAndPersistSuggestions took %s with issues locked, want at or near %s, well under the lock's own hold time", elapsed, writeSuggestionTimeout)
-	}
+	suggestions := suggestionsBehindLock(t, deps, "issues", "", "Should the service use REST or GraphQL for its public API?", source)
 	if suggestions == nil || suggestions.Missing == "" {
-		t.Fatalf("suggestions = %+v, want Missing set when the project lookup is blocked", suggestions)
+		t.Fatalf("suggestions = %+v, want Missing set: the allowance ended while the project lookup waited behind the lock on issues", suggestions)
 	}
 }
 
