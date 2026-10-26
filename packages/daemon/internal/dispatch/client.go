@@ -67,6 +67,7 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			LastSeq:      issue.LastSeq,
 			ResolvedRepo: deref(issue.ResolvedRepo),
 			BlockedBy:    issue.BlockedBy,
+			ClaimedBy:    issue.Claim.holder(),
 		})
 	}
 	return issues, nil
@@ -91,6 +92,7 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 		LastSeq:           response.LastSeq,
 		ResolvedRepo:      deref(response.ResolvedRepo),
 		BlockedBy:         response.BlockedBy,
+		Claim:             response.Claim.claim(),
 	}, nil
 }
 
@@ -228,6 +230,11 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	if response.Approval.Seq != nil {
 		approved.Seq = *response.Approval.Seq
 	}
+	// Only an open request is named: Dispatch names the ask an older review answered too, which is
+	// no request anyone is asked to act on now.
+	if response.Approval.State == "awaiting" {
+		approved.AskID, approved.WaitingOn = deref(response.Approval.AskID), response.Approval.WaitingOn
+	}
 	return approved, nil
 }
 
@@ -341,29 +348,49 @@ func dispatchError(status int, statusText string, payload []byte) *Error {
 }
 
 type issueSummaryResponse struct {
-	Key          string   `json:"key"`
-	Title        string   `json:"title"`
-	Status       string   `json:"status"`
-	Parent       *string  `json:"parent"`
-	Rank         string   `json:"rank"`
-	Labels       []string `json:"labels"`
-	LastSeq      int64    `json:"last_seq"`
-	ResolvedRepo *string  `json:"resolved_repo"`
-	BlockedBy    []string `json:"blocked_by"`
+	Key          string         `json:"key"`
+	Title        string         `json:"title"`
+	Status       string         `json:"status"`
+	Parent       *string        `json:"parent"`
+	Rank         string         `json:"rank"`
+	Labels       []string       `json:"labels"`
+	LastSeq      int64          `json:"last_seq"`
+	ResolvedRepo *string        `json:"resolved_repo"`
+	BlockedBy    []string       `json:"blocked_by"`
+	Claim        *claimResponse `json:"claim"`
 }
 
 type issueResponse struct {
-	Key               string   `json:"key"`
-	Project           string   `json:"project"`
-	Title             string   `json:"title"`
-	Status            string   `json:"status"`
-	Parent            *string  `json:"parent"`
-	Rank              string   `json:"rank"`
-	Labels            []string `json:"labels"`
-	PrimaryArtifactID string   `json:"primary_artifact_id"`
-	LastSeq           int64    `json:"last_seq"`
-	ResolvedRepo      *string  `json:"resolved_repo"`
-	BlockedBy         []string `json:"blocked_by"`
+	Key               string         `json:"key"`
+	Project           string         `json:"project"`
+	Title             string         `json:"title"`
+	Status            string         `json:"status"`
+	Parent            *string        `json:"parent"`
+	Rank              string         `json:"rank"`
+	Labels            []string       `json:"labels"`
+	PrimaryArtifactID string         `json:"primary_artifact_id"`
+	LastSeq           int64          `json:"last_seq"`
+	ResolvedRepo      *string        `json:"resolved_repo"`
+	BlockedBy         []string       `json:"blocked_by"`
+	Claim             *claimResponse `json:"claim"`
+}
+
+// claimResponse is an issue's claim as Dispatch's issue reads serve it (null for none).
+type claimResponse struct {
+	Actor actor `json:"actor"`
+}
+
+// claim is the claim as Claim, nil for none or for one naming no actor.
+func (c *claimResponse) claim() *Claim {
+	if c == nil || c.Actor.Kind == "" || c.Actor.ID == "" {
+		return nil
+	}
+	return &Claim{Kind: c.Actor.Kind, ID: c.Actor.ID}
+}
+
+// holder is the claim as Claim.Holder writes it.
+func (c *claimResponse) holder() string {
+	return c.claim().Holder()
 }
 
 type repoProjectResponse struct {
@@ -389,6 +416,10 @@ type approvalResponse struct {
 	LatestVersion int     `json:"latest_version"`
 	Version       *int    `json:"version"`
 	Reason        *string `json:"reason"`
+	// AskID and WaitingOn name the open approval request and whose turn it waits on, sent while
+	// State is awaiting.
+	AskID     *string `json:"ask_id"`
+	WaitingOn string  `json:"waiting_on"`
 	// At is the latest review's created_at and Seq its event's sequence on the issue; a Dispatch
 	// that predates the sequence, or a review recorded before it kept one, sends no seq.
 	At  *string `json:"at"`
