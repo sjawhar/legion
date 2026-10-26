@@ -239,10 +239,14 @@ not while the side turn runs or a reply is in flight, not when a reply fails, an
 process ends mid-turn or mid-reply and the session is resumed. An answered BTW's reply records
 its dedupe key too once posted. A same-mode Retry of a refused one, a new event id under the same
 dedupe key, still reaches the session. Whatever the record, a BTW that reaches replay is one inert
-notice by construction: its card is handed with `triggerTurn: false` (`CardDelivery` `inert`, kept
-when a withdrawn card is handed again), as is a failure notice naming a BTW, so a stale side
-question never runs as a turn; it says it runs nothing and that Dispatch shows whether it was
-answered. A replayed card of a
+notice by construction: its card is a steer handed with `triggerTurn: false` (`CardDelivery`
+`inert`), as is a failure notice naming a BTW, and it is handed only while the host is settled
+(idle, holding no message, on this instance's session: `hostSettled`). An idle host writes it at
+once and runs nothing, but a streaming turn takes a steer it is handed and the agent loop runs
+another model turn for it at the stop boundary (measured on omp 18.12.2), so while the host is
+busy the card waits under its claim, unhanded, and the first settled heartbeat hands it
+(`UnwrittenFrames.handBackWithdrawn`), as it does a withdrawn inert card. The notice says it runs
+nothing and that Dispatch shows whether it was answered. A replayed card of a
 frame the dedupe let go of that the open session's ledger lacks (shown before the host moved to
 this session) waits on its write too, with no claim.
 

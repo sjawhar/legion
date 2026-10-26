@@ -360,7 +360,12 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   const ledger = createLedger(now);
   const cursors = new Map<string, ReplayCursor>();
   // When each cursor started in this process (a first read, or a reset after a stream
-  // recreation): a live frame received before then may sit at or below where it started.
+  // recreation): a live frame received before then may sit at or below where it started. The
+  // start is stamped when the replay answer is handled, after the listener read its watermark
+  // (`last_seq`), so a frame published before that read but taken off the NATS socket after the
+  // answer is stamped after the start: if it then fails live it is left to replay, yet its stored
+  // copy is at or below the cursor, so no sweep shows it and its failure is only logged. This
+  // window is reasoned from the order of the reads, not driven by a test.
   const cursorStarts = new Map<string, number>();
   let streamCreated: string | undefined;
   // A frame's failures by its stream sequence; in memory only, so a restart gives it three more.

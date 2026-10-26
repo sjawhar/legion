@@ -169,16 +169,20 @@ export interface Arrival<Message> {
  * when it arrived. nats.js pushes a message into a subscription's iterator as it arrives, and this
  * always waits on that iterator, so the stamp is the arrival time whatever the caller is doing
  * with the messages before it (a Dispatch accept, pictures, a side turn): a message waits here
- * until the caller asks for the next one. Once the subscription ends or throws, nothing more is
- * yielded: the caller's next read ends, or throws that error, and the messages read but not yet
- * taken are dropped, as the subscription's own iterator drops what it still holds when it stops.
+ * until the caller asks for the next one. Once the subscription ends or throws, every message
+ * already read is still yielded, in order, and only then does the caller's next read end or throw
+ * that error, as nats.js's own iterator yields the messages it took before it stops. A caller that
+ * stops reading early returns the subscription's iterator, which stops the subscription once the
+ * iterator's pending read settles (nats.js takes a return only after the read in flight).
  */
 export async function* readArrivals<Message>(
   subscription: AsyncIterable<Message>,
   now: () => number = Date.now
 ): AsyncGenerator<Arrival<Message>, void, undefined> {
+  const source = subscription[Symbol.asyncIterator]();
   const arrived: Arrival<Message>[] = [];
   let stopped: { readonly error?: unknown; readonly failed: boolean } | undefined;
+  let left = false;
   let wake: (() => void) | undefined;
   const signal = () => {
     wake?.();
@@ -186,8 +190,10 @@ export async function* readArrivals<Message>(
   };
   void (async () => {
     try {
-      for await (const message of subscription) {
-        arrived.push({ message, receivedAt: now() });
+      for (;;) {
+        const read = await source.next();
+        if (read.done === true || left) break;
+        arrived.push({ message: read.value, receivedAt: now() });
         signal();
       }
       stopped = { failed: false };
@@ -196,17 +202,26 @@ export async function* readArrivals<Message>(
     }
     signal();
   })();
-  for (;;) {
-    if (stopped?.failed === true) throw stopped.error;
-    if (stopped !== undefined) return;
-    const next = arrived.shift();
-    if (next !== undefined) {
-      yield next;
-      continue;
+  try {
+    for (;;) {
+      const next = arrived.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (stopped?.failed === true) throw stopped.error;
+      if (stopped !== undefined) return;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      wake = resolve;
+      await promise;
     }
-    const { promise, resolve } = Promise.withResolvers<void>();
-    wake = resolve;
-    await promise;
+  } finally {
+    if (stopped === undefined) {
+      left = true;
+      // The subscription's own end, or the reader's error, says how it stopped; a rejected return
+      // adds nothing a caller that left could act on.
+      void Promise.resolve(source.return?.()).catch(() => undefined);
+    }
   }
 }
 

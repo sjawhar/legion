@@ -54,7 +54,8 @@
   frame no sweep will show, a frame received before its subject's cursor started included (a host
   stamps when the frame arrived with `readArrivals` from `@legion/envoy-client/delivery`, which
   reads a subscription as its messages arrive, so a frame queued behind a slow delivery is not
-  stamped late);
+  stamped late, and yields every message it read before the subscription's end or error, as
+  nats.js's own iterator does);
   `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
   field; a recreated stream, a cursor older than the stream's oldest message,
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are

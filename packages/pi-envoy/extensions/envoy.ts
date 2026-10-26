@@ -1549,7 +1549,10 @@ export default function envoyExtension(pi: PiApi): void {
           );
         } catch {
           // A failed injection is logged by deliver and must not tear down the subscription; the
-          // next sweep shows the stream's copy, or deliver reported one no sweep can show.
+          // next sweep shows the stream's copy, or deliver reported one no sweep can show. A BTW
+          // is neither: it is recorded before its side turn, so no sweep shows it, and its outcome
+          // is Dispatch's record (a reply that failed leaves the attempt unanswered there, and a
+          // Retry runs again).
         }
       }
     } catch {

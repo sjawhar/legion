@@ -157,8 +157,9 @@ connection was down.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
-  starts no turn at all: an Oh My Pi session shows it as one inert notice, and a Claude Code
-  session, which is never sent a BTW, passes it over.
+  starts no turn at all: an Oh My Pi session shows it as one inert notice once it is idle (a turn
+  running when it comes back ends first), and a Claude Code session, which is never sent a BTW,
+  passes it over.
 - **Once:** the session records what it was shown, in its transcript (Oh My Pi) or in a state
   file per session (Claude Code), so a restart or resume does not show a message again (up to
   20,000 messages shown in 72 hours). An Oh My Pi session counts a message shown only once its
@@ -176,9 +177,11 @@ code `REPLAY_UNAVAILABLE`: the session then says once, as a warning, that missed
 recovered, and live delivery goes on as before. A session on an older plugin recovers nothing.
 
 The listener trusts the session id a replay names, as it trusts it on every `/v1` route: there is
-no per-session secret, so whoever can reach the listener and knows a live session's id can read
-that session's stored inbox for the last 72 hours. It refuses a wildcard id, another session's
-inbox reached through a registered topic, and every failed-delivery lane.
+no per-session secret, and the listener does not check that the session is live. So whoever holds
+the listener's API credential (its shared token or an accepted service-account token), or reaches
+it on loopback while `/v1` is open, and knows a session's id, live or ended, can read that
+session's stored inbox for the last 72 hours. It refuses a wildcard id, another session's inbox
+reached through a registered topic, and every failed-delivery lane.
 
 ## The NATS grant a Legion daemon needs
 

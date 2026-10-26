@@ -38470,8 +38470,10 @@ function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
 async function* readArrivals(subscription, now = Date.now) {
+  const source = subscription[Symbol.asyncIterator]();
   const arrived = [];
   let stopped;
+  let left = false;
   let wake;
   const signal = () => {
     wake?.();
@@ -38479,8 +38481,11 @@ async function* readArrivals(subscription, now = Date.now) {
   };
   (async () => {
     try {
-      for await (const message of subscription) {
-        arrived.push({ message, receivedAt: now() });
+      for (;; ) {
+        const read = await source.next();
+        if (read.done === true || left)
+          break;
+        arrived.push({ message: read.value, receivedAt: now() });
         signal();
       }
       stopped = { failed: false };
@@ -38489,19 +38494,28 @@ async function* readArrivals(subscription, now = Date.now) {
     }
     signal();
   })();
-  for (;; ) {
-    if (stopped?.failed === true)
-      throw stopped.error;
-    if (stopped !== undefined)
-      return;
-    const next = arrived.shift();
-    if (next !== undefined) {
-      yield next;
-      continue;
+  try {
+    for (;; ) {
+      const next = arrived.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (stopped?.failed === true)
+        throw stopped.error;
+      if (stopped !== undefined)
+        return;
+      const { promise: promise2, resolve } = Promise.withResolvers();
+      wake = resolve;
+      await promise2;
     }
-    const { promise: promise2, resolve } = Promise.withResolvers();
-    wake = resolve;
-    await promise2;
+  } finally {
+    if (stopped === undefined) {
+      left = true;
+      Promise.resolve(source.return?.()).catch(() => {
+        return;
+      });
+    }
   }
 }
 var DedupeIdentitySchema = exports_external.object({

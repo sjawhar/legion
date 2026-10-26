@@ -30,7 +30,9 @@
   whether its answer or refusal fails, is still in flight, or the process ends mid-turn or
   mid-reply and the session is resumed; a Retry of it still runs. Whatever the record, a BTW that
   reaches replay is shown as one notice that starts no turn, saying it runs nothing, and so is a
-  failure notice naming a BTW. A replayed subscription removal takes the
+  failure notice naming a BTW: it is handed only once the host is idle with nothing queued, since a
+  streaming turn would run another model turn for it, and waits for the first such heartbeat while
+  a turn runs. A replayed subscription removal takes the
   topic out of the listener's registry too, so a later restart does not follow it again.
   The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
   cards themselves, read back by the event they name) and where it read to
