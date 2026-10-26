@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T01:24:30Z",
+  "completed": "2026-10-26T01:29:00Z",
   "generation": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2205",
   "codeHead": "87ea738e6a519f4d696393c3631584d1afdda214",
@@ -62,5 +62,21 @@
   "discoveredComplexity": [],
   "reviewRound": 1,
   "codeHeadGeneration2Round0": "e9d5f5ac7a0513a3410fe75edeacb0cd722b9252",
-  "reviewThreads": []
+  "reviewThreads": [
+    {
+      "thread": "PRRT_kwDORFy7ds6wG368",
+      "reply": "Fixed in 779874f4: the older-plugin session pins `@sjawhar/pi-envoy@10.24.0`, the last release before the settings frame",
+      "resolvedAt": "87ea738e6a51"
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6wG369",
+      "reply": "Fixed in 779874f4: the keys note reads copies taken with `:-`, so an unset key no longer stops `set -u`",
+      "resolvedAt": "87ea738e6a51"
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6wG37A",
+      "reply": "Fixed in 87ea738e: the keys leave the script's environment before it starts anything and reach only the driver and Oh My Pi; the README says so",
+      "resolvedAt": "87ea738e6a51"
+    }
+  ]
 }
