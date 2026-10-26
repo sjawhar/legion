@@ -2,54 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T19:08:42Z",
-  "headSha": "ddcbe02a006db5ee763e65ad2aeef6c155442d8a",
-  "round": 10,
-  "standard": "The architect's decision after review round 5 (2026-10-26T16:42Z): dispatch:// autolinks and links whose words are their target, past the bounds, read with the bounded parser as https:// forms are, while an author-written link still opens; main merged forward (never rebased) with this branch's migrations renumbered after main's 0119; both driven on builds of the merged head and of main, migrations on a fresh database and on one main eee16056 wrote.",
-  "provider": "367 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T19:08Z; no subagent was used.",
+  "completed": "2026-10-26T20:47:24Z",
+  "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
+  "round": 11,
+  "standard": "The architect's decision after review round 6 (2026-10-26T19:23Z): a dispatch:// link whose text equals its target and that the bounded read names nothing for is plain text (no <a>, no href=\"\", no data-dispatch-href, no hover card), for <dispatch://…>, [X](X) and a #b- id over 256 bytes; tests fail at e3d09251 and pass at the head; https:// forms and author links unchanged. Driven at the head and at e3d09251 in a real browser.",
+  "provider": "390 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T20:47Z; no subagent was used.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the link forms in my own throwaway browser test on trees of the merged head f7eae616 (code 44f6cfa2), main ad909178 (contains eee16056) and the previous head 9b1586c5; ran the implementer's updated pictures.e2e.ts test on the previous head as its control; ran the head's migrations on a fresh database and on a database main eee16056 wrote."
+    "how": "Ran the implementer's updated pictures.e2e.ts at the head (passes, chromium and iphone) and in a git archive of the round-6 head e3d09251 (fails 2/2), and drove every form's DOM, hover and click in my own throwaway browser test on both builds."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Item 1: <dispatch://…> and [dispatch://X](dispatch://X) to a document whose key is 2,049-2,692 bytes are not drawn as titled references (the server records none), the https:// forms stay plain links, and author-written links still open",
-      "surface": "Dispatch's browser harness (Playwright, chromium and iphone) with a real server built from each tree: the head f7eae616, git archives of main ad909178 and of the previous head 9b1586c5",
-      "command": "bun run e2e -- e2e/tester-text-urls.e2e.ts (throwaway, deleted): one comment on a document named with 2,680 characters (key 2,710 bytes) holding a bare URL, <URL>, [URL](URL), <dispatch://…>, [dispatch://…](dispatch://…), a bare dispatch://…, [designurl](URL), [designref](dispatch://…) and <dispatch://…/short-md>; GET /api/v1/references?from=<comment>; each link's href, data-dispatch-ref and words; click of both author links",
-      "observed": "Head: server records only short-md; the three https:// forms keep href = the URL and words = the URL with no data-dispatch-ref; <dispatch://…> and [dispatch://…](dispatch://…) show their dispatch:// words with no data-dispatch-ref and an empty href (not a titled reference); the bare dispatch:// text draws no link; both author links have href /issues/CORE-1/artifacts/<slug> and open the document ('The long-named design.' visible); the short <dispatch://…> is a reference link titled short.md",
-      "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
-      "negativeControl": "Previous head 9b1586c5: the server records the same single reference, but <dispatch://…> and [dispatch://…](dispatch://…) draw as titled reference links to the long document (the round-5 finding); the implementer's updated pictures.e2e.ts fails there 2/2 ('Angle:' link text is the document's name, not the dispatch:// URL). Main ad909178 records the long document (artifact key 2,710) and draws every form as a reference, so it agrees with itself"
+      "criterion": "Round-7 behaviour: <dispatch://…>, [dispatch://X](dispatch://X) and a #b- id over 256 bytes, past the bounds, render as their words with no <a>, no href=\"\", no data-dispatch-href, no hover card",
+      "surface": "Dispatch's browser harness (Playwright, chromium) with a real server built from the head and from a git archive of e3d09251",
+      "command": "bun run e2e -- e2e/tester-plain.e2e.ts --project chromium (throwaway, deleted): one comment on a document named with 2,680 characters (key 2,710 bytes) holding <dispatch://…>, [dispatch://…](dispatch://…), <dispatch://CORE-1/spec#b-<300 b's>>, [same](same), a bare URL, <URL>, [designurl](URL), [designref](dispatch://…); GET /api/v1/references?from=<comment>; per paragraph: count of a, a[href=\"\"], [data-dispatch-href], [data-dispatch-ref]; forced hover then tooltip count; forced click then URL",
+      "observed": "Server records 0 references. Head: the four dispatch:// forms each a=0, href=\"\"=0, data-dispatch-href=0, data-dispatch-ref=0, tooltip 0, click stays on the page; https:// forms a plain link (no data-dispatch-ref, no tooltip); author links data-dispatch-ref set, tooltip 1, open /issues/CORE-1/artifacts/<slug> showing 'The long-named design.'",
+      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
+      "negativeControl": "e3d09251: the four dispatch:// forms each render a=1 with href=\"\" and data-dispatch-href (the leftover review round 6 found); the updated pictures.e2e.ts fails 2/2 there"
     },
     {
-      "criterion": "Item 2: the forward merge of main, migrations renumbered after main's 0119, run on a fresh database and on a database main eee16056 wrote",
-      "surface": "Head server built from f7eae616: on a fresh database (infra366_t9, port 8801) and on infra366_t9_roll after main eee16056 wrote it (port 8841)",
-      "command": "On eee16056: a spec with callout ship_it and a 3,200-byte callout id, a document named with 2,680 characters, a comment citing dispatch://CORE-1/spec#b-ship%5Fit and the long document's #b-x, an ask block with a 3,200-byte id; stop it; start the head on the same database; reads, doc-edit of the spec and the long document, ?to= reads; schema_migrations",
-      "observed": "schema_migrations 1-119 after eee16056, 1-127 after the head (0120-0127 this branch's); main's 0118 embeddings pending_since column present; reads 200, both edits 'Applied 1 ops (version 2)'; ?to=X lists eee16056's comment; the long document's #b-x is past the 2,048-byte target bound and records nothing; the owed settlement opens the ask under its 3,200-byte id; nothing owed afterwards; no SQLSTATE 54000 or level=ERROR in the head's log. Fresh database: the head migrates and serves; block-graph.sh exit 0, 37 PASS; block-coverage.sh documents=5 indexed=5 not_indexed=0",
-      "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
-      "negativeControl": "371d6c87 (no INFRA-364) on the A12 database: ?to=dispatch://ACME-1 → 500, log 'graph node kind \"block\" is not addressable'"
+      "criterion": "The round's tests fail before and pass after",
+      "surface": "Dispatch's browser suite (chromium and iphone)",
+      "command": "bun run e2e -- e2e/pictures.e2e.ts -g 'long-named picture' at the head and in a git archive of e3d09251 with the head's pictures.e2e.ts copied in",
+      "observed": "Head: passes on both projects; e3d09251: 2 failed. The MarkdownBody.test.tsx change is CI's to judge (Tests run 40393605197, in progress at the time of writing)",
+      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
+      "negativeControl": "e3d09251's failure above"
     },
     {
-      "criterion": "Regression: A12 with eee16056 as the old build; the dashboard's reference, Referenced by and picture surfaces",
-      "surface": "Three builds on one database; Dispatch's browser suite at the head on both projects",
-      "command": "OLD=dispatch-eee NEW=dispatch-head9 NEG=dispatch-371d6c879565 bash $TMPDIR/t366/a12.sh; cd packages/dispatch && bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/pictures.e2e.ts",
-      "observed": "A12 exit 0, 8 PASS lines, old build count 3 = list 3, no SQLSTATE 54000 in either build's log; browser 40 passed",
-      "headSha": "f7eae6165aa443fac48994db7280a66be8fcafb3",
-      "negativeControl": "The previous head's failure of the updated pictures test (above)"
+      "criterion": "Migrations renumbered after main's 0120 run on a database main b4bea385 wrote, and on a fresh one",
+      "surface": "Real Go servers built from main b4bea385 and from the head on one local Postgres database (infra366_t11_roll); the head on a fresh database (infra366_t11)",
+      "command": "On main: spec with callout ship_it and a 3,200-byte callout id, a 2,680-character-named document, a comment citing #b-ship%5Fit and the long document's #b-x, an ask block with a 3,200-byte id; stop it; start the head on the same database; reads, two doc-edits, ?to=<ship_it>; then block-graph.sh against the head on a fresh database",
+      "observed": "schema_migrations 120 → 128 (artifact_reviews seq column present); reads 200; both edits applied; ?to=<ship_it> lists main's comment; the ask opens under its 3,200-byte id; owed documents, items and settlements 0; no SQLSTATE 54000 or level=ERROR. Fresh: block-graph.sh exit 0, 37 PASS (its first attempt's first CLI call reported 'Unable to connect' while the server answered /healthz; the retry passed)",
+      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
+      "negativeControl": "Unauthenticated GET /api/v1/block-links → 401 (round 10)"
+    },
+    {
+      "criterion": "Regression of the dashboard surfaces round 7 touched",
+      "surface": "Dispatch's browser suite at the head, chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/pictures.e2e.ts",
+      "observed": "40 passed",
+      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
+      "negativeControl": "e3d09251's failure of the updated pictures test"
     }
   ],
   "attempted": [
-    "The merge is two forward merges (56d31191 onto df396380, 44f6cfa2 onto ad909178), each with two parents and no rebase; the implementer posted the fingerprints at https://github.com/sjawhar/legion/pull/2210#issuecomment-6423164429.",
-    "Round 10 is the rebase re-check after the forward merge of main 6cdb9995 (e3d09251): the round-9 real-surface proof stands, since the product diff is identical; the PR body's E2E (tester) line carries the re-check."
+    "A12 was not re-run: its throwaway driver was on the replaced volume, and round 11's server diff is main's merge, whose migrations the database run above covers."
   ],
-  "ci": "At e3d09251: Tests 40383011699, Legion Envoy and Contracts 40383011488, Docs 40383011523, Worker Image 40383011483 queued; PR Title 40383251036 pending.",
-  "rebaseRecheck": {
-    "from": "f7eae6165aa443fac48994db7280a66be8fcafb3",
-    "to": "ddcbe02a006db5ee763e65ad2aeef6c155442d8a",
-    "fingerprint": "2e83582a2764eff441c5c4b271a44fd1658778da629261d290d42ef9e7c5ca59 at both heads, computed by the tester with jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
-    "verdict": "unchanged: rebase re-check f7eae616 → ddcbe02a: fingerprint unchanged, bare gates only",
-    "bareGates": "CI at e3d09251 read on GitHub: Tests 40383011699, Legion Envoy and Contracts 40383011488, Docs 40383011523 and Worker Image 40383011483 queued, PR Title 40383251036 pending. Smoke on a server built from ddcbe02a (run-server.sh, fresh database infra366_t10): migrations to 127, block-graph.sh exit 0 with 37 PASS, unauthenticated GET /api/v1/block-links 401.",
-    "harness": "The new pod had no /legion/harness; the tester recreated it (setup.sh starts a postmaster only when pg_isready fails on 55432) and told the implementer."
-  }
+  "ci": "At 1d4f991e: Tests 40393605197 in progress; Legion Envoy and Contracts 40393605179 queued; Docs 40393605183, Worker Image 40393605135 and PR Title 40393816915 success."
 }
