@@ -30,9 +30,9 @@
 #                               profile's default model and the fallback target
 #   SESSION_SETTINGS_CHROMIUM   the Chromium Playwright launches (default /usr/bin/chromium)
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY   the caller's own provider keys, required for a model of that
-#                               provider; taken out of the environment once checked and given back
-#                               to the driver alone, which passes them to Oh My Pi and to nothing
-#                               else; never printed
+#                               provider; taken out of the environment before the run starts
+#                               anything and given back to the driver alone, which passes them to
+#                               Oh My Pi and to nothing else; never printed
 #   SESSION_SETTINGS_EVIDENCE_DIR   default a fresh directory under TMPDIR; kept and printed: the
 #                               transcript, every service's log, each Oh My Pi's stderr and log, the
 #                               session files, and one screenshot per check
@@ -47,6 +47,13 @@ set -euo pipefail
 for variable in $(compgen -e); do
   case $variable in DISPATCH_* | ENVOY_* | NATS_* | OMP* | PI_*) unset "$variable" ;; esac
 done
+
+# The provider keys leave the environment before anything starts, so no process of the run inherits
+# them; the driver alone gets them back, and hands them to each Oh My Pi it starts and to nothing
+# else.
+anthropic_key=${ANTHROPIC_API_KEY:-}
+openai_key=${OPENAI_API_KEY:-}
+unset ANTHROPIC_API_KEY OPENAI_API_KEY
 
 # The nats-server the run installs when the caller names none: the 2.10 line the daemon's own NATS
 # tests pin (packages/daemon/internal/testnats/nats.go), as merged-root-waits.sh installs it.
@@ -129,8 +136,8 @@ read -r -a models <<<"${SESSION_SETTINGS_MODELS:-anthropic/claude-haiku-5-5 open
 for model in "${models[@]}"; do
   [[ $model =~ ^[A-Za-z0-9._-]+/[^[:space:]]+$ ]] || fail "SESSION_SETTINGS_MODELS holds '$model', which is not provider/id"
   case ${model%%/*} in
-    anthropic) [ -n "${ANTHROPIC_API_KEY:-}" ] || fail "ANTHROPIC_API_KEY is required for $model (SESSION_SETTINGS_MODELS)" ;;
-    openai) [ -n "${OPENAI_API_KEY:-}" ] || fail "OPENAI_API_KEY is required for $model (SESSION_SETTINGS_MODELS)" ;;
+    anthropic) [ -n "$anthropic_key" ] || fail "ANTHROPIC_API_KEY is required for $model (SESSION_SETTINGS_MODELS)" ;;
+    openai) [ -n "$openai_key" ] || fail "OPENAI_API_KEY is required for $model (SESSION_SETTINGS_MODELS)" ;;
   esac
 done
 chromium=${SESSION_SETTINGS_CHROMIUM:-/usr/bin/chromium}
@@ -149,11 +156,6 @@ fi
 [ -x "$nats_bin" ] || fail "LEGION_E2E_NATS_BIN names $nats_bin, which is not an executable file"
 note "Oh My Pi $omp ($("$omp" --version 2>/dev/null | head -1)); nats-server $("$nats_bin" --version); Chromium $chromium"
 note "models ${models[0]} (the profile's default) and ${models[1]}; LEGION_TEST_PG_DSN set (not printed)"
-# The keys leave the environment here, so no build, install or service below inherits them; the
-# driver alone gets them back, and hands them to each Oh My Pi it starts and to nothing else.
-anthropic_key=${ANTHROPIC_API_KEY:-}
-openai_key=${OPENAI_API_KEY:-}
-unset ANTHROPIC_API_KEY OPENAI_API_KEY
 note "keys: ANTHROPIC_API_KEY ${#anthropic_key} chars, OPENAI_API_KEY ${#openai_key} chars (passed to Oh My Pi only)"
 
 # ---- builds ------------------------------------------------------------------------------------------

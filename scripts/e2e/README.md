@@ -1645,11 +1645,11 @@ It differs from [`dispatch-user-turns.sh`](#dispatch-user-turnssh) in these ways
   `HOME` links `.omp/natives` to the caller's cache, as [`lib/omp-home.sh`](#libomp-homesh) does.
   The Oh My Pi is `LEGION_TEST_OMP`, not a mise tool spec.
 - **The model turns use the caller's own provider keys, not the Hawk gateway.** The script takes
-  `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` out of its environment once it has checked them, so no
-  build, install or service it starts inherits them, and gives them back to the driver alone, which
-  takes them off its own environment at once and passes them to each Oh My Pi it starts and to no
-  other process (Chromium included). It sets no key of its own, and prints only each key's length.
-  A key is needed only for a model of its provider.
+  `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` out of its environment before it starts anything, so
+  no build, install, service or log of the run inherits them, and gives them back to the driver
+  alone, which takes them off its own environment at once and passes them to each Oh My Pi it
+  starts and to no other process (Chromium included). It sets no key of its own, and prints only
+  each key's length. A key is needed only for a model of its provider.
 - **Postgres is a loopback server the caller names**, in `LEGION_TEST_PG_DSN`, as for
   [`merged-root-waits.sh`](#merged-root-waitssh). The rig creates a database of its own in it and
   drops it on any exit. In a pod, start one without root as
