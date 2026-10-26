@@ -66,7 +66,9 @@ publishes a pull request already merged without reading it. With `LEGION_READY_S
 both must be refused `READY_UNREVIEWED_CHANGE` naming that path. Unset, the check must pass, and
 READY must be accepted, or refused only by a check that runs after it: the head's handoffs, a
 conflict or a by-hand file list. It only reads GitHub; the pull request and its
-two heads are the operator's to make and close.
+two heads are the operator's to make and close. As `TestRealGitHubCredentialSurface` does, it reads
+both Apps from [`lib/github-apps.sh`](#libgithub-appssh) and checks them against `GET /app` before
+it acts, which needs `bun` and `jq` on `PATH`.
 
 
 ## stage1-skeleton.sh
@@ -2905,10 +2907,9 @@ one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRet
 this lib and run its `require_app_inputs`, `app_key_command` and `check_github_apps` (through
 `liveProofApps` and `proveLiveProofApps` in `packages/daemon/internal/api/real_github_test.go`;
 `proveLiveProofApps` checks the very block the proofs act with), so they hold no copy of the pair,
-its checks or its key command, and they prove both Apps as the stage proofs do before they act. The
-checks run in
-the C locale whatever the caller's, so a UTF-8 locale does not admit fullwidth digits or accented
-letters. `require_app_inputs` also fills `app_key_unsets`, the
+its checks or its key command, and they prove both Apps as the stage proofs do before they act.
+The checks run in the C locale whatever the caller's, so a UTF-8 locale does not admit fullwidth
+digits or accented letters. `require_app_inputs` also fills `app_key_unsets`, the
 `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
 role's key name, this deployment's own two, and every exported variable whose name holds
 `PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the three

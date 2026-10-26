@@ -136,10 +136,11 @@ Read from GitHub itself (`GET /app` with each App's JWT, 2026-09-13):
 | 3202636 (implement) | `legion-implementer` | `trajectory-s-legion-implementer` | actions:write, checks:**read**, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, **statuses:write**, workflows:write |
 | 3202653 (review) | `legion-reviewer` | `trajectory-s-legion-reviewer` | actions:write, **checks:write**, issues:write, metadata:read, packages:read, pull_requests:write |
 
-(2026-10-26: the two Apps were renamed on 2026-10-16. Main's commits by bot user 271566630 read
-`legion-implementer[bot]` up to 2026-10-16T05:11Z and `trajectory-s-legion-implementer[bot]` from
-05:53Z, and GitHub now shows the review App's earlier reviews as `trajectory-s-legion-reviewer[bot]`
-(bot user 271566912). So the `legion-implementer[bot]` and `legion-reviewer[bot]` this entry and
+(2026-10-26: the two Apps were renamed on 2026-10-16. GitHub's `GET /apps/<slug>` gives both their
+`updated_at` as 2026-10-16T05:44Z, and main's commits by bot user 271566630 read
+`legion-implementer[bot]` up to 05:11Z and `trajectory-s-legion-implementer[bot]` from 05:53Z;
+GitHub now shows the review App's earlier reviews as `trajectory-s-legion-reviewer[bot]` (bot
+user 271566912). So the `legion-implementer[bot]` and `legion-reviewer[bot]` this entry and
 older entries quote, before 2026-10-16, are these two Apps. The slugs `legion-implementer` and
 `legion-reviewer` have since gone to two other Apps, and main carries commits by
 `legion-implementer[bot]` after 2026-10-16 under another bot user id. Identify an App by its id,
