@@ -57,6 +57,13 @@ func isLifecycleWrite(ctx context.Context) bool {
 // else - and so is a block settlement could not read. Classification reads the database as it
 // stands now: the caller writes the asks' rows after this for a close, and before it for a reopen.
 //
+// A document outside the Proof schema is left as it is, as settlement leaves it, and so is one
+// whose stored history does not load (ErrDocumentUnloadable): nothing can read or open it, so no
+// reader sees its blocks open, and the history a retry would meet is the same. Each is logged,
+// naming the issue and the document, and the other documents are written as if it were not
+// there, so the close, reopen or repair writing them is not refused for good. Every other error,
+// a failed or rebuilding room's ErrServiceUnavailable and the database's included, is returned.
+//
 // An answered ask, which the close's final sweep passes, is written into its copies alone, never
 // into its own block: the answer route writes that block itself (SetBlockAttributes), and a write
 // from the row could put back an answer it left out for size. Each copy gets the ask's state,
@@ -199,7 +206,15 @@ func (s *Service) writeDocumentAskStates(
 		})
 		return err
 	})
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	switch {
+	case err == nil, errors.Is(err, websocket.ErrNoChanges):
+	case errors.Is(err, ErrDocumentUnloadable) && !errors.Is(err, ErrServiceUnavailable):
+		// Nothing can load the document, so no reader sees its blocks open, and a retry meets the
+		// same history: the close, reopen or repair writing it goes on without it.
+		slog.Warn("dispatch: leave the ask blocks of a document whose history cannot load as they are",
+			"issue", *owner.IssueKey, "artifact", artifactID, "error", err)
+		return nil, nil
+	default:
 		return nil, err
 	}
 	return marked, nil

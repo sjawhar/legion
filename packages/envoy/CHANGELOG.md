@@ -1323,7 +1323,11 @@
   earlier release reopened during the roll, and logs `withdrawn`, `restored` and `swept` counts.
   A pass that finds nothing to change writes nothing: it appends no update to any document and
   leaves each document's owed settlement marked when it was, so an interval pass does not sweep
-  the closed issues' documents again.
+  the closed issues' documents again. An issue whose repair fails no longer holds that bound back:
+  each interval pass moves it and carries the issues it did not repair into the next pass, so the
+  next pass retries them and sweeps only the other documents marked since. A document of the issue
+  whose stored history cannot load is left as it is and logged, so the close, the reopen and the
+  repair go on without it rather than answer `409 DOCUMENT_UNLOADABLE` until it is rebuilt.
   The dashboard, which ships in this server, shows a withdrawn decision block on a closed issue's
   current document with the badge `Withdrawn` and `Withdrawn when <closer> closed the issue`, as
   the activity feed's `ask.resolved` line reads; a saved version shows its own attributes, so a

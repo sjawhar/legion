@@ -1900,7 +1900,11 @@ by the close of <KEY>.", at}` and gets one `ask.resolved` (actor the closer) bef
 `issue.closed`; its block, and each copy of it in another document of the issue, is written
 `state="resolved"` into the live document, and no version is written while the issue is closed.
 An ask block that still has no ask row is written `state="resolved"` with no record, logged, and
-settlement indexes it as a new open ask when the issue reopens. Asks already answered or resolved
+settlement indexes it as a new open ask when the issue reopens. A document of the issue whose
+stored history does not load (`docs.ErrDocumentUnloadable`), like one outside the schema, is left
+as it is and logged at WARN naming the issue and the document: nothing can read or open it, so the
+close, the reopen and the repair go on without it rather than answer `409 DOCUMENT_UNLOADABLE` for
+good; a failed room's `503` and a database error still fail them. Asks already answered or resolved
 are left as they were, and the close records no answer, review or approval. A reopen opens again
 exactly the asks whose resolution kind is `withdrawn`, with `state: open`, no answer and no
 resolution and everything else kept, each with one `ask.opened` (actor the reopener) before
@@ -1911,10 +1915,14 @@ closed or reopened is converged by `api.RepairIssueAsks`, at boot (bounded at 30
 every `api.IssueAskRepairInterval` (10 minutes) under the lease `issue-ask-repair`, each interval
 pass bounded at 5 minutes. Per issue, under its row, a closed issue's open asks are withdrawn in
 the name of its latest `issue.closed` actor, an open issue's `withdrawn` asks are restored in the
-name of the event that reopened it, and a closed issue whose documents owe a settlement marked
-since the last pass gets the close's final sweep, which writes block `state` attributes only. A
-pass logs its `withdrawn`, `restored` and `swept` counts. Why it is not a read-path repair is
-`cmd/dispatch/README.md`'s ("Pre-deploy census").
+name of the event that reopened it, and a closed issue that has open asks, or whose documents owe a
+settlement marked since the last pass, gets the close's final sweep in the same write of each
+document, which writes block `state` attributes only. Each interval pass moves that bound to one
+interval before its own start whenever it listed its candidates, and carries every issue it did
+not repair - one that failed or one it ran out of time before - into the next pass, so one issue
+failing every pass does not make every pass sweep every closed issue. A pass logs its `withdrawn`,
+`restored` and `swept` counts, `swept` counting every unindexed block it marked. Why it is not a
+read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy census").
 
 ## Critical conventions
 

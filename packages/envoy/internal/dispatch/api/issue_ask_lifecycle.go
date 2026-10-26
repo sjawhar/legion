@@ -34,6 +34,10 @@ func withdrawnReason(issueKey string) string {
 // later attempt. A settlement still short after those is logged and the close proceeds; its blocks
 // are not asks yet, and the close's sweep marks them resolved (sweepClosedIssueAsks). An issue
 // already closed, or none, settles nothing: its close is refused.
+//
+// ctx must not be cancelled by the client (context.WithoutCancel): a settlement runs to its end
+// whether or not the client waits for the close, as the settlement it stands in for would, and
+// issueSettleBudget (docs.SettleIssueDocuments) bounds it all the same.
 func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
@@ -51,13 +55,27 @@ func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 // whose actor is the closer and whose owner is the issue. The blocks showing the asks in the
 // issue's documents, and their copies, are written resolved first, while the rows still read open
 // (docs.WriteIssueAskStates classifies copies by the rows as they stand), so every document write
-// comes before the first event this appends. With markUnindexed, every readable ask block no
-// settlement has indexed yet is written resolved too, and each one is logged.
+// comes before the first event this appends. Unindexed blocks are the close's final sweep's to
+// mark (sweepClosedIssueAsks).
 //
 // ctx is joined to tx (Docs.Join); the caller holds the issue's row and has locked every event
 // owner it appends to (LockOwners) before calling, and commits through the ledger and publishes
 // the returned events. It answers the asks as withdrawn, oldest id first.
-func (s *server) withdrawIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey string, actor model.Actor, markUnindexed bool) ([]model.Ask, []model.Event, error) {
+func (s *server) withdrawIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey string, actor model.Actor) ([]model.Ask, []model.Event, error) {
+	open, shown, err := s.readOpenIssueAsks(ctx, tx, issueKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, shown, actor, false); err != nil {
+		return nil, nil, err
+	}
+	return s.recordWithdrawnAsksTx(ctx, tx, issueKey, open, actor)
+}
+
+// readOpenIssueAsks reads and locks every open ask of issueKey, oldest id first, in tx, which the
+// caller holds the issue's row in, and answers them beside the same asks as their blocks show them
+// once withdrawn: resolved. WriteIssueAskStates writes nothing from a resolution.
+func (s *server) readOpenIssueAsks(ctx context.Context, tx pgx.Tx, issueKey string) ([]model.Ask, []model.Ask, error) {
 	open, err := s.readIssueAsks(ctx, tx, `
 		select `+askRowColumns+`
 		`+askRowFrom+`
@@ -68,18 +86,18 @@ func (s *server) withdrawIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey st
 	if err != nil {
 		return nil, nil, err
 	}
-	// The blocks take the state the rows are about to; WriteIssueAskStates writes nothing from a
-	// resolution.
 	shown := make([]model.Ask, len(open))
 	for index, ask := range open {
 		ask.State = "resolved"
 		shown[index] = ask
 	}
-	unindexed, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, shown, actor, markUnindexed)
-	if err != nil {
-		return nil, nil, err
-	}
-	logUnindexedAskBlocks(issueKey, unindexed)
+	return open, shown, nil
+}
+
+// recordWithdrawnAsksTx records each of open, the open asks of issueKey readOpenIssueAsks read,
+// withdrawn by actor, and appends its ask.resolved event, once their blocks are written. It
+// answers the asks as withdrawn and the events.
+func (s *server) recordWithdrawnAsksTx(ctx context.Context, tx pgx.Tx, issueKey string, open []model.Ask, actor model.Actor) ([]model.Ask, []model.Event, error) {
 	reason := withdrawnReason(issueKey)
 	withdrawn := make([]model.Ask, 0, len(open))
 	events := make([]model.Event, 0, len(open))
@@ -190,7 +208,7 @@ func (s *server) sweepClosedIssueAsksTx(ctx context.Context, issueKey string, wi
 	for index, ask := range withdrawn {
 		ids[index] = ask.ID
 	}
-	if _, err := s.sweepIssueAskBlocksTx(documentCtx, tx, issueKey, ids, actor); err != nil {
+	if _, err := s.sweepIssueAskBlocksTx(documentCtx, tx, issueKey, ids, nil, actor); err != nil {
 		return err
 	}
 	return ledger.Commit(ctx)
@@ -199,10 +217,12 @@ func (s *server) sweepClosedIssueAsksTx(ctx context.Context, issueKey string, wi
 // sweepIssueAskBlocksTx is the close's final sweep of issueKey's documents (sweepClosedIssueAsks)
 // in tx, which the caller holds the issue's row in and ctx is joined to: it writes the blocks of
 // the asks withdrawnIDs names, the asks the close withdrew (none when nil), and of every other
-// resolved or answered block ask of the issue, and their copies, from their rows as they stand
-// (docs.WriteIssueAskStates), marks resolved every readable ask block no settlement has indexed,
-// logs each one and answers them.
-func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey string, withdrawnIDs []string, actor model.Actor) ([]docs.BlockRef, error) {
+// resolved or answered block ask of the issue, and their copies, from their rows as they stand,
+// and the blocks of withdrawing, open asks as their blocks show them once withdrawn
+// (readOpenIssueAsks), which a repair records withdrawn after this, all in one write of each
+// document (docs.WriteIssueAskStates). It marks resolved every readable ask block no settlement
+// has indexed, logs each one and answers them.
+func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey string, withdrawnIDs []string, withdrawing []model.Ask, actor model.Actor) ([]docs.BlockRef, error) {
 	// The rows as they stand under the issue's row: a reopen, an answer and a second close
 	// between the close's commit and this lock leave them other than the close wrote them. Every
 	// other resolved or answered block ask's blocks are written from its row too: an ask resolved
@@ -210,7 +230,8 @@ func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey 
 	// marked its copies owed a settlement, and no settlement runs while the issue is closed, so the
 	// sweep writes those copies its state in that settlement's place. An answered ask's own block
 	// is the answer route's to write, and WriteIssueAskStates leaves it as it is. A nil
-	// withdrawnIDs is a null array, which matches no id.
+	// withdrawnIDs is a null array, which matches no id. withdrawing are open rows, which the
+	// query does not select.
 	current, err := s.readIssueAsks(ctx, tx, `
 		select `+askRowColumns+`
 		`+askRowFrom+`
@@ -220,7 +241,7 @@ func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey 
 	if err != nil {
 		return nil, err
 	}
-	unindexed, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, current, actor, true)
+	unindexed, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, append(current, withdrawing...), actor, true)
 	if err != nil {
 		return nil, err
 	}

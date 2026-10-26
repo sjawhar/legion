@@ -454,6 +454,64 @@ func TestClosingAnIssueWaitsForTheSettlementOfItsDocumentInFlight(t *testing.T) 
 	}
 }
 
+// A client that hangs up on its close while the close's own settlement of a document runs does not
+// cut that settlement short: it runs on without the client's cancellation, so the decision block
+// written a moment before is indexed as an ask credited to its writer, and the document owes no
+// settlement afterwards, whatever becomes of the close.
+func TestAClientHangingUpOnItsCloseStillLetsTheDocumentsSettle(t *testing.T) {
+	// cancelOn names the document whose next settlement cancels the close's request once it holds
+	// the issue's row.
+	var cancelOn atomic.Pointer[string]
+	var cancelClose atomic.Pointer[context.CancelFunc]
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		// An hour, so the only settlement is the close's own.
+		documents := docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		documents.AfterSettleLockForTest(func(room string) {
+			if target := cancelOn.Load(); target != nil && *target == room && cancelOn.CompareAndSwap(target, nil) {
+				(*cancelClose.Load())()
+			}
+		})
+		t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+		return documents
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "A close its client hangs up on", "Context\n")
+	spec := issue.PrimaryArtifactID
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+spec+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops": []map[string]string{{
+			"op": "insert", "after": "end",
+			"markdown": ":::ask{#late-decision urgency=\"high\" multiple=\"false\"}\nShip late?\n:::\n",
+		}},
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("write the decision block: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	if id := findBlockAsk(t, handler, issue.Key, spec, "late-decision"); id != "" {
+		t.Fatalf("the decision block is ask %s before any settlement", id)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelClose.Store(&cancel)
+	cancelOn.Store(&spec)
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/issues/"+issue.Key, strings.NewReader(`{"status":"done"}`)).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if cancelOn.Load() != nil {
+		t.Fatal("the close ran no settlement of the document")
+	}
+
+	id := findBlockAsk(t, handler, issue.Key, spec, "late-decision")
+	if id == "" {
+		t.Fatal("the settlement the client hung up on never indexed the decision block")
+	}
+	if ask := readBlockAsk(t, handler, id); ask.Author.Kind != "session" || ask.Author.ID != sessionActor()["id"] {
+		t.Fatalf("the decision's author = %#v, want the session that wrote it", ask.Author)
+	}
+	awaitSettled(t, database, spec)
+}
+
 // awaitRequests releases start, then waits up to raceDeadline for requests, failing the test
 // when they do not all answer: a deadlock between them.
 func awaitRequests(t *testing.T, requests *sync.WaitGroup, start chan struct{}, what string) {

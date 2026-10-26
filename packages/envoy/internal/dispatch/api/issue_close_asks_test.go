@@ -444,6 +444,75 @@ func TestClosingAnIssueWithdrawsADecisionBlockPastedUnderARepeatedID(t *testing.
 	}
 }
 
+// A document of the issue whose stored history does not load is one nothing can read or open, so
+// it shows nobody an ask block open, and it stays unloadable however often a write meets it: the
+// close of its issue goes on without it and withdraws the plain ask beside it, naming the closer,
+// the reopen restores that ask, and the repair passes over the issue, withdrawing for a close an
+// older release made and restoring for its reopen, succeed rather than fail on that document for
+// good.
+func TestClosingAnIssueWithAnUnloadableDocumentWithdrawsItsAsksAndReopeningRestoresThem(t *testing.T) {
+	// An hour, so no settlement timer loads the unloadable document between the requests.
+	f := newRepairFixtureSettlingAfter(t, time.Hour)
+	issue := createInteractionIssue(t, f.handler, "TEST", "Closing beside an unloadable document", "Context\n")
+	uploaded := dispatchRequest(t, f.handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "notes.md", "content": "Notes\n",
+	}, "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the notes: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	notes := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact.ID
+	plainAsk := createSessionAsk(t, f.handler, issue.Key, "Which region?")
+
+	// The notes' one stored update is replaced by bytes that do not decode, with no room holding
+	// the document and no settlement owed that the close's own settlement would load it for.
+	ctx := context.Background()
+	if err := f.documents.Evict(ctx, notes); err != nil {
+		t.Fatalf("evict the notes: %v", err)
+	}
+	if _, err := f.database.Pool.Exec(ctx, `delete from doc_settlements_pending where artifact_id = $1`, notes); err != nil {
+		t.Fatalf("clear the notes' owed settlement: %v", err)
+	}
+	corrupted, err := f.database.Pool.Exec(ctx, `update doc_updates set update = '\xff'::bytea where artifact_id = $1`, notes)
+	if err != nil {
+		t.Fatalf("corrupt the notes' history: %v", err)
+	}
+	if corrupted.RowsAffected() != 1 {
+		t.Fatalf("the notes hold %d stored updates, want the upload's one", corrupted.RowsAffected())
+	}
+	if _, err := docs.NewPgVersioned(f.database).LoadDocument(ctx, notes); !errors.Is(err, docs.ErrDocumentUnloadable) {
+		t.Fatalf("load the corrupted notes: %v, want ErrDocumentUnloadable", err)
+	}
+
+	closed := dispatchRequest(t, f.handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close beside the unloadable notes: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	requireWithdrawn(t, f.handler, issue.Key, plainAsk, model.Actor{Kind: "user", ID: "alice"})
+	reopened := dispatchRequest(t, f.handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "todo"}, "alice")
+	if reopened.Code != http.StatusOK {
+		t.Fatalf("reopen beside the unloadable notes: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	if got := readBlockAsk(t, f.handler, plainAsk); got.State != "open" || got.Resolution != nil {
+		t.Fatalf("ask %s after the reopen = %s %#v, want open with no record", plainAsk, got.State, got.Resolution)
+	}
+
+	closer := repairActor("session-older-closer")
+	closeWithoutWithdrawing(t, f, issue.Key, &closer, time.Now())
+	if repair := repairNow(t, f); repair.Withdrawn != 1 {
+		t.Fatalf("repair of the closed issue = %+v, want its plain ask withdrawn", repair)
+	}
+	requireWithdrawn(t, f.handler, issue.Key, plainAsk, closer)
+	reopenWithoutRestoring(t, f, issue.Key, "todo", repairActor("session-older-reopener"))
+	if repair := repairNow(t, f); repair.Restored != 1 {
+		t.Fatalf("repair of the reopened issue = %+v, want its plain ask restored", repair)
+	}
+	if got := readBlockAsk(t, f.handler, plainAsk); got.State != "open" || got.Resolution != nil {
+		t.Fatalf("ask %s after the repair's restoration = %s %#v, want open with no record", plainAsk, got.State, got.Resolution)
+	}
+}
+
 // documentBlockAsks is every ask, in any state, indexed for a block of document.
 func documentBlockAsks(t *testing.T, handler http.Handler, issue, document string) []model.Ask {
 	t.Helper()

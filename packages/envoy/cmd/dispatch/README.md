@@ -605,12 +605,15 @@ holding open asks gets them withdrawn exactly as a close withdraws them, attribu
 its latest `issue.closed` (an issue with no such event is logged and skipped), so the asks left
 open on issues closed before the release are withdrawn naming each issue's earlier closer; an open
 issue holding `withdrawn` asks gets them restored, attributed to the actor of the event that
-reopened it; and a closed issue whose documents owe a settlement marked since the last pass (at
-boot, the last 10 minutes; on the first interval pass, any) gets the close's final sweep, which
-writes block `state` attributes only, never an ask row or a record. Each record is dated when the
-pass writes it. A pass logs `dispatch: repaired the asks of closed and reopened issues` with
-`withdrawn=<n> restored=<n> swept=<n>`; one that fails or runs out of time is logged, and the next
-pass repairs what it left.
+reopened it; and a closed issue that holds open asks, or whose documents owe a settlement marked
+since the last pass (at boot, the last 10 minutes; on the first interval pass, any), gets the
+close's final sweep in the same write of each document, which writes block `state` attributes
+only, never an ask row or a record. A document whose stored history does not load is logged and
+left as it is, as the close leaves it. Each record is dated when the pass writes it. A pass logs
+`dispatch: repaired the asks of closed and reopened issues` with `withdrawn=<n> restored=<n>
+swept=<n>`; one that fails or runs out of time is logged, and the next pass repairs what it left:
+each interval pass that listed its candidates moves the bound to one interval before its own
+start, and carries every issue it did not repair, failed or not reached, into the next pass.
 
 Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default
 (`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row,

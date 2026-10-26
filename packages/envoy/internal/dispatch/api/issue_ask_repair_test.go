@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -451,7 +452,7 @@ func TestAnIntervalRepairSweepsOnlyTheDocumentsMarkedSinceItsLastPass(t *testing
 	}
 	s := &server{deps: f.deps}
 	bound := time.Now().Add(-time.Hour)
-	repair, _, err := s.repairIssueAsks(context.Background(), &bound)
+	repair, _, _, err := s.repairIssueAsks(context.Background(), &bound, nil)
 	if err != nil {
 		t.Fatalf("bounded repair: %v", err)
 	}
@@ -527,6 +528,94 @@ func TestARepairThatChangesNothingAppendsNoUpdateAndMarksNoDocument(t *testing.T
 		if got := eventCount(t, f.database, closed.Key) + eventCount(t, f.database, older.Key); got != events {
 			t.Fatalf("%s appended %d events", pass.name, got-events)
 		}
+	}
+}
+
+// issueAskFailingDocs is a document service whose writes of ask states into one issue's documents
+// always fail, as a repair of an issue whose documents cannot be written fails every pass, and
+// which counts the writes it is asked for, by issue.
+type issueAskFailingDocs struct {
+	docs.API
+	failing string
+	mu      sync.Mutex
+	writes  map[string]int
+}
+
+func (d *issueAskFailingDocs) WriteIssueAskStates(ctx context.Context, issueKey string, asks []model.Ask, actor model.Actor, markUnindexed bool) ([]docs.BlockRef, error) {
+	d.mu.Lock()
+	d.writes[issueKey]++
+	d.mu.Unlock()
+	if issueKey == d.failing {
+		return nil, errors.New("the issue's documents cannot be written")
+	}
+	return d.API.WriteIssueAskStates(ctx, issueKey, asks, actor, markUnindexed)
+}
+
+// takeWrites is the writes counted since the last call, by issue; counting starts again from none.
+func (d *issueAskFailingDocs) takeWrites() map[string]int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	writes := d.writes
+	d.writes = map[string]int{}
+	return writes
+}
+
+// One issue whose repair fails every pass does not hold the interval passes' window back: the pass
+// it fails in still moves the window to one interval before its own start, so the next pass sweeps
+// only the documents marked owing since, and the failed issue, carried into that pass, is tried
+// again. Three closed issues' documents owe a settlement marked a day ago: one issue's repair
+// fails, one document is marked again after the first pass, and one is left as it is. The first
+// pass, bounded by nothing, reaches all three issues; the second reaches the failed issue and the
+// one marked again, never the third.
+func TestARepairPassThatFailsOneIssueStillMovesTheWindowAndRetriesIt(t *testing.T) {
+	// An hour, so the only settlement is the one each close through PATCH runs.
+	f := newRepairFixtureSettlingAfter(t, time.Hour)
+	failing := createInteractionIssue(t, f.handler, "FAIL", "Fails every pass", closeDecision)
+	remarked := createInteractionIssue(t, f.handler, "MARK", "Marked again", closeDecision)
+	untouched := createInteractionIssue(t, f.handler, "LEFT", "Left as it is", closeDecision)
+	documents := []string{failing.PrimaryArtifactID, remarked.PrimaryArtifactID, untouched.PrimaryArtifactID}
+	for _, issue := range []string{failing.Key, remarked.Key, untouched.Key} {
+		if closed := dispatchRequest(t, f.handler, http.MethodPatch, "/api/v1/issues/"+issue, map[string]string{"status": "done"}, "alice"); closed.Code != http.StatusOK {
+			t.Fatalf("close %s: status=%d body=%s", issue, closed.Code, closed.Body.String())
+		}
+	}
+	ctx := context.Background()
+	for _, document := range documents {
+		awaitOwedSettlement(t, f.database, document)
+	}
+	if _, err := f.database.Pool.Exec(ctx, `
+		update doc_settlements_pending set marked_at = now() - interval '1 day' where artifact_id = any($1::uuid[])
+	`, documents); err != nil {
+		t.Fatalf("age the documents' marks: %v", err)
+	}
+	wrapper := &issueAskFailingDocs{API: f.documents, failing: failing.Key, writes: map[string]int{}}
+	deps := f.deps
+	deps.Docs = wrapper
+	s := &server{deps: deps}
+
+	markedSince, retry := s.repairIssueAsksOnTick(ctx, nil, nil)
+	if markedSince == nil {
+		t.Fatal("the pass that failed one issue left the window unbounded")
+	}
+	if !reflect.DeepEqual(retry, []string{failing.Key}) {
+		t.Fatalf("the first pass carries %v, want the failed issue %s alone", retry, failing.Key)
+	}
+	if got, want := wrapper.takeWrites(), map[string]int{failing.Key: 1, remarked.Key: 1, untouched.Key: 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the first pass wrote the issues' documents %v times, want %v", got, want)
+	}
+	if _, err := f.database.Pool.Exec(ctx, `update doc_settlements_pending set marked_at = now() where artifact_id = $1`, remarked.PrimaryArtifactID); err != nil {
+		t.Fatalf("mark the remarked document again: %v", err)
+	}
+
+	next, retry := s.repairIssueAsksOnTick(ctx, markedSince, retry)
+	if got, want := wrapper.takeWrites(), map[string]int{failing.Key: 1, remarked.Key: 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the second pass wrote the issues' documents %v times, want %v: the failed issue again and the document marked since", got, want)
+	}
+	if next == nil || !next.After(*markedSince) {
+		t.Fatalf("the second pass moved the window from %v to %v, want it later", *markedSince, next)
+	}
+	if !reflect.DeepEqual(retry, []string{failing.Key}) {
+		t.Fatalf("the second pass carries %v, want the failed issue %s alone", retry, failing.Key)
 	}
 }
 

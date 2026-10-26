@@ -126,9 +126,12 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := r.PathValue("key")
-	if input.Status != nil && status == "done" {
+	// Whether the write closes the issue (closing) waits for the issue's row; whether it asks to is
+	// known now.
+	closes := input.Status != nil && status == "done"
+	if closes {
 		// Before the transaction, which settlement's own would queue behind on the issue's row.
-		s.settleIssueBeforeClose(r.Context(), key)
+		s.settleIssueBeforeClose(context.WithoutCancel(r.Context()), key)
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -206,6 +209,8 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	closing := closes && before.ClosedAt == nil
+	reopening := input.Status != nil && !closes && before.ClosedAt != nil
 	if before.ClosedAt != nil {
 		// A closed issue takes only its rank (board order), its component attachment
 		// (classified without reopening), and an external_links write that adds no URL the issue
@@ -216,7 +221,6 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// waits for a reopen.
 		addsLink := input.ExternalLinks != nil && !isExternalLinksSubset(*input.ExternalLinks, before.ExternalLinks)
 		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || addsLink || assigneeProvided || parentProvided || input.BlockedBy != nil || repoProvided
-		reopening := input.Status != nil && status != "done"
 		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided && input.ExternalLinks == nil) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
@@ -234,7 +238,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	// previousClaim is set only when this write closes the issue, so it alone says both that a
 	// claim is being released and whose it was.
 	var previousClaim *model.IssueClaim
-	if input.Status != nil && status == "done" {
+	if closing {
 		previousClaim = before.Claim
 	}
 	// Every provided column lands in one UPDATE, updated_at with it; a components-only PATCH
@@ -385,8 +389,6 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		afterParent = parent
 	}
 	parentChanged := parentProvided && !stringPointersEqual(before.Parent, afterParent)
-	closing := input.Status != nil && status == "done" && before.ClosedAt == nil
-	reopening := input.Status != nil && before.ClosedAt != nil
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
 	// lockPatchRowsAndParent already holds each of those rows, so LockOwners re-locks them in that order.
@@ -417,7 +419,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	events := []model.Event{}
 	switch {
 	case closing:
-		withdrawn, events, err = s.withdrawIssueAsksTx(documentCtx, tx, key, actor, false)
+		withdrawn, events, err = s.withdrawIssueAsksTx(documentCtx, tx, key, actor)
 	case reopening:
 		_, events, err = s.restoreIssueAsksTx(documentCtx, tx, key, actor)
 	}

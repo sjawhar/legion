@@ -58,9 +58,9 @@ func (r *IssueAskRepair) add(other IssueAskRepair) {
 
 // RepairIssueAsks brings every issue's asks to what its last close or reopen leaves them, for the
 // issues a process older than the withdrawal closed or reopened:
-//   - a closed issue holding open asks gets them withdrawn exactly as a close withdraws them
-//     (unindexed blocks marked resolved too), attributed to the actor of its latest issue.closed
-//     event, every field as the event stores it;
+//   - a closed issue holding open asks gets them withdrawn exactly as a close withdraws them,
+//     attributed to the actor of its latest issue.closed event, every field as the event stores
+//     it, and its documents the close's final sweep below;
 //   - an open issue holding withdrawn asks gets them restored exactly as a reopen restores them,
 //     attributed to the actor of the event that reopened it last: the first issue.updated after its
 //     latest issue.closed whose status is not done;
@@ -71,6 +71,9 @@ func (r *IssueAskRepair) add(other IssueAskRepair) {
 //     out, are written again from their rows, and every readable ask block with no ask row and no
 //     source is marked resolved, each one logged, attributed to its latest closer.
 //
+// A closed issue's repair writes each of its documents once, the withdrawn asks' blocks beside
+// the sweep's, and counts every unindexed block it marks resolved as swept.
+//
 // An issue with no event naming the closer or the reopener is logged and left as it is: no actor
 // is invented. Every record is dated when the pass writes it. Each issue is repaired in a
 // transaction of its own that holds the issue's row and reads its state and asks again under it,
@@ -80,7 +83,7 @@ func (r *IssueAskRepair) add(other IssueAskRepair) {
 // deps.Docs and deps.Events.
 func RepairIssueAsks(ctx context.Context, deps Deps, markedSince *time.Time) (IssueAskRepair, error) {
 	s := &server{deps: deps}
-	repair, _, err := s.repairIssueAsks(ctx, markedSince)
+	repair, _, _, err := s.repairIssueAsks(ctx, markedSince, nil)
 	return repair, err
 }
 
@@ -94,12 +97,16 @@ func RepairIssueAsks(ctx context.Context, deps Deps, markedSince *time.Time) (Is
 // close's own write left for as long as the issue stays closed, so a pass that swept every such
 // document would read every closed issue's documents each interval, for good. After its first
 // pass, which sweeps them all, each pass sweeps only the documents marked owing since the last
-// pass that finished began, less one interval, so a write whose transaction began before that
-// pass and committed after it is still swept; a pass that fails moves nothing, so the next one
-// covers what it left.
+// pass that listed its candidates began, less one interval, so a write whose transaction began
+// before that pass and committed after it is still swept, and the issues that pass did not
+// repair: each one whose repair failed and each one it did not reach before its time ran out. The
+// window moves with every pass that listed its candidates, so one issue that fails every pass
+// costs each pass that issue alone rather than a sweep of every closed issue owing a settlement;
+// a pass that could not list them moves nothing and carries what the pass before it carried.
 func RunIssueAskRepair(ctx context.Context, deps Deps, leases duty.Leases) {
 	s := &server{deps: deps}
 	var markedSince *time.Time
+	var unrepaired []string
 	ticker := time.NewTicker(IssueAskRepairInterval)
 	defer ticker.Stop()
 	for {
@@ -108,36 +115,41 @@ func RunIssueAskRepair(ctx context.Context, deps Deps, leases duty.Leases) {
 			return
 		case <-ticker.C:
 			duty.Exclusive(ctx, leases, issueAskRepairLease, IssueAskRepairInterval, func(ctx context.Context) {
-				if began, finished := s.repairIssueAsksOnTick(ctx, markedSince); finished {
-					since := began.Add(-IssueAskRepairInterval)
-					markedSince = &since
-				}
+				markedSince, unrepaired = s.repairIssueAsksOnTick(ctx, markedSince, unrepaired)
 			})
 		}
 	}
 }
 
 // repairIssueAsksOnTick is one interval pass of RunIssueAskRepair, bounded by
-// issueAskRepairTimeout, logging what it changed and why it failed. It answers when the pass
-// began, by the database's clock, and whether it finished.
-func (s *server) repairIssueAsksOnTick(ctx context.Context, markedSince *time.Time) (time.Time, bool) {
+// issueAskRepairTimeout, logging what it changed and why it failed. It sweeps the documents marked
+// owing after markedSince (all, when it is nil) and the closed issues of retry, and answers the
+// next pass's bound and retry: one interval before the pass began, by the database's clock, and
+// the issues it did not repair; or markedSince and retry as they were, when it could not list its
+// candidates.
+func (s *server) repairIssueAsksOnTick(ctx context.Context, markedSince *time.Time, retry []string) (*time.Time, []string) {
 	passCtx, cancel := context.WithTimeout(ctx, issueAskRepairTimeout)
 	defer cancel()
-	repair, began, err := s.repairIssueAsks(passCtx, markedSince)
+	repair, began, unrepaired, err := s.repairIssueAsks(passCtx, markedSince, retry)
 	if repair.Changed() {
 		slog.Info("dispatch: repaired the asks of closed and reopened issues", repair.LogArgs()...)
 	}
 	if err != nil && ctx.Err() == nil {
 		slog.Error("dispatch: repair the asks of closed and reopened issues", append(repair.LogArgs(), "error", err)...)
 	}
-	return began, err == nil
+	if began.IsZero() {
+		return markedSince, retry
+	}
+	since := began.Add(-IssueAskRepairInterval)
+	return &since, unrepaired
 }
 
 // issueAskRepairCandidates lists the issues a repair may have work on, read without locks: each
 // is decided again under its row. The withdrawals and restorations come first, so a pass cut
 // short by its time spends it on them rather than on the sweeps. A closed issue is swept when one
-// of its documents owes a settlement marked after $1, or at all when $1 is null. It also answers
-// the database's clock as the list was read.
+// of its documents owes a settlement marked after $1, or at all when $1 is null or the issue is
+// one of $2, the issues the last pass did not repair. It also answers the database's clock as the
+// list was read.
 const issueAskRepairCandidates = `
 	select statement_timestamp(), array(
 		select key from (
@@ -156,7 +168,8 @@ const issueAskRepairCandidates = `
 			where i.closed_at is not null
 				and exists (
 					select 1 from artifacts d join doc_settlements_pending p on p.artifact_id = d.id
-					where d.issue_key = i.key and d.kind = 'doc' and ($1::timestamptz is null or p.marked_at > $1)
+					where d.issue_key = i.key and d.kind = 'doc'
+						and ($1::timestamptz is null or p.marked_at > $1 or i.key = any($2::text[]))
 				)
 		) candidates
 		group by key
@@ -165,36 +178,42 @@ const issueAskRepairCandidates = `
 `
 
 // repairIssueAsks is RepairIssueAsks, sweeping only the closed issues whose documents were marked
-// owing a settlement after markedSince, or every one when it is nil; it answers when it began.
-func (s *server) repairIssueAsks(ctx context.Context, markedSince *time.Time) (IssueAskRepair, time.Time, error) {
+// owing a settlement after markedSince, or every one when it is nil, and the closed issues of
+// retry whose documents owe one at all. It answers when it began, by the database's clock, zero
+// when it could not list its candidates, and the candidates it did not repair: each one whose
+// repair failed and each one it did not reach before ctx ended.
+func (s *server) repairIssueAsks(ctx context.Context, markedSince *time.Time, retry []string) (IssueAskRepair, time.Time, []string, error) {
 	var total IssueAskRepair
 	var began time.Time
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
-		return total, began, errors.New("repair issue asks: database unavailable")
+		return total, began, nil, errors.New("repair issue asks: database unavailable")
 	}
 	ctx = store.WithTransactionTracking(ctx)
 	var issues []string
-	if err := s.deps.Store.Pool.QueryRow(ctx, issueAskRepairCandidates, markedSince).Scan(&began, &issues); err != nil {
-		return total, began, fmt.Errorf("list the issues whose asks need repair: %w", err)
+	if err := s.deps.Store.Pool.QueryRow(ctx, issueAskRepairCandidates, markedSince, retry).Scan(&began, &issues); err != nil {
+		return total, time.Time{}, nil, fmt.Errorf("list the issues whose asks need repair: %w", err)
 	}
 	var failures []error
-	for _, issueKey := range issues {
+	var unrepaired []string
+	for index, issueKey := range issues {
 		if ctx.Err() != nil {
 			failures = append(failures, ctx.Err())
+			unrepaired = append(unrepaired, issues[index:]...)
 			break
 		}
 		repair, err := s.repairIssueAsksOf(ctx, issueKey)
 		if err != nil {
 			slog.Error("dispatch: repair the asks of an issue", "issue", issueKey, "error", err)
 			failures = append(failures, fmt.Errorf("%s: %w", issueKey, err))
+			unrepaired = append(unrepaired, issueKey)
 			continue
 		}
 		total.add(repair)
 	}
 	if len(failures) > 0 {
-		return total, began, fmt.Errorf("repair the asks of %d of %d issues: %w", len(failures), len(issues), errors.Join(failures...))
+		return total, began, unrepaired, fmt.Errorf("repair the asks of %d of %d issues: %w", len(failures), len(issues), errors.Join(failures...))
 	}
-	return total, began, nil
+	return total, began, nil, nil
 }
 
 // repairIssueAsksOf repairs issueKey's asks (RepairIssueAsks) in a transaction of its own, which
@@ -239,24 +258,26 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 				"issue", issueKey, "open_asks", open, "owes_settlement", owesSettlement)
 			return repair, nil
 		}
-		if owesSettlement {
-			// The close's final sweep (sweepClosedIssueAsks), from the resolved and answered block
-			// asks' rows as they stand under the issue's row. Every document write comes before the
-			// first event.
-			unindexed, err := s.sweepIssueAskBlocksTx(documentCtx, tx, issueKey, nil, closer)
-			if err != nil {
-				return repair, err
-			}
-			repair.Swept = len(unindexed)
+		// The open asks are withdrawn as a close withdraws them, and the documents get the close's
+		// final sweep (sweepClosedIssueAsks) in the same write: the open asks' blocks and copies
+		// written resolved, while their rows still read open, beside the resolved and answered block
+		// asks' blocks and copies from their rows as they stand, and every unindexed block marked
+		// resolved. Every document write comes before the first event.
+		openAsks, withdrawing, err := s.readOpenIssueAsks(documentCtx, tx, issueKey)
+		if err != nil {
+			return repair, err
 		}
-		if open > 0 {
-			var asks []model.Ask
-			asks, events, err = s.withdrawIssueAsksTx(documentCtx, tx, issueKey, closer, true)
-			if err != nil {
-				return repair, err
-			}
-			repair.Withdrawn = len(asks)
+		unindexed, err := s.sweepIssueAskBlocksTx(documentCtx, tx, issueKey, nil, withdrawing, closer)
+		if err != nil {
+			return repair, err
 		}
+		repair.Swept = len(unindexed)
+		var asks []model.Ask
+		asks, events, err = s.recordWithdrawnAsksTx(documentCtx, tx, issueKey, openAsks, closer)
+		if err != nil {
+			return repair, err
+		}
+		repair.Withdrawn = len(asks)
 	case !closed && withdrawn > 0:
 		reopener, found, err := latestIssueEventActor(ctx, tx, `
 			select e.actor from events e
