@@ -8,10 +8,11 @@
   the app Deployment's `envoy-dispatch` container as both its request and its limit: 1 CPU and
   `4Gi` by default, the size it always had, so a deployment that sets neither renders the same pod.
   The `cloud-sql-proxy` sidecar, the front door and the listener keep their sizes. The component
-  refuses, naming the input, a value that is not a quantity or is empty, and a size at which GKE
-  Autopilot would not run the app pod (the two containers' sum) as rendered: below `500m` or
-  `512Mi` or outside 1 to 6.5 GiB of memory per CPU, which Autopilot raises, or above 30 CPU or
-  `110Gi`, which it rejects.
+  refuses, naming the input, a value that is not a quantity or is empty, a decimal exponent
+  outside `e-9` to `e18`, and a size at which GKE Autopilot would not run the app pod (the two
+  containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
+  CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
+  Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
 - Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
   Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
   `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces

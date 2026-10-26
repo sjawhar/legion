@@ -178,13 +178,17 @@ quantities (`2`, `1500m`; `8Gi`, `6144Mi`), each rendered as both its request an
 and `4Gi` by default, so a deployment that sets neither renders the pod it always had. The pod's
 `cloud-sql-proxy` sidecar keeps its own `200m` and `256Mi`, and the front door and the listener
 keep theirs. Autopilot sizes the pod by the two containers' sum, so before it registers a resource
-the component refuses, by name, a value that is not a quantity or is empty, and a size at which
-Autopilot would not run the pod as rendered: a pod below `500m` or `512Mi` (the floor of a
-`safe-to-evict: "false"` pod, so `appCpu` at least `300m` and `appMemory` at least `256Mi`) or
-outside 1 to 6.5 GiB of memory per CPU, which Autopilot raises, and a pod above 30 CPU or `110Gi`
-(`appCpu` at most `29800m`, `appMemory` at most `112384Mi`), which Autopilot rejects; these are
-the bounds of Autopilot's default general-purpose compute class
+the component refuses, by name, a value that is not a quantity or is empty, a decimal exponent
+outside `e-9` to `e18` (the range the suffixes `n` to `E` cover; write a suffix instead), and a
+size at which Autopilot would not run the pod as rendered: a pod below `500m` or `512Mi` (the
+floor of a `safe-to-evict: "false"` pod, so `appCpu` at least `300m` and `appMemory` at least
+`256Mi`) or outside 1 to 6.5 GiB of memory per CPU, which Autopilot raises, and a pod above 30 CPU
+or `110Gi` (`appCpu` at most `29800m`, `appMemory` at most `112384Mi`), which Autopilot rejects;
+these are the bounds of Autopilot's default general-purpose compute class
 ([Resource requests in Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests)).
+The pod runs at exactly the rendered size only on a cluster that supports Pod bursting; on one
+that does not, Autopilot also rounds the pod's CPU up to a multiple of 250m (the default pod's
+1200m becomes 1250m).
 A change to either replaces the app's pods as any change to its pod template does: recreated at
 one replica, rolled above one.
 

@@ -150,8 +150,9 @@ func TestDispatchAppContainerDefaultsToOneCPUAnd4Gi(t *testing.T) {
 }
 
 // The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod:
-// with cloud-sql-proxy's 200m and 256Mi, 300m and 256Mi make the 500m and 512Mi floor, and 29800m
-// and 112384Mi the 30 CPU and 110Gi ceiling.
+// with cloud-sql-proxy's 200m and 256Mi, 300m and 256Mi make the 500m and 512Mi floor, 29800m
+// and 112384Mi the 30 CPU and 110Gi ceiling, and 800m and 6400Mi exactly 6.5 GiB per CPU. A
+// decimal exponent inside e-9 to e18 is valued exactly, its mantissa included.
 func TestDispatchAcceptsAppResourcesWithinAutopilotsBounds(t *testing.T) {
 	for _, row := range []struct{ cpu, memory string }{
 		{"300m", "512Mi"},
@@ -161,6 +162,9 @@ func TestDispatchAcceptsAppResourcesWithinAutopilotsBounds(t *testing.T) {
 		{"4", "16G"},
 		{"29800m", "112384Mi"},
 		{"2e0", "0.5e10"},
+		{"800m", "6400Mi"},
+		{"1", "4500000k"},
+		{"1000000000e-9", "0.000000004e18"},
 	} {
 		t.Run(row.cpu+"/"+row.memory, func(t *testing.T) {
 			args := dispatchArgs()
@@ -283,6 +287,28 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		}, err: []string{`appMemory "110Gi"`, "at most 112384Mi", "above 110Gi", "rejects"}},
 		{name: "app CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("8") }, err: []string{`appCpu "8"`, `appMemory "4Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
 		{name: "app memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("32Gi") }, err: []string{`appCpu "1"`, `appMemory "32Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory just above 6.5 GiB per CPU", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("800m")
+			a.AppMemory = pulumi.StringRef("6401Mi")
+		}, err: []string{`appCpu "800m"`, `appMemory "6401Mi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "an app CPU with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(" 1") }, err: []string{`appCpu " 1"`, "Kubernetes quantity"}},
+		{name: "an app CPU with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1 ") }, err: []string{`appCpu "1 "`, "Kubernetes quantity"}},
+		{name: "an app memory with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(" 4Gi") }, err: []string{`appMemory " 4Gi"`, "Kubernetes quantity"}},
+		{name: "an app memory with a trailing line break", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4Gi\n") }, err: []string{`appMemory "4Gi\n"`, "Kubernetes quantity"}},
+		// Kubernetes reads this as 100 CPU: the mantissa makes up for the exponent.
+		{name: "an app CPU whose exponent a small mantissa makes up for", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("0.000000000000000000000000000000000001e38")
+		}, err: []string{`appCpu "0.000000000000000000000000000000000001e38"`, "decimal exponent outside e-9 to e18"}},
+		// Kubernetes reads this as 4 CPU, a size the pod could have with 6Gi.
+		{name: "an app CPU of 4 written with a large exponent", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("0.0000000000000000000000000000000000004e37")
+			a.AppMemory = pulumi.StringRef("6Gi")
+		}, err: []string{`appCpu "0.0000000000000000000000000000000000004e37"`, "decimal exponent outside e-9 to e18"}},
+		// Kubernetes reads this as 10 CPU.
+		{name: "an app CPU whose negative exponent a long mantissa makes up for", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("10000000000000000000000000000000000000000e-39")
+		}, err: []string{`appCpu "10000000000000000000000000000000000000000e-39"`, "decimal exponent outside e-9 to e18"}},
+		{name: "an app memory with an exponent past int's range", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("1e99999999999999999999") }, err: []string{`appMemory "1e99999999999999999999"`, "decimal exponent outside e-9 to e18"}},
 		{name: "an Azure endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
 			setAzureKey(a)
 			a.AzureEmbedTokensPerMinute = nil

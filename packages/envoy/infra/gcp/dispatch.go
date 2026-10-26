@@ -570,13 +570,13 @@ func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error)
 		}
 		memory = *args.AppMemory
 	}
-	appCPU, ok := quantityValue(cpu)
-	if !ok {
-		return "", "", fmt.Errorf("appCpu %q is not a Kubernetes quantity, such as 1, 1500m or 2", cpu)
+	appCPU, err := appQuantity("appCpu", cpu, "1, 1500m or 2")
+	if err != nil {
+		return "", "", err
 	}
-	appMemory, ok := quantityValue(memory)
-	if !ok {
-		return "", "", fmt.Errorf("appMemory %q is not a Kubernetes quantity, such as 4Gi or 6144Mi", memory)
+	appMemory, err := appQuantity("appMemory", memory, "4Gi or 6144Mi")
+	if err != nil {
+		return "", "", err
 	}
 	proxyCPU, _ := quantityValue(dispatchProxyCPU)
 	proxyMemory, _ := quantityValue(dispatchProxyMemory)
@@ -607,39 +607,66 @@ func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error)
 	return cpu, memory, nil
 }
 
+// appQuantity is the exact value of input's quantity, or a refusal naming input.
+func appQuantity(input, value, examples string) (*big.Rat, error) {
+	quantity, err := quantityValue(value)
+	switch {
+	case errors.Is(err, errQuantityExponent):
+		return nil, fmt.Errorf("%s %q has a decimal exponent outside e%d to e%d, the range of the suffixes n to E; write it with a suffix, such as %s", input, value, minQuantityExponent, maxQuantityExponent, examples)
+	case err != nil:
+		return nil, fmt.Errorf("%s %q is not a Kubernetes quantity, such as %s", input, value, examples)
+	}
+	return quantity, nil
+}
+
 var (
 	quantityBinarySuffixes  = map[string]uint{"Ki": 10, "Mi": 20, "Gi": 30, "Ti": 40, "Pi": 50, "Ei": 60}
 	quantityDecimalSuffixes = map[string]int{"n": -9, "u": -6, "m": -3, "": 0, "k": 3, "M": 6, "G": 9, "T": 12, "P": 15, "E": 18}
+
+	errNotQuantity      = errors.New("not a Kubernetes quantity")
+	errQuantityExponent = errors.New("decimal exponent out of range")
 )
 
-// quantityValue is the exact value of a Kubernetes quantity (CPU in cores, memory in bytes), and
-// false when value is not one.
-func quantityValue(value string) (*big.Rat, bool) {
+// minQuantityExponent and maxQuantityExponent bound a quantity's decimal exponent (the e<n> form)
+// to the range its suffixes cover, n to E. Every value inside it is computed exactly, whatever
+// its mantissa; one outside it is refused rather than computed, since 10^n costs time without
+// bound, and no size this component takes needs one.
+const (
+	minQuantityExponent = -9
+	maxQuantityExponent = 18
+)
+
+// quantityValue is the exact value of a Kubernetes quantity (CPU in cores, memory in bytes):
+// errNotQuantity when value is not one, errQuantityExponent when its decimal exponent is outside
+// minQuantityExponent to maxQuantityExponent.
+func quantityValue(value string) (*big.Rat, error) {
 	match := quantityRule.FindStringSubmatch(value)
 	if match == nil {
-		return nil, false
+		return nil, errNotQuantity
 	}
 	number, ok := new(big.Rat).SetString(match[1])
 	if !ok {
-		return nil, false
+		return nil, errNotQuantity
 	}
 	suffix := match[2]
 	if shift, ok := quantityBinarySuffixes[suffix]; ok {
-		return number.Mul(number, new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), shift))), true
+		return number.Mul(number, new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), shift))), nil
 	}
 	exponent, ok := quantityDecimalSuffixes[suffix]
 	if !ok {
-		// A decimal exponent, whose digits quantityRule guarantees; out of int's range, Atoi
-		// returns the largest int of the exponent's sign. Past ±36 every non-zero value is beyond
-		// Autopilot's bounds on the same side, so the exponent is clamped rather than raised.
-		exponent, _ = strconv.Atoi(suffix[1:])
-		exponent = max(-36, min(36, exponent))
+		// A decimal exponent, whose digits quantityRule guarantees; Atoi fails only past int's
+		// range, which is outside the bounds too.
+		var err error
+		exponent, err = strconv.Atoi(suffix[1:])
+		if err != nil || exponent < minQuantityExponent || exponent > maxQuantityExponent {
+			return nil, errQuantityExponent
+		}
 	}
 	power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(abs(exponent))), nil)
 	if exponent < 0 {
-		return number.Quo(number, new(big.Rat).SetInt(power)), true
+		return number.Quo(number, new(big.Rat).SetInt(power)), nil
 	}
-	return number.Mul(number, new(big.Rat).SetInt(power)), true
+	return number.Mul(number, new(big.Rat).SetInt(power)), nil
 }
 
 func abs(n int) int {
