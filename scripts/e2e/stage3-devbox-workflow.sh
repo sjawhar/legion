@@ -20,9 +20,14 @@
 # sjawhar-agent App), never a Legion App, so run the script from the operator's own Oh My Pi
 # session, not a Legion pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses
 # to start otherwise (require_proof_human, lib/workflow.sh).
-# The App private keys are resolved through private_key_command by the daemon, and by
-# lib/app-logins.ts once to read each App's bot login from GitHub (read_app_logins,
-# lib/workflow.sh); they never enter this shell, a pane, an argv, or this transcript.
+# Legion's two role Apps are this deployment's own by default, and four inputs for another
+# deployment's: LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
+# LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secret-store keys holding
+# their private keys (lib/github-apps.sh). `prerequisites` proves each key is its id's App before the
+# run writes anything, whichever pair it took. The App private keys are resolved through
+# private_key_command by the daemon, and by lib/app-logins.ts once to prove each App and read its bot
+# login from GitHub (read_app_logins, lib/workflow.sh); they never enter this shell, a pane, an argv,
+# or this transcript.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -182,8 +187,7 @@ start_listener() {
   ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
     ENVOY_MACHINE_ID="legion-e2e3-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
     start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
-    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
   await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
     curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
 }
@@ -207,8 +211,7 @@ start_dispatch() {
     ENVOY_URL="http://127.0.0.1:$port_listener" \
     start_kept dispatch dispatch_keeper DISPATCH_LISTEN_FD \
     --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
-    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
   await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
     curl -fsS --max-time 5 "http://127.0.0.1:$port_dispatch/api/v1"
@@ -244,13 +247,7 @@ review_round_cap: 3
 # linger_hours keeps its default (72 h): the tree's close at its expiry is Stage 4b's proof.
 production_check_hours: 0.25
 instructions: $work/instructions.md
-github_apps:
-  implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
-  review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'value=\$(printf %s \"\${GH_REVIEW_APP_PRIVATE_KEY_B64}\" | tr \"_-\" \"/+\"); case \$((\${#value} % 4)) in 1) value=\${value%?};; 2) value=\"\${value}==\";; 3) value=\"\${value}=\";; esac; printf %s \"\$value\" | base64 -d'"
+$(<"$work/github-apps.yaml")
 EOF
 }
 
@@ -267,8 +264,7 @@ start_daemon() {
   # alone, set by its env, not the held-port helper's that runs it.
   start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
     env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
-    -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-    -u GH_REVIEW_APP_PRIVATE_KEY_B64 HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
+    -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
     "$work/legion" start --config "$work/legion.yaml"
   await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
     curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
@@ -547,6 +543,12 @@ approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.ki
 begin prerequisites
 refuse_leftovers legion-e2e3
 for tool in go docker jq curl python3 tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
+# against GitHub here, before the run writes anything (lib/github-apps.sh); legion.yaml's
+# github_apps is the block proved.
+require_app_inputs implement review
+write_github_apps implement review
+read_app_logins
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as the merge's close would, and the
@@ -668,8 +670,7 @@ dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$proj
 # are observed, never manufactured, and only the smoke repository is forwarded to this run's NATS.
 SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
   SMOKE_UPSTREAM_NATS="$upstream_nats" \
-  start_process bridge env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
-    -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
+  start_process bridge env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
@@ -697,7 +698,6 @@ committing nothing. Follow each instruction precisely, use the Go-daemon Legion 
 and do not create work outside the issue's smoke branch.
 EOF
 start_daemon
-read_app_logins
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
 pane_watcher &
 watcher_pid=$!
