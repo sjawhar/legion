@@ -16,6 +16,7 @@ import {
   patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
+import { consecutiveLinkClearance } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -413,8 +414,10 @@ test("an inline link keeps its line and grows its hit box without covering its n
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
   // An open ask's question renders in full on the Inbox, so it is where a body with a wrapped
-  // link and two stacked links can be measured. A generous hit box would reach the words
-  // beside the first and the link above the last.
+  // link, two stacked links and two links on consecutive lines can be measured. A generous hit
+  // box would reach the words beside the first, the link below the stacked pair's upper one, and
+  // the text of the line above the last. A question reads a single newline as a space, so the
+  // last pair is split by a hard break.
   const bodyAsk = await createAsk(
     issue.key,
     {
@@ -424,13 +427,15 @@ test("an inline link keeps its line and grows its hit box without covering its n
         "[First choice](https://example.invalid/one)",
         "",
         "[Second choice](https://example.invalid/two)",
+        "",
+        "[Upper choice](https://example.invalid/upper-choice)\\\n[Lower choice](https://example.invalid/lower-choice)",
       ].join("\n"),
     },
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
 
-  // A message turn is 16px prose on 24px lines - the tightest pitch a message body reaches -
-  // and a hard break puts two links on consecutive lines of it.
+  // A message turn is 16px prose on 24px lines, and a hard break puts two links on consecutive
+  // lines of it.
   await createMessage(
     issue.key,
     {
@@ -554,9 +559,9 @@ test("an inline link keeps its line and grows its hit box without covering its n
       line.probeClear,
       'the turn was left under the fixed comment composer, so the probe measured the composer - or [aria-label="Comment composer"] is gone'
     ).toBe(true);
-    // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
-    // a message body reaches - the lower link's padded box starts at least two pixels below
-    // the upper link's own text, which is the margin the probe at `upperText.bottom + 1` needs.
+    // On consecutive lines of one message turn - 16px prose on 24px lines - the lower link's
+    // padded box starts at least two pixels below the upper link's own text, which is the
+    // margin the probe at `upperText.bottom + 1` needs.
     expect(
       line.lowerClearance,
       "the lower link's padded box starts within a pixel of the upper link's own text, so the probe one pixel below that text is inside the lower link, and the padding check below would go red for the pitch rather than for the padding"
@@ -570,16 +575,15 @@ test("an inline link keeps its line and grows its hit box without covering its n
       .locator('main a:not([data-testid^="ask-"] a)')
       .filter({ hasText: /^Upper line$/ });
     await expect(upperLink).toHaveCount(1);
-    // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
-    // a message body reaches - a tap at the bottom of the upper link's own text is taken by
-    // the upper link.
+    // On consecutive lines of one message turn - 16px prose on 24px lines - a tap at the bottom
+    // of the upper link's own text is taken by the upper link.
     await upperLink.click({
       position: { x: line.hitX, y: line.onTextBottomY },
       timeout: 5_000,
       trial: true,
     });
     // One pixel below that text is still inside the upper link's hit box: this trial click is
-    // the check that goes red when the three pixels of `.prose a { padding-block }` are gone.
+    // the check that goes red when the padding of `.prose a { padding-block }` is gone.
     await upperLink.click({
       position: { x: line.hitX, y: line.inPaddingY },
       timeout: 5_000,
@@ -648,6 +652,9 @@ test("an inline link keeps its line and grows its hit box without covering its n
         secondTop: secondRect.y,
       };
     });
+    // Two choices a hard break puts on consecutive lines of the card's 15px text on 24.375px
+    // lines (`text-[15px] leading-relaxed`).
+    const choices = await consecutiveLinkClearance(card, "Upper choice", "Lower choice");
 
     // The probe, the two trial clicks and the tap are asserted above, each beside what it
     // measures. What is left:
@@ -662,6 +669,24 @@ test("an inline link keeps its line and grows its hit box without covering its n
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
+    // 5. Two choices on consecutive lines of the card: the lower one's padded box starts at or
+    //    below the upper one's own text.
+    expect(
+      Math.abs(choices.fontSize - 15),
+      `the card's text is ${choices.fontSize}px, not 15px, so this measures another pitch`
+    ).toBeLessThanOrEqual(0.1);
+    expect(
+      Math.abs(choices.lineHeight - 24.375),
+      `the card's lines are ${choices.lineHeight}px, not 24.375px, so this measures another pitch`
+    ).toBeLessThanOrEqual(0.1);
+    expect(
+      Math.abs(choices.linePitch - choices.lineHeight),
+      `the choices are ${choices.linePitch}px apart, not one ${choices.lineHeight}px line, so they are not on consecutive lines`
+    ).toBeLessThanOrEqual(0.5);
+    expect(
+      choices.clearance,
+      "the lower choice's padded box starts above the upper choice's own text, so a tap on the upper choice can open the lower one"
+    ).toBeGreaterThanOrEqual(0);
   } finally {
     await context.close();
   }

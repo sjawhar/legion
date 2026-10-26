@@ -11,7 +11,7 @@ import {
   replyToMessageDelivery,
   setAgentStreamResponder,
 } from "./api";
-import { expectUncovered } from "./layout";
+import { consecutiveLinkClearance, expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
 import { navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -773,6 +773,79 @@ test("a capped model name ends in an ellipsis on a phone, in the header and on t
       scrollWidth: document.documentElement.scrollWidth,
     }));
     expect(widths.scrollWidth).toBe(widths.clientWidth);
+  } finally {
+    await context.close();
+  }
+});
+
+// A turn's reasoning is 12px italic text on 16px lines. Two reasoning links on consecutive lines:
+// the lower one's padded box has to start at or below the upper one's own text, or a tap on the
+// upper line can open the lower link.
+test("on a phone the live view keeps a reasoning link's padded box off the line above", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    !PHONE_PROJECTS.includes(testInfo.project.name),
+    "the padding is the phone media query's: at desktop width it is off, so the row would pass whatever the CSS"
+  );
+  const reasoning: FakeSession = {
+    ...planner,
+    session_id: "01a0e0c1-0000-7000-8000-0000000304a1",
+  };
+  await setLiveSessions([planner, reasoning]);
+  await publishAgentStreamFrame(
+    reasoning.session_id,
+    {
+      frames: [
+        {
+          kind: "message",
+          message: {
+            at: 1_000,
+            id: "a1000",
+            parts: [
+              {
+                text: "[Upper reasoning](https://example.invalid/upper)\n[Lower reasoning](https://example.invalid/lower)",
+                type: "reasoning",
+              },
+              { text: "Both links are in the reasoning.", type: "text" },
+            ],
+            role: "assistant",
+            streaming: false,
+          },
+          seq: 1,
+          v: 1,
+        },
+      ],
+      session_id: reasoning.session_id,
+      v: 1,
+    },
+    "replay"
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/agents/${reasoning.session_id}/live`);
+    const body = page.getByTestId("agent-reasoning");
+    // The first paint can be the plain-text fallback, which has no links: wait for the link.
+    await expect(body.getByRole("link", { name: "Lower reasoning" })).toBeVisible();
+    const measured = await consecutiveLinkClearance(body, "Upper reasoning", "Lower reasoning");
+    expect(
+      Math.abs(measured.fontSize - 12),
+      `the reasoning text is ${measured.fontSize}px, not 12px, so this row measures another pitch`
+    ).toBeLessThanOrEqual(0.1);
+    expect(
+      Math.abs(measured.lineHeight - 16),
+      `the reasoning lines are ${measured.lineHeight}px, not 16px, so this row measures another pitch`
+    ).toBeLessThanOrEqual(0.1);
+    expect(
+      Math.abs(measured.linePitch - measured.lineHeight),
+      `the links are ${measured.linePitch}px apart, not one ${measured.lineHeight}px line, so they are not on consecutive lines`
+    ).toBeLessThanOrEqual(0.5);
+    expect(
+      measured.clearance,
+      "the lower reasoning link's padded box starts above the upper link's own text, so a tap on the upper line can open the lower link"
+    ).toBeGreaterThanOrEqual(0);
   } finally {
     await context.close();
   }
