@@ -448,18 +448,20 @@ RUN dpkg-query -W -f '${db:Status-Status} ${Package}\n' > /tmp/dpkg-packages \
 # the pinned release, fetched here. jj, uv and agent-browser link Rust crates whose license texts
 # none of their releases ships, so their sections name the Cargo.lock that lists those crates
 # (agent-browser's is cli/Cargo.lock); agent-browser also embeds axe-core, whose two license files
-# its repository keeps beside the copy it embeds, fetched here too. gopls, which the go stage
-# compiles, links Go modules the same way, and its section names the go.mod that lists them rather
-# than a go-licenses report like `legion`'s, because go-licenses (go-third-party-notices.sh's
-# v2.0.1, under Go 1.27.1) finds no license for one of them, github.com/segmentio/asm, and would fail
-# the build. kubectl's section names the go.mod of the Kubernetes release its binary is built from,
-# the same way. The k8s.io modules that go.mod replaces with ./staging/src, kubectl itself among them,
-# are that release's own source, each with its license file under staging/src/k8s.io at the release's
-# tag; the repository keeps the license text of every other module it links under LICENSES/vendor
-# there. The language servers' own LICENSE files come from their installed trees in the toolchain
-# stage; TypeScript's ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with
-# them. A missing or empty file fails the build. The fetches depend only on the pins, so they come
-# first, in a layer a source change reuses; the assembly reads the other stages' outputs after them.
+# its repository keeps beside the copy it embeds, fetched here too, and a static build of its
+# dashboard web app, whose section names the pnpm-lock.yaml that lists the app's npm packages.
+# gopls, which the go stage compiles, links Go modules the same way, and its section names the
+# go.mod that lists them rather than a go-licenses report like `legion`'s, because go-licenses
+# (go-third-party-notices.sh's v2.0.1, under Go 1.27.1) finds no license for one of them,
+# github.com/segmentio/asm, and would fail the build. kubectl's section names the go.mod of the
+# Kubernetes release its binary is built from, the same way. The k8s.io modules that go.mod
+# replaces with ./staging/src, kubectl itself among them, are that release's own source, each with
+# its license file under staging/src/k8s.io at the release's tag; the repository keeps the license
+# text of every other module it links under LICENSES/vendor there. The language servers' own
+# LICENSE files come from their installed trees in the toolchain stage; TypeScript's
+# ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with them. A missing or
+# empty file fails the build. The fetches depend only on the pins, so they come first, in a layer
+# a source change reuses; the assembly reads the other stages' outputs after them.
 FROM tools AS notices
 ARG BUN_VERSION
 ARG JJ_TOOL
@@ -473,7 +475,7 @@ ARG GOPLS_VERSION
 ARG AGENT_BROWSER_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
 COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
-# The twenty-one reads below (sixteen LICENSE/NOTICE fetches, five HEAD checks) are independent
+# The twenty-two reads below (sixteen LICENSE/NOTICE fetches, six HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
 # rarely), and running unauthenticated GitHub raw-content requests in parallel risks tripping its
@@ -516,6 +518,8 @@ RUN set -eu; \
     crates "$jj_repo" "$jj_tag" jj jj-crates; \
     crates astral-sh/uv "$UV_VERSION" uv uv-crates; \
     crates vercel-labs/agent-browser "v${AGENT_BROWSER_VERSION}" agent-browser agent-browser-crates cli/Cargo.lock; \
+    curl -fsSIo /dev/null "$(gh_raw_url vercel-labs/agent-browser "v${AGENT_BROWSER_VERSION}" pnpm-lock.yaml)"; \
+    printf 'agent-browser embeds a static build of its packages/dashboard web app. The npm packages it is built from are the\ndependencies listed under the packages/dashboard importer of\nhttps://github.com/vercel-labs/agent-browser/blob/v%s/pnpm-lock.yaml, the lockfile of the release this image\ninstalls, and the packages that lockfile resolves them to; the license of each is published with it on npmjs.com.\n' "$AGENT_BROWSER_VERSION" > /in/agent-browser-dashboard-npm; \
     curl -fsSIo /dev/null "$(gh_raw_url golang/tools "gopls/v${GOPLS_VERSION}" gopls/go.mod)"; \
     printf 'gopls links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/golang/tools/blob/gopls/v%s/gopls/go.mod, the module file of the release this image builds; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$GOPLS_VERSION" > /in/gopls-modules; \
     curl -fsSIo /dev/null "$(gh_raw_url kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod)"; \
@@ -558,6 +562,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "agent-browser: the Rust crates it links" /in/agent-browser-crates \
       "agent-browser: the axe-core it embeds, LICENSE-axe-core.txt of github.com/vercel-labs/agent-browser at v${AGENT_BROWSER_VERSION} (cli/src/native/a11y)" /in/agent-browser-LICENSE-axe-core.txt \
       "agent-browser: axe-core's LICENSE-axe-core-THIRD-PARTY.txt of github.com/vercel-labs/agent-browser at v${AGENT_BROWSER_VERSION} (cli/src/native/a11y)" /in/agent-browser-LICENSE-axe-core-THIRD-PARTY.txt \
+      "agent-browser: the npm packages of the dashboard it embeds" /in/agent-browser-dashboard-npm \
       "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE \
       "Go ${GO_VERSION}, /opt/go (go and gofmt at /usr/local/bin): LICENSE of github.com/golang/go at go${GO_VERSION}" /in/go-LICENSE \
       "gopls v${GOPLS_VERSION}, /usr/local/bin/gopls: LICENSE of github.com/golang/tools at gopls/v${GOPLS_VERSION}" /in/gopls-LICENSE \
