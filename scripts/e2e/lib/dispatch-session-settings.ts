@@ -1590,11 +1590,17 @@ async function run(rigFile: string): Promise<void> {
       const pickedAt = Date.now();
       await page.pickModel(target);
       const stored = await newMessage(services, S, `/model ${target}`, storedBefore);
-      const attempt = stored.message.deliveries.at(-1);
-      expect(
-        attempt !== undefined && attempt.state !== "failed",
-        `Dispatch's send failed: ${JSON.stringify(attempt ?? null)}`
+      // Dispatch commits the message before it asks the listener for the target and records the
+      // attempt, so a read can hold the message with no attempt yet: wait for the attempt.
+      const attempt = await until(
+        `Dispatch to record an attempt to deliver message ${stored.message.id}`,
+        30_000,
+        async () =>
+          (await services.thread(S))
+            .find((read) => read.message.id === stored.message.id)
+            ?.message.deliveries.at(-1)
       );
+      expect(attempt.state !== "failed", `Dispatch's send failed: ${JSON.stringify(attempt)}`);
       const { header } = await page.headerUntil(
         "the no-answer line",
         45_000,
@@ -1608,7 +1614,7 @@ async function run(rigFile: string): Promise<void> {
       expect(!header.pickersDisabled, "the pickers are still disabled after the no-answer line");
       await page.shot("no-answer");
       note(
-        `picked ${target} (message ${stored.message.id}, attempt ${attempt?.attempt} ${attempt?.state}); ${waited} ms later the switch line read "${header.status}"; the header still shows ${header.model}, ${header.thinking}, pickers enabled`
+        `picked ${target} (message ${stored.message.id}, attempt ${attempt.attempt} ${attempt.state}); ${waited} ms later the switch line read "${header.status}"; the header still shows ${header.model}, ${header.thinking}, pickers enabled`
       );
       const createdAt = Date.parse(stored.message.created_at);
       const wait = createdAt + 65_000 - Date.now();
@@ -1636,10 +1642,10 @@ async function run(rigFile: string): Promise<void> {
         return lines.find(
           (line) =>
             line.includes(stored.message.id) &&
-            line.includes(`attempt ${attempt?.attempt} was requested more than a minute ago`)
+            line.includes(`attempt ${attempt.attempt} was requested more than a minute ago`)
         );
       });
-      const again = await services.accept(stored.message.id, attempt?.attempt ?? 1, S);
+      const again = await services.accept(stored.message.id, attempt.attempt, S);
       expect(
         again.status === 409 && JSON.stringify(again.body).includes('"ACCEPT_STALE"'),
         `the accept asked again answered ${again.status} ${JSON.stringify(again.body)}, want 409 ACCEPT_STALE`
