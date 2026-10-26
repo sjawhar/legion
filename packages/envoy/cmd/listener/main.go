@@ -366,7 +366,8 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // once the durable consumer binds, which during a rolling deploy waits out the task being replaced
 // while /v1 already serves; 200 "healthy" with the durable consumer's lag once every dependency
 // answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a
-// cache's watcher has stopped, the durable consumer is gone, or the durable consumer is
+// cache's watcher has stopped, the durable consumer is gone, a bus check did not answer within
+// healthzBudget, or the durable consumer is
 // "not bound to this listener's subscription" because it was recreated server-side and now
 // delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
 // the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
@@ -377,9 +378,11 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 //
 // The checks that go to the bus share one healthzBudget taken from the request's own context: the
 // flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
-// not answered when it ends is answered as the same check failing is (healthzPing), so a stall in
-// JetStream alone, which the flush's core PING does not see, is answered inside the budget rather
-// than after the 10 s JetStream wait.
+// not answered when it ends (healthzPing) is 503 unhealthy naming the dependency and the
+// context's deadline, so a stall in JetStream alone, which the flush's core PING does not see,
+// fails the container health check inside the budget, as the 10 s JetStream wait it replaces
+// failed it by running past the check's timeout. A check that answered with a failure keeps its
+// answer.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -413,8 +416,8 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			}
 		}
 		for _, c := range d.caches {
-			if err := healthzPing(ctx, c.cache); err != nil {
-				writeDependencyHealth(w, c.name+" KV", err, c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
+			if answered, err := healthzPing(ctx, c.cache); err != nil {
+				writeDependencyHealth(w, c.name+" KV", err, !answered || c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
 		}
@@ -431,7 +434,8 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		}
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer, nats.Context(ctx))
 		if err != nil {
-			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
+			// A read ctx ended did not answer, the info read's own form of healthzPing's unanswered.
+			writeDependencyHealth(w, "durable consumer", err, ctx.Err() != nil || errors.Is(err, nats.ErrConsumerNotFound))
 			return
 		}
 		// One read and no confirming second one, unlike durableProbe's: the endpoint reports the
@@ -452,14 +456,14 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 const healthzBudget = 3 * time.Second
 
 // healthzPing is cache's Ping as a /healthz request holding ctx waits for it (bus.Bounded): nats.go's
-// KV Status takes no context, so a ping that has not answered when ctx ends fails with ctx's error,
-// the "context deadline exceeded" a ping that waited out the JetStream MaxWait failed with. The
-// abandoned ping runs on to its answer or that wait; what it can still do then - record a
+// KV Status takes no context, so a ping that has not answered when ctx ends is answered false, with
+// ctx's error, the "context deadline exceeded" a ping that waited out the JetStream MaxWait failed
+// with. The abandoned ping runs on to its answer or that wait; what it can still do then - record a
 // recreated bucket's error on its watcher, or prune the session cache's last-seen times - is what
 // any later ping would do.
-func healthzPing(ctx context.Context, cache kvCache) error {
-	_, _, err := bus.Bounded(ctx, func() (struct{}, error) { return struct{}{}, cache.Ping() })
-	return err
+func healthzPing(ctx context.Context, cache kvCache) (answered bool, err error) {
+	_, answered, err = bus.Bounded(ctx, func() (struct{}, error) { return struct{}{}, cache.Ping() })
+	return answered, err
 }
 
 func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, terminal bool) {

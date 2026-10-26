@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -266,11 +267,32 @@ func writeBusUnavailable(w http.ResponseWriter, err error) int {
 // ctx, is the store's own answer: a key NATS refuses (bus.ErrRefused), no key (nats.ErrKeyNotFound),
 // a record this build cannot decode (store.ErrMalformedInterest, store.ErrMalformedRoleClaim), or a
 // conditional write or delete another writer's change beat (nats.ErrKeyExists). Every other error
-// did not answer, whatever it names, and so does any error once ctx has ended: a failure joined
-// with a call the budget ran out on (store.Registry.SetRoleWithPrevious's) did not answer whole.
+// did not answer, whatever it names, and so does any error once ctx has ended. An errors.Join of
+// failures (store.Registry.SetRoleWithPrevious joins a lost claim with its holder read and its
+// rollback) answered only when every part of it did.
 func storeAnswered(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
+	}
+	return storeAnswer(err)
+}
+
+// joinedType is the type errors.Join returns. fmt.Errorf with several %w also unwraps to a list,
+// but its parts are one failure and the detail it carries (store.ErrMalformedInterest and the
+// decode error), so only a join is split; a join under a single-%w wrapper is found by walking the
+// wrapper's chain first.
+var joinedType = reflect.TypeOf(errors.Join(errors.New("")))
+
+func storeAnswer(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if joined, ok := e.(interface{ Unwrap() []error }); ok && reflect.TypeOf(e) == joinedType {
+			for _, part := range joined.Unwrap() {
+				if !storeAnswer(part) {
+					return false
+				}
+			}
+			return true
+		}
 	}
 	return errors.Is(err, bus.ErrRefused) || errors.Is(err, nats.ErrKeyNotFound) || errors.Is(err, nats.ErrKeyExists) ||
 		errors.Is(err, store.ErrMalformedInterest) || errors.Is(err, store.ErrMalformedRoleClaim)

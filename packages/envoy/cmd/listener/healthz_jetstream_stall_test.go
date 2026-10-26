@@ -136,10 +136,10 @@ func (r *subjectStallRelay) close() {
 // /healthz flushes the connection first, a core PING, and then pings each cache's bucket and reads
 // the durable consumer's info, which are JetStream requests. nats.go's KV Status takes no context
 // and the info read waited out the JetStream MaxWait (10 s), so a JetStream that stops answering
-// while core NATS still does held /healthz past a probe's own timeout. Each must answer inside
-// /healthz's 3 s budget instead, with the answer the same check waiting out that wait always had:
-// 200 degraded, naming the dependency and the context's deadline. The negative control is /healthz
-// on the same rig before the stall: 200 healthy.
+// while core NATS still does held /healthz past a probe's own timeout, and the container health
+// check (`curl -sf`) failed. Each must answer inside /healthz's 3 s budget instead, and still fail
+// that check: 503 unhealthy, naming the dependency and the context's deadline. The negative control
+// is /healthz on the same rig before the stall: 200 healthy.
 func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.T) {
 	for _, stall := range []struct {
 		name     string
@@ -202,8 +202,8 @@ func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.
 				t.Fatalf("/healthz answered after %s (%d %v), want inside %s - a JetStream that stopped answering must be reported inside the budget",
 					elapsed, code, body, healthzWithin)
 			}
-			if code != http.StatusOK || body["status"] != "degraded" || body["error"] != stall.want {
-				t.Fatalf("/healthz with %s stalled = %d %v, want 200 degraded with the error %q", stall.name, code, body, stall.want)
+			if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["error"] != stall.want {
+				t.Fatalf("/healthz with %s stalled = %d %v, want 503 unhealthy with the error %q", stall.name, code, body, stall.want)
 			}
 			t.Logf("/healthz with %s stalled: %d in %s: %v", stall.name, code, elapsed, body["error"])
 		})

@@ -805,7 +805,7 @@
   `capability_refused` on a send, and `publish_denied`, `role_unclaimed`, `role_lapsed`,
   `role_holder_changed` or `role_claim_unreadable` on a publish (INFRA-141).
 - The Envoy listener's webhook routes and `/healthz` answer a bus that went silent inside their
-  callers' wait, with the answers and statuses they always gave (INFRA-141). A GitHub check_suite
+  callers' wait (INFRA-141). A GitHub check_suite
   or check_run delivery's CI record - the wait for a write it queues behind and its own write - is
   held to 4 s, two write budgets, each KV call included, where a silent bus held it for the 10 s
   JetStream wait, and ends sooner when its request does; it is still the 503 a failed record was.
@@ -815,8 +815,17 @@
   Wispr event's and a GitHub event's end when the sender drops the request, or at that 5 s; each
   is still the 503 a failed publish was. `/healthz`'s flush, cache KV pings and durable consumer
   read share one 3 s budget, so a stall in JetStream alone, which the flush does not see, is
-  answered in 3 s rather than 10 s, as the same check failing always was (`200 degraded`,
-  `context deadline exceeded`).
+  answered in 3 s rather than 10 s: a check that did not answer within it is `503 unhealthy`
+  naming the dependency and `context deadline exceeded`, so the container health check (`curl
+  -sf`) still fails and replaces the task, as it did when the 10 s wait outran it. A check that
+  answered with a failure keeps its answer.
+- `POST /v1/roles/set`'s cleanups - the rollback of a claim that did not land and the old holder's
+  loss of the role's topic - run under their own 3.5 s bound detached from the request, so a
+  request whose budget ended still starts them (INFRA-141). The role reaper removes a role topic
+  whose claim names another session or none, once two consecutive passes find it so on the same
+  revision of the record, logging `role reaper removed a role topic whose claim names another
+  session or none` at INFO. A claim whose lost compare-and-swap is joined with a store call that
+  did not answer is the bus-unavailable 503 with `Retry-After: 1`, not the store's answer.
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is

@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -9,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -197,8 +202,9 @@ func TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.
 // direct get of the claim; for the claim's write it is the conditional create, which nats.go
 // publishes with headers (HPUB) after the read and the claimant's interest write have answered,
 // so the write itself is what meets the silent bus, and the rollback that follows a write that did
-// not answer must not take the request past its budget either. The negative control is the same
-// claim asked on a rig of its own before any freeze: it is served.
+// not answer must not take the request past its budget either. The negative control is a hard claim
+// of another role (role-store-control) by the same claimant on the same rig before the freeze: it
+// is served.
 func TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget(t *testing.T) {
 	const claimant = "ses_role_store_claimant"
 	for _, freeze := range []struct {
@@ -218,6 +224,46 @@ func TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget(t *testing.
 			rig.relay.arm(freeze.trigger, 1)
 			recorder, elapsed := rig.serve(http.MethodPost, "/v1/roles/set", freeze.body)
 			wantWriteBusUnanswered(t, "POST /v1/roles/set", recorder, elapsed)
+		})
+	}
+}
+
+// store.Registry.SetRoleWithPrevious joins a claim that lost its conditional write
+// (nats.ErrKeyExists) with its holder read and its rollback (errors.Join). errors.Is finds a store
+// answer in any part of a join, so a lost claim joined with a call the bus did not answer was
+// answered as the store's own, a 500 with no Retry-After. A join is a store answer only when every
+// part of it is; anything else is the bus-unavailable 503 with Retry-After: 1. The controls: a join
+// of store answers, a store answer wrapped alone, and a store answer wrapped with its detail by one
+// fmt.Errorf (an unreadable record and its decode error) are each still the store's answer.
+func TestAJoinedStoreErrorIsTheStoresAnswerOnlyWhenEveryPartIs(t *testing.T) {
+	dropped := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
+	for _, c := range []struct {
+		name     string
+		err      error
+		answered bool
+	}{
+		{"a lost claim joined with a dropped connection", errors.Join(nats.ErrKeyExists, dropped), false},
+		{"a lost claim joined with no responders", errors.Join(nats.ErrKeyExists, nats.ErrNoResponders), false},
+		{"a lost claim joined with a join that holds no responders", errors.Join(nats.ErrKeyExists, errors.Join(nats.ErrKeyNotFound, nats.ErrNoResponders)), false},
+		{"a wrapped join of a lost claim and a dropped connection", fmt.Errorf("claim: %w", errors.Join(nats.ErrKeyExists, dropped)), false},
+		{"a dropped connection alone", dropped, false},
+		{"a lost claim joined with no key", errors.Join(nats.ErrKeyExists, nats.ErrKeyNotFound), true},
+		{"a lost claim alone", fmt.Errorf("write role r's claim: %w", nats.ErrKeyExists), true},
+		{"an unreadable record and its decode error", fmt.Errorf("%w: %w", store.ErrMalformedInterest, errors.New("unexpected end of JSON input")), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := storeAnswered(context.Background(), c.err); got != c.answered {
+				t.Fatalf("storeAnswered(%q) = %t, want %t", c.err, got, c.answered)
+			}
+			recorder := httptest.NewRecorder()
+			writeStoreError(context.Background(), recorder, c.err, http.StatusInternalServerError)
+			code, retry := recorder.Code, recorder.Header().Get("Retry-After")
+			if c.answered && (code == http.StatusServiceUnavailable || retry != "") {
+				t.Fatalf("the store's answer %q was answered %d with Retry-After %q, want the route's own status", c.err, code, retry)
+			}
+			if !c.answered && (code != http.StatusServiceUnavailable || retry != "1") {
+				t.Fatalf("%q was answered %d with Retry-After %q (%s), want 503 with Retry-After: 1", c.err, code, retry, recorder.Body.String())
+			}
 		})
 	}
 }

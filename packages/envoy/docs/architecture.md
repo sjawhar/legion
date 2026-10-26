@@ -169,15 +169,21 @@ context ends. Store work that did not answer, whatever it names, is
 `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`
 (`writeStoreError`, `cmd/listener/api.go`). The store's own answers keep the answers they had: a
 refused key its 413 or 400, a held role its 409, and no key, an undecodable record or a lost
-compare-and-swap the status the route always gave it. A write the budget abandoned may still land
+compare-and-swap the status the route always gave it; an error a claim joins from several is one
+only when every part of it is. A write the budget abandoned may still land
 after the 503: a put rewrites the record the caller's retry writes again, and a delete or a claim
 is conditional on the revision it read (`store.Registry.UpsertWithin`, `Remove`,
 `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete` say why each is safe).
+A claim's rollback and its old holder's topic cleanup run under their own 3.5 s bound detached
+from the request, so they still run once its budget has ended; a role topic one of them fails to
+remove is removed by the role reaper once two consecutive passes find its claim naming another
+session or none on the same revision of the record (`store.Registry.ReapRoleClaims`).
 
 ## Webhook and health check bounds
 
-The webhook routes and `/healthz` do their bus work within the request, keeping every answer and
-status they had; only how long a silent bus can hold them changed.
+The webhook routes and `/healthz` do their bus work within the request. The webhook routes keep
+every answer and status they had, and `/healthz` every answer but a check's that did not answer;
+what changed is how long a silent bus can hold them.
 
 | Path | Bus work | Bound | A call that did not answer |
 | --- | --- | --- | --- |
@@ -185,7 +191,7 @@ status they had; only how long a silent bus can hold them changed.
 | `/webhook/github`, any other event | publishes | the request, the route's write deadline, and the bus's 5 s a publish | `503 service unavailable` |
 | `/webhook/slack` | publishes | 2.5 s from the handler's start (`slackAnswerBudget`), inside the 3 s Slack waits | `503 service unavailable` |
 | `/webhook/ghostwispr` | publish | the request, and the bus's 5 s | `503 service unavailable` |
-| `/healthz` | flush, each cache's KV ping, the durable consumer's info read | 3 s from the request's start, shared (`healthzBudget`) | as the same check failing: `200 degraded` naming the dependency, or `503 unhealthy` for the flush |
+| `/healthz` | flush, each cache's KV ping, the durable consumer's info read | 3 s from the request's start, shared (`healthzBudget`) | `503 unhealthy` naming the dependency and `context deadline exceeded`, so the container health check fails, as it did when the 10 s wait outran it; a check that answered with a failure keeps its answer (`200 degraded` or `503 unhealthy`) |
 
 nats.go's KV calls take no context and wait out the JetStream MaxWait (10 s), so a CI write's KV
 calls and `/healthz`'s pings are waited for through a context (`kvCall`, `bus.Bounded`) that
