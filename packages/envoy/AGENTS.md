@@ -2079,13 +2079,37 @@ method, the route pattern, its path values, the query, the media type and the bo
 body with its boundary masked, since a client mints a boundary per attempt), so a repeat is told
 from a reuse:
 
-- Before it reads a byte of the body, the layer looks the key up by login and key alone, naming no
+- Before it spools a byte of the body, the layer looks the key up by login and key alone, naming no
   digest: a row still in flight answers `409 KEY_IN_FLIGHT` with `Retry-After: 1` at once, so a
-  repeat of a large upload whose first attempt still runs costs nothing, and a different request
-  under a key still running gets `KEY_IN_FLIGHT` too, then `KEY_REUSED` once the first has
-  answered. An upload to a closed issue (`POST /api/v1/issues/{key}/artifacts`) is refused
-  `409 ISSUE_CLOSED` before its body is read, keyed or not, and claims no key.
-- The layer then reads the body, spooling at most the route's own limit (`keyedBodyLimit`: an
+  repeat of a large upload whose first attempt still runs is never written to disk, and a different
+  request under a key still running gets `KEY_IN_FLIGHT` too, then `KEY_REUSED` once the first has
+  answered. A fresh upload to a closed or missing issue (`POST /api/v1/issues/{key}/artifacts`) is
+  refused as its handler would refuse it (`409 ISSUE_CLOSED` for a closed one) before its body is
+  spooled, keyed or not, and claims no key (`refuseUploadToAClosedIssue`, mounted ahead of the
+  layer). That refusal stands in for the handler, so it answers only a request whose handler
+  would run - a fresh key, one past its window, an abandoned one: a repeat under a key the layer
+  answers itself (`requestKeyAnswersItself`: a stored answer, a first still running, a write that
+  committed and lost its answer) goes on to the layer whatever the issue's state now, so an upload
+  that landed before the issue closed is replayed its `201`. The key is looked up only when the
+  issue refuses with its own 4xx.
+- Every answer given before a request's body is read waits for that body (`drainBeforeAnswer`,
+  `api/body_drain.go`, which `register` puts around every route but a `GET`): the layer's
+  `KEY_IN_FLIGHT` and `KEY_INVALID`, the closed-issue refusal, `LOGIN_CHANGED`, a refused path
+  parameter, a handler's refusal made before it decodes. The answer is written only once the rest
+  of the body is read and discarded, never spooled, at most `routeBodyLimit` and one byte more.
+  An HTTP/1.1 client that sends a whole body before it reads the answer - WebKit and Firefox
+  uploading a file - otherwise met net/http's close of a connection with its body unread as a
+  reset, and dropped the answer with it (FinalReview4 L2; the browser suite's 20 MB in-flight
+  upload row). A body past the limit is answered as the limit answers it, in place of the early
+  answer and without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three
+  upload routes, `413 REQUEST_TOO_LARGE` on every other), and the connection closes, so a client
+  that sends past 26 MiB may still see a failed connection. The one early answer the limit does
+  not replace is a `401`: a caller that resolves to nobody is refused before any limit is judged,
+  and a page whose session lapsed reads that `401` as its cue to sign in again. A body a layer read
+  to its end or past the limit itself is left as it is, and so is the body of an
+  `Expect: 100-continue` request never told to continue. `routes.enforceCookieOrigin`'s `403` for
+  a cross-origin cookie write is answered before the route, outside the drain.
+- The layer then reads the body, spooling at most the route's own limit (`routeBodyLimit`: an
   upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
   `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route
   refuses it. A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a

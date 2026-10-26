@@ -182,7 +182,8 @@ mishandles text typed over what follows a block's last line break; both also run
 `e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch,
 the whole of `e2e/live-socket.e2e.ts`, since one socket per tab, its rotation and its resume
 are each engine's own connection behaviour, and the keyed write path, `e2e/keyed-writes.e2e.ts`
-and `e2e/keyed-send.e2e.ts`, since each engine fails, aborts and resumes a request its own way
+and `e2e/keyed-send.e2e.ts`, since each engine fails, aborts and resumes a request, and reads an
+upload's answer, its own way
 (`AGENTS.md` lists the rest of each project's specs). `webkit-iphone` runs the live view's
 phone rows of `e2e/agent-view.e2e.ts`, the header row of `e2e/agent-view-settings.e2e.ts` that
 shows the session's reported model, the rows of `e2e/phone-conversation.e2e.ts` that check what
