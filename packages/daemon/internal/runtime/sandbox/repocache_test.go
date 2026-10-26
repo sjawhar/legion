@@ -809,7 +809,7 @@ func mountsOf(c corev1.Container) []string {
 }
 
 // The feed lives on the issue's own volume, under the subPath feed: workspace-fetch mounts that
-// alone, read-write, and no other part of the volume; workspace-init and every role container
+// alone, read-write, and no other part of the volume; workspace-init and the roles container
 // mount the volume whole and the feed again, read-only, over it, so no agent can write the feed the
 // token-holding container reads. No emptyDir feed is left.
 func TestTheFeedIsOnTheIssueVolumeAndOnlyTheFetchWritesIt(t *testing.T) {
@@ -831,7 +831,7 @@ func TestTheFeedIsOnTheIssueVolumeAndOnlyTheFetchWritesIt(t *testing.T) {
 	}
 	for _, c := range spec.Containers {
 		if got := mountsOf(c); !slices.Contains(got, feed+" ro") || !slices.Contains(got, TreeRoot+"  rw") || slices.Contains(got, feed+" rw") {
-			t.Errorf("role container %s mounts the issue volume %q, want it whole and the feed read-only", c.Name, got)
+			t.Errorf("container %s mounts the issue volume %q, want it whole and the feed read-only", c.Name, got)
 		}
 	}
 	for _, v := range spec.Volumes {
@@ -877,6 +877,9 @@ func TestAnIssuePodsFetchIsToldItsRepositorysCacheAndItsToken(t *testing.T) {
 	}
 	if env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"] != ProvisionDir+"/"+cacheTokenKey {
 		t.Errorf("the fetch is told LEGION_REPOSITORY_CACHE_TOKEN_FILE=%q", env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"])
+	}
+	if want := rootSpec(t).DefaultBranch; want == "" || env["LEGION_DEFAULT_BRANCH"] != want {
+		t.Errorf("the fetch is told LEGION_DEFAULT_BRANCH=%q, want the issue's recorded default %q", env["LEGION_DEFAULT_BRANCH"], want)
 	}
 	if issueSecret := g.secret(secretName(loc.Sandbox.Name)); issueSecret == nil || string(issueSecret.Data[cacheTokenKey]) != bearer || bearer == "" {
 		t.Errorf("the issue pod's provisioning Secret holds %v, want the cache's bearer %q", issueSecret, bearer)

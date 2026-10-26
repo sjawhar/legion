@@ -25,7 +25,7 @@ import (
 //   - LEGION_GH_OWNERS_DIR (ghAgentEnv), the one variable `legion git-credential` reads
 //     (runGitCredential, cmd/legion/gitcredential.go);
 //   - GIT_CONFIG_COUNT and each GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> below it, the role's
-//     command-scope entries (gitCredentialEnv);
+//     command-scope entries (gitConfigEnv);
 //   - HOME at an empty temporary directory, GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1,
 //     so git reads no global, XDG or system configuration;
 //   - GIT_TERMINAL_PROMPT=0, so a missing credential fails rather than prompts;
@@ -45,9 +45,9 @@ import (
 // record under any other helper key, empty or not, and a helper key with no value at all, may
 // change what git runs for github.com, so each counts as one entry. helper_effective is the number
 // of entries after the last reset, and the list is `expected` when it is exactly one entry,
-// `!legion git-credential` under one of those two keys at command scope, where gitCredentialEnv
+// `!legion git-credential` under one of those two keys at command scope, where gitConfigEnv
 // puts it. The negative control runs the same ls-remote with every command-scope helper value
-// emptied, gitCredentialEnv's GIT_CONFIG_VALUE_1 among them, and liveSetupControlClass reads how
+// emptied, gitConfigEnv's GIT_CONFIG_VALUE_1 among them, and liveSetupControlClass reads how
 // it ended: legion-smoke is private, so it must be refused for want of a credential, and git=ok is
 // then the helper's doing. A control that failed for any other reason (no network, a GitHub
 // error, a timeout) proves nothing, and its record says so.

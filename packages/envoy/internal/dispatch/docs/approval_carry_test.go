@@ -460,7 +460,7 @@ func TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion(t *testing.T) {
 }
 
 // approveStoredVersion records login's approval of version number of artifactID as a row alone,
-// with no event and so no event sequence: a review recorded before migration 0118, which the
+// with no event and so no event sequence: a review recorded before migration 0120, which the
 // carry reads as it reads any other.
 func approveStoredVersion(t *testing.T, database *store.Store, artifactID string, number int, login string) {
 	t.Helper()

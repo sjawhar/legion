@@ -8,7 +8,7 @@ import (
 
 // artifactReviewsEventSeqVersion is the migration that adds the sequence of each review's
 // artifact.* event to its row.
-const artifactReviewsEventSeqVersion = 118
+const artifactReviewsEventSeqVersion = 120
 
 // TestMigrationAddsTheReviewsEventSequence: a review recorded before the column reads back with no
 // sequence, so the approval read gives it its time alone; the release before it keeps inserting

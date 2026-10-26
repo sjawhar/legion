@@ -583,7 +583,11 @@ export interface ArtifactApproval {
   /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
   /** The latest review's event sequence on the document's owner, which orders the review among
-   *  the owner's events as they commit; absent for a review recorded before Dispatch kept it. */
+   *  the owner's events as they commit. Absent for a review recorded before Dispatch kept it, and
+   *  on every read the release before that serves (during a rollout or a rollback), so a missing
+   *  `seq` does not prove an older review. It orders; it does not say which versions the review
+   *  covers, which is `version`: a carried approval's `seq` can be below its version's own
+   *  `artifact.version`. */
   readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
@@ -1453,7 +1457,7 @@ export interface SearchResultsPage {
 export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
 
 /** `SearchResponse.degraded`'s one value today: meaning search could not run for this request (no
- * Bedrock credentials configured, the query's own embedding timed out, or Bedrock answered an
+ * embedder configured, the query's own embedding timed out, or the model service answered an
  * error) and search fell back to keyword-only ranking. Generated into Go as
  * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
  * `search-answer.ts` compares against cannot drift apart. */
@@ -1468,12 +1472,48 @@ export type SearchResponse = {
   readonly took_ms: number;
   /**
    * Why this search fell back to keyword-only ranking - today only
-   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no Bedrock credentials configured, the
-   * query's own embedding timed out, or Bedrock answered an error) - absent when meaning search
+   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no embedder configured, the query's own
+   * embedding timed out, or the model service answered an error) - absent when meaning search
    * ran normally.
    */
   readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
+
+/** One kind's (or every kind's) counts in `SearchCoverage`. `items` is every searchable item;
+ * `current` those with a vector from the configured embedder's identity at the item's current
+ * text, `failed` those whose row is dead and not current, and `lacking` the rest
+ * (`items - current - failed`). `oldest_lacking_seconds` is how long the longest-waiting lacking
+ * item has waited for its vector, from when its row last became pending or when the item was
+ * written, whichever is later; null when nothing lacks. Mirrors `model.SearchCoverageCounts`. */
+export interface SearchCoverageCounts {
+  readonly items: number;
+  readonly current: number;
+  readonly lacking: number;
+  readonly failed: number;
+  readonly oldest_lacking_seconds: number | null;
+}
+
+/** `SearchCoverage`'s counts for each kind meaning search ranks. Mirrors
+ * `model.SearchCoverageKinds`. */
+export interface SearchCoverageKinds {
+  readonly issue: SearchCoverageCounts;
+  readonly document: SearchCoverageCounts;
+  readonly comment: SearchCoverageCounts;
+  readonly ask: SearchCoverageCounts;
+  readonly message: SearchCoverageCounts;
+}
+
+/** `GET /api/v1/search/coverage`: how much of what meaning search ranks has a current vector from
+ * the configured embedder (INFRA-393). `identity` is the value `embeddings.model` records and
+ * search compares, `place` and `model` are read from it; all three are null when no embedder is
+ * configured, and then nothing is current. Mirrors `model.SearchCoverage`. */
+export interface SearchCoverage {
+  readonly identity: string | null;
+  readonly place: "bedrock" | "azure" | null;
+  readonly model: string | null;
+  readonly total: SearchCoverageCounts;
+  readonly kinds: SearchCoverageKinds;
+}
 
 export interface DuplicateCandidate {
   readonly key: string;
