@@ -2,21 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T07:00:00Z",
+  "completed": "2026-10-26T10:00:00Z",
   "generation": 3,
-  "round": "the round after review 5647844063; code head 954e9d184941, handoff head 5dcda609",
-  "scope": "The architect's ruling (Envoy 6628c26753c5eb3462a14cab9669a3e4): confirm that the four statements of 5647844063 are corrected and that no code changed after dfe43f43 apart from them; approve the head by SHA if both hold and no defect is found.",
-  "decision": "approved",
-  "verified": [
-    "All four statements are corrected in 954e9d184941: AGENTS.md's /v1/messages/publish row and docs/architecture.md:122-126 credit both a spent deadline and a cancel to publishConfirmed's single context check, which matches internal/bus/confirm.go; AGENTS.md's role-ownership bullet names store.Registry's RoleClaim/ReleaseExpiredRoleClaim through bounded; the comment on TestAPublishConfirmedWithASpentDeadlinePublishesNothing gives a true reason. CHANGELOG.md's matching sentence was corrected too. grep: no withinContext, 'reading it at entry', 'reading it once more' or 'publishCoreTo` refuses' remains in packages/envoy or docs.",
-    "The only non-.legion paths changed from dfe43f43 to 5dcda609 are packages/envoy/AGENTS.md, CHANGELOG.md, docs/architecture.md and internal/bus/publish_ended_context_test.go, and the test file's diff has no changed line outside // comments. No runtime code changed, so no thermonuclear pass runs this round.",
-    "Proofs: the implementer's real-binary proof at code head dfe43f43 (PR body, review 5647344074's round: malformed claim 500 on both routes, frozen bus 503 in 3.50 s, e2e-local exit 0) and the tester's line at faf41f3e (prose-only delta; the dfe43f43 real-binary evidence stands; the test file's comment-stripped AST is identical) both name this code."
+  "round": "the range 954e9d18..83135449: dc06110d (bounded interest reads), merge 5aee84d6 (main's #2199, INFRA-122), and the unreadable-interest fix 5c5ee4f3/0ad64d7f/849dbb98; code head 849dbb989eff",
+  "scope": "The architect's rulings (Envoy 39d084a54b867cfc1ac6415c4d380f8a, 457844d1e2563a411443dae84a035a7f): review the whole range from 954e9d18 and raise only a defect; approve by SHA if none; name the provider that answered.",
+  "decision": "changes_requested",
+  "confirmed": [
+    "dc06110d: every interest read on GET /v1/sessions, /v1/registry/<id> and /v1/interests/<id> is bounded by the request's context (list: one 3.5 s budget, 1 s per read; registry: at most 2 s session read + 1 s interest read; interests: 3.5 s). A read that did not answer is a 503 with Retry-After: 1. TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget fails at 10.000 s with the reads under context.Background() (code-quality mutant V1).",
+    "Merge 5aee84d6 against main's 748e8d952 (#2199): the registry path keeps main's store.Interest{SessionID} with no MachineID, so the owner is the entry's MachineID; both paths use DeliverWithResultForEntry with the read-through entry; OwnedElsewhere is checked before reasonFor and is ACKed before the unplaceable branch. No test of either side was lost: each one missing had been deleted by its own side (main's owner-rule rewrite; the branch's removed Deliverer.Sessions/SessionLookup API). TestE2E_AgentToAgent_RemoteMachine now tests the owner pushing to the entry's host; the non-owner case is covered by TestDelivery_CrossMachineAgentMessageACKsWithoutDelivery.",
+    "Decode fix: store.ErrMalformedInterest; GET /v1/registry/<id> and /v1/interests/<id> answer 500 with no Retry-After; GET /v1/sessions lists the session with no topics; Upsert replaces, Remove(nil) deletes and releases, Remove(topics) leaves the record, SetRoleWithPrevious replaces the claimant's record. Every new test fails on its own mutant (code-quality section 1)."
   ],
-  "ci": "CI head faf41f3eb85b (compare to 5dcda609: ahead, only .legion/). Required: lint, typecheck, test completed/success (Tests 40275967174); pr-title completed/success (PR Title 40276241104). Also success: Docs 40275967328, Worker Image 40275967173, envoy-e2e-local. Legion Envoy and Contracts 40275967201 was still running (envoy-go queued, envoy-go-race in progress) behind a repository-wide runner backlog; it is not required.",
-  "verdictProvenance": "provider not verified: this session's transcript is held in the SQL session store, and the per-turn provider and model of the turns that wrote this verdict could not be read from it in this pod.",
+  "ci": "CI head 76e46d409561. At reading, Tests, Docs, Worker Image and Legion Envoy and Contracts were queued and PR Title pending. A request for changes does not wait for CI.",
+  "thermonuclear": "Both run at 83135449. deep-review: CHANGES, one Low defect (below), reproduced with an overlay probe: 413 at HEAD, 200 at dc06110d^. code-quality: CLEAN; every new test fails with its fix removed; no test lost in the merge; no false doc in scope.",
+  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session, which wrote the verdict: anthropic/claude-opus-5-5, 156 of 156 assistant turns. DeepReview4: mixed, 66 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol. CodeQuality4: mixed, 47 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol.",
   "critical": 0,
   "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "threads": "45 threads in total, all resolved. I replied 'Accepted: fixed in 954e9d184941' on each of 5647844063's four threads (PRRT_kwDORFy7ds6wJdhk, -wJdhn, -wJdhq, -wJdhs), each verified in the text. No bot threads."
+  "minor": 1,
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "Regression from dc06110d. sessionInfoFor treats every error other than ErrKeyNotFound and ErrMalformedInterest as a read that did not answer. A session id the session bucket holds but the interest bucket refuses as a key (bus.ErrRefused: a legacy key longer than envoy_interests' 3974-byte get limit, or one outside nats.go's alphabet) therefore makes sessionsHandler answer the whole GET /v1/sessions with writeBusUnavailable's 413 or 400. Before dc06110d that session was listed with no topics. GET /v1/registry/<id> also turns from 200 into 413 for such a session. The comment at api.go:665-667, 'Any other error is a read that did not answer ... the bus-unavailable 503', is false for this case. Fix: no interest record can exist under a refused key, so answer bus.ErrRefused in sessionInfoFor as ErrKeyNotFound is answered (empty topics and roles); correct the comment; add a list test with testnats.LegacyKeys(bus.SessionBucket, ...)."}
+  ],
+  "threads": "45 threads, all resolved; none opened since the last round, and no bot threads."
 }
