@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-172",
+  "completed": "2026-10-26T17:53:33Z",
+  "planDocument": "dispatch://INFRA-172/artifact/plan-md (version 1)",
+  "readAt": "sjawhar/legion main ad909178",
+  "deliverables": [
+    "architecture-assessment.md on INFRA-172: every spec Problem item and the nine items of the performance comment (dispatch://INFRA-172/comment/e4aae0d0-52ab-4b54-8fba-fc88c17b9c00), the document-flow trace, the visible render differences, the large files, the schema proposal",
+    "refactor-order.md on INFRA-172: ordered steps marked Before/With/After INFRA-156 with INFRA-140 and INFRA-173 notes, the before-or-with verdict, the escaped-pipe rule and count",
+    "escaped-pipe-census.ts on INFRA-172: the script that took the count through the Dispatch API, with a --file mode for the matcher alone",
+    "a pull request on sjawhar/legion: a pass in pmdoc markRows (packages/envoy/internal/dispatch/pmdoc/table.go:378-383) after goldmark's Transform that splits a cell at a mid-row pipe after an even backslash run, rowCells changed to the same rule, Go tests, the corpus case, a browser e2e parity test in packages/dispatch/e2e/editor-paste.e2e.ts, and .dispatch/architecture/dispatch-pmdoc.md"
+  ],
+  "taskOrder": "T1 census -> T2 rule -> T3 code; T4 trace, T5 render differences, T6 Problem and performance items, T7 large files, T8 schema proposal, T9 refactor order run beside T1-T3; T10 publish and one message to the architect; T11 pull request",
+  "architectDecisions": [
+    "1. The pull request carries the escaped-pipe code change (default yes when the count lets Go follow the browser without changing how a stored document reads).",
+    "2. The implementer writes the schema proposal as a section; the architect writes the :::ask block at its end; sign-off waits for the answer, since the merge closes INFRA-172 and Dispatch then refuses answers (409 ISSUE_CLOSED, packages/envoy/internal/dispatch/api/interactions_test.go:417-418). This also holds INFRA-173 until the answer.",
+    "3. Uncovered render differences go to the architect as drafts; the architect files a tree child or opens a report-issue ask; the implementer links the result.",
+    "4. A conflict with INFRA-156's graph design goes to the architect, who posts it on INFRA-156.",
+    "5. A before-or-with verdict that asks INFRA-156 to pause, re-sequence or change is a decision for the human; the architect writes that block too.",
+    "6. The production check's write: default a scratch document uploaded to INFRA-138 and read back, since INFRA-172 is closed by then.",
+    "7. Settled by the architect 2026-10-26T17:53Z: the review's outcome goes into INFRA-173's plan and the issues it files, not into the INFRA-138 root spec."
+  ],
+  "groundRules": [
+    "Pin commit C (main@origin at the implementer's start); cite every file and line at C as a GitHub permalink.",
+    "Public repository: no company name, deployment-repository name or private host in the pull request, commits or tests; no production document text in the repository; the census corpus stays under $TMPDIR.",
+    "Before READY, nothing is owed or open on INFRA-172's documents (dispatch open-asks; dispatch doc-read --blocks).",
+    "Settled by the architect 2026-10-26T17:53Z: the implementer's push that hands the pull request to testing carries no skip-checks trailer, whatever paths it touches (dispatch://INFRA-177/comment/56710a41-d3ee-4be6-a2f1-1699a396436f), even if T3 has not landed."
+  ],
+  "acceptance": [
+    {"criterion": "A1", "surface": "architecture-assessment.md and the repository at C", "check": "every cited permalink's end line <= `jj file show -r <C> <path> | wc -l`; 10 random citations read", "negativeControl": "a made-up <path>#L99999 citation is flagged"},
+    {"criterion": "A2", "surface": "Dispatch", "check": "`dispatch read --ref <link>` resolves for every row; no row reuses an INFRA-341 map issue for a different difference", "negativeControl": "`dispatch read --issue INFRA-99999` is refused"},
+    {"criterion": "A3", "surface": "Dispatch", "check": "`dispatch doc-read --issue INFRA-172 --artifact architecture-assessment.md --blocks` shows one ask block in the schema section, 2-4 options, answered before sign-off", "negativeControl": "the same read of refactor-order.md shows no ask block"},
+    {"criterion": "A4", "surface": "refactor-order.md and the census script", "check": "rule, counts, UTC time and method stated; a re-run differs only by documents written since", "negativeControl": "`--file` over a local file with one mid-row \\\\|, one closing \\\\|, one \\| and one \\\\| in a code fence reports exactly one mid-row and one closing hit"},
+    {"criterion": "A5", "surface": "the repository at C", "check": "non-test, non-generated files over 2,000 lines in the five Dispatch packages equal the assessment's list (plus sse.ts, ProofDocument.tsx and the three ask components)", "negativeControl": "none"},
+    {"criterion": "A6", "surface": "architecture-assessment.md", "check": "one entry for each of the 11 stages, none allowed", "negativeControl": "none"},
+    {"criterion": "A7", "surface": "refactor-order.md", "check": "each step carries one Before/With/After marker and an INFRA-140/INFRA-173 note; the verdict sentence leads", "negativeControl": "none"},
+    {"criterion": "R4 settled in code", "surface": "Go tests, the pmdoc differential, the browser suite", "check": "`cd packages/envoy && go test ./internal/dispatch/pmdoc/`; `bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base <C> --corpus $TMPDIR/infra172/corpus.jsonl --out $TMPDIR/infra172/diff` reports zero regressions, misreads and panics; `bun run e2e -- editor-paste` in packages/dispatch with the rootless Postgres of docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md", "negativeControl": "each new test fails at C"},
+    {"criterion": "after the deploy", "surface": "production", "check": "the deployment instructions' dispatch-production-check.sh with --commit <merged sha> --page /issues/INFRA-172 --route /api/v1/schema/blocks; then the scratch upload with a mid-row \\\\| table read back with dispatch doc-read", "negativeControl": "the same table read back before the deploy"}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's push, pull request body, E2E proof and simplify pass rules",
+      "dispatch: every document upload and doc-edit, the decision-section shape for T8, the phone test; read references/document-edits.md and documents.md first",
+      "dispatch-first: search before treating a render difference as uncovered (T5) and before citing a source (T6)",
+      "ce-simplify-code: the simplify pass on the pmdoc change that references/pr-body.md asks for"
+    ],
+    "test": [
+      "legion-worker: the tester drives the changed surface (citations at C, the census --file matcher, the differential, the browser test) and reads CI for the static checks",
+      "dispatch: reading the two documents and their blocks with doc-read and --blocks, and resolving every link with dispatch read"
+    ],
+    "review": [
+      "legion-worker: the review round, the merge gate and what an approval needs (both E2E lines, the head SHA)",
+      "dispatch: judging the documents against the spec's acceptance, the decision-section shape and that nothing is left open before the merge closes the issue"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The pull request has nothing defined to carry; the deliverables are Dispatch documents and the merge closes the issue.", "answer": "The pull request carries the escaped-pipe code change (T3), recorded as a scope departure and architect decision 1."},
+      {"finding": "Every write to INFRA-172 stops at the merge (409 ISSUE_CLOSED).", "answer": "Ground rule and acceptance row: nothing owed or open on INFRA-172's documents before READY; production check writes to INFRA-138 (decision 6)."},
+      {"finding": "A3 asks for a decision block that phase workers cannot write; placement has costs.", "answer": "Architect decision 2: section by the implementer, block by the architect at its end, sign-off waits for the answer; departure 4."},
+      {"finding": "INFRA-173 could start before R3 is answered once INFRA-172 closes.", "answer": "Sign-off waits for the answer, so INFRA-172 stays open and INFRA-173 blocked until then (decision 2)."},
+      {"finding": "R2's new issue conflicts with Legion's no-filing rule.", "answer": "Architect decision 3 and departure 3: drafts to the architect, who files a tree child or opens a report-issue ask; A2 rewritten."},
+      {"finding": "R2 overlaps INFRA-341's audit.", "answer": "T5 takes INFRA-341's map as given, scopes R2 to markdown/document reading across the three renderers, and checks no duplicate links."},
+      {"finding": "The count has no method without a database credential; population and pattern undefined.", "answer": "T1: API crawl of every stored version via /versions/{number} at <=5 requests per second, exact pattern (table row, outside code fences, even run >=2, mid-row vs closing), three counts (latest, every version, approved), UTC times, refusals sent to the architect; departure 1."},
+      {"finding": "'Settle' in R4 reads as state-the-rule or make-it-true.", "answer": "Make it true in code when the count allows without the human (T3); otherwise T2 escalates through the architect before code."},
+      {"finding": "Spec facts the code contradicts: four renderers, typed blocks built four times, one pod, moved lines.", "answer": "Plan section 'Facts the spec states that the code no longer supports'; the assessment states the corrections; departure 6 retargets R3."},
+      {"finding": "Two numbers have no source (1,111 renderings; 12% concurrent edits).", "answer": "T6 finds the source or marks each unsourced; nothing in the plan rests on them."},
+      {"finding": "A comment on INFRA-156 is an in-tree finding that goes via the architect.", "answer": "Architect decision 4 and departure 5."},
+      {"finding": "The company name fails the public-repository checks.", "answer": "Ground rule: neutral wording in the pull request, commits and tests; no production text committed."},
+      {"finding": "'Plan' collides with Legion's plan.md.", "answer": "Deliverables are architecture-assessment.md and refactor-order.md."},
+      {"finding": "Most criteria had no machine check.", "answer": "Pinned commit C with permalink checks, fixed 11-stage trace, 2,000-line threshold plus named files, Before/With/After definitions, verdict sentence; acceptance table with commands."},
+      {"finding": "What the tester can re-run.", "answer": "Acceptance table: citation check, census and its --file matcher, differential, browser test with rootless Postgres, each with a negative control."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {"spec": "Design 3: count stored documents with the escaped pipe in the deployment's database.", "plan": "Count through Dispatch's API, which returns the stored artifact_versions.markdown for every version.", "evidence": "The pod holds no database credential (no agent-secrets helper, no kube context for Dispatch's namespace); GET /api/v1/artifacts/{id}/versions/{number} reads the stored markdown (routes_table.go:159).", "outcome": {"kind": "unchanged"}},
+    {"spec": "A4: the plan states the escaped-pipe rule and the count; non-goal: the refactor itself.", "plan": "The pull request also makes Go read a mid-row escaped pipe as the browser does, when the count allows it without the human.", "evidence": "R4 says settle; Go and the browser read '| a \\\\| b |' differently today (pmdoc/render_table_test.go:264-268); without a code change the pull request carries only handoffs, which retro removes.", "outcome": {"kind": "changed", "scope": "adds one code change (pmdoc markRows pass, rowCells, tests, browser e2e test, architecture page) to the issue's pull request"}},
+    {"spec": "R2/A2: link each visible render difference to an existing INFRA issue or a new one.", "plan": "Each difference links an open INFRA issue, a child the architect filed, or an ask on the report issue.", "evidence": "skill legion-worker references/findings.md: Legion roles file no issue for a finding; only an architect files children of its tree.", "outcome": {"kind": "changed", "acceptance": "A2: each visible render difference links an open INFRA issue, a child the architect filed, or an ask on the report issue."}},
+    {"spec": "R3/A3: the schema proposal is a decision block for the human.", "plan": "The implementer writes the proposal section; the architect writes the block; the human answers before the architect signs off.", "evidence": "skill legion-worker: phase workers write no decision block; Dispatch refuses an answer on a closed issue (api/interactions_test.go:417-418) and the merge closes INFRA-172.", "outcome": {"kind": "changed", "acceptance": "A3: the schema proposal is a decision block for the human, written by the architect, answered before the architect signs off."}},
+    {"spec": "Decision: the first graph conflict goes to INFRA-156's holder as a comment on INFRA-156.", "plan": "The implementer sends it to the architect, who posts the comment on INFRA-156.", "evidence": "INFRA-156 is in this tree; findings.md routes a worker's in-tree finding to the tree's architect.", "outcome": {"kind": "unchanged"}},
+    {"spec": "Problem 1: four renderers; each new block type must be built four times.", "plan": "Three renderers; the typed-block schema is already one file; R3 targets the built-in node lists, the three type copies, the hard-coded ask type and the two markdown parsers.", "evidence": "dispatch doc-read prints server markdown (envoy-client/src/dispatch-http.ts:867-873); pmdoc/schema/blocks.json is embedded (schema.go:13-14) and served at GET /api/v1/schema/blocks (routes_table.go:53) to both browser renderers.", "outcome": {"kind": "unchanged"}}
+  ]
+}
