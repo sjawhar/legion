@@ -16,9 +16,18 @@
 #            event shows once within two heartbeats of the session's return and is still once
 #            three heartbeats later, and leg 1's is still once. (Remote mode SIGKILLs omp instead
 #            of ending its input, since /v1/messages/send needs the registration a clean exit drops.)
+#   leg 3    a fresh session starts a long turn, and omp's get_state reports it streaming; two
+#            envelopes are published live, then the proxy is killed, two more are published and
+#            the proxy comes back. get_state shows omp holding all four cards in memory for the
+#            still-streaming turn (queuedMessageCount), the session file holds no card for any of
+#            them, and omp is SIGKILLed. omp resumes the same session file; once it has gone idle,
+#            each of the four events has exactly one entry, still one three heartbeats later.
 #   control  leg 1 again with a session running the released plugin (SMOKE_REPLAY_CONTROL_PLUGIN):
 #            it ends with no entry for its publish, while a frame published live afterwards shows
 #            once, so the session was connected and writing cards all along.
+#   control  leg 3's live half with the released plugin: two envelopes published live while a turn
+#   (turn)   streams, held by omp, SIGKILLed unwritten; after the resume, once idle and five
+#            heartbeats on, at least one of them has no entry.
 #
 # Local mode (the default) builds natsd (packages/envoy/internal/testnats/cmd/natsd) and the
 # listener (packages/envoy/cmd/listener) from this checkout and starts them on loopback ports of its
@@ -373,6 +382,9 @@ start_proxy() {
 
 # ---- one omp session --------------------------------------------------------------------------
 readonly system_note="This session is an automated smoke test. Answer every message, Envoy cards included, with the single word ok, and call no tools."
+# Leg 3's sessions: one that answers the long prompt instead of saying ok to it.
+readonly turn_note="This session is an automated smoke test. Follow the user's instructions exactly and call no tools. Answer every Envoy card with the single word ok."
+session_note=""
 session_name=""
 session_home=""
 rpc_log=""
@@ -381,11 +393,13 @@ sid=""
 session_file=""
 subject=""
 
-# prepare_session NAME: the session's scratch HOME, working directory, session directory and the
-# envoy.json the plugin reads (${HOME}/.config/legion/envoy.json, the neutral file), naming the
-# listener and the proxy as its only NATS server, with Dispatch off.
+# prepare_session NAME [NOTE]: the session's scratch HOME, working directory, session directory and
+# the envoy.json the plugin reads (${HOME}/.config/legion/envoy.json, the neutral file), naming the
+# listener and the proxy as its only NATS server, with Dispatch off. NOTE (default system_note) is
+# appended to the session's system prompt.
 prepare_session() {
   session_name=$1
+  session_note=${2:-$system_note}
   session_home="${work}/${session_name}"
   mkdir -p "${session_home}/home/.config/legion" "${session_home}/cwd" "${session_home}/sessions" "${session_home}/tmp"
   jq -n --arg url "$envoy_url" --arg nats "nats://127.0.0.1:${proxy_port}" \
@@ -422,7 +436,7 @@ start_session() {
   exec {omp_fd}<>"${session_home}/stdin"
   local -a args=(--mode rpc --no-ui --model "$model" --thinking off --cwd "${session_home}/cwd"
     --session-dir "${session_home}/sessions" --no-extensions --no-skills --no-rules --no-tools --no-lsp
-    --no-title --append-system-prompt "$system_note" -e "$with_plugin")
+    --no-title --append-system-prompt "$session_note" -e "$with_plugin")
   [[ -z "$resume" ]] || args+=(--resume "$resume")
   local -a assignments=(HOME="${session_home}/home" TMPDIR="${session_home}/tmp" OMP_SESSION_STORAGE=file
     ENVOY_HEARTBEAT_MS="$heartbeat_ms")
@@ -515,6 +529,63 @@ has_card() {
 show_cards() {
   local line
   while IFS= read -r line; do printf '   transcript: %s\n' "$line"; done < <(card_entries "$1")
+}
+
+# card_counts ID...: each ID with its count of envoy-message entries.
+card_counts() {
+  local id out=""
+  for id in "$@"; do out+="${id} card=$(cards "$id"), "; done
+  printf '%s\n' "${out%, }"
+}
+
+# cards_each N ID...: every ID has exactly N envoy-message entries.
+cards_each() {
+  local want=$1 id
+  shift
+  for id in "$@"; do (($(cards "$id") == want)) || return 1; done
+}
+
+all_shown() {
+  local id
+  for id in "$@"; do has_card "$id" || return 1; done
+}
+
+# ---- omp's view of its turn (get_state over RPC) ----------------------------------------------
+# omp_state: whether a turn streams, and how many messages omp holds in memory for the turn to take
+# (a card handed over while a turn streams is one of them until omp writes it). Sets omp_view.
+omp_view=""
+state_asks=0
+omp_state() {
+  state_asks=$((state_asks + 1))
+  local id="state-${state_asks}"
+  rpc_send "$(jq -nc --arg id "$id" '{type: "get_state", id: $id}')"
+  await "$omp_pid" "omp's get_state answer" "${session_home}/stderr-${launches}.log" 30 rpc_frame response "$id"
+  omp_view="$(rpc_frame response "$id" | jq -c '.data | {isStreaming, queuedMessageCount}')"
+}
+
+# await_state FILTER SECONDS WHAT: asks omp_state each second until the jq FILTER holds of omp_view;
+# fails naming WHAT and the last view once SECONDS have passed.
+await_state() {
+  local deadline=$((SECONDS + $2))
+  while :; do
+    omp_state
+    jq -e "$1" <<<"$omp_view" >/dev/null && return 0
+    ((SECONDS < deadline)) || fail "omp's state is ${omp_view} after ${2}s waiting for ${3}"
+    sleep 1
+  done
+}
+
+# start_long_turn ID: a prompt whose answer streams for far longer than leg 3 needs (about a minute
+# on the default model), once omp reports the turn streaming.
+readonly long_prompt="Write the integers from 1 to 1200 in English words, one per line, and nothing else. Do not stop early."
+start_long_turn() {
+  rpc_send "$(jq -nc --arg id "$1" --arg message "$long_prompt" '{type: "prompt", id: $id, message: $message}')"
+  await_state '.isStreaming' 30 "the long turn to stream"
+  note "long turn started; get_state: ${omp_view}"
+}
+
+await_idle() {
+  await_state '.isStreaming == false and .queuedMessageCount == 0' "$1" "the session to go idle"
 }
 
 # ---- NATS's view of the session (local mode) --------------------------------------------------
@@ -692,16 +763,18 @@ expect_once() {
   show_cards "$id"
 }
 
-# leg_one WITH_PLUGIN N LABEL: register, break, publish, restore; leaves event_id and restored_at.
-restored_at=0
-leg_one() {
+# open_session WITH_PLUGIN: the proxy, then omp with WITH_PLUGIN on the prepared session,
+# registered, subscribed (as natsd shows it, local mode) and following its subject: the plugin
+# under test once it wrote its replay cursor, the released plugin, which keeps none, two
+# heartbeats on.
+open_session() {
   start_proxy
   note "proxy (pid ${proxy_pid}) on 127.0.0.1:${proxy_port} fronts ${upstream}"
   start_session "$1"
   wait_registered
   if [[ "$mode" == local ]]; then
     wait_until 60 subscribed || fail "natsd shows no connection subscribed to ${subject} within 60s: $(session_connections)"
-    note "natsd /connz?subs=1 before the break: $(session_connections)"
+    note "natsd /connz?subs=1 once registered: $(session_connections)"
   fi
   if [[ "$1" == "$plugin" ]]; then
     wait_until 60 cursor_started || fail "the session wrote no replay cursor for ${subject} within 60s"
@@ -709,11 +782,32 @@ leg_one() {
   else
     sleep $((2 * heartbeat_s))
   fi
+}
+
+# leg_one WITH_PLUGIN N LABEL: register, break, publish, restore; leaves event_id and restored_at.
+restored_at=0
+leg_one() {
+  open_session "$1"
   take_watermark
   break_connection
   publish "$2" "$3"
   (($(cards "$event_id") == 0)) || fail "${event_id} reached the session while its connection was down"
   restore_connection
+}
+
+# sigkill_and_resume WITH_PLUGIN ID...: with the turn still streaming and no card for any ID in the
+# session file, SIGKILLs omp and resumes the same session file with WITH_PLUGIN.
+sigkill_and_resume() {
+  local with_plugin=$1 killed_sid=$sid killed_file=$session_file
+  shift
+  cards_each 0 "$@" || fail "omp wrote a card before the SIGKILL: $(card_counts "$@")"
+  note "before the SIGKILL the session file holds: $(card_counts "$@")"
+  kill_session
+  note "omp SIGKILLed with its turn streaming; the session file holds: $(card_counts "$@")"
+  start_session "$with_plugin" "$killed_file"
+  [[ "$sid" == "$killed_sid" && "$session_file" == "$killed_file" ]] ||
+    fail "the resumed omp is on session ${sid} (${session_file}), not ${killed_sid} (${killed_file})"
+  wait_registered
 }
 
 begin leg-1-reconnect
@@ -755,6 +849,47 @@ note "leg 1's ${leg1_event} is still exactly one entry after the resume"
 stop_session_gracefully
 kill_proxy
 
+begin leg-3-mid-turn
+prepare_session turn "$turn_note"
+open_session "$plugin"
+take_watermark
+start_long_turn long
+turn_events=()
+for n in 5 6; do
+  publish "$n" "leg 3, published live while a turn streamed"
+  turn_events+=("$event_id")
+done
+await_state '.isStreaming and .queuedMessageCount >= 2' $((2 * heartbeat_s)) "omp to hold leg 3's live cards for its turn"
+note "omp holds the live cards for its streaming turn; get_state: ${omp_view}; $(card_counts "${turn_events[@]}")"
+break_connection
+for n in 7 8; do
+  publish "$n" "leg 3, published while the connection was down and a turn streamed"
+  turn_events+=("$event_id")
+done
+cards_each 0 "${turn_events[@]:2}" || fail "a card reached the session while its connection was down: $(card_counts "${turn_events[@]:2}")"
+restore_connection
+await_state '.isStreaming and .queuedMessageCount >= 4' $((4 * heartbeat_s)) "the replay to hand omp the stored cards mid-turn"
+note "$((SECONDS - restored_at))s after the restart omp holds all four cards for its still-streaming turn; get_state: ${omp_view}"
+sigkill_and_resume "$plugin" "${turn_events[@]}"
+resumed_at=$SECONDS
+wait_until 300 all_shown "${turn_events[@]}" ||
+  fail "300s after the resume not every leg 3 event has an entry: $(card_counts "${turn_events[@]}")"
+await_idle 300
+note "the resumed session is idle $((SECONDS - resumed_at))s after its return; get_state: ${omp_view}; $(card_counts "${turn_events[@]}")"
+cards_each 1 "${turn_events[@]}" || {
+  for id in "${turn_events[@]}"; do show_cards "$id"; done
+  fail "want exactly one entry for each leg 3 event once the resumed session is idle: $(card_counts "${turn_events[@]}")"
+}
+sleep $((3 * heartbeat_s))
+cards_each 1 "${turn_events[@]}" || {
+  for id in "${turn_events[@]}"; do show_cards "$id"; done
+  fail "want exactly one entry for each leg 3 event three heartbeats later: $(card_counts "${turn_events[@]}")"
+}
+note "three heartbeats ($((3 * heartbeat_s))s) later still exactly one entry each: $(card_counts "${turn_events[@]}")"
+for id in "${turn_events[@]}"; do show_cards "$id"; done
+stop_session_gracefully
+kill_proxy
+
 begin control
 prepare_session control
 leg_one "$control_plugin" 3 "control, published while the connection was down"
@@ -782,5 +917,32 @@ show_cards "$live_event"
 stop_session_gracefully
 kill_proxy
 
+begin control-mid-turn
+prepare_session control-turn "$turn_note"
+open_session "$control_plugin"
+take_watermark
+start_long_turn long
+control_turn_events=()
+for n in 9 10; do
+  publish "$n" "control, published live while a turn streamed"
+  control_turn_events+=("$event_id")
+done
+await_state '.isStreaming and .queuedMessageCount >= 2' $((2 * heartbeat_s)) "omp to hold the released plugin's live cards for its turn"
+note "omp holds the released plugin's live cards for its streaming turn; get_state: ${omp_view}"
+sigkill_and_resume "$control_plugin" "${control_turn_events[@]}"
+sleep $((5 * heartbeat_s))
+await_idle 300
+note "five heartbeats ($((5 * heartbeat_s))s) after the resume the control session is idle; get_state: ${omp_view}; $(card_counts "${control_turn_events[@]}")"
+lost=()
+for id in "${control_turn_events[@]}"; do
+  (($(cards "$id") == 0)) && lost+=("$id")
+  show_cards "$id"
+done
+((${#lost[@]} > 0)) ||
+  fail "the released plugin showed every live card after the SIGKILL; the control does not reproduce the loss: $(card_counts "${control_turn_events[@]}")"
+note "the released plugin lost ${lost[*]}: no entry once the resumed session is idle"
+stop_session_gracefully
+kill_proxy
+
 passed=1
-printf 'SMOKE REPLAY PASS: %s\n' "the plugin under test showed ${leg1_event} (published while its NATS connection was down) and ${leg2_event} (published while omp was stopped, then resumed) exactly once each, still once three heartbeats later; the released plugin (${control_version}) showed nothing for ${control_event}, published the same way, and showed its live ${live_event}"
+printf 'SMOKE REPLAY PASS: %s\n' "the plugin under test showed ${leg1_event} (published while its NATS connection was down) and ${leg2_event} (published while omp was stopped, then resumed) exactly once each, still once three heartbeats later, and showed ${turn_events[*]} (two published live and two replayed after a reconnect while a turn streamed, held by omp and SIGKILLed unwritten, then resumed) exactly once each once idle, still once three heartbeats later; the released plugin (${control_version}) showed nothing for ${control_event}, published the same way, showed its live ${live_event}, and lost ${lost[*]} published live while a turn streamed and SIGKILLed unwritten"

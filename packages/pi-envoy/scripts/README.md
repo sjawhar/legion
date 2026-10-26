@@ -125,9 +125,22 @@ real JetStream NATS, and the session reaches NATS only through a `socat` proxy t
 - **Leg 2:** omp stops, another envelope is published, and omp resumes the same session file: that
   event shows once within two heartbeats of the session's return, still once three heartbeats
   later, and leg 1's is still once.
+- **Leg 3, cards held by a streaming turn:** a fresh session starts a long turn (writing 1 to 1200
+  in words), and omp's RPC `get_state` reports `isStreaming: true` before anything is published.
+  Two envelopes are published live; the proxy is then killed, two more are published and the
+  proxy comes back. `get_state` shows omp holding all four cards in memory for the still-streaming
+  turn (`queuedMessageCount` 4), the session file holds no `envoy-message` entry for any of them
+  (`card=0` each), and omp is SIGKILLed. omp resumes the same session file; once the resumed
+  session has gone idle (`isStreaming: false`, nothing queued), each of the four events has exactly
+  one entry (`card=1` each), still one three heartbeats later. A card counts as shown only once
+  omp writes it, so the cards the kill dropped come back from the stream.
 - **Negative control, same run:** leg 1 again with a session running the released plugin
   (`SMOKE_REPLAY_CONTROL_PLUGIN`) ends with no entry for its publish, and a frame published live
   afterwards shows once, so that session was connected and writing cards the whole time.
+- **Negative control for leg 3, same run:** the released plugin through leg 3's live half: two
+  envelopes published live while a turn streams, held by omp (`queuedMessageCount` 2), SIGKILLed
+  unwritten. Five heartbeats after the resume, once the session is idle, at least one of them has
+  no entry: that plugin keeps no record of a card omp holds in memory, so the kill loses it.
 
 Each step prints what it observed, and every matched transcript entry is printed as a
 `transcript:` line.
@@ -149,8 +162,8 @@ Env overrides:
   listener's `/v1/messages/send`, and the listener's `/v1/replay` shows the stream stored it, so
   the run also proves the route and its grant there. The script cannot stop a remote NATS or read
   its monitoring endpoint: it breaks the session's connection by killing the local proxy that
-  fronts the remote NATS, and leg 2 SIGKILLs omp, since `/v1/messages/send` needs the registration
-  a clean exit drops. This is the production check after a rollout.
+  fronts the remote NATS (leg 3 included), and leg 2 SIGKILLs omp, since `/v1/messages/send`
+  needs the registration a clean exit drops. This is the production check after a rollout.
 - `SMOKE_REPLAY_ENVOY_TOKEN_FILE` — remote mode only: a file holding the listener's bearer, sent
   from a 0600 header file and handed to the session as `ENVOY_TOKEN_FILE`.
 - `SMOKE_REPLAY_CONTROL_PLUGIN` — the released plugin the control runs (default
@@ -163,7 +176,8 @@ Env overrides:
 Prerequisites, each checked before anything starts: `go` (local mode), `bun` with the checkout's
 dependencies installed, `socat`, `setsid`, `pgrep`, `omp`, `curl`, `jq`, and every variable
 `SMOKE_REPLAY_PROVIDER_ENV` names. Every model call is real and costs tokens: one prompt per
-session start and one turn per card.
+session start and one turn per card, and leg 3 and its control each add a long answer (about a
+thousand lines), which leg 3's resumed session may write again.
 
 No process it starts inherits the caller's environment: each gets `PATH`, the provider variables
 (omp only) and what the script sets — a scratch `HOME` holding the session's `envoy.json` (the
@@ -174,11 +188,20 @@ scratch directory under `$TMPDIR`; an exit trap stops every process the script s
 the proxy by the process group it alone runs in) and removes that directory after a pass, keeping
 it, with each session's RPC log and session file, after anything else.
 
+### Timing
+
+A local run takes about three and a half minutes (measured on omp 18.8.9 with the default model):
+about 10 s to build and start the services, 25 s for leg 1, 20 s for leg 2, 70 s for leg 3 (40 s of
+it the resumed session's answer), 45 s for each control. Each wait is bounded:
+registration 90 s, a replayed card two heartbeats (10 s), the long turn's start 30 s, omp holding
+the live cards two heartbeats and the replayed ones four, and leg 3's resumed session 300 s to
+show every card and 300 s more to go idle.
+
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | `SMOKE REPLAY PASS:` both legs showed each event exactly once and the control showed none. |
+| 0 | `SMOKE REPLAY PASS:` legs 1 to 3 showed each event exactly once, the control showed none of its missed publish, and the leg 3 control lost at least one of its live cards. |
 | 1 | `SMOKE REPLAY FAIL (<step>):` an observation failed; the line names the step and what was seen. |
 | 2 | Refused: a prerequisite is missing, the configuration is invalid, or the model provider did not answer the session's first prompt (its error is printed). |
 | 129, 130, 143 | Interrupted by SIGHUP, SIGINT or SIGTERM; cleanup still ran. |
