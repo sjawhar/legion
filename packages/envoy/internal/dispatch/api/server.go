@@ -465,7 +465,12 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		if route.Method != http.MethodGet {
 			handler = s.refuseChangedLogin(handler)
 		}
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, handler)))
+		handler = s.refuseUnstorableParameters(route.Pattern, handler)
+		if route.Method != http.MethodGet {
+			// Every layer above may answer before the body is read; the answer waits for the body.
+			handler = drainBeforeAnswer(route.Method, route.Pattern, handler)
+		}
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(handler))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
@@ -976,7 +981,7 @@ func decodeJSON(r *http.Request, value any) error {
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
 		if errors.As(err, &maxBytes) {
-			return errorf(http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds %d bytes", maxJSONRequestBytes)
+			return errJSONTooLarge
 		}
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
 	}

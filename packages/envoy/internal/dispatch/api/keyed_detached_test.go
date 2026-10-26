@@ -319,9 +319,11 @@ func (b *countingBody) Read(p []byte) (int, error) {
 }
 
 // INFRA-258. A repeat of a keyed write whose first request still runs is answered 409
-// KEY_IN_FLIGHT before any of its body is read: the key is looked up by its login and key first,
-// so a slow upload's repeats - the page asks again about once a second - never send the file again
-// only to be told to wait.
+// KEY_IN_FLIGHT before the keyed layer reads any of its body: the key is looked up by its login and
+// key first, so a slow upload's repeats - the page asks again about once a second - are never
+// spooled again only to be told to wait. The rig mounts the layer alone; register's
+// drainBeforeAnswer then reads the body off the connection and discards it before the answer is
+// written (TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst).
 func TestAnInFlightRepeatIsAnsweredBeforeItsBodyIsRead(t *testing.T) {
 	const pattern = "/api/v1/issues/{key}/artifacts"
 	rig := newKeyedRigAt(t, pattern, answerRun)

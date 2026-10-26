@@ -41,7 +41,8 @@ import (
 //     instead: a different request under the key is 422 KEY_REUSED, naming the request that used
 //     it; a first request still running (its lease, IdempotencyLease, renewed every
 //     keyedLeaseRenewal while it runs) is 409 KEY_IN_FLIGHT with Retry-After: 1, answered before
-//     the repeat's body is read (requestKeyInFlight); a finished one is replayed, its stored
+//     the repeat's body is spooled (requestKeyInFlight), once that body is read off the
+//     connection and discarded (drainBeforeAnswer); a finished one is replayed, its stored
 //     status and body with Idempotency-Replayed: ?1, and the handler does not run again.
 //   - The handler finishes whatever its client does: it runs on the request's context with the
 //     client's cancellation taken off, bounded by keyedHandlerLimit and counted in the server's
@@ -85,7 +86,7 @@ const (
 	keyedBodyInMemory = 1 << 20
 	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
 	// fields (uploadArtifactFor). Every other route reads a JSON body of at most
-	// maxJSONRequestBytes (keyedBodyLimit).
+	// maxJSONRequestBytes (routeBodyLimit).
 	keyedBodyMax = maxArtifactBlobSize + 1<<20
 	// keyedBookkeeping bounds the layer's work around the handler - the claim before it, and each
 	// statement recording its answer after it - which runs on past a client that went away, since
@@ -224,7 +225,7 @@ type resolvedCaller struct {
 func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
 	wildcards := patternWildcards(pattern)
 	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
-	bodyLimit := keyedBodyLimit(method, pattern)
+	bodyLimit := routeBodyLimit(method, pattern)
 	run := handler
 	if s.deps.TestHooksEnabled {
 		run = s.slowedByTestHook(handler)
@@ -252,8 +253,9 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			return
 		}
 		login := requestKeyLogin(actor, human)
-		// A repeat whose first request still runs is told so before its body is read: a slow
-		// upload's repeats would each send the whole file again only to be told to wait.
+		// A repeat whose first request still runs is told so before its body is spooled: a slow
+		// upload's repeats would each be written to disk again only to be told to wait. Its body
+		// is still read off the connection, and discarded, before the answer (drainBeforeAnswer).
 		if inFlight, err := s.requestKeyInFlight(r.Context(), login, key); err != nil || inFlight {
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
 			if err != nil {
@@ -335,11 +337,12 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 	}
 }
 
-// keyedBodyLimit is the largest body a keyed route reads, the most the layer spools before its
-// handler runs: an upload's file and a megabyte of fields (uploadArtifactFor) for an upload route,
-// and a JSON body (decodeJSON) for every other. A body past it is refused by the route's handler
-// whatever its key, so it runs unkeyed rather than spooled.
-func keyedBodyLimit(method, pattern string) int64 {
+// routeBodyLimit is the largest body a route reads: an upload's file and a megabyte of fields
+// (uploadArtifactFor) for an upload route, and a JSON body (decodeJSON) for every other. It is the
+// most the keyed layer spools before its handler runs - a body past it is refused by the route's
+// handler whatever its key, so it runs unkeyed rather than spooled - and the most an early answer
+// discards before it is written (drainBeforeAnswer).
+func routeBodyLimit(method, pattern string) int64 {
 	if keyedUploads[method+" "+pattern] {
 		return keyedBodyMax
 	}
@@ -536,7 +539,7 @@ func (w spillWriter) Write(p []byte) (int, error) {
 }
 
 // readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
-// (keyedBodyLimit), writing it to digest as it goes; for a multipart contentType, with its boundary
+// (routeBodyLimit), writing it to digest as it goes; for a multipart contentType, with its boundary
 // masked (boundaryMask). A body that fits in keyedBodyInMemory never touches the disk: a route
 // whose limit is no more than that holds even its one byte past the limit in memory.
 func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
@@ -703,7 +706,7 @@ func (held heldRequestKey) storedSuccess() []byte {
 
 // requestKeyInFlight reports whether login's key is held by a first request still running: a row
 // inside the key's window, unanswered, its lease live - the KEY_IN_FLIGHT claimRequestKey would
-// answer, judged before the request's body is read. It names no digest, so a different request
+// answer, judged before the request's body is spooled. It names no digest, so a different request
 // under a key still in flight is told to wait too, and KEY_REUSED once the first has answered.
 func (s *server) requestKeyInFlight(ctx context.Context, login, key string) (bool, error) {
 	var inFlight bool
@@ -719,6 +722,30 @@ func (s *server) requestKeyInFlight(ctx context.Context, login, key string) (boo
 		return false, fmt.Errorf("look up an idempotency key: %w", err)
 	}
 	return inFlight, nil
+}
+
+// requestKeyAnswersItself reports whether login's key holds a row this layer answers without
+// running the handler: an answer it replays (or refuses as KEY_REUSED), a first request still
+// running inside its lease (KEY_IN_FLIGHT), or one that committed a write and lost its holder
+// (KEY_COMMITTED, or its recovery point). A key no row holds, one past its window and one whose
+// holder died with nothing committed report false: a repeat of the first request runs the handler
+// there. It judges no digest, since it runs before the body is spooled. It is how a check ahead of
+// this layer (refuseUploadToAClosedIssue) leaves a repeat to be answered as its first request was.
+func (s *server) requestKeyAnswersItself(ctx context.Context, login, key string) (bool, error) {
+	var answers bool
+	err := s.deps.Store.Pool.QueryRow(ctx, `
+		select status is not null or coalesce(leased_at >= now() - make_interval(secs => $3), false)
+		       or committed_at is not null or recovery is not null
+		from request_keys
+		where login = $1 and idempotency_key = $2 and created_at >= now() - make_interval(secs => $4)
+	`, login, key, s.keyLease().Seconds(), contracts.IdempotencyKeyTTL.Seconds()).Scan(&answers)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("look up an idempotency key: %w", err)
+	}
+	return answers, nil
 }
 
 // claimRequestKey takes login's key for r, whose digest is digest, and answers whatever the key

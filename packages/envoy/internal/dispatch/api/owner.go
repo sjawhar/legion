@@ -135,7 +135,7 @@ func ownerOpenStatus(ctx context.Context, q queryer, owner owner, lock string) (
 // resolves every mention against the Envoy listener before its transaction opens, and an owner
 // that does not exist or is already closed refuses the comment whatever the listener says, so
 // a request that cannot be written costs no listener call at all; an upload to an issue is refused
-// so before its body is read (refuseUploadToAClosedIssue). The locked check still decides; this
+// so before its body is spooled (refuseUploadToAClosedIssue). The locked check still decides; this
 // one only spares the work, and takes no lock of its own so a write on a busy owner waits for that
 // lock once rather than twice.
 func (s *server) refuseClosedOwnerBeforeResolving(ctx context.Context, owner owner) error {
