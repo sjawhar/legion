@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T07:25:00Z",
+  "completed": "2026-10-26T12:30:00Z",
   "proof": [
+    {
+      "criterion": "Review round 2 and the architect's rule (2026-10-26): a length bound only decides which keys go into an index; it never makes a read fail and never refuses a write main accepts. References read of a document whose key is 2049-2692 bytes; a rebuild with a long block id; a suggestion's create and accept with a long block id; a read of a block id over 256 bytes.",
+      "surface": "Real Go server builds on fresh local Postgres databases (one per build): the head, the previous head 05ea3ef4 and main 9ed0397b; the real dispatch CLI and dev-signed-in human calls; throwaway script $TMPDIR/infra366/r7-cases.sh (corrupts doc_updates to make a document unloadable for the rebuild)",
+      "command": "NAME=<build> BIN=<binary> bash $TMPDIR/infra366/r7-cases.sh, for the head (e26a6648), 05ea3ef4 and main 9ed0397b; then OLD=main-9ed0397b NEW=head bash $TMPDIR/infra366/r6-accept.sh; block-graph.sh, block-coverage.sh and `bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts` at the head",
+      "observed": "Head: a 2610-byte document key uploads; ?to= 200, ?from= 200 (attached_to), block-links 200, `dispatch read --ref` exit 0 with no 'unavailable'; corrupted document 409 DOCUMENT_UNLOADABLE then rebuild from markdown with a 3200-byte id 200 (source_version 2); suggestion with a 3200-byte id created and accepted 200, spec holds the id; ?to=<spec>#b-<3200 bytes> 404; server log 0 '54000' and 0 'level=ERROR'. Main 9ed0397b: same reads 200, rebuild 200, accept 200 (block read 400). The five architect cases on a main-written database rolled onto the head all pass with 0 '54000'; driver 37 PASS; coverage not_indexed=0; browser 28 passed.",
+      "headSha": "e26a664800117741870bf39724aa94cb3809c382",
+      "negativeControl": "The previous head 05ea3ef4 on the same script: ?to=/?from=/block-links of the 2610-byte key 400 INVALID_REFERENCE and `dispatch read` prints 2 'unavailable' lines; the rebuild 400 and the suggestion accept 400 'block id too long'; the long block read 400"
+    },
     {
       "criterion": "Tester round 5 and the architect's acceptance (2026-10-26, dispatch://INFRA-459 scope folded into this PR): no write main accepts fails at the head; no id or slug the reference grammar reads reaches a B-tree key past 2704 bytes; a new artifact name over a bound is refused 4xx; an ask or anchor under a block id of any length is written and settlement never fails; a database main wrote is read, edited and indexed by the head. Red test TestTextCitingABlockOfALongNamedDocumentIsStillWritten.",
       "surface": "Two real server builds on one local Postgres database (infra366_r6): main 81a3b5ef writes, then the head is rolled onto it; the real dispatch CLI; throwaway script $TMPDIR/infra366/r6-accept.sh",
@@ -101,7 +109,12 @@
     "Round 6: text/refs.go MaxTargetBytes and targetFits over every reference kind; contracts dispatch-text-rules.ts MAX_REFERENCE_TARGET_BYTES/referenceTargetFits; dashboard routes.ts routeTarget; envoy-client dispatch-owner.ts and dispatch-execute.ts; shared text table rows (5276279b, f77a7a19, 20863d49)",
     "Round 6: api/artifacts.go maxNewArtifactKeyBytes (2692), refusal of new names and reference keys past it, route descriptions (a7eaf1c3)",
     "Round 6: migrations 0123 (block_id_key, asks_block_id_unique, asks_anchor_block_id_idx) and 0124 (comments_anchor_block_id_idx); docs/copied_asks.go lookups (28bb6e9a)",
-    "Round 6: docs, README migrations 0123-0124, CHANGELOGs, skills/dispatch, claude-envoy dist (3415df86); forward merge of main 9ed0397b (05ea3ef4)"
+    "Round 6: docs, README migrations 0123-0124, CHANGELOGs, skills/dispatch, claude-envoy dist (3415df86); forward merge of main 9ed0397b (05ea3ef4)",
+    "Round 8: pmdoc LongBlockID removed, docs/tree.go (53505a76)",
+    "Round 8: text.TargetID and text.ParseRef, refs.ToID removed, API reads unbounded, envoy-client parsers unbounded (98206c03)",
+    "Round 8: dashboard target-id.ts and reference-spans.ts out of routes.ts (922 lines), parseNodeReference/nodeRouteFromHref for server data, versioned spec page, BlockTarget.block = {id, pin?}, contracts utf8Bytes and encodeBlockId per code point, shared href rows (aee29df2)",
+    "Round 8: MentionExcerpts comment, indexRenderedVersion/indexUnrenderedVersion, acceptance lib.sh (4fb3569c); docs (c00e53a6)",
+    "Round 8: forward merge of main 8298fc71, migrations renumbered 0118-0125 after main's 0117, envoy-client dispatch-command.ts args['issue'] for claude-envoy's typecheck (e26a6648)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
@@ -109,13 +122,15 @@
     "Bun keeps an exported array in a bundle when any element is a non-literal expression (a template with a computed value), so the long-id fixture rows of DISPATCH_TEXT_REFERENCES are written out as literals; otherwise the test table ships in claude-envoy's dist.",
     "A block node id is <ref_key>#<block id>, and ref_key (artifact slug) is unbounded, so node_id and from_node are hash indexed: their reads are all equalities (= and = any, bitmap scan), and uniqueness already follows from (artifact_id, block_id) and the unique ref_key. Migration 0117 is this PR's own and unreleased, so it was edited in place.",
     "Migrations 0123 and 0124 drop and rebuild the ask-block and anchor indexes on asks and comments in one transaction each, holding that table ACCESS EXCLUSIVE while the index builds; the census for each answers 0.",
-    "The artifact-name bound is 2692 bytes for the name and for the new reference key <owner>/<slug>, the largest a B-tree entry holds (12-byte overhead), so the tester's 2683-byte name on TEST-1 (key 2690) is still accepted as main accepts it; such a document can be written but not cited, since its references exceed the 2048-byte target bound."
+    "The artifact-name bound is 2692 bytes for the name and for the new reference key <owner>/<slug>, the largest a B-tree entry holds (12-byte overhead), so the tester's 2683-byte name on TEST-1 (key 2690) is still accepted as main accepts it; such a document can be written but not cited, since its references exceed the 2048-byte target bound.",
+    "Main's 0117_architecture_sources_per_repo is a stop-the-world migration; this branch's migrations follow it as 0118-0125."
   ],
   "deviations": [
     "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes).",
     "Round 2: the earlier proof entries ran at 042c0195; this round changes only refs.BlockTextAt, so I re-ran the block-graph driver (37 PASS) at 73e2394d and did not repeat the browser and A12 runs.",
     "Round 3: the Referenced by row now also shows a 'block <id>' link to the block of the shown document it cites. Without it, a source's two rows are identical. The reviewer's row-key finding asked only for the key; the link is what makes the two rows tell apart, and the browser test covers it.",
-    "Round 3: pmdoc's three timing tests (TestUpdateIsLinearInTheBlockCount, TestBareURLShapesParseAndRenderLinearly, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText) fail on this pod on main 81a3b5ef too (10 ms clock granularity); claude-envoy's tmux SIGTERM timing test failed once in the full suite as before."
+    "Round 3: pmdoc's three timing tests (TestUpdateIsLinearInTheBlockCount, TestBareURLShapesParseAndRenderLinearly, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText) fail on this pod on main 81a3b5ef too (10 ms clock granularity); claude-envoy's tmux SIGTERM timing test failed once in the full suite as before.",
+    "Round 8: components have Go-only bound rows; the dashboard's text reader parses no component reference (on main either), so a shared-table row would fail its TS reader."
   ],
   "openQuestions": []
 }
