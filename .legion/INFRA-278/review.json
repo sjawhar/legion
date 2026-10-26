@@ -2,41 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T05:52:19Z",
-  "round": 2,
-  "reviewedCodeHead": "5ab9e45980a5beaba06fa76edf53c1841bfa27b9",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T07:12:40Z",
+  "round": 3,
+  "reviewedCodeHead": "7a7fd8066cf75be9347324b2cb85cc66e1b76465",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 3,
-  "ci": "CI head 5ab9e459 (newest pull_request run; compare to handoff head 274f0c08 touches only .legion/): lint and typecheck success; the required test job is queued on the architect's re-run of Tests run 40272884546 (attempt 2) after an image-pull failure; pr-title success. Not yet green, so no approval was possible this round in any case.",
-  "thermo": "thermonuclear-deep-review at 5ab9e459: APPROVE with two Minors (receipt-timeout duplicate undocumented; stale PR body risk lines). thermonuclear-code-quality: CHANGES (ask reach drops route_status; file size; suppressed_authors simplification; sentinel error; duplicated 1-minute window; create/edit reorder).",
-  "roundOneThreads": "All seven round-1 threads verified fixed and replied to (PRRT_kwDORFy7ds6wIQHp, Hr, Hv, Hw, Hx, H0, H3); census re-run: 25 files, matches the body.",
+  "ci": "CI head 7a7fd806 (newest pull_request run; compare to the handoff head touches only .legion/): every required check (lint, typecheck, test in Tests run 40281027298; pr-title in PR Title run 40281142449) completed success. Non-required suites (Legion Envoy and Contracts, Worker Image, Docs) were still queued or running at the read.",
+  "thermo": "thermonuclear-deep-review at 7a7fd806: APPROVE, 3 Minors; thermonuclear-code-quality at 7a7fd806: CHANGES, structural only. Providers read from each run's own session transcript (assistant turns): deep-review mixed, 1 turn openai/gpt-6.1-sol (the first) and 42 turns anthropic/claude-opus-5-5; code-quality mixed, 1 turn openai/gpt-6.1-sol (the first) and 15 turns anthropic/claude-opus-5-5.",
+  "threads": "All 12 review threads (7 round 1, 5 round 2) carry my reply naming the fixing commit; all resolved by the implementer; no bot threads.",
+  "census": "Re-ran the census search at 7a7fd806: 25 files, matching the body, which names route_status via AskReach extends IssueRouteReach.",
+  "mergeable": "GitHub reports the PR CONFLICTING with main at this head; a forward merge follows, then the fingerprint confirmation.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/api/sse.ts:160",
-      "description": "Round-1 finding 3's fixes (ask card refresh on issue.closed carrying a route change, and on a claim landing during an in-flight Inbox fetch) are proven only by unit tests; the tester did not drive them. The deployment rule for a reader-facing Dispatch change requires a browser-suite test failing before and passing at the head: add both cases to packages/dispatch/e2e (Playwright route.fetch then delayed route.fulfill for the in-flight Inbox)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/inbox_queries.go:159; packages/dispatch/web/src/features/inbox/AskRecipients.tsx:143",
-      "description": "The ask read keeps only RouteHolder from roster.reach and drops RouteStatus, so 'listener did not answer' and 'nobody holds the role' are both null: during a listener outage a held role route renders offline and uncounted while a session route is counted. Carry route_status (embed IssueRouteReach) and render unknown as unknown."
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/inbox/AskRecipients.tsx:285-300",
+      "description": "Under route_status unknown with a role route, the Unfollow dialog still says the answer will no longer reach the follower, though it may hold the role. Judged Minor: only during a listener outage, the panel above already marks the reach unknown, and the error is the cautious one (it never claims a session is reached when it is not)."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:2273",
-      "description": "A receipt-timeout send is recorded failed though it may have landed, so the session gets both the mention and the outbox copy (tester reproduced); a row created over a minute before its claim does the same. Docs promise one copy: state the at-least-once exception in AGENTS.md, envoy.md, for-agents.md, the skill and the CHANGELOG."
+      "file": "packages/dispatch/web/src/features/inbox/AskRecipients.tsx:79-82",
+      "description": "The 'Route reach unknown' text and title are copied from IssueHeader.tsx:466-468, not shared through features/issue/RouteReach.tsx. Duplication only."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:540",
-      "description": "The outbox's '1 minute' pending window duplicates api's claimLapsed by comment only; share one constant so the two cannot drift."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:550",
-      "description": "While a comment.created is deferred, its comment.edited/resolved/reopened can reach the session first (reorder new this round); document it in AGENTS.md beside the mention rule."
+      "file": "packages/envoy/internal/dispatch/model/model.go:1003-1007",
+      "description": "DeliveryClaimLapse is a Duration used only to format the interval string, which turns claimLapsed and mentionDeliveryQuery from const to var. Style only; the window is shared as asked."
     }
   ]
 }
