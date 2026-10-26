@@ -51,7 +51,23 @@
 # job.
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+# A relative path argument is read from the caller's directory, so it is resolved there before
+# the cd below, and rewritten relative to the repository root, where it is then read. Both sides
+# are physical paths, so a checkout reached through a symlink prints the same repository paths.
+repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+args=()
+for arg in "$@"; do
+  case $arg in
+    '' | /*) args+=("$arg") ;;
+    *)
+      rel=$(realpath -ms --relative-to="$repo_root" -- "$arg")
+      case $rel in -*) rel=./$rel ;; esac
+      args+=("$rel")
+      ;;
+  esac
+done
+set -- "${args[@]}"
+cd "$repo_root"
 
 encoded_byte='%[[:xdigit:]]{2}'
 dashes='‐|‑|‒|–|—|―|−|﹘|﹣|－'
