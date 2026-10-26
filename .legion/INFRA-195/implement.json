@@ -2,82 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-195",
-  "completed": "2026-10-25T19:43:53Z",
+  "completed": "2026-10-26T00:28:30Z",
+  "generation": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2205",
-  "codeHead": "dce4ecf05e85",
+  "codeHead": "e9d5f5ac7a0513a3410fe75edeacb0cd722b9252",
   "proof": [
     {
-      "criterion": "A5 (before the merge): a test in Dispatch's browser suite, at desktop and phone widths, fails at the commit before the change and passes at its head (A1 header values and change, older-session notice; A2 pick sends a switch shown in the conversation, refusal shown; A3 agent token refused; A4 unanswered switch text)",
-      "surface": "Dispatch browser suite: real Go Dispatch server, production SPA bundle, rootless Postgres 17 + pgvector, Playwright Chromium, projects chromium (1280x800) and iphone (390 px)",
-      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/agent-view-settings.e2e.ts e2e/agent-view.e2e.ts --reporter=list (head); the same over e2e/agent-view-settings.e2e.ts on `jj new 1525e1078b80` with only that file restored from the head (baseline)",
-      "observed": "Head 04c4a43b11d3: 46 passed, 10 skipped (agent-view.e2e.ts's existing project gates), 0 failed in 3.1m. Baseline 1525e1078b80: 18 failed, 2 passed in 5.6m: rows 1, 4-7, 9, 10 fail on their own first header assertion (waiting for getByRole('combobox', {name:'Model'})), rows 2 and 3 on getByTestId('agent-settings-notice'), at both chromium and iphone; row 8 (agent bearer 403 HUMAN_ONLY, nothing sent) passes at both, as designed: the route already refused it. No import, compile or selection failure. webkit-iphone cannot start in a pod (INFRA-92); CI carries it at head. Rebase re-check 47e88948fa7d \u2192 dce4ecf05e85 (forward merge of main decf80f9, resolving packages/contracts/CHANGELOG.md by keeping both entries): fingerprint 2dc5af44a0277a22f360e715fb5eb688b326fd712af637e5e6806123330a679a unchanged, bare gates only (typecheck of six packages, pi-envoy 930 pass, dispatch agent-view 78 pass, biome clean at the merge); the run above stands.",
-      "headSha": "dce4ecf05e85a66a043f6c5f93c1ffdbea7aa101",
-      "negativeControl": "The baseline build (no settings UI) is the broken input: every row that names the header fails on its own first assertion, so the rows detect the feature's absence."
+      "criterion": "A1 / A2: a page held open across a session relaunched with --resume follows the resumed process (rig check 14, amended to three steps: the switch stays; numbering behind a first-watch barrier; arming on a relaunch onto the other model)",
+      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod: /opt/omp/bin/omp in --mode rpc with this checkout's packed pi-envoy, pinned nats-server v2.10.22, the real Envoy listener, Dispatch with NATS on and test hooks off, rootless Postgres 17 + pgvector, one held-open Chromium page signed in as alice; models anthropic/claude-haiku-5-5 and openai/gpt-5-nano",
+      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' SESSION_SETTINGS_EVIDENCE_DIR=$TMPDIR/infra195/rig-head-worker bash scripts/e2e/dispatch-session-settings.sh",
+      "observed": "exit 0, `all 20 checks passed in 309s`. Check 14: step 1, --resume (pid 5779) at openai/gpt-5-nano, medium as picked last (get_state, /effort); step 2, first relay control message {\"v\":1,\"type\":\"watch\"} 6094 ms after registration, +1 s, then RPC set_thinking_level minimal shown on the held page 9134 ms after the RPC answer and medium again 9896 ms after; step 3, --resume --model anthropic/claude-haiku-5-5 (pid 5810), get_state anthropic/claude-haiku-5-5, held page showed it with no RPC change and no reload; screenshot on the held page before the reload; set_model back to openai/gpt-5-nano and the reloaded header agrees. Transcript: https://github.com/sjawhar/legion/pull/2205#issuecomment-6405520895",
+      "headSha": "e9d5f5ac7a0513a3410fe75edeacb0cd722b9252",
+      "negativeControl": "Arming: the same rig with the `publishState` call removed from the pi-envoy it packs (scratch edit, never committed, reverted) → `FAIL resume-keeps-switch: arming: timed out after 20s waiting for the header to show anthropic/claude-haiku-5-5 ... after a reload the header shows {\"model\":\"anthropic/claude-haiku-5-5\",...}: the session reported it and the page held open across the relaunch never applied it`; steps 1 and 2 passed in that run (minimal shown 9154 ms, medium 9872 ms). Numbering: the tester's run at 546fda00 + 631dc09f failed `FAIL resume-keeps-switch: timed out after 20s ...` (test.json failures[0])."
     },
     {
-      "criterion": "A1, A2, A3, A4 end to end on a local stack: a real Oh My Pi session on this pi-envoy, a real Envoy listener, NATS, Postgres and Dispatch built from the change, its page driven in a browser",
-      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod: /opt/omp/bin/omp 18.8.9 (.omp-pin fork) in --mode rpc with this checkout's packed pi-envoy, pinned nats-server v2.10.22, the real Envoy listener, Dispatch with NATS on and test hooks off, rootless Postgres, one held-open Chromium page signed in as alice; models anthropic/claude-haiku-5-5 and openai/gpt-5-nano from the pod's provider keys",
-      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' SESSION_SETTINGS_EVIDENCE_DIR=/legion/scratch/tmp/infra195/rig-evidence-head bash scripts/e2e/dispatch-session-settings.sh",
-      "observed": "exit 0, `all 20 checks passed in 274s` (the plan's 18 checks; check 2 is three named checks): header-before-any-turn (header = get_state model and /effort level; picker offers the 143 models get_available_models lists), terminal-set-model 9.4 s and 10.1 s, terminal-set-thinking 9.9 s, terminal-typed-effort 9.8 s from the RPC answer to the header, message-switch, picker-model (stored `/model anthropic/claude-haiku-5-5` by alice, status `The session answered: Model set to anthropic/claude-haiku-5-5.`, next composer turn ran on it), picker-auto-kept, picker-level-after-model, picker-effort, picker-during-turn, picker-refusal (session's own `Failed to set model: No API key for ...` shown, host unchanged), forged-switch-changes-nothing, agent-token-refused (403 HUMAN_ONLY, host unchanged), other-session-unchanged, no-answer (no-answer line after 30 s with SIGSTOP; after SIGCONT the late accept 409 ACCEPT_STALE, host unchanged), resume-keeps-switch, new-session-defaults, fallback (header showed the fallback model 247 ms after the session file's model_change), older-plugin-notice (released pi-envoy 10.22.0: last turn's model, no picker, restart notice), attribution (bob's switch shown under bob on alice's page). Rebase re-check 47e88948fa7d \u2192 dce4ecf05e85 (forward merge of main decf80f9, resolving packages/contracts/CHANGELOG.md by keeping both entries): fingerprint 2dc5af44a0277a22f360e715fb5eb688b326fd712af637e5e6806123330a679a unchanged, bare gates only (typecheck of six packages, pi-envoy 930 pass, dispatch agent-view 78 pass, biome clean at the merge); the run above stands.",
-      "headSha": "dce4ecf05e85a66a043f6c5f93c1ffdbea7aa101",
-      "negativeControl": "forged-switch-changes-nothing: a person-shaped steer forged on the session's agent subject naming an attempt Dispatch never stored, body `/model anthropic/claude-haiku-5-5`, plus an Envoy message `/effort high` from a second client; before openai/gpt-5-nano at medium, after openai/gpt-5-nano at medium (either applied would read haiku or high); both arrived as cards. agent-token-refused: the session's own Dispatch bearer is answered 403 HUMAN_ONLY."
-    },
-    {
-      "criterion": "Layout: the header change does not break any other row of the browser suite (INFRA-92: a layout change is proven by the whole project)",
-      "surface": "Dispatch browser suite, whole chromium project, same pod harness",
-      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --reporter=list",
-      "observed": "743 passed, 22 skipped (the project's existing gates), 0 failed in 42.8m at head 04c4a43b11d3, exit 0. Rebase re-check 47e88948fa7d \u2192 dce4ecf05e85 (forward merge of main decf80f9, resolving packages/contracts/CHANGELOG.md by keeping both entries): fingerprint 2dc5af44a0277a22f360e715fb5eb688b326fd712af637e5e6806123330a679a unchanged, bare gates only (typecheck of six packages, pi-envoy 930 pass, dispatch agent-view 78 pass, biome clean at the merge); the run above stands.",
-      "headSha": "dce4ecf05e85a66a043f6c5f93c1ffdbea7aa101",
-      "negativeControl": "The baseline run above: the same harness fails 18 rows when the header lacks the feature, so it is not a harness that passes everything."
+      "criterion": "A2: a keyboard user passes a model to reach the next; Enter picks; leaving resets; a held picker keeps focus and its step survives the switch (rows 11a-11d, packages/dispatch/e2e/keyboard-session-pickers.e2e.ts)",
+      "surface": "Dispatch browser suite: real Go Dispatch server, production SPA bundle, rootless Postgres 17 + pgvector, Playwright Chromium; projects chromium (1280x800) and iphone (390 px); webkit and firefox listed here, run by CI",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/agent-view-settings.e2e.ts e2e/keyboard-session-pickers.e2e.ts e2e/agent-view.e2e.ts --reporter=list; bunx playwright test --config e2e/playwright.config.ts --project=webkit --project=firefox e2e/keyboard-session-pickers.e2e.ts --list",
+      "observed": "Head: 56 passed, 10 skipped (agent-view.e2e.ts's existing project gates), 0 failed in 3.7m; the five keyboard rows (11a, 11b by Tab, 11b by click, 11c, 11d) pass at chromium and iphone. --list: the same five rows under [webkit] and [firefox], `Total: 10 tests in 1 file`. A5 baseline (fork point decf80f922a1, only the new file restored): 10 failed, every row on `expect(getByRole('combobox', { name: 'Model' })).toBeVisible()` (line 127, expectPicked), no import, compile or selection failure. Row 11a moved byte-identical from the tester's 48735af1. Evidence: https://github.com/sjawhar/legion/pull/2205#issuecomment-6405520895",
+      "headSha": "e9d5f5ac7a0513a3410fe75edeacb0cd722b9252",
+      "negativeControl": "17406960be1c (the tester's handoff, before 9f93e30b and 0683c7f0) with only the new file restored, --project=chromium → 5 failed: 11a `toBeEnabled` received disabled (the arrow sent a switch); 11b x2 `toHaveValue(\"anthropic/model-b\")` received anthropic/model-a (the step switched and snapped back); 11c `toHaveValue(\"openai/model-c\")` received anthropic/model-a; 11d `toHaveAttribute(\"aria-disabled\",\"true\")` received \"\" (pickers held with `disabled`)."
     }
   ],
   "filesChanged": [
-    "packages/contracts/src/agent-stream.ts",
-    "packages/contracts/CHANGELOG.md",
-    "packages/pi-shared/src/omp-host.d.ts",
-    "packages/pi-shared/src/pi-types.ts",
-    "packages/pi-shared/test/host-registry.ts",
-    "packages/pi-envoy/src/agent-stream.ts",
-    "packages/pi-envoy/src/agent-stream.test.ts",
-    "packages/pi-envoy/extensions/envoy.ts",
-    "packages/pi-envoy/extensions/envoy.test.ts",
-    "packages/pi-envoy/AGENTS.md",
-    "packages/pi-envoy/CHANGELOG.md",
-    "packages/dispatch/web/src/features/agent-view/conversation.ts",
-    "packages/dispatch/web/src/features/agent-view/conversation.test.ts",
-    "packages/dispatch/web/src/features/agent-view/SessionSettings.tsx",
-    "packages/dispatch/web/src/features/agent-view/use-session-switch.ts",
-    "packages/dispatch/web/src/features/agent-view/use-session-switch.test.ts",
-    "packages/dispatch/web/src/features/agent-view/AgentConversationPage.tsx",
-    "packages/dispatch/web/src/features/agent-view/AgentConversationPage.test.tsx",
-    "packages/dispatch/web/src/features/agent-view/AgentRuntimeThread.tsx",
-    "packages/dispatch/e2e/agent-view-settings.e2e.ts",
+    "packages/dispatch/e2e/keyboard-session-pickers.e2e.ts (new)",
+    "packages/dispatch/e2e/agent-view-settings.e2e.ts (row 11a moved out)",
     "packages/dispatch/e2e/playwright.config.ts",
     "packages/dispatch/AGENTS.md",
-    "docs/site/src/content/docs/dispatch/agents.md",
+    "packages/contracts/src/agent-stream.ts",
     "packages/envoy/CHANGELOG.md",
-    "scripts/e2e/dispatch-session-settings.sh",
     "scripts/e2e/lib/dispatch-session-settings.ts",
     "scripts/e2e/README.md"
   ],
   "trickyParts": [
-    "Replay budget: the settings frame is paid first and whole, then commands keep the host-order prefix that fits what is left (#fitCommands re-runs whenever settings change, so a settings change can republish a shorter commands frame); order is history, settings, commands last. A 5,000-model test pins it.",
-    "The header never shows a value the session did not report: values come only from the latest settings frame by seq; the switch outcome is the reply to that message id, independent of frame order.",
-    "Pickers appear only when the session reports settings AND its commands frame lists the built-in model/effort without terminalOnly (decision 6).",
-    "Send is held via assistant-ui's isSendDisabled (AgentRuntimeThread sendDisabled prop) so typed text stays editable while a switch is pending.",
-    "What each oracle records (asked for vs happened): a settings frame and RPC get_state report the model the session has selected for its next turn (asked for); /effort reports the configured level (asked for); the session file's assistant message `model` and `model_change` role `fallback` record what ran (happened). The rig's picker-model check reads both: get_state after the pick and the next turn's assistant message model in the session file."
+    "Rig check 14 step 2's barrier subscribes to agentStreamControlSubject(S) with a bare NATS client (Services.nextControl) and waits for the relay's first watch plus 1 s; without it the RPC change can land before the first watch and be read while nobody watches.",
+    "Step 3 relaunches with `--resume <file> --model <other>`, so the resumed process holds settings no one has seen; only publishState on arming gets them to the held page.",
+    "keyboard-session-pickers.e2e.ts is self-contained (imports only ./agents, ./api, ./seed, ./users helpers present at the base) so the A5 baseline fails each row on its own assertion."
   ],
   "deviations": [
-    "Decision 8 case 3 refined in the simplify pass: a later failed attempt reads `The session answered: <error>` only when it is the session's own error reply (`rowAnsweredWithError`: failed with an envelope id); a failure Dispatch recorded itself reads `No answer came from the session: <error>`, as the POST-time failure does. Unit-tested both ways.",
-    "packages/pi-shared/test/host-registry.ts (outside Task 2's list) gained the four optional getters so envoy tests need no casts.",
-    "packages/dispatch/web/src/features/agent-view/AgentRuntimeThread.tsx (outside Task 4's list) gained a sendDisabled prop to hold Send while a switch is pending.",
-    "No contracts unit test: decision 1 defines no type guard (Task 1 asks for one only for a guard).",
-    "The rig's check 2 is three named checks (terminal-set-model, terminal-set-thinking, terminal-typed-effort), so a passing run prints 20 ok lines for the plan's 18 checks.",
-    "The rig falls back to /opt/omp/bin/omp for LEGION_TEST_OMP: no omp is on PATH in this pod.",
-    "One-only built-in: when exactly one of model/effort is runnable from Dispatch, its picker is offered and the terminal-only notice still shows (decision 7 has no row for it)."
+    "Fix commits 9f93e30b and 0683c7f0 kept as they are, per the plan; this round adds e3fc96fa (rows), 971a4e02 (contract seq clause, changelog), e9d5f5ac (rig check 14).",
+    "The A5 baseline's fork point is now decf80f922a1 (main merged into the branch at dce4ecf0), not 1525e1078b80 as in generation 1; the procedure is the plan's `fork_point(main@origin | @-)`.",
+    "Step 2 of check 14 also asserts the level set back shows on the held page (an extra 20 s assertion), and step 3's screenshot is taken before the restoring set_model, then the reload follows as the plan's extra check.",
+    "Gate note: `cd packages/pi-envoy && bun test` is 932 pass, 3 skip, 1 fail; the failure is scripts/prepack.test.ts expecting bin/dispatch packed `-rwxr-xr-x`, while this pod's checkout has the file at 0775 (provisioned under the volume's group-write umask; this branch does not touch it). CI's checkout packs 0755. All other gates clean: dispatch agent-view 81 pass, tsc in pi-envoy, dispatch, contracts exit 0, biome over packages/pi-envoy packages/dispatch packages/contracts scripts/e2e clean.",
+    "The simplify pass is not run again (it ran once at 5ac927eb → 04c4a43b, plan Task 8 step 6)."
   ],
   "openQuestions": [],
-  "discoveredComplexity": [
-    "Outside this issue: on the .omp-pin Oh My Pi fork, the rig's fallback check showed the retry-fallback request to anthropic/claude-haiku-5-5 refused 400 `context_management: Extra inputs are not permitted`; the header behaviour under test (following the fallback) held. Evidence posted at dispatch://INFRA-49/comment/0ee66b58-0aa4-49f1-80aa-0df5b5580825 and sent to the controller; no ask opened because Dispatch asked for no more posts on INFRA-49 until a person replies."
-  ]
+  "discoveredComplexity": []
 }
