@@ -421,6 +421,33 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"payload_summary": "",
 	})
 
+	// Refused for the target: it is live, but the frame asks for a delivery mode it does not
+	// advertise (the store holds it with no capabilities at all), so the route never publishes.
+	// The envelope was built, so the line carries its fields.
+	unadvertised, unadvertisedRecord := send(sendBody(map[string]any{
+		"target_session": target,
+		"source":         "dispatch",
+		"source_session": sender,
+		"message":        "steer this",
+		"payload":        `{"delivery":{"mode":"steer"}}`,
+	}))
+	if unadvertised.Code != http.StatusForbidden {
+		t.Fatalf("a send asking for a mode the target does not advertise: status %d, body %s; want 403", unadvertised.Code, unadvertised.Body.String())
+	}
+	assertRecordFields(t, unadvertisedRecord, map[string]any{
+		"msg":             "listener send",
+		"level":           "WARN",
+		"outcome":         "capability_refused",
+		"status":          float64(http.StatusForbidden),
+		"target_session":  target,
+		"source":          "dispatch",
+		"source_session":  sender,
+		"payload_summary": "steer this",
+	})
+	if eventID, _ := unadvertisedRecord["event_id"].(string); eventID == "" {
+		t.Fatalf("the capability refusal's line carries no event id, though its envelope was built: %v", unadvertisedRecord)
+	}
+
 	const topic = "notifications.team.recorded-squad"
 	published, publishedRecord := publish(sendBody(map[string]any{
 		"topic":          topic,
@@ -468,6 +495,35 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 	if holder, ok := refusedRecord["holder"]; ok {
 		t.Fatalf("the unclaimed role's line names holder %v: there is no holder to name", fmt.Sprint(holder))
 	}
+
+	// The role is claimed, but by a session the store does not hold: the claim has lapsed, and the
+	// line names the holder the answer's own body names.
+	const lapsedHolder = "ses_recorded_lapsed_holder"
+	lapsedRole := "recorded-lapsed"
+	if _, err := registry.SetRole(lapsedHolder, "test-machine", lapsedRole, false); err != nil {
+		t.Fatalf("claim role %s for a session the store does not hold: %v", lapsedRole, err)
+	}
+	lapsedTopic := contracts.RoleTopicPrefix + lapsedRole
+	lapsed, lapsedRecord := publish(sendBody(map[string]any{
+		"topic":          lapsedTopic,
+		"source":         "agent",
+		"source_session": sender,
+		"message":        "is the holder still there?",
+	}))
+	if lapsed.Code != http.StatusNotFound {
+		t.Fatalf("a publish to a role whose holder lapsed: status %d, body %s; want 404", lapsed.Code, lapsed.Body.String())
+	}
+	assertRecordFields(t, lapsedRecord, map[string]any{
+		"msg":             "listener publish",
+		"level":           "WARN",
+		"outcome":         "role_lapsed",
+		"status":          float64(http.StatusNotFound),
+		"topic":           lapsedTopic,
+		"source":          "agent",
+		"source_session":  sender,
+		"payload_summary": "is the holder still there?",
+		"holder":          lapsedHolder,
+	})
 }
 
 // A session read that did not answer is no evidence the session is gone, so the send that made it
