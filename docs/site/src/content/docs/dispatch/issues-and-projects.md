@@ -168,23 +168,26 @@ still clamps a title shows the whole of it on hover.
 
 ### Changes Dispatch has not confirmed
 
-Every change you make — a status, a priority, an assignee, labels, an answer to an ask, a comment,
-a comment resolved — is sent under a name of its own, and Dispatch makes it once under that name
-however many times the page asks. So a change tried again after a lost answer, a timeout or an
-outage lands exactly once, and the page keeps asking while your connection is down.
+Every change you make — a status, a priority, an assignee, labels, a pin, an answer to an ask, a
+comment, a comment resolved, an upload — is sent under a name of its own, and Dispatch makes it
+once under that name however many times the page asks. So a change tried again after a lost
+answer, a timeout or an outage lands exactly once, and the page keeps asking while your connection
+is down, at once when it comes back. A change Dispatch is slow to finish is waited for and made
+once, and an upload still going up is never cut off, however long a slow link takes.
 
 A corner of the screen accounts for the ones still out: **Saving 2 changes…**, and once one has
 gone 30 seconds unconfirmed, **Dispatch has not confirmed 2 changes — still trying**, with **Stop
 trying** beside each. A change Dispatch refuses shows its reason where you made it, with
 **Retry**, when that place is a form or a field you are in front of: a comment, an answer, the
 title, the priority, the assignee, the repository, the components, a new issue. A quick control
-such as **Status** or **Labels** instead puts itself back as it was, and the corner lists the
-change as **Not saved: …** with why, **Retry** and **Discard**. While any change is unconfirmed
-the browser asks you to confirm before you leave or reload the page, and a change a reload
-interrupted is picked up again when the page comes back, for the person who made it and for
-nobody else; an upload in progress is the exception, since its file cannot be kept. One
-interrupted more than five minutes ago is not sent on its own: it comes back as **Not sent**, for
-you to retry or discard.
+such as **Status**, **Labels** or a pin shows your choice while it is out, puts itself back as it
+was if it is refused, and the corner lists the change as **Not saved: …** with why, **Retry** and
+**Discard**. Changes to one issue go out in the order you made them. While any change is
+unconfirmed the browser asks you to confirm before you leave or reload the page, and a change a
+reload interrupted, an upload's file included, is picked up again when the page comes back, for
+the person who made it and for nobody else: a change pending when someone else signs in at that
+browser, in this tab or another, is dropped unsent. One interrupted more than five minutes ago is
+not sent on its own: the corner lists it as **Not saved: …** with **Retry** and **Discard**.
 
 Now and then Dispatch makes a change but its answer is lost on the way back. The change is made;
 the page says so (for example **The issue “…” was made, but Dispatch lost its answer, so it may
