@@ -11,8 +11,8 @@ Every path it cites is in sjawhar/legion.
   merge, never `jj rebase`.**
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
   because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
-  pick up the default branch or refresh CI (a single failed CI job is re-run on its own: *A red CI job* in
-  `skill://legion-worker`). A conflict-forced rebase that leaves the branch's diff unchanged is a
+  pick up the default branch or refresh CI (a single failed CI job is re-run on its own: *Never waiting on CI* in
+  `skill://legion-worker/references/pr-body.md`). A conflict-forced rebase that leaves the branch's diff unchanged is a
   confirmation, not a new round (see *The unchanged-diff check* below); that name is the event's,
   kept by the rules below and the learnings that cite it, and the operation it names is always
   the merge here. Before merging, record

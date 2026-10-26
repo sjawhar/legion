@@ -1,75 +1,44 @@
 ---
 name: legion-oracle
-description: Research institutional knowledge before escalating questions to users. Check docs/solutions/ and codebase patterns before asking humans.
+description: Use when you are about to ask a human a question about a pattern, convention, solved problem or technical approach that the repository or its docs/solutions/ might already answer.
 ---
 
 # Legion Oracle
 
-Research institutional knowledge before escalating questions to users.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-## Core Principle
+## When to research instead of asking
 
-**Check docs/solutions/ first.** This codebase captures learnings from past work.
+- Research when the answer is a fact a file, command or document can show (a pattern, convention, solved problem or technical approach), because `docs/solutions/` records what past work learned and a human should not answer it twice.
+- Ask the human directly when the answer is a choice between options that each work (a preference, requirement, scope decision or judgment call), because no file can choose. Quote any earlier decision a file records (`file:line`), so the human can confirm it in one word.
 
-## When to Use
+## Research steps
 
-```dot
-digraph oracle_decision {
-    "About to ask user a question?" [shape=diamond];
-    "Is it a preference/requirement?" [shape=diamond];
-    "Might be documented?" [shape=diamond];
-    "Ask user directly" [shape=box];
-    "Use oracle" [shape=box];
+If the deployment instructions (the `# Deployment instructions` part of your system prompt, from
+`legion.yaml`'s `instructions:`) name a role and say it answers research questions (a role, not the
+`oracle` task agent), send your question to it first with
+`envoy_publish(topic="notifications.role.<name>", expects_reply="required")`, because that role may
+already hold the answer. Then end your turn: the reply arrives as a delivery that starts your next
+one, and research before it duplicates the role's work. If the publish returns an error (no session
+holds the role), put the error in your output and research at once.
 
-    "About to ask user a question?" -> "Is it a preference/requirement?" [label="yes"];
-    "About to ask user a question?" -> "Ask user directly" [label="no - not asking"];
-    "Is it a preference/requirement?" -> "Ask user directly" [label="yes"];
-    "Is it a preference/requirement?" -> "Might be documented?" [label="no"];
-    "Might be documented?" -> "Use oracle" [label="yes"];
-    "Might be documented?" -> "Ask user directly" [label="no"];
-}
-```
-
-**Use oracle for:** patterns, conventions, solved problems, technical approaches
-
-**Ask directly for:** preferences, requirements, scope decisions, human judgment
-
-## Research Strategy
-
-If the deployment instructions name a librarian (or oracle) role, publish your question to
-`notifications.role.<name>` with `expects_reply: required` and wait for the reply before
-researching yourself. Then run steps 1-2 (parallel OK), and 3-4 if needed, with tools a Legion
-pane actually has: `read`, `grep`, `web_search`, and `task(agent="scout")` (fast read-only
-codebase search) or `task(agent="oracle")` (deeper read-only analysis when the answer needs
-judgment across many files). Do not name any other agent.
+Run steps 1 and 2, in parallel if you choose, since neither needs the other's result. Run step 3
+when the question names a library, and step 4 when it asks for general practice, each only when
+steps 1 and 2 give no `file:line` source for some part of the question. Use only `read`, `grep`,
+`web_search`, the `envoy_publish` above, and `task` with `scout` or `oracle`: the daemon's boot
+gate checks that the agents Legion's prompts name exist, and no other.
 
 | Step | Tool | Query |
 |------|------|-------|
-| 1. Institutional learnings | `grep` then `read` over `docs/solutions/` (front-matter `tags`, then the body) | [question]'s keywords |
-| 2. Codebase patterns | `task(agent="scout")`; `task(agent="oracle")` when judgment across many files is needed | Find how [module] handles [topic] |
-| 3. Framework docs | `read` the library's documentation URL | [library] [topic] |
-| 4. External practices | `web_search`, then `read` the primary source | Current best practices for [topic] |
+| 1. Institutional learnings | `grep`, then `read`, over `docs/solutions/` (front-matter `tags` first, then the body) | each name the question gives (module, file, function, error text), then two or three words for the problem |
+| 2. Codebase patterns | `task(agent="scout")` for a read-only search; `task(agent="oracle")` when scout's answer spans two or more modules or shows patterns that disagree | how [module] handles [topic] |
+| 3. Framework docs | `web_search`, then `read` the library's official docs page | [library] docs [topic] |
+| 4. External practices | `web_search`, then `read` what the tool's or standard's maintainer publishes (docs, RFC, changelog); give its URL | current practice for [topic] |
 
-Before relying on a step 1 hit, also search `docs/solutions/` for its path
-(`docs/solutions/<its-path>`). A hit in another file's front matter under its `supersedes:` key
-(on that line, or as an item of the list below it) supersedes what you found; a line
-`Extends docs/solutions/<its-path>` extends it. Legion runs no pass that reconciles these links,
-so following them is the only way to know the hit is still current.
+Before you rely on a step 1 hit, `grep` `docs/solutions/` for its path. If another file lists that path under its front-matter `supersedes:` key (on that line or as a list item below it), use that file instead; if one has a line `Extends docs/solutions/<hit path>`, read both. Nothing else reconciles these links.
 
 ## Output
 
-**Found:** Answer with source (file:line or URL)
-
-**Not found:** "Checked docs/solutions/ and codebase - no relevant learnings found" → search externally OR escalate to user
-
-## Example
-
-```
-Question: How should I paginate a GraphQL connection?
-
-grep pagination docs/solutions/   → no matches
-task(agent="scout")               → packages/daemon/src/state/fetch.ts loops on
-                                    pageInfo.hasNextPage / endCursor (contextsPage)
-
-Answer: cursor-based, per the `while (page.hasNextPage)` loop in packages/daemon/src/state/fetch.ts
-```
+- Found: the answer with its source (`file:line` or a URL), so the reader can check it.
+- Partly found: each part found with its source, then each part not found.
+- Not found: "Checked docs/solutions/ (queries: ...) and codebase (scout query: ...) - no file answers this", so the reader knows what was searched. Then ask the human the part no step answered.
