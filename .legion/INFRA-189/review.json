@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-189",
+  "completed": "2026-10-26T15:18:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "129234997bb493bc0a4e13b2cad78bde96e8a45a",
+  "critical": 0,
+  "important": 4,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/reference-target.ts",
+      "description": "A 404 issue query is refetched on every issue.updated and issue.closed event: api/sse.ts pushes [\"issue\"] for all three issue events and refreshQueries invalidates every active match, so each key-shaped word on screen (UTF-8) costs one GET /api/v1/issues/{key} per issue event anywhere, per tab. Plan Step 3.6 says only issue.created refetches a 404, and the comments at reference-target.ts:52-85 and useRenderedMarkdown.tsx:35-37 say so. Fix: issue.updated/issue.closed skip issue queries whose error is a 404 (issue.created and a stream reconnect keep refetching them), with a unit test."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/doc/editor-references.tsx",
+      "description": "The live editor draws a #id's title over a trailing - or _ that the renderer leaves as text: scanEditorReferences keeps the candidate's whole run (textReferences('see #q2- now') gives #q2-@4-8) while questionReference trims to q2, so the decoration hides the author's '-'. Design 4 says the editor uses the same rules; implement.json trickyParts lists it as known. Fix so the decorated range is the #id the renderer links."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx",
+      "description": "useBareReferences filters keys by name but #ids by one boolean: in 'See \\#q2 and #q3' the server indexes only q3 (backslash is no mention start; raw scan gives #q3 only), but the rendered text 'See #q2 and #q3' yields both and linkifyDispatchRefs links q2, a link with no Referenced-by edge. Fix: carry the written #ids and link only those."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/refs/scope.go",
+      "description": "questionBlocks reads directive lines with no notion of code fences: a fenced example ':::ask{#q9 copied_from=\"<uuid>\"}' is returned as a declaration (probe via go test -overlay: [{id:q9 copiedFrom:1111...}]), so QuestionMap maps #q9 to that ask while pmdoc settlement never treats the fenced line as a block. Fix: skip lines inside fenced code blocks, with a scope_test row (the existing fenced :::ask{#fake} row at scope_test.go:224 asserts the opposite reading)."
+    }
+  ],
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 129234997bb493bc0a4e13b2cad78bde96e8a45a (newest pull_request run): lint success, typecheck success, test success, pr-title success (run 40340139745); compare 12923499...2e8cd864 touches only .legion/. Non-required Legion Envoy and Contracts jobs still queued at 15:17Z.",
+  "thermonuclear": "thermonuclear-deep-review: APPROVE at 2e8cd864 (two request-volume Minors, the first raised here as Important). thermonuclear-code-quality: CHANGES at 2e8cd864 (one TS resolver copied four times with the editor copy drifted, a second #id filter, a fenced-declaration reader; the rest cleanup).",
+  "pr2210": "Re-checked at phase start: sjawhar/legion#2210 is OPEN, not merged; no merge-second work owed."
+}
