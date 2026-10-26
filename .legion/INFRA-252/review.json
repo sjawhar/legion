@@ -2,17 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T11:05:00Z",
-  "round": 4,
-  "scope": "Narrowed by the architect: the daemon migration renumbered to 0052, main's 0051_issue_suspend_release and this branch's migration loading together in migrations.All, and no correctness defect introduced.",
-  "reviewedCodeHead": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
-  "decision": "approved",
-  "critical": 0,
+  "completed": "2026-10-26T12:56:00Z",
+  "round": 5,
+  "scope": "Narrowed by the architect: the behaviour-preserving refactor of the five cleanup items (3b91e647), and any correctness defect.",
+  "reviewedCodeHead": "3b91e647b69340a714cc2e72ae74eea8055e5156",
+  "decision": "changes_requested",
+  "critical": 1,
   "important": 0,
   "minor": 0,
-  "keyFindings": [],
-  "verification": "55c575a0 renames 0051_issue_ancestry.up.sql to 0052_issue_ancestry.up.sql and changes only its header line; no code, test, doc or script names the old file. On `git merge-tree --write-tree origin/main 55c575a0` (tree 4ccee51b, main 7f6ef46f), the migrations directory ends 0050_claim_failure, 0051_issue_suspend_release, 0052_issue_ancestry, and a one-line test of migrations.All() on it passes (versions 50, 51, 52). Main has no daemon 0052. The two migrations touch different tables (outbox payloads; issues.ancestry), so their order is immaterial.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at af8fd044 (code 55c575a0): both APPROVE, no findings. Provider not verified: no run's transcript, as the reviewer can read it, records which provider answered.",
-  "ci": "At 55c575a0: the first runs were cancelled repo-wide at 10:20Z; rerun once at 10:21Z. Read 11:04Z: Tests 40301762532 success (test, lint, typecheck success), PR Title 40301810089 success, Docs 40301762595, Worker Image 40301762544 and Legion Envoy and Contracts 40301762543 success. Required: lint, typecheck, test, pr-title. Compare 55c575a0...af8fd044 touches only .legion/.",
-  "risk": "A database that applied this branch's pre-rename 0051 (a pod's local test database) records version 51 for the ancestry column and would skip main's 0051_issue_suspend_release and then fail 0052; it needs a reset before running the merged code. CI and production never ran it."
+  "refactor": "All five items done and behaviour preserved, checked path by path: chains carried as []intake.DispatchIssue (IssueSummary.Ancestry removed); applyFact's records/todoWake flags gone, settle order kept (reread stays a local passed to settleReread, which keeps the settle after the observation's writes); the not-live refusal in adoptChildren alone, same order and message (intake.ChildNotAdoptable); promoteHolds uses the last pass's slots; prepareRecorded shared. The two test files only convert IssueSummary to DispatchIssue for Reconcile; no assertion changed.",
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "packages/daemon/internal/store/migrations/0052_issue_ancestry.up.sql",
+      "description": "Main moved again: #2188 (bc307fb5, 2026-10-26T12:20Z) added 0052_dispatch_issues.up.sql and 0053_issue_taken_back.up.sql, so this branch's 0052 collides with main's 0052 and migrations.All would refuse the merged tree. GitHub now reports the PR CONFLICTING: git merge-tree with origin/main conflicts in admit/admit.go, api/architect.go, daemon/workflow.go, intake/intake_test.go, record/store.go, record/store_test.go and the architect wake-routing and controller admission references (source and generated). Forward-merge main, renumber the migration to 0054_issue_ancestry.up.sql, and prove migrations.All on the merged head."
+    }
+  ],
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 717f0b86 (code 3b91e647): both APPROVE the refactor, no findings; go build and go vet clean. Provider not verified.",
+  "ci": "At 3b91e647, read 2026-10-26T12:52Z: Tests 40317495101 success (test, lint, typecheck), PR Title 40317609872 success, Docs and Worker Image success, Legion Envoy and Contracts 40317494961 queued (not required). Required: lint, typecheck, test, pr-title. Compare 3b91e647...717f0b86 touches only .legion/."
 }
