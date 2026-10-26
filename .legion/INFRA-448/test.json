@@ -2,59 +2,64 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T12:59:54Z",
+  "completed": "2026-10-26T16:19:01Z",
+  "round": 2,
+  "testedCodeHead": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently at code head 19e3dfb6 with the tester's own builds, ports (25222/25020/25777/25778, e2e 28448/2944x), databases and fixtures: C1 live with curl on the real Dispatch server, listener and nats-server; the registry and collaborators route; the CLI close-with-reason; C2's closed-issue-posting spec green at the head and red at the current main bc307fb5 (implementer's recipe.sh pointed at this lane); C3's script. Every observation matched the implementer's E2E line; the C2 red was repeated at bc307fb5 rather than 135d22e0, with the same five failing assertions."
+    "how": "Full round (the fingerprint changed with review round 1's fixes). Drove the same surfaces independently at code head adb397f9 with the tester's own builds, ports, databases and fixtures: C1 live with curl, the registry's new claim under concurrent writes, the listener without and then with the legion_agents grant on a real nkey-authorized nats-server, the collaborators route against a grant-less listener, the CLI close-with-reason, C2's browser spec plus an editor regression set, and C3. Every claim in the implementer's round-1 proof matched what I observed."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening still works",
-      "surface": "real Dispatch server, Envoy listener and nats-server v2.10.29 built at the head, Postgres 17 + pgvector, driven with curl (people by dev sign-in, agents by the agent bearer, a live session subscribed to the listener)",
-      "command": "the steps 1-35 and 79b in https://github.com/sjawhar/legion/pull/2234#issuecomment-6416592941 (issue TST-1 closed with PATCH status done)",
-      "observed": "201: person and agent comment, person and agent message, thread reply, reply to a resolved root (root reopened), human reply on an open ask (ask stays open), reply on an anchored root, quote-anchored comment with occurrence 1, agent anchored comment mentioning the live planner (attempt 1 sent), comment and message retries, the planner's replies to both deliveries. 409 ISSUE_CLOSED: suggestion (with and without a mention), new ask, comment edit, resolve, claim, document edit, named version, approval request, ask answer; spec text unchanged. 75 concurrent comment/message/reply writes with 5 status toggles: 75x201, no deadlock or ERROR in the log. Reopen 200 (status toggles). With the listener stopped a plain and a mention comment still post",
-      "headSha": "19e3dfb6ef31349a0c8b86104479c385865a172b",
-      "negativeControl": "Dispatch built at main bc307fb5 on the same steps: person and agent comment, person and agent message, and an anchored comment on the closed issue each 409 ISSUE_CLOSED"
+      "criterion": "C2: on a closed issue, a margin comment on one of its documents posts (the closed document offers Comment on a text selection)",
+      "evidence": "Red test packages/dispatch/e2e/closed-issue-posting.e2e.ts:278 'a margin comment on a spec whose issue closed while the page was open posts with its quote', commit 8cbdfa9d5b46. Command: cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts. Result at code head adb397f9: chromium passes; iphone fails at :300 expect(actionBar(page).getByRole('button')).toHaveText(['Comment']), received [] (the bar never shows). Same page after a reload offers Comment. Cause as read: packages/proof-editor/src/dispatch-action-bar.ts:193-197 sets editorLostFocus on focusout for a touch selection; the editor's switch to contenteditable=false when the issue closes blurs it, and a read-only element never takes focusin again (:188-190), so :255 and :287-296 hide the bar for every later touch selection. A person with the spec open and focused on a phone when the merge closes the issue cannot comment on a quote until they reload."
     },
     {
-      "criterion": "C2: on a closed issue, a comment, a message, Reply, Retry and a margin comment on its document are each proven by a browser test red at the commit before the change and green at the head",
-      "surface": "Dispatch browser suite (packages/dispatch/e2e), chromium and iphone, real Dispatch server and web build with the fake listener, the tester's own lane",
-      "command": "cd packages/dispatch && source e2e.env (tester lane) && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/mention-composer.e2e.ts e2e/keyboard-agents-picker.e2e.ts e2e/phone-conversation.e2e.ts e2e/margin-composer-hold.e2e.ts; red: recipe.sh bc307fb5 e2e/closed-issue-posting.e2e.ts",
-      "observed": "head: 133 passed, 5 skipped (the specs' own iPhone-only skips); all 10 closed-issue-posting rows pass. Extra throwaway browser probes on a closed issue: the 2nd/3rd/4th occurrence of a repeated word, a selection across two paragraphs, and a quote split by an earlier comment mark each post 201 and the server's mark lands on the selected text (5 passed)",
-      "headSha": "19e3dfb6ef31349a0c8b86104479c385865a172b",
-      "negativeControl": "at main bc307fb5 (product built from that tree, the head's e2e/ copied in) 10 failed on behaviour assertions: :116 Comment composer not found, :147 and :183 Reply not found, :211 Retry not found, :248 selection bar not [\"Comment\"]"
-    },
-    {
-      "criterion": "Collaborators route and the Legion agent registry the route reads (spec: GET /api/v1/issues/{key}/collaborators lists everyone who worked an issue, stopped and replaced agents included)",
-      "surface": "the real envoy-listener on nats-server (open and under exactly core.ListenerPermissions on an nkey-authorized server), the real Dispatch server reading it",
-      "command": "registry: PUT /v1/legion/agents (7 entries), GET ?issue=, /roles/<token>, /sessions/<id>, the refusals in the evidence comment; grant: nats-server -c <config holding core.ListenerPermissions(grant-host)> + listener with NATS_NKEY_SEED_FILE; collaborators: GET /api/v1/issues/TST-1/collaborators with the listener up, stopped and restarted",
-      "observed": "registry lists by role in workflow order with replaced_by and replaced_at, live from the session registry, survives a listener restart; under the exact grant /healthz healthy, PUT and the three reads 200, 0 violations; collaborators merges the registry with event actors into one row per session, excludes legion-daemon:<PROJECT>, lists an ask answerer as answered, 200 with legion_registry unavailable while the listener is down",
-      "headSha": "19e3dfb6ef31349a0c8b86104479c385865a172b",
-      "negativeControl": "PUT and GET with no bearer or a wrong bearer 401 with nothing written; batch of 257 413; body over 1 MiB 413; session moved to another issue 409; non-UTC started_at, unknown harness, dotted session id, path/body mismatch 400; collaborators unauthenticated 401, unknown issue 404, 404 no route at main bc307fb5; the grant minus legion_agents: publish violation on $JS.API.STREAM.INFO.KV_legion_agents and the listener exits"
-    },
-    {
-      "criterion": "dispatch issue-update --status done --reason on an already-closed issue is refused before the reason is posted (plan part 3)",
-      "surface": "the workspace's packages/envoy-client/bin/dispatch.ts run from env -i against the head's Dispatch server with the agent bearer",
-      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue TST-1 --status done --reason 'closing again from the CLI'; same on the open TST-2",
-      "observed": "closed TST-1: 'ISSUE_CLOSED: issue is closed; TST-1 closed at 2026-10-26T12:40:43.175865Z, so the reason was not posted and the close was not sent', exit 1, message count 29 before and after; open TST-2: reason posted as a message, status triage -> done, exit 0",
-      "headSha": "19e3dfb6ef31349a0c8b86104479c385865a172b",
-      "negativeControl": "the already-closed issue is the refused input: exit 1 and no message written"
-    },
-    {
-      "criterion": "C3: no remaining statement that a closed issue refuses comments or messages",
-      "surface": "the repository at the head",
-      "command": "bash /legion/scratch/tmp/infra448/c3.sh, plus a wider search over skills, docs, daemon prompts, packages/pi-envoy, pi-legion, claude-envoy, envoy-client, contracts/src and every README.md and AGENTS.md for closed issue / issue is closed / ISSUE_CLOSED / after the close near comment, message, reply, post or answer",
-      "observed": "c3.sh prints only the five kept lines (repo field and document rebuild, the closed document room); the wider search finds only statements that a closed issue takes comments and messages and true statements about asks, artifacts and a second close",
-      "headSha": "19e3dfb6ef31349a0c8b86104479c385865a172b",
-      "negativeControl": "the same script found 30 hits at base 135d22e0 (implementer's run); at the head the corrected sentences are matched by the wider search as 'still takes comments and messages'"
+      "criterion": "C2 and the spec's 'reopening still works': a closed issue's page, once the issue is reopened from it, takes edits to its document again (fix in place per the controller, under dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830)",
+      "evidence": "Red test packages/dispatch/e2e/closed-issue-posting.e2e.ts:321 'a spec opened while its issue was closed takes edits once the issue is reopened from its page', commit dac91dcef8af. Command: cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts. Result at code head adb397f9: fails in both projects at :335 expect(documentEditor(page)).toHaveAttribute('contenteditable','true'), received 'false', after the closed banner is gone. The same sequence as a throwaway probe at main bc307fb5 gave the same result (pre-existing). Cause as read: a closed issue's socket is admitted read-only, ProofDocument's onAdmission stores schemaReadOnly=true (packages/dispatch/web/src/features/doc/ProofDocument.tsx onAdmission), and on reopen editorAccess(false, true) answers 'read'; nothing re-reads the admission or reconnects the socket when the issue reopens. The fix the controller named: the document page re-reads its admission (or reconnects) when the issue reopens."
     }
   ],
-  "ci": "At 19e3dfb6: Tests 40323212078, Legion Envoy and Contracts 40323211951, Docs 40323211983 and PR Title 40323272659 queued; Worker Image 40323211974 pending. Not re-run by the tester.",
+  "failed": 2,
+  "proofRun": [
+    {
+      "criterion": "C1 (live)",
+      "command": "/legion/scratch/tmp/infra448-tester/c1.sh against the head's Dispatch :25777, listener :25020, nats-server v2.10.29 :25222, Postgres 17 database infra448_tester_live",
+      "observed": "201: person and agent comment and message, thread reply, reply to a resolved root (root reopened), human reply on an open ask, reply on an anchored root, quote-anchored comment with occurrence, anchored comment mentioning the live planner (attempt 1 sent), both retries, both agent replies. 409 ISSUE_CLOSED: suggestion with and without a mention, new ask, comment edit, resolve, reopen route, claim, document edit, named version, approval request; spec unchanged. Reopen 200 then ask 201. 75 concurrent comment/message/reply writes beside status toggles: 75x201, no deadlock or ERROR from the run",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "Dispatch at main bc307fb5 (round 1, same steps): person and agent comment, message and anchored comment 409 ISSUE_CLOSED; collaborators 404"
+    },
+    {
+      "criterion": "Review fix: registry writes keep one issue and role per session",
+      "command": "20 races of two single PUTs (TST-11, TST-12) and one batch PUT (TST-13) of one new session; 15 trials of 4 concurrent same-issue re-puts with different titles",
+      "observed": "each race exactly one 200 and two 409 (14/2/4 winners); 20 sessions listed once each under their recorded issue and role, 0 orphan index keys; same-issue re-puts agree across session key, issue and role listings in every trial; 2 of 70 concurrent same-session writes (10 at once, then 15 trials of 4) answered 503 'its key moved under 3 claims in a row' with Retry-After (documented retry)",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "a batch holding one new session for two issues 400 naming entries[1] with nothing written; moving a recorded session 409"
+    },
+    {
+      "criterion": "Review fix: the listener serves without the legion_agents grant",
+      "command": "nats-server -c <one nkey user holding core.ListenerPermissions(grant-host) minus legion_agents> + listener with NATS_NKEY_SEED_FILE; then the same server restarted on its store with the full grant; Dispatch pointed at the grant-less listener",
+      "observed": "listener healthy, subscribe and /v1/sessions 200, all five registry calls 503 naming the missing grant, one ERROR line; after the restart with the full grant the same process answers the registry 200 within ~2 s, PUT and reads 200, 0 violations; Dispatch's collaborators route 200 with legion_registry unavailable against the grant-less listener",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "round 1 at 19e3dfb6: the same grant-less listener exited at start"
+    },
+    {
+      "criterion": "C2 and editor regression",
+      "command": "bun run e2e -- --project=chromium --project=iphone closed-issue-posting, mention-composer, keyboard-agents-picker, phone-conversation, margin-composer-hold; then playwright --project=chromium margin, margin-thread-reply, margin-kind-switch, doc, document, overlapping-marks, keyboard-document, anchors, spec-suggestion-decoration, failed-room, editor-paste, collab-cursor",
+      "observed": "133 passed, 5 skipped (13.0m); 178 passed, 2 skipped (16.5m). Throwaway probes: whitespace-only selection on a closed doc shows no bar; the third occurrence of a repeated word anchors at the selected offset (chromium and iphone); an open page whose issue closes switches to Comment alone and posts by quote on chromium, not on iphone (the failure above)",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "round 1: closed-issue-posting 10 failed at main bc307fb5 on the composer, Reply, Reply, Retry and selection-bar assertions"
+    },
+    {
+      "criterion": "CLI close-with-reason; collaborators; C3",
+      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --status done --reason on closed TST-1 and open TST-2; GET /api/v1/issues/TST-1/collaborators; bash c3.sh",
+      "observed": "closed: ISSUE_CLOSED, exit 1, 28 messages before and after; open: reason posted then closed, exit 0. Collaborators: registry rows with replaced_by, posting agents, legion-daemon excluded, unauth 401, unknown 404; title doc now says the newest event's title. c3.sh prints only the five kept lines",
+      "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
+      "negativeControl": "the already-closed issue is the refused input: exit 1, nothing written"
+    }
+  ],
+  "ci": "At adb397f9: Tests 40349519567, Legion Envoy and Contracts 40349519454, Docs 40349519549, Worker Image 40349519478 and the PR Title runs queued. Not re-run by the tester.",
   "observations": [
-    "Collaborators title for an agent with no registry entry comes from delivery.ResolveSessionTitles, the shared helper: the newest event's origin title. When that newest event carries none (tst-agent's last writes had no origin) the row's title is null, although an older event of the session carried 'Legion tester · TST-1'. The field comment says 'the session's newest stamped title'. Plugin writes always stamp a title, so this shows only for writes made without one; no criterion names the title.",
-    "Every holder of the listener's API bearer can write the registry, as every other /v1 write; 'the daemon is the only writer' is a convention, not an enforced boundary.",
-    "A registry entry's live flag follows the session registry's 5-minute TTL: a subscribed session read false until it renewed its subscription."
+    "The Comment-on-selection chord ($mod+Alt+m, packages/dispatch/web/src/features/doc/ProofDocument.tsx:340-351) runs only while the view is editable, so on a closed issue's document a keyboard user has the bar's Comment button and no chord.",
+    "The controller answered the reopen finding draft: do not open an ask; it is fixed in this pull request (failure 2)."
   ]
 }
