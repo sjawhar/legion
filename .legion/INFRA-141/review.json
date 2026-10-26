@@ -2,24 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T10:42:00Z",
+  "completed": "2026-10-26T11:32:00Z",
   "generation": 3,
-  "round": "the round after review 5650228351; code commit 38feffb0c7a1, handoff head ce91be67",
-  "scope": "The architect's ruling (Envoy a27cfa69cdcdceacd9095aeb4b329a30): confirm that GET /v1/sessions refuses its list with the 503 only for a read that did not answer and lists a session with no topics on any other error, with a LegacyKeys test that fails before the fix, and that no other code changed since 849dbb98; approve if both hold and no defect is found.",
+  "round": "the round after review 5650773083; code commit f804579ef795, handoff head 8a84f45c",
+  "scope": "The architect's settled rule (Envoy 959c102233ce019c0ccbbbefaffe8193): a read counts as answered only for its named answers (not found, a refused key, an undecodable record), and any other error is the 503. Confirm the inversion on the session list, the corrected comment and three doc statements, the raw write-error test, that every other read this PR touches follows the rule, and that nothing else changed after 38feffb0; approve if all hold and no defect is found.",
   "decision": "changes_requested",
   "confirmed": [
-    "No other code changed after 849dbb98: the only non-.legion paths are api.go, internal/store/kv.go (the Logger() accessor alone), the new interest_key_refused_list_test.go, AGENTS.md, CHANGELOG.md and docs/architecture.md.",
-    "The refused key is listed: TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses passes at the head. With api.go overlaid from 849dbb98 it fails at :107, 'GET /v1/sessions: status 413, body {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"}' (go test -overlay, workspace unchanged). TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget and the three unreadable-interest tests still pass at the head."
+    "Inversion: interestReadAnswered = ErrMalformedInterest || bus.ErrRefused; sessionsHandler refuses with writeBusUnavailable on err != nil && !interestReadAnswered(err).",
+    "Raw write-error test: TestAnInterestReadFailingWithARawSocketErrorIsTheBusNotAnswering passes at the head. With api.go overlaid from 38feffb0 it fails on /v1/sessions, 'status 200 ... \"topics\":null' (go test -overlay, workspace unchanged). The LegacyKeys, bounded-read and unreadable-interest tests pass at the head.",
+    "Every other read follows the rule (deep review's per-read table, nine reads: send target session, senderStamp (enrichment only), role claim, holder session, conditional release, the registry route's session and interest reads, GET /v1/interests/<id>, GET /v1/sessions). Each named answer gets a non-503 answer and every other error gets the 503 with Retry-After: 1.",
+    "The comment and three doc statements the last review named are true at the head.",
+    "Nothing else changed after 38feffb0: the only paths outside .legion/ are api.go, the new test, AGENTS.md, CHANGELOG.md and docs/architecture.md."
   ],
-  "ci": "CI head 1476cbdcfa53. At reading, Tests, Docs, Legion Envoy and Contracts and PR Title were queued and Worker Image pending. A request for changes does not wait for CI.",
-  "thermonuclear": "Both run at ce91be67 under the defect-only rule. Both returned CHANGES with the same finding, traced in nats.go v1.50.0 from the module cache, which I re-read: natsWriter.flush returns the raw socket write error.",
-  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session, which wrote the verdict: anthropic/claude-opus-5-5, 177 of 177 assistant turns. DeepReview5: mixed, 34 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol. CodeQuality5: mixed, 41 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol.",
+  "ci": "CI head 31173bae8957. At reading, Tests, Legion Envoy and Contracts and PR Title were queued and Worker Image pending. A request for changes does not wait for CI.",
+  "thermonuclear": "Both run at 8a84f45c under the defect-only rule. deep-review: CHANGES, one false comment; nine reads classified, all following the rule. code-quality: CLEAN; the watcher swap reaches both routes' read path, and the test fails with the change reverted.",
+  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session, which wrote the verdict: anthropic/claude-opus-5-5, 200 of 200 assistant turns. DeepReview6: mixed, 53 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol. CodeQuality6: mixed, 26 anthropic/claude-opus-5-5 and 1 openai/gpt-6.1-sol.",
   "critical": 0,
   "important": 0,
-  "minor": 2,
+  "minor": 1,
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "interestReadDidNotAnswer is an allowlist, and it misses a read that did not answer. When nats.go's write buffer reaches its 32 KiB limit, natsWriter.flush returns the socket's raw write error (nats.go:2143-2145); publish (:4406) and requestWithContext (context.go:60-62) pass it through unwrapped as a *net.OpError (broken pipe, connection reset). It matches no sentinel, so GET /v1/sessions lists that session with no topics, the answer the ruling and the comments rule out for an unanswered read, while GET /v1/registry/<id> answers the same error with a 503. Fix: classify as answered only the answers the code names (nats.ErrKeyNotFound, bus.ErrRefused, store.ErrMalformedInterest) and treat every other error as a read that did not answer, as /v1/registry already does; the LegacyKeys test keeps passing."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "False statements. The comment at api.go:664-665 says every other error is one the bus or this client answered; docs/architecture.md:57 says a connection that could not carry the request is always a 503; AGENTS.md's /v1/sessions row says any other error means the bus answered. All three are false for the case above. The interestReadDidNotAnswer comment (api.go:702-706) and AGENTS.md also name nats.ErrTimeout and nats.ErrConnectionReconnecting, which this read never returns: getJSContextOpts always sets a ctx, so the read takes requestWithContext, and ErrConnectionReconnecting is returned only by Conn.Drain."}
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "False comment on writeBusUnavailable (api.go:235-238, added by this PR in eb225a9a): 'bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy errors.Is(err, bus.ErrRefused) ... so this one guard keeps the header off exactly those two and off nothing else.' bus.ErrRefused has a third member, bus.ErrInvalidKey (internal/bus/nats.go), which the same comment names seven lines further down. GET /v1/interests/ses:bad answers 400 with no Retry-After through that same guard, as interest_key_refused_list_test.go asserts. Say that the guard keeps the header off every bus.ErrRefused: ErrTooLarge (413), and ErrInvalidSubject and ErrInvalidKey (400)."}
   ],
-  "threads": "46 threads. PRRT_kwDORFy7ds6wNi6I (5650228351's): I replied with what was fixed and what stands, and unresolved it. Every other thread is resolved. No bot threads."
+  "threads": "49 threads. I replied 'Accepted' on PRRT_kwDORFy7ds6wNi6I and on 5650773083's three threads (PRRT_kwDORFy7ds6wOaze, -wOazh, -wOazn). All are resolved. No bot threads."
 }
