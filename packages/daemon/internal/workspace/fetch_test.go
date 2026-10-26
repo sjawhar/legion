@@ -742,9 +742,10 @@ func (c *rewritingClock) Sleep(ctx context.Context, d time.Duration) error {
 }
 
 // A fetch killed mid-update leaves git's lock files in the feed, which outlives it on the issue's
-// volume (or the cache's): the next Fetch, the feed's only writer, removes each and logs it with
-// its age before it fetches, so the feed is never blocked for good, and the objects the issue's
-// clone borrows through alternates are kept.
+// volume (or the cache's), and a transfer killed mid-pack leaves the pack it was receiving under a
+// temporary name: the next Fetch, the feed's only writer, removes each and logs it with its age
+// before it fetches, so the feed is never blocked for good and carries no pack that never
+// arrived, and the objects the issue's clone borrows through alternates are kept.
 func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 	run := newLocalRunner(t)
 	req := fetchRequest(t)
@@ -759,6 +760,10 @@ func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(feed, lock), []byte("interrupted\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	partial := filepath.Join(feed, "objects", "pack", "tmp_pack_Ab12Cd")
+	if err := os.WriteFile(partial, []byte("PACK half a pack\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	moved := pushRemoteBranch(t, run.remote, "main", "after-the-interruption.txt")
 	var logged []string
@@ -779,6 +784,14 @@ func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 		}) {
 			t.Errorf("the removal of %s was not logged: %q", lock, logged)
 		}
+	}
+	if _, err := os.Stat(partial); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the partial pack is still in the feed (%v)", err)
+	}
+	if !slices.ContainsFunc(logged, func(line string) bool {
+		return strings.HasPrefix(line, "removed the partial pack "+partial+", last written ")
+	}) {
+		t.Errorf("the partial pack's removal was not logged: %q", logged)
 	}
 	for _, object := range objects {
 		if err := exec.Command("git", "--git-dir="+feed, "cat-file", "-e", object).Run(); err != nil {
@@ -1745,7 +1758,7 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 // cache ready 35 minutes in, whose history takes 25 minutes to check, gives the delta its whole
 // bound, and the fresh feed is filled. So does a cache ready on the wait's last ask, 39 min 50 s
 // in, whose history takes that whole first bound: before the delta had a bound of its own, the
-// fetch died there and its replacement streamed the cache again (dispatch://INFRA-460). The
+// fetch died there and its replacement streamed the cache again (sjawhar/legion#2235). The
 // fetch still ends inside FetchBudget.
 func TestFetchGivesTheCachesStreamAndTheDeltaTheirOwnBounds(t *testing.T) {
 	polls := func(d time.Duration) int { return int(d / CachePoll) }
@@ -1831,7 +1844,7 @@ func TestFetchGivesTheCachesStreamAndTheDeltaTheirOwnBounds(t *testing.T) {
 // daemon makes in its place finds the repository and asks GitHub for the delta alone: it streams
 // the cache no second time, and the feed ends at the remote's branches. Nine LINUX issue pods died
 // in the delta on 2026-10-26, and before this each replacement began the 2 GB stream again
-// (dispatch://INFRA-460).
+// (sjawhar/legion#2235).
 func TestAFetchThatFailsInTheDeltaLeavesTheCachesStreamInTheFeed(t *testing.T) {
 	run := newLocalRunner(t)
 	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
@@ -1869,22 +1882,26 @@ func TestAFetchThatFailsInTheDeltaLeavesTheCachesStreamInTheFeed(t *testing.T) {
 	}
 }
 
-// A feed kept on the issue's volume is fetched into with the narrowed refspecs, pruned within them:
-// an issue branch GitHub deleted leaves the feed, as provisioning relies on (a bookmark with no row
-// starts at the default branch), while a branch outside the two that the cache's stream brought
-// stays as the stream left it, and a branch outside them pushed since is not taken.
+// A feed kept on the issue's volume is fetched into with the narrowed refspecs, and holds GitHub's
+// branch names: an issue branch GitHub deleted leaves the feed, as provisioning relies on (a
+// bookmark with no row starts at the default branch), and so does a branch outside the two that
+// the cache's stream brought and GitHub has since deleted, while one GitHub still has stays as the
+// stream left it, and a branch outside the two pushed since is not taken.
 func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *testing.T) {
 	run := newLocalRunner(t)
 	pushRemoteBranch(t, run.remote, "legion/ACME-1", "doomed.txt")
 	pushRemoteBranch(t, run.remote, "release/v7.1", "streamed.txt")
+	pushRemoteBranch(t, run.remote, "gone/soon", "gone.txt")
 	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
 	req := fetchRequest(t)
-	req.CacheURL, req.CacheToken, req.Log = served.serve(t), testCacheToken, func(string) {}
+	var logged []string
+	req.CacheURL, req.CacheToken, req.Log = served.serve(t), testCacheToken, func(line string) { logged = append(logged, line) }
 	if _, err := Fetch(context.Background(), run, req); err != nil {
 		t.Fatalf("the first Fetch: %v", err)
 	}
 	feed := filepath.Join(req.Feed, "acme", "widgets.git")
 	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "-D", "legion/ACME-1")
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "-D", "gone/soon")
 	moved := pushRemoteBranch(t, run.remote, "legion/ACME-2", "kept.txt")
 	pushRemoteBranch(t, run.remote, "unread/big", "unread.txt")
 	before := len(run.Calls())
@@ -1906,13 +1923,16 @@ func TestAFeedOnTheVolumeTakesTheNarrowedDeltaAndDropsADeletedIssueBranch(t *tes
 		t.Fatalf("the feed on the volume was fetched with %q, want it ending in %q", fetch.Argv, want)
 	}
 	refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)")
-	for ref, want := range map[string]bool{"refs/heads/legion/ACME-1": false, "refs/heads/legion/ACME-2": true, "refs/heads/release/v7.1": true, "refs/heads/unread/big": false} {
+	for ref, want := range map[string]bool{"refs/heads/legion/ACME-1": false, "refs/heads/legion/ACME-2": true, "refs/heads/release/v7.1": true, "refs/heads/unread/big": false, "refs/heads/gone/soon": false} {
 		if got := strings.Contains(refs, ref+"\n"); got != want {
 			t.Errorf("the feed holds %s: %t, want %t; its refs are %q", ref, got, want, refs)
 		}
 	}
 	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/legion/ACME-2")); got != moved {
 		t.Errorf("the feed's legion/ACME-2 is %s, want the remote's %s", got, moved)
+	}
+	if !slices.Contains(logged, "removed gone/soon from the feed: GitHub no longer has it") {
+		t.Errorf("the removal of gone/soon was not logged: %q", logged)
 	}
 }
 
@@ -1977,7 +1997,9 @@ type failingStep struct {
 
 func (f *failingStep) Run(ctx context.Context, command Command) (Result, error) {
 	if f.step(command.Argv) == f.fail {
-		return Result{ExitCode: 128, Stderr: "fatal: the remote end hung up unexpectedly\n"}, nil
+		// Not a transient failure (transientCloneFailure), so the fetch does not retry it through
+		// fetchBackoff's real waits.
+		return Result{ExitCode: 128, Stderr: "fatal: write error: No space left on device\n"}, nil
 	}
 	return f.recordingRunner.Run(ctx, command)
 }

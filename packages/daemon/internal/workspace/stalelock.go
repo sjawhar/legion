@@ -45,13 +45,38 @@ func RemoveStaleGitLocks(workspace Workspace, now time.Time, log func(string)) e
 
 // RemoveStaleFeedLocks removes every git lock file in the bare repository gitDir, a feed: the
 // `<file>.lock` a fetch killed mid-update leaves beside a ref, packed-refs, HEAD or the shallow
-// file, which blocks every later update of that file. Objects are never touched. Each removal is
-// logged with the lock's path and age, and a lock it cannot remove is an error naming it. A feed's
+// file, which blocks every later update of that file. It also removes the `tmp_pack_*` and
+// `tmp_idx_*` files a transfer killed mid-pack leaves under objects/pack: git writes a received
+// pack under such a name and renames it once whole, so one left there is a pack that never
+// arrived, which nothing reads and which a feed kept on the volume would otherwise carry, and
+// hard-link into the issue's clone, for good. No other object is touched. Each removal is
+// logged with the file's path and age, and one it cannot remove is an error naming it. A feed's
 // only writer is Fetch, called by one process at a time: a pod's workspace-fetch, its first init
 // container and the one container that mounts the feed writable, or the repository cache's process
-// under its write lock, so no lock there is held by anyone when Fetch starts.
+// under its write lock, so no lock or transfer there is live when Fetch starts.
 func RemoveStaleFeedLocks(gitDir string, now time.Time, log func(string)) error {
-	return removeLocksUnder(gitDir, "", now, log, "a feed's only writer is the fetch now starting")
+	why := "a feed's only writer is the fetch now starting"
+	if err := removeLocksUnder(gitDir, "", now, log, why); err != nil {
+		return err
+	}
+	partial, err := filepath.Glob(filepath.Join(gitDir, "objects", "pack", "tmp_*"))
+	if err != nil {
+		return err
+	}
+	for _, path := range partial {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("read the partial pack %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove the partial pack %s: %w", path, err)
+		}
+		log(fmt.Sprintf("removed the partial pack %s, last written %s ago: %s", path, now.Sub(info.ModTime()).Round(time.Second), why))
+	}
+	return nil
 }
 
 // removeLocksUnder removes every `*.lock` file under dir but those under skip, logging each with

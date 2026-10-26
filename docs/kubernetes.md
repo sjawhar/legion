@@ -2092,8 +2092,9 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    the cache's Service, and `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, the cache's own token), and a
    fresh feed comes from that cache alone: the fetch waits for it to be ready (`waiting for the
    repository cache <url> to be ready: <its answer>`, every 10 s, for at most the cache's own first
-   clone's 30 minutes and 10 more), unpacks its copy of the repository, checks it as git checks
-   what it takes from a remote, then fetches from GitHub only what the cache lacks: its log's last
+   clone's 30 minutes and 10 more), unpacks its copy of the repository, checks each pack and its
+   index against the checksums git wrote into them and that every object the refs reach is there,
+   then fetches from GitHub the default branch and the Legion issue branches: its log's last
    line is `workspace-init fetch: <n> bytes from the repository cache <url> in <d>, its history
    verified in <d>; <m> bytes from GitHub for the delta (<k> refs)`. A cache that is never ready,
    refuses the pod's token, names another repository, or streams history that does not verify
@@ -2584,11 +2585,14 @@ misnames writes the other blob's content without an error; the daemon hands a po
 address only while its Service is the cache's own (below).
 
 From GitHub the fetch then takes the repository's default branch and `refs/heads/legion/*` alone,
-which is what the issue's clone is made from and all the cache can be behind on: every other
-branch comes from the cache's tar, at most one `refresh_minutes` old, and an agent that needs a
-branch newer than that fetches it from GitHub through its clone's `origin`. So a large branch
-pushed between the cache's refresh and a wave of launches is never pulled into every issue pod at
-once. A cache that is not ready is waited
+pruned within those, after deleting from the feed every branch GitHub no longer lists (one
+`git ls-remote --symref <url> HEAD refs/heads/*` before the delta). That is what the issue's clone
+is made from. Every other branch keeps the content the cache's tar left it — at most one
+`refresh_minutes` old when the feed was streamed, older on a feed kept on the volume (never streamed
+again) or from a cache whose fetches have been failing — and an agent that needs a branch newer
+than that fetches it from GitHub through its clone's `origin`. So a large branch pushed between the
+cache's refresh and a wave of launches is never pulled into every issue pod at once, and a branch
+GitHub deleted or renamed away from, a default branch among them, leaves a kept feed too. A cache that is not ready is waited
 for, and one that never becomes ready fails the fetch, naming its last answer; the issue pod's
 failure then names the cache's state (`the repository cache of <owner>/<repo>, which a fresh feed
 comes from alone, is failing: container cache CrashLoopBackOff: …`).
@@ -3734,8 +3738,8 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   non-zero, else the main one) are quoted in the daemon log;
 - `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
   whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s wait for
-  the repository cache, then its stream, verification and delta under one
-  `workspace.FetchTimeout` rather than `workspace.CommandTimeout`, all within
+  the repository cache, then its stream and verification under one `workspace.FetchTimeout` and
+  its delta under another, rather than `workspace.CommandTimeout`, all within
   `workspace.FetchBudget` ([Trust model](#trust-model-the-provisioning-token)), then
   `workspace-init`'s shared clone of the feed, whose steps that follow the repository's size share
   one `workspace.CloneTimeout`, and its other commands, each up to `workspace.CommandTimeout`;
@@ -3764,14 +3768,14 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   once and about 12½ minutes when every connect times out (127 s each), after which the fetch fails
   and the launch ends; each relaunch of the claim then holds the issue's lifecycle lane as long
   again, and the issue's later lifecycle rows wait on it. A repository cache that is slow to become
-  ready and a transfer that keeps making progress can hold the launch for the fetch's whole 70
+  ready and a transfer that keeps making progress can hold the launch for the fetch's whole 100
   minutes, and `workspace-init`'s shared clone of the feed, for a large repository, up to 30 more.
   Each launch try is bounded inside the runtime (`sandbox.Runtime.LaunchBound`,
   `internal/runtime/sandbox/relaunch.go`) at the sum of the try's waits and bounded calls — three
   boot timeouts; the repository cache's waits, five more boot timeouts and the calls of one other
   ensure of the cache that may hold its turn ahead of the try; the launcher wait's backstop of
   twice the boot timeout plus `sandbox.Runtime.ProvisionBound`; the termination grace; and the
-  try's client calls at their 30 s timeout — about 2 h 50 min at the defaults; a try that reaches
+  try's client calls at their 30 s timeout — about 3 h 20 min at the defaults; a try that reaches
   it is charged a launch failure and the next try runs, while a try the daemon's own stop ends is
   still charged nothing.
   Once the launch returns, the boot watchdog re-arms on the claim, bounded by its registration
@@ -3870,11 +3874,13 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_PARAMETERS` unset), with a
   one-shot credential git asks for `https://github.com` alone. The cache is asked with the
   cache's own token, from the same Secret, and an answer naming another repository is refused.
-  Its tar may hold only the repository's refs and packs (`HEAD`, `packed-refs`, `refs/`,
-  `objects/pack/pack-<id>.pack`), each a regular file or a directory inside the feed, never a
-  configuration, hook, index or alternates file; the first entry that is not is refused by name
-  and the fetch fails (`FeedEntry`, `internal/workspace/clone.go`), as it does when a pack does
-  not index or the history is not whole. A feed is filled beside its final path and renamed into
+  Its tar may hold only the repository's refs, packs and the index of each pack (`HEAD`,
+  `packed-refs`, `refs/`, `objects/pack/pack-<id>.pack` and `.idx`), each a regular file or a
+  directory inside the feed, never a configuration, hook, reverse index, bitmap or alternates file;
+  the first entry that is not is refused by name and the fetch fails (`FeedEntry`,
+  `internal/workspace/clone.go`), as it does when a pack or an index fails the checksums git wrote
+  into it, a pack without an index does not index, or the history is not whole. The index's names
+  are taken on the cache's word ("The repository cache"). A feed is filled beside its final path and renamed into
   place once whole, with git's automatic garbage collection off and every fetch's objects kept as
   a pack, since the issue's clone keeps its objects there. It mounts no other part of the issue's
   volume and no config home, and it takes an existing feed repository only in the shape it writes

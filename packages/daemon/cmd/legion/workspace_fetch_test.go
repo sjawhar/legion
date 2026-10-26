@@ -57,7 +57,9 @@ if [ "$2 $3 $4 $5" = "fetch --prune --quiet https://github.com/acme/widgets" ]; 
 fi
 if [ "$2 $3 $4 $5" = "ls-remote --symref https://github.com/acme/widgets HEAD" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
-	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" ls-remote --symref "$WINIT_REMOTE" HEAD
+	first="$1"
+	shift 5
+	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$first" ls-remote --symref "$WINIT_REMOTE" HEAD "$@"
 fi
 exec "$WINIT_REAL_GIT" "$@"
 `
