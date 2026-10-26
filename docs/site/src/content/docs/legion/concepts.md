@@ -146,10 +146,14 @@ off a waiting root takes it out of line; taking it off a running tree does not s
 A root at `admitted` that now waits only for a person returns its slot rather than blocking the
 project: a closed design gate or root-level `dispatch ask` moves it to `awaiting_person`, while the
 architect's same session is suspended after its current turn. The root stays live for its children.
-`waitingOn` in `legion state` names the gate version or ask. Only your act answers it: after your
-approval, changes request, answer, resolution or reply on one of the root's asks (a closed one
-included), or a newer spec version, `answeredAt` shows that admission will resume it ahead of
-never-run roots. An agent's reply, answer or resolution answers nothing. A label removal or
+`waitingOn` in `legion state` names the gate version or ask. Only your act answers it: a wait on a
+question is answered by your answer, resolution or reply on that ask (closed or not) or your review
+of the spec, and also by Dispatch retracting the question when its decision block leaves the spec;
+a wait on the gate by your approval, changes request, answer or resolution of one of the root's
+asks, a reply of yours that hands one to the agent, or a newer spec version. Then `answeredAt`
+shows that admission will resume it ahead of never-run roots, with a task naming what you did. An
+agent's reply, answer or resolution answers nothing, and an act of yours from before the wait
+began is one the architect already read. A label removal or
 foreign Dispatch claim removes it instead; Legion never resumes work another owner took. A root
 whose claim a person or another session already holds keeps its slot while its architect asks that
 holder to release it, and so does an admitted root whose label you took off, since only a labelled
