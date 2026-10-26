@@ -652,12 +652,14 @@ it, then look at what the row `waitsOn` names is doing.
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
 - **`intake: a durable consumer is behind its stream; every event it has not reached yet waits for
-  it`** (a warning with `consumer`, `behindSeconds` and `pending`). The daemon is handling events
-  JetStream stored more than five minutes before; it says so at most once a minute per consumer.
+  it`** (a warning with `consumer`, `behindSeconds`, `pending` and `delivered`). The daemon is
+  handling events JetStream stored more than five minutes before; it says so at most once a minute
+  per consumer. `pending` near zero with `delivered` above one is one event retried after
+  failures, not a backlog: a retried event keeps the time it was first stored.
   Every event that consumer has not reached waits: on the GitHub consumer a pull request's opened
   or push, on the Dispatch consumer a status change. The daemon's two-minute read of each open
-  pull request still follows its head and records one an implementer completed on, so neither
-  waits more than two minutes for the backlog to drain.
+  pull request still follows its head, and records the pull request of an issue whose implementer
+  completed, so neither waits for the backlog to drain.
 - **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at

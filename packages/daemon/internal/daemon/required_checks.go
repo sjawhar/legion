@@ -94,10 +94,10 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 	}
 	read := map[string]requiredchecks.Set{}
 	for _, pr := range open {
-		prCtx, cancel := context.WithTimeout(ctx, requiredChecksRead)
-		github, pull, err := w.readPullRequest(prCtx, pr)
+		readCtx, cancelRead := context.WithTimeout(ctx, requiredChecksRead)
+		github, pull, err := w.readPullRequest(readCtx, pr)
+		cancelRead()
 		if err != nil {
-			cancel()
 			if ctx.Err() != nil {
 				return
 			}
@@ -106,15 +106,18 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			}
 			continue
 		}
-		pr, err = w.followHead(ctx, pr, pull)
-		if err != nil {
-			cancel()
+		if pr, err = w.followHead(ctx, github, pr, pull); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			w.log.Warn("follow a pull request's head GitHub shows; a later pass reads it again", "repo", pr.Repo, "pullRequest", pr.Number, "head", pull.Head.SHA, "error", err)
+			if w.logPassFailure(pr, "what a pull request's new head changed, to follow it", err) {
+				return
+			}
 			continue
 		}
+		// The reads below start their bound only now: following a head waits on the fact lock,
+		// which the GitHub consumer's backlog can hold for a while.
+		prCtx, cancel := context.WithTimeout(ctx, requiredChecksRead)
 		base, mergeable := pull.Base.Ref, pull.mergeability()
 		if pr.Mergeability != mergeable || mergeable == record.MergeabilityConflicting {
 			eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())

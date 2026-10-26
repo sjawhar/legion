@@ -286,16 +286,17 @@ const (
 )
 
 // lagWatch tells, at most once every consumerLagEvery, that its durable consumer is handling a
-// message JetStream stored more than consumerLagWarn before: how far behind the consumer is, and
-// how many messages still wait behind that one. Every event a consumer has not reached waits for
-// it - a pull request's opened or synchronize, a Dispatch status change - so the line is the
-// operator's sign that the daemon acts on old news. Nothing else watches the GitHub consumer's
-// position; the Dispatch consumer's is watched only while admission holds roots for it.
+// message JetStream stored more than consumerLagWarn before: how far behind the consumer is, how
+// many messages still wait behind that one, and how many times this one was delivered, since a
+// message retried after a failure keeps the time it was first stored. Every event a consumer has
+// not reached waits for it - a pull request's opened or synchronize, a Dispatch status change - so
+// the line is the operator's sign that the daemon acts on old news. Nothing else watches the GitHub
+// consumer's position; the Dispatch consumer's is watched only while admission holds roots for it.
+// JetStream's Consume calls its handler for one message at a time, so observe takes no lock.
 type lagWatch struct {
 	consumer string
 	logger   *slog.Logger
 	now      func() time.Time
-	mu       sync.Mutex
 	last     time.Time
 }
 
@@ -306,18 +307,12 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 	}
 	now := l.now()
 	behind := now.Sub(metadata.Timestamp)
-	if behind < consumerLagWarn {
-		return
-	}
-	l.mu.Lock()
-	if !l.last.IsZero() && now.Sub(l.last) < consumerLagEvery {
-		l.mu.Unlock()
+	if behind < consumerLagWarn || (!l.last.IsZero() && now.Sub(l.last) < consumerLagEvery) {
 		return
 	}
 	l.last = now
-	l.mu.Unlock()
 	l.logger.Warn("intake: a durable consumer is behind its stream; every event it has not reached yet waits for it",
-		"consumer", l.consumer, "behindSeconds", int64(behind/time.Second), "pending", metadata.NumPending,
+		"consumer", l.consumer, "behindSeconds", int64(behind/time.Second), "pending", metadata.NumPending, "delivered", metadata.NumDelivered,
 		"subject", message.Subject(), "stream_seq", metadata.Sequence.Stream, "published_at", metadata.Timestamp.UTC().Format(time.RFC3339))
 }
 

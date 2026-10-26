@@ -18,7 +18,7 @@ type storedMessage struct {
 }
 
 func (m storedMessage) Metadata() (*jetstream.MsgMetadata, error) {
-	return &jetstream.MsgMetadata{Timestamp: m.stored, NumPending: m.pending, Sequence: jetstream.SequencePair{Stream: 1013506}}, nil
+	return &jetstream.MsgMetadata{Timestamp: m.stored, NumPending: m.pending, NumDelivered: 1, Sequence: jetstream.SequencePair{Stream: 1013506}}, nil
 }
 
 func (storedMessage) Subject() string { return "notifications.github.acme.widgets.push.branch.main" }
@@ -41,7 +41,7 @@ func TestLagWatchSaysOnceAMinuteThatAConsumerIsBehind(t *testing.T) {
 	if got := lines(); got != 1 {
 		t.Fatalf("a consumer two hours behind logged %d lines, want one:\n%s", got, logs.String())
 	}
-	for _, want := range []string{"consumer=legion-capture-github", "behindSeconds=7200", "pending=4102", "stream_seq=1013506"} {
+	for _, want := range []string{"consumer=legion-capture-github", "behindSeconds=7200", "pending=4102", "delivered=1", "stream_seq=1013506"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("the line does not say %s:\n%s", want, logs.String())
 		}
