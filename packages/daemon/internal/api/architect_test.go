@@ -98,12 +98,27 @@ func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue
 	return issue, nil
 }
 
-func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) error {
+// SetStatus answers as Dispatch's PATCH does: the issue as the write left it, its sequence moved on
+// by the one event a change of status makes, and as it stood when the status was already that one,
+// with no event. The fake keeps the written issue, so a later read sees the write.
+func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) (dispatch.Issue, error) {
 	if r.err != nil {
-		return r.err
+		return dispatch.Issue{}, r.err
 	}
 	r.writes = append(r.writes, statusWrite{issue: issue, status: status})
-	return nil
+	written, ok := r.issues[issue]
+	if !ok {
+		written = dispatch.Issue{Key: issue}
+	}
+	if written.Status != status {
+		written.Status = status
+		written.LastSeq++
+	}
+	if r.issues == nil {
+		r.issues = map[string]dispatch.Issue{}
+	}
+	r.issues[issue] = written
+	return written, nil
 }
 
 func (r *statusRecorder) HandOver(context.Context, dispatch.Issue, string) error {

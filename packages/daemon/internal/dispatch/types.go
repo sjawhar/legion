@@ -28,7 +28,7 @@ func MessageBodyLength(body string) int {
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
-	SetStatus(ctx context.Context, key, status string) error
+	SetStatus(ctx context.Context, key, status string) (Issue, error)
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)

@@ -87,6 +87,21 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		ClaimedBy: issue.Claim.Holder(), ClaimKnown: !issue.ClaimUnread, Observed: true}
 }
 
+// OwnStatusWrite is the event the daemon's own status write makes, as the Dispatch consumer
+// decodes it (decodeDispatchEvent): written is the issue Dispatch answered that write with
+// (dispatch.Client.SetStatus), the state the event carries, at the event's sequence, and its actor
+// is the daemon's own session. An API route that writes a status applies it in the request, so the
+// record does not wait for the event to come back through the consumer; the event, at a sequence no
+// later than this one, then finds its fence.
+func OwnStatusWrite(written dispatch.Issue) DispatchIssue {
+	event := ObservedIssue(written)
+	event.Observed, event.DaemonActor, event.Type = false, true, "issue.updated"
+	if written.Status == "done" {
+		event.Type = "issue.closed"
+	}
+	return event
+}
+
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
 // no event's type or actor: what a boot's reconcile records or prepares from.
 func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {

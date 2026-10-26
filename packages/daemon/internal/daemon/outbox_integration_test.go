@@ -271,7 +271,7 @@ func (d *blockingDispatch) ListIssues(context.Context, string, []string) ([]disp
 func (d *blockingDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, nil
 }
-func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
+func (d *blockingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
 	d.mu.Lock()
 	d.writes++
 	entered, release, fail := d.entered, d.release, d.fail
@@ -282,7 +282,7 @@ func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
 	if release != nil {
 		<-release
 	}
-	return fail
+	return dispatch.Issue{}, fail
 }
 func (d *blockingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("blockingDispatch takes no hand-over")
@@ -431,12 +431,12 @@ func (d *refusingDispatch) GetIssue(_ context.Context, key string) (dispatch.Iss
 	d.reads++
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
-func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	if refusal, refused := d.refuse[status]; refused {
-		return fmt.Errorf("set Dispatch status %s: %w", status, refusal)
+		return dispatch.Issue{}, fmt.Errorf("set Dispatch status %s: %w", status, refusal)
 	}
 	d.status = status
-	return nil
+	return dispatch.Issue{}, nil
 }
 func (d *refusingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("refusingDispatch takes no hand-over")
@@ -465,13 +465,13 @@ func (d *boardDispatch) ListIssues(context.Context, string, []string) ([]dispatc
 func (d *boardDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
-func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	if d.failures > 0 {
 		d.failures--
-		return errors.New("Dispatch down")
+		return dispatch.Issue{}, errors.New("Dispatch down")
 	}
 	d.status = status
-	return nil
+	return dispatch.Issue{}, nil
 }
 func (d *boardDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("boardDispatch takes no hand-over")

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -573,25 +574,20 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the children to release")
 		return
 	}
-	for _, child := range children {
+	// Each child the release writes todo is recorded by its own write in this request
+	// (applyOwnStatusWrite), not when the write's event comes back through the Dispatch consumer,
+	// and a child Dispatch already shows todo by Dispatch's view of it (enterTodoChild). The
+	// workflow records a child only under a recorded parent, so a parent this wave releases goes
+	// first.
+	for _, child := range releaseOrder(children) {
 		if !child.write {
-			continue
-		}
-		if err := s.dispatch.SetStatus(r.Context(), child.view.Key, "todo"); err != nil {
-			var dispatchError *dispatch.Error
-			if errors.As(err, &dispatchError) {
-				writeFailure(w, http.StatusBadGateway, dispatchError.Code, dispatchError.Message)
+			if !s.enterTodoChild(w, r, grant.Tree, child.view) {
 				return
 			}
-			writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", "Dispatch status update failed")
-			return
-		}
-	}
-	for _, child := range children {
-		if child.write {
 			continue
 		}
-		if !s.enterTodoChild(w, r, grant.Tree, child.view) {
+		written, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
+		if !ok || !s.applyOwnStatusWrite(w, r, written) {
 			return
 		}
 	}
@@ -632,23 +628,54 @@ func (s *server) readReleasedBefore(ctx context.Context, children []releasedChil
 	return tx.Commit(ctx)
 }
 
+// releaseOrder is the wave in the request's order, except that each child comes after every child
+// of the wave on its Dispatch parent chain: the workflow records a child only under a recorded
+// parent, so a parent the wave releases must be recorded before its child is applied. A chain is
+// followed through the wave's own children only, since a parent outside the wave is recorded or not
+// whatever the order.
+func releaseOrder(children []releasedChild) []releasedChild {
+	byKey := make(map[string]releasedChild, len(children))
+	for _, child := range children {
+		byKey[child.view.Key] = child
+	}
+	depth := make(map[string]int, len(children))
+	for _, child := range children {
+		seen := map[string]bool{child.view.Key: true}
+		for parent := child.view.Parent; parent != nil && !seen[*parent]; {
+			above, inWave := byKey[*parent]
+			if !inWave {
+				break
+			}
+			seen[*parent] = true
+			depth[child.view.Key]++
+			parent = above.view.Parent
+		}
+	}
+	ordered := slices.Clone(children)
+	slices.SortStableFunc(ordered, func(a, b releasedChild) int { return cmp.Compare(depth[a.view.Key], depth[b.view.Key]) })
+	return ordered
+}
+
 // releaseOutcome answers what this request did with each of its children, once its writes and
 // observations are in, in the request's own order. It reads each child's record again and the
 // project's whole mirror with one query (record.Store.DispatchIssues), as every blocker judgement
 // reads it, in one read-only transaction: a wave's children share the issues they wait on, and the
 // mirror is one row per issue of the project.
 //
-// A child is started when this request started its first phase (startedByRelease). Otherwise it is
-// held when it waits on an issue that is not done, unless it is running a phase it was already in:
-// what it waits on is judged from the blockers Dispatch showed the request (blockers.UnfinishedOf),
-// not from the child's own mirror row, since a child this request writes todo — out of backlog, or
-// parked at done — has no row or record of its release until that write's event arrives, after
-// this answer. That event enters it through the workflow's enterChild, which holds it at
-// phase.Admitted on that same wait, as enterTodoChild's observation already has a child found todo.
+// A child is started when this request started its first phase (startedByRelease): the request
+// records every child it releases, one it writes todo — out of backlog, or parked at done — by its
+// own write (applyOwnStatusWrite), and one Dispatch already shows todo by Dispatch's view of it
+// (enterTodoChild). Otherwise it is held when it waits on an issue that is not done, unless it is
+// running a phase it was already in: what it waits on is judged from the blockers Dispatch showed
+// the request (blockers.UnfinishedOf), which the workflow's enterChild held a recorded child at
+// phase.Admitted on, and which still answers for a written child the workflow could not record yet
+// (a parent outside the wave that the daemon does not record), whose write's event, when the
+// consumer delivers it, enters it on that same wait.
 //
 // A child in neither list is one this request started nothing for and that waits on nothing — its
-// own todo event is still to start it, or its tree's closed design gate holds it until the gate's
-// opening starts it — or one already running a phase before the request, which holds nothing back.
+// tree's closed design gate holds it until the gate's opening starts it, or the workflow could not
+// record it yet and its write's event is still to start it — or one already running a phase before
+// the request, which holds nothing back.
 func (s *server) releaseOutcome(ctx context.Context, children []releasedChild) ([]string, []HeldChild, error) {
 	if s.pool == nil || s.records == nil {
 		return nil, nil, errors.New("record dependencies are unavailable")
@@ -926,7 +953,7 @@ func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "CHILD_NOT_RUNNING", fmt.Sprintf("%s is already out of the workflow; rerun_child runs it again", child.Key))
 		return
 	}
-	if s.setDispatchStatus(w, r, child.Key, "backlog") {
+	if _, ok := s.setDispatchStatus(w, r, child.Key, "backlog"); ok {
 		writeJSON(w, http.StatusOK, EmptyResponse{})
 	}
 }
@@ -954,7 +981,7 @@ func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
 		return
 	}
-	if s.setDispatchStatus(w, r, child.Key, "todo") {
+	if _, ok := s.setDispatchStatus(w, r, child.Key, "todo"); ok {
 		writeJSON(w, http.StatusOK, EmptyResponse{})
 	}
 }
@@ -979,25 +1006,6 @@ func (s *server) childOfTree(w http.ResponseWriter, r *http.Request) (record.Iss
 		return record.Issue{}, false
 	}
 	return child, true
-}
-
-// setDispatchStatus writes an issue's status in Dispatch, answering a refused or failed write 502.
-func (s *server) setDispatchStatus(w http.ResponseWriter, r *http.Request, issue, status string) bool {
-	if s.dispatch == nil {
-		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
-		return false
-	}
-	err := s.dispatch.SetStatus(r.Context(), issue, status)
-	var dispatchError *dispatch.Error
-	switch {
-	case errors.As(err, &dispatchError):
-		writeFailure(w, http.StatusBadGateway, dispatchError.Code, dispatchError.Message)
-		return false
-	case err != nil:
-		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", "Dispatch status update failed")
-		return false
-	}
-	return true
 }
 
 func validPhase(value phase.Phase) bool {

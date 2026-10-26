@@ -94,9 +94,9 @@ func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispat
 func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, d.getErr
 }
-func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.statuses = append(d.statuses, status)
-	return d.statusErr
+	return dispatch.Issue{}, d.statusErr
 }
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))

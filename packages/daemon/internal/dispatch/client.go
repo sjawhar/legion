@@ -80,22 +80,7 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 	if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key), nil, &response); err != nil {
 		return Issue{}, err
 	}
-	return Issue{
-		Key:               response.Key,
-		Project:           response.Project,
-		Title:             response.Title,
-		Status:            response.Status,
-		Parent:            response.Parent,
-		Rank:              response.Rank,
-		Labels:            response.Labels,
-		HandedOver:        CarriesLegionLabel(response.Labels),
-		PrimaryArtifactID: response.PrimaryArtifactID,
-		LastSeq:           response.LastSeq,
-		ResolvedRepo:      deref(response.ResolvedRepo),
-		BlockedBy:         response.BlockedBy,
-		Claim:             response.Claim.claim(),
-		ClaimUnread:       response.Claim.unread(),
-	}, nil
+	return response.issue(), nil
 }
 
 // ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
@@ -119,12 +104,19 @@ func deref(value *string) string {
 	return *value
 }
 
-// SetStatus updates an issue through PATCH /api/v1/issues/{key}.
-func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) error {
-	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(key), daemonWrite{
+// SetStatus updates an issue through PATCH /api/v1/issues/{key} and returns the issue as Dispatch
+// answers the write: as the write left it, at the sequence of the event the write made (or, for a
+// status the issue already had, as it stood, at the sequence it had run to, since such a write
+// makes no event).
+func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) (Issue, error) {
+	var response issueResponse
+	if err := c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(key), daemonWrite{
 		Status: status,
 		Actor:  daemonActor(key),
-	}, nil)
+	}, &response); err != nil {
+		return Issue{}, err
+	}
+	return response.issue(), nil
 }
 
 // HandOver writes issue's status for its hand-over to Legion, on the issue's sequence as the client
@@ -375,6 +367,26 @@ type issueResponse struct {
 	ResolvedRepo      *string        `json:"resolved_repo"`
 	BlockedBy         []string       `json:"blocked_by"`
 	Claim             *claimResponse `json:"claim"`
+}
+
+// issue is the response as Issue: Dispatch's issue detail, and the issue its PATCH answers with.
+func (r issueResponse) issue() Issue {
+	return Issue{
+		Key:               r.Key,
+		Project:           r.Project,
+		Title:             r.Title,
+		Status:            r.Status,
+		Parent:            r.Parent,
+		Rank:              r.Rank,
+		Labels:            r.Labels,
+		HandedOver:        CarriesLegionLabel(r.Labels),
+		PrimaryArtifactID: r.PrimaryArtifactID,
+		LastSeq:           r.LastSeq,
+		ResolvedRepo:      deref(r.ResolvedRepo),
+		BlockedBy:         r.BlockedBy,
+		Claim:             r.Claim.claim(),
+		ClaimUnread:       r.Claim.unread(),
+	}
 }
 
 // claimResponse is an issue's claim as Dispatch's issue reads serve it (null for none).
