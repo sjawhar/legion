@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { Agent, CredentialSession } from "../../api/types";
 import { textMutedOnCanvas } from "../../theme/classes";
 import { AgentName } from "../refs/AgentName";
+import { useAgentRegistry } from "../refs/agent-registry";
 import {
   type CredentialSessionLine,
   type CredentialSessionSource,
@@ -16,14 +17,32 @@ const SOURCE_PREFIX: Record<CredentialSessionSource, string> = {
   request: "",
 };
 
-/** One id: the agent, with its running state and its live link, then, while the agents list
- *  lists it, where it runs. */
+/**
+ * One id: the agent, with its running state and its live link, then its full id, then where it
+ * runs while the agents list lists it, or in words that it isn't running or couldn't be
+ * checked. A request's id is an unsigned claim (`session.ts`), and an unlisted id's name is its
+ * short form `session:<8>…`, which a forged id (or any session started in the same minute)
+ * shares; so the person approving reads the whole id, and the state in words rather than only
+ * the mark's ring. The full id breaks anywhere, so it never widens the record page's grid.
+ */
 function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
+  // The cached agents list `AgentName` reads too, so the words and the mark always agree.
+  const state = useAgentRegistry(false).state(line.id);
+  let rest: string;
+  if (line.place !== null) {
+    rest = ` · ${line.id} · ${line.place.dir} · ${line.place.machineId}`;
+  } else if (state === "not-running") {
+    rest = ` · ${line.id} isn't running.`;
+  } else if (state === "unknown") {
+    rest = ` · couldn't check whether ${line.id} is running.`;
+  } else {
+    rest = ` · ${line.id}`;
+  }
   return (
-    <span className={textMutedOnCanvas}>
+    <span className={`${textMutedOnCanvas} [overflow-wrap:anywhere]`}>
       {line.source === null ? "" : SOURCE_PREFIX[line.source]}
       <AgentName sessionId={line.id} storedTitle={undefined} />
-      {line.place === null ? "" : ` · ${line.place.dir} · ${line.place.machineId}`}
+      {rest}
     </span>
   );
 }
@@ -31,12 +50,12 @@ function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): R
 /**
  * The credential request's session: the Inbox row and the record page both render this one
  * component (LEGION-587), so a running, not-running, couldn't-check or unnamed session always
- * reads identically in both places. Each id is an `AgentName`, whose mark says whether it is
- * running, not running, or could not be checked. Takes the agents list (and its loading/error
- * state) as props rather than calling `useAgents` itself: a page that renders several of these
- * (the Inbox's pending-requests list) reads the list once from its own page-level `useAgents`
- * call for every line's directory and machine. Renders bare text/links, no wrapping element:
- * each call site supplies its own layout.
+ * reads identically in both places. Each id is an `AgentName` and its full id, and a line says
+ * in words when its session isn't running or could not be checked. Takes the agents list (and
+ * its loading/error state) as props rather than calling `useAgents` itself: a page that renders
+ * several of these (the Inbox's pending-requests list) reads the list once from its own
+ * page-level `useAgents` call for every line's directory and machine. Renders bare text/links,
+ * no wrapping element: each call site supplies its own layout.
  */
 export function CredentialSessionLines({
   agents,

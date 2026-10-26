@@ -332,6 +332,37 @@ test("on a phone the ask card's asker still opens its copy handles, and the live
   }
 });
 
+// The ask card's provenance line holds the turn, the asker's copy-handles button with the live
+// link beside it, and the time. On a phone the live link's 44 px touch box and "Waiting on you"
+// leave the asker's name a few letters ("Le…") unless the asker gets a line of its own.
+test("on a phone the ask card's asker reads its whole name beside Waiting on you and the live link", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the narrow provenance line is a phone layout");
+  const seeded = await seed();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${seeded.runAsk}`);
+    await expect(card.getByTestId(`turn-${seeded.runAsk}`)).toHaveText("Waiting on you");
+    await expect(
+      card.getByRole("link", { exact: true, name: `Open live conversation with ${runCurrent}` })
+    ).toBeVisible();
+    const name = card
+      .getByRole("button", { expanded: false, name: /Running agent \(current\)/ })
+      .locator(`[title="${runCurrent}"]`);
+    await expect(name).toHaveText(runCurrent);
+    const fits = await name.evaluate((element) => ({
+      client: element.clientWidth,
+      scroll: element.scrollWidth,
+    }));
+    expect(fits.scroll, "the asker's name is not cut short").toBeLessThanOrEqual(fits.client);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("the page reads the agent list once, asks nothing per agent, and shows a rename and a stop without a reload", async ({
   browser,
 }, testInfo) => {

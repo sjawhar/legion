@@ -70,7 +70,9 @@ test("surfaces a failure to load the list instead of hiding the section", () => 
 });
 
 // LEGION-587: a row whose session names a live agent links to it; one whose session names an id
-// the agents list doesn't carry reads as not running, with neither mistaken for the other.
+// the agents list doesn't carry reads as not running, with neither mistaken for the other. Every
+// line carries the full id: a request's id is an unsigned claim, and a short form is shared by
+// any id with the same first eight characters.
 test("a row's session reads as a running session's title, linked to its live conversation", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([runningAgent()]);
   try {
@@ -85,7 +87,7 @@ test("a row's session reads as a running session's title, linked to its live con
     );
     expect(screen.getByRole("img", { name: "Running" })).toBeDefined();
     expect(link.closest("[data-agent-name]")?.parentElement?.textContent).toBe(
-      "Reviewing LEGION-587 · /home/alice/legion · devbox-alice"
+      "Reviewing LEGION-587 · sess-1 · /home/alice/legion · devbox-alice"
     );
   } finally {
     agents.mockRestore();
@@ -113,7 +115,8 @@ test("encodes a running session's id before building its live link", async () =>
 });
 
 // An id the agents list does not carry is the agent's not-running state: its short id, marked
-// not running, still linked, with no directory or machine.
+// not running, still linked, then its full id and "isn't running" in words, with no directory or
+// machine.
 test("a row's session naming an id the agents list doesn't carry reads as not running", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([]);
   try {
@@ -126,14 +129,15 @@ test("a row's session naming an id the agents list doesn't carry reads as not ru
     expect(name.getAttribute("href")).toBe("/agents/sess-gone/live");
     const agent = name.closest("[data-agent-name]");
     expect(agent?.getAttribute("data-agent-state")).toBe("not-running");
-    expect(agent?.parentElement?.textContent).toBe("session:sess-gon…");
+    expect(agent?.parentElement?.textContent).toBe("session:sess-gon… · sess-gone isn't running.");
   } finally {
     agents.mockRestore();
   }
 });
 
 // Envoy unavailable or not configured: the agents list never answers, so an id is the agent's
-// unknown state, never not running.
+// unknown state, never not running, and the line says in words, with the full id, that it
+// couldn't check.
 test("a row's session reads as unknown while the agents list cannot be read", async () => {
   const agents = spyOn(api, "listAgents").mockRejectedValue(new Error("envoy unavailable"));
   try {
@@ -146,8 +150,9 @@ test("a row's session reads as unknown while the agents list cannot be read", as
     expect(
       screen.getByRole("link", { name: "session:sess-gon…" }).closest("[data-agent-name]")
         ?.parentElement?.textContent
-    ).toBe("session:sess-gon…");
+    ).toBe("session:sess-gon… · couldn't check whether sess-gone is running.");
     expect(screen.queryByRole("img", { name: "Not running" })).toBeNull();
+    expect(screen.queryByText(/isn't running/)).toBeNull();
   } finally {
     agents.mockRestore();
   }

@@ -537,62 +537,66 @@ export function AskCard({
             280 px margin, where a single row could not hold five copy controls without pushing
             the reference out of reach. */}
         <div
-          className={`mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
+          className={`@container mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
         >
-          {/* Turn, author and time are one unwrapped group whose names truncate: a separator
-              that wrapped left a line opening - or ending - on a bare "·", and the agents are the
-              only parts that can give up width ("Waiting on you" never does). A block ask the
-              server indexed with no pending author has an empty label and still says when it
-              was asked. */}
-          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap">
+          {/* Turn, author and time are one group whose names truncate: a separator that wrapped
+              left a line opening - or ending - on a bare "·", and the agents are the only parts
+              that can give up width ("Waiting on you" never does). Below 24rem of line (a phone,
+              a margin) the turn takes a line of its own with no separator after it, and the
+              asker and time share the next: beside the turn and the live link's 44 px touch box
+              the asker's name kept only two letters. A block ask the server indexed with no
+              pending author has an empty label and still says when it was asked. */}
+          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap @max-sm:flex-wrap">
             {turnHolder === null ? null : (
               <span
-                className={`${turnHolder === "you" ? "shrink-0" : "min-w-0 truncate"} font-semibold ${textSecondaryOnSurface}`}
+                className={`${turnHolder === "you" ? "shrink-0" : "min-w-0 truncate"} font-semibold @max-sm:basis-full ${textSecondaryOnSurface}`}
                 data-testid={`turn-${displayedAsk.id}`}
               >
                 Waiting on {turnHolder === "you" ? "you" : <AgentName actor={turnHolder} inline />}
               </span>
             )}
             {turnHolder === null ? null : (
-              <span className="shrink-0" aria-hidden="true">
+              <span className="shrink-0 @max-sm:hidden" aria-hidden="true">
                 ·
               </span>
             )}
-            {sessionAuthor === undefined ? (
-              <TruncatedText className="min-w-0" title={askerTitle}>
-                {displayedAsk.author.id === "" ? (
-                  "asked"
-                ) : (
-                  <AgentName actor={displayedAsk.author} />
-                )}
-              </TruncatedText>
-            ) : (
-              // The asker's button keeps its name and opens the session's copy handles; the
-              // component's live link sits beside it, outside the button. `whitespace-pre`
-              // keeps the space before an attribution suffix, which a flex item would drop.
-              <AgentName
-                actor={sessionAuthor}
-                className="flex min-w-0 items-center whitespace-pre"
-                control={(name) => (
-                  <button
-                    aria-expanded={handlesOpen}
-                    className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
-                    onClick={() => setHandlesOpen((open) => !open)}
-                    type="button"
-                  >
-                    <TruncatedText className="min-w-0" title={askerTitle}>
-                      {name}
-                    </TruncatedText>
-                    <ChevronIcon expanded={handlesOpen} />
-                  </button>
-                )}
-                kind="control"
-              />
-            )}
-            <span className="shrink-0" aria-hidden="true">
-              ·
+            <span className="flex min-w-0 items-center gap-x-1.5">
+              {sessionAuthor === undefined ? (
+                <TruncatedText className="min-w-0" title={askerTitle}>
+                  {displayedAsk.author.id === "" ? (
+                    "asked"
+                  ) : (
+                    <AgentName actor={displayedAsk.author} />
+                  )}
+                </TruncatedText>
+              ) : (
+                // The asker's button keeps its name and opens the session's copy handles; the
+                // component's live link sits beside it, outside the button. `whitespace-pre`
+                // keeps the space before an attribution suffix, which a flex item would drop.
+                <AgentName
+                  actor={sessionAuthor}
+                  className="flex min-w-0 items-center whitespace-pre"
+                  control={(name) => (
+                    <button
+                      aria-expanded={handlesOpen}
+                      className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
+                      onClick={() => setHandlesOpen((open) => !open)}
+                      type="button"
+                    >
+                      <TruncatedText className="min-w-0" title={askerTitle}>
+                        {name}
+                      </TruncatedText>
+                      <ChevronIcon expanded={handlesOpen} />
+                    </button>
+                  )}
+                  kind="control"
+                />
+              )}
+              <span className="shrink-0" aria-hidden="true">
+                ·
+              </span>
+              <Timestamp at={displayedAsk.created_at} />
             </span>
-            <Timestamp at={displayedAsk.created_at} />
           </span>
           {reference === undefined ? null : <CopyRefButton route={reference} />}
           {!handlesOpen ? null : (
