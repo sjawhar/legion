@@ -8,7 +8,7 @@ tags:
   - gvisor
   - go-test
 date: 2026-10-10
-status: active
+status: superseded in part by INFRA-257 — cgo is no longer among what a pod lacks, since the image carries gcc and libc6-dev with cgo off by default, so the supervise table tests run; the rest stands
 module: packages/daemon
 related_issues:
   - "LEGION-631"
@@ -40,6 +40,8 @@ related_issues:
   Docker (testcontainers, NATS) and cgo (the supervise table tests type-check `net`); skip those by
   name and say so in the proof. The pod's `/tmp` does not survive a relaunch — the setup is
   rerun, not found.
+  (INFRA-257: cgo is no longer missing; skip the supervise table tests only on an older pinned image
+  digest without gcc.)
 
 ## Evidence
 

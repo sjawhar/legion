@@ -46,7 +46,8 @@ var (
 	// missing or "none" (LEGION-567's reconcile needs it to read merged PRs).
 	ErrNoPullRequestsRead = errors.New("the installation lacks Pull requests: read")
 	// ErrNoBranch is GitHub's 422 for a configured branch that does not exist,
-	// or its 404 for a repository it cannot find or the installation cannot see.
+	// or its 404 for a repository it cannot find or the installation cannot see;
+	// Branch also answers it for a name that is not exactly a branch's (see Branch).
 	ErrNoBranch = errors.New("the branch does not exist")
 	// ErrTreeTruncated is GitHub's truncated=true on a tree read: the
 	// directory exceeds the tree API caps (100k entries / 7 MB), so the
@@ -633,11 +634,13 @@ func (c *Client) request(ctx context.Context, method, target, authorization, acc
 }
 
 // Ref resolves branch to its commit SHA under an installation token
-// (`GET /repos/{owner}/{repo}/commits/{branch}`) — one call that also proves
-// the branch exists. GitHub answers a branch that does not exist with 422 and
-// a repository it cannot find or the installation cannot see with 404; both
-// are ErrNoBranch. An empty repository answers 409 per GitHub's docs, which
-// passes through as a read error.
+// (`GET /repos/{owner}/{repo}/commits/{branch}`). That read resolves any
+// commit-ish, so a SHA, `main~1` or `refs/heads/main` resolves too: Ref answers
+// a head, and it does not prove that branch names a branch. A source's save
+// proves that with Branch. GitHub answers a value that resolves to nothing with
+// 422 and a repository it cannot find or the installation cannot see with 404;
+// both are ErrNoBranch. An empty repository answers 409 per GitHub's docs,
+// which passes through as a read error.
 // It asks for the SHA alone (`Accept: application/vnd.github.sha`), so the
 // commit's file list, which GitHub's JSON answer carries, never counts
 // against responseLimit. An answer that is not one 40-hex SHA is an error,
@@ -663,6 +666,48 @@ func (c *Client) Ref(ctx context.Context, token, owner, repo, branch string) (st
 		return "", fmt.Errorf("commit for %s/%s@%s: GitHub answered no commit SHA (%d bytes)", owner, repo, branch, len(body))
 	}
 	return sha, nil
+}
+
+// Branch proves branch is the name of a branch owner/repo has and answers its head commit SHA,
+// with one exact read under an installation token (`GET /repos/{owner}/{repo}/git/ref/heads/{branch}`,
+// the name path-escaped so a `/` in it travels as %2F). A source's save checks its branch with
+// Branch rather than Ref: Ref's `commits/{ref}` resolves any commit-ish, so a SHA, `main~1`,
+// `HEAD` or `refs/heads/main` would pass it and be stored as the branch, while the exact read
+// answers 404 for every one of them and for a prefix of a branch's name. 404 (no such branch,
+// or a repository GitHub cannot find or the installation cannot see), 409 (an empty repository)
+// and 422 are ErrNoBranch. A 200 naming another ref, or carrying no 40-hex SHA, is ErrNoBranch
+// too: GitHub's exact read never answers one, but the check does not trust that it cannot.
+func (c *Client) Branch(ctx context.Context, token, owner, repo, branch string) (string, error) {
+	if c == nil {
+		return "", ErrNoAppKey
+	}
+	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
+		"/git/ref/heads/" + url.PathEscape(branch)
+	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+token)
+	if err != nil {
+		return "", err
+	}
+	noBranch := fmt.Errorf("%w: %s on %s/%s", ErrNoBranch, branch, owner, repo)
+	switch status {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity:
+		return "", noBranch
+	default:
+		return "", fmt.Errorf("GET %s: status %d: %s", target, status, body)
+	}
+	var ref struct {
+		Ref    string `json:"ref"`
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(body, &ref); err != nil {
+		return "", fmt.Errorf("decode branch %s of %s/%s: %w", branch, owner, repo, err)
+	}
+	if ref.Ref != "refs/heads/"+branch || !commitSHA.MatchString(ref.Object.SHA) {
+		return "", noBranch
+	}
+	return ref.Object.SHA, nil
 }
 
 // Dir is one directory listing at a commit: the directory's own tree object

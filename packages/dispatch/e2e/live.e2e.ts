@@ -481,9 +481,9 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // the issue's message threads, the two one-row event reads the unread mark
   // needs (the first event past the watermark, and the issue's head),
   // Conversation's live-agent query, the one block-schema fetch every document
-  // surface shares for the session, the header's lookup of the project's
-  // architecture source (the `Components:` line offers its picker only when the
-  // project has a source; the component tree itself is fetched only once the picker
+  // surface shares for the session, the header's read of the project's
+  // architecture sources (the `Components:` line offers its picker only when the
+  // project has one; the component tree itself is fetched only once the picker
   // opens, never on load), the header's read of the repository mappings (an issue
   // that resolves to no repository, as this one does, shows the `Repository:` item only
   // when its project maps one), me/agents/state, whose unread replies the Agents badge
