@@ -281,3 +281,24 @@ while panes can still read the keys, so the order is:
 
 Record the rotation on LEGION-74 as its spec asks (dates and key fingerprints only; never key
 material).
+
+## Serving on a socket the harness holds
+
+`legion start` binds legion.yaml's `bind` and `port` for its API. With `LEGION_LISTEN_FD=<n>` in
+its environment, it serves the API on descriptor `<n>` instead, a listening TCP socket it inherited
+from whatever started it, and binds nothing. A test harness opens that socket on port 0, so the
+kernel chooses the port, and holds it until the daemon serves on it; no other program can take the
+port in between. A shared-box deployment leaves the variable unset.
+
+- The file's `bind` and `port` must name the socket's address: `bind` an IP literal equal to the
+  socket's IP (`0.0.0.0` matches only a socket on every IPv4 interface, and a host name matches
+  nothing), `port` its port. The registry entry, the default `daemon_url` and `legion state` dial
+  them. A socket they do not name, or a descriptor that is not a listening TCP socket, refuses the
+  start before it takes the team or opens the store, naming `LEGION_LISTEN_FD` and the setting:
+  `legion start: legion.yaml: port=8081 does not match LEGION_LISTEN_FD=3, a socket listening on 127.0.0.1:8080`.
+- The daemon takes the socket over before it runs anything, the configuration's key commands
+  included, and serves on a close-on-exec copy, then unsets the variable: no process it starts, its
+  panes and tmux server among them, holds the socket or inherits the variable.
+- The boot line `legion daemon started` names the address the daemon serves on, as it does when it
+  binds.
+- `legion start --check-config` binds nothing and never reads the variable.

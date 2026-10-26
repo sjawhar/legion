@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -179,71 +180,85 @@ func startScratchDispatch(t *testing.T) (string, string) {
 	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-10*time.Second).Before(deadline) {
 		deadline = testDeadline.Add(-10 * time.Second)
 	}
-	// Dispatch binds the port it is given, and a free port found here is any process's until then:
-	// a start that lost it to another process is started again on another.
-attempts:
-	for attempt := 1; ; attempt++ {
-		port := boundPort(t)
-		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-		command := exec.Command(binary)
-		command.Dir = filepath.Join(repositoryRoot, "packages", "envoy")
-		command.Env = append(os.Environ(),
-			"DATABASE_URL="+serverURL.String(),
-			"DISPATCH_AGENT_TOKEN="+token,
-			"DISPATCH_IDENTITY=header:X-Dispatch-User",
-			"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
-			"DISPATCH_NATS_DISABLED=1",
-			"DISPATCH_LISTEN_HOST=127.0.0.1",
-			fmt.Sprintf("DISPATCH_PORT=%d", port),
-			"DISPATCH_SERVER_URL="+baseURL,
-			"DISPATCH_WEB_DIST="+filepath.Join(repositoryRoot, "packages", "dispatch", "web", "dist"),
-			"HOME="+home,
-		)
-		output := &syncBuffer{}
-		command.Stdout = output
-		command.Stderr = output
-		if err := command.Start(); err != nil {
-			t.Fatalf("start scratch Dispatch: %v", err)
+	// Dispatch serves on a socket held here on a port the kernel chose (DISPATCH_LISTEN_FD), so no
+	// other process can take the port before Dispatch serves it. The file is a descriptor of its own
+	// for the socket, so the socket stays listening once the listener is closed.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a port for scratch Dispatch: %v", err)
+	}
+	held, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		t.Fatalf("hold a port for scratch Dispatch: take the listening socket's descriptor: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	command := exec.Command(binary)
+	command.Dir = filepath.Join(repositoryRoot, "packages", "envoy")
+	command.Env = append(os.Environ(),
+		"DATABASE_URL="+serverURL.String(),
+		"DISPATCH_AGENT_TOKEN="+token,
+		"DISPATCH_IDENTITY=header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
+		"DISPATCH_NATS_DISABLED=1",
+		// ExtraFiles' first entry is descriptor 3 in Dispatch.
+		"DISPATCH_LISTEN_FD=3",
+		"DISPATCH_LISTEN_HOST=127.0.0.1",
+		fmt.Sprintf("DISPATCH_PORT=%d", port),
+		"DISPATCH_SERVER_URL="+baseURL,
+		"DISPATCH_WEB_DIST="+filepath.Join(repositoryRoot, "packages", "dispatch", "web", "dist"),
+		"HOME="+home,
+	)
+	command.ExtraFiles = []*os.File{held}
+	output := &syncBuffer{}
+	command.Stdout = output
+	command.Stderr = output
+	// From here Dispatch's is the only copy of the socket, so a Dispatch that exits releases the
+	// port and nothing of the test's answers on it.
+	err = command.Start()
+	_ = held.Close()
+	if err != nil {
+		t.Fatalf("start scratch Dispatch: %v", err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- command.Wait() }()
+	stopped := false
+	t.Cleanup(func() {
+		if stopped {
+			return
 		}
-		exited := make(chan error, 1)
-		go func() { exited <- command.Wait() }()
-		stopped := false
-		t.Cleanup(func() {
-			if stopped {
-				return
+		_ = command.Process.Signal(os.Interrupt)
+		select {
+		case err := <-exited:
+			if err != nil {
+				t.Errorf("scratch Dispatch stopped: %v\n%s", err, output.String())
 			}
-			_ = command.Process.Signal(os.Interrupt)
-			select {
-			case err := <-exited:
-				if err != nil {
-					t.Errorf("scratch Dispatch stopped: %v\n%s", err, output.String())
-				}
-			case <-time.After(10 * time.Second):
-				_ = command.Process.Kill()
-				<-exited
-				t.Error("scratch Dispatch did not stop after SIGINT")
-			}
-		})
-		for time.Now().Before(deadline) {
-			select {
-			case err := <-exited:
-				stopped = true
-				if attempt < 3 && strings.Contains(output.String(), "address already in use") {
-					t.Logf("scratch Dispatch lost port %d to another process before binding it; starting it on another", port)
-					continue attempts
-				}
-				t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", err, output.String())
-			default:
-			}
-			if response, err := pollClient.Get(baseURL + "/api/v1"); err == nil {
-				response.Body.Close()
-				if response.StatusCode == http.StatusOK {
-					return baseURL, token
-				}
-			}
-			time.Sleep(50 * time.Millisecond)
+		case <-time.After(10 * time.Second):
+			_ = command.Process.Kill()
+			<-exited
+			t.Error("scratch Dispatch did not stop after SIGINT")
 		}
-		t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
+	})
+	for {
+		select {
+		case err := <-exited:
+			stopped = true
+			t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", err, output.String())
+		default:
+		}
+		// Each poll is bounded (pollClient): until Dispatch serves, the held socket queues the
+		// connection unanswered.
+		if response, err := pollClient.Get(baseURL + "/api/v1"); err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return baseURL, token
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/envoy/listenfd"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -238,18 +240,6 @@ func heldListen(network, address string) (net.Listener, error) {
 // daemon takes the listener and serves it, and a daemon that exits before then never answers it.
 var pollClient = &http.Client{Timeout: time.Second}
 
-// boundPort is a free loopback port for a process that binds it itself, such as a scratch server
-// launched as a command: until it does, the port is any process's.
-func boundPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
-}
-
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
@@ -396,6 +386,57 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	}
 	if count, _ := boots(t, cfg); count != 0 {
 		t.Fatalf("boots after a start that never served = %d, want 0", count)
+	}
+}
+
+// `legion start` hands Run the socket it inherited (LEGION_LISTEN_FD), which a harness opened on a
+// port the kernel chose and held from then on: the daemon serves its API on that socket without
+// binding an address of its own, and its boot line names the address it serves on.
+func TestRunServesTheSocketItIsHandedAndLogsItsAddress(t *testing.T) {
+	cfg := testConfig(t)
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
+	}
+	file, err := held.(*net.TCPListener).File()
+	_ = held.Close()
+	if err != nil {
+		t.Fatalf("take the held socket's descriptor: %v", err)
+	}
+	// The descriptor `legion start` inherits is a bare number no *os.File owns, which Adopt closes.
+	descriptor, err := syscall.Dup(int(file.Fd()))
+	_ = file.Close()
+	if err != nil {
+		t.Fatalf("copy the held socket's descriptor: %v", err)
+	}
+	socket, err := listenfd.Inspect("LEGION_LISTEN_FD", strconv.Itoa(descriptor))
+	if err != nil {
+		_ = syscall.Close(descriptor)
+		t.Fatalf("inspect the held socket: %v", err)
+	}
+	inherited, err := listenfd.Adopt(socket)
+	if err != nil {
+		t.Fatalf("adopt the held socket: %v", err)
+	}
+	address := socket.Addr().String()
+	if thief, err := net.Listen("tcp", address); err == nil {
+		_ = thief.Close()
+		t.Fatalf("another listener took %s before the daemon served it", address)
+	}
+	cfg.Port = socket.Addr().Port
+	cfg.DaemonURL = "http://" + address
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.inherited = inherited
+	o.listen = func(_, address string) (net.Listener, error) {
+		t.Errorf("the daemon bound %s in place of serving the socket it was handed", address)
+		return nil, &net.AddrError{Err: "bound in place of the socket it was handed", Addr: address}
+	}
+	logs := &syncBuffer{}
+
+	startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
+
+	if logged := bootField(t, logs.String(), "address"); logged != address {
+		t.Errorf("the boot line names address %q, want %q, the socket the daemon serves on", logged, address)
 	}
 }
 

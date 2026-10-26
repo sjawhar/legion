@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/listenfd"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
@@ -308,10 +309,32 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 	log := slog.New(slog.NewJSONHandler(stderr, nil))
 	slog.SetDefault(log)
 
+	// The inherited socket is adopted first, before the configuration's key commands run, so none
+	// of them inherits its descriptor: from here on only the close-on-exec copy serving it is open.
+	inherited, socket, err := adoptListenFD()
+	if err != nil {
+		fmt.Fprintf(stderr, "legion start: %v\n", err)
+		return 1
+	}
+	if inherited != nil {
+		// daemon.Run closes it once it stops serving; this close is for a refusal before then, and
+		// is a harmless second close after.
+		defer inherited.Close()
+	}
 	cfg, err := config.Load(configPath, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
+	}
+	// legion.yaml always resolves both bind and port, and both must name the inherited socket: the
+	// registry entry, the default daemon_url and `legion state --port` all dial them.
+	if inherited != nil {
+		bind := listenfd.Setting{Name: "bind", Value: cfg.Bind, Set: true}
+		port := listenfd.Setting{Name: "port", Value: strconv.Itoa(cfg.Port), Set: true}
+		if err := socket.CheckAgainst(bind, port); err != nil {
+			fmt.Fprintf(stderr, "legion start: %s: %v\n", configPath, err)
+			return 1
+		}
 	}
 	applyLinkedPlugins(&cfg)
 	absoluteConfig, err := filepath.Abs(configPath)
@@ -359,11 +382,42 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		}
 	}()
 
-	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log); err != nil {
+	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log, inherited); err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// listenFDVariable names the listening TCP socket `legion start` serves its API on in place of
+// binding legion.yaml's bind and port: a test harness opens it on port 0 and holds it until the
+// daemon serves, so no other program takes the port in between. `legion start --check-config`
+// binds nothing and never reads it.
+const listenFDVariable = "LEGION_LISTEN_FD"
+
+// adoptListenFD is the listener serving the socket LEGION_LISTEN_FD names, with what Inspect found
+// of it, or nil when the variable is unset. Adopt closes the inherited descriptor whether it serves
+// or not; a descriptor Inspect refuses is left as it was, for the refused start's exit to close.
+// The variable is unset once the socket is adopted: its descriptor number no longer names it, and
+// every process the daemon starts, its panes among them, inherits the daemon's environment.
+func adoptListenFD() (net.Listener, listenfd.Socket, error) {
+	value, set := os.LookupEnv(listenFDVariable)
+	if !set {
+		return nil, listenfd.Socket{}, nil
+	}
+	socket, err := listenfd.Inspect(listenFDVariable, value)
+	if err != nil {
+		return nil, listenfd.Socket{}, err
+	}
+	listener, err := listenfd.Adopt(socket)
+	if err != nil {
+		return nil, listenfd.Socket{}, err
+	}
+	if err := os.Unsetenv(listenFDVariable); err != nil {
+		_ = listener.Close()
+		return nil, listenfd.Socket{}, fmt.Errorf("unset %s once its socket is adopted: %w", listenFDVariable, err)
+	}
+	return listener, socket, nil
 }
 
 func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {

@@ -101,7 +101,8 @@ const (
 	busyBackoffFirst = 250 * time.Millisecond
 )
 
-// overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
+// overrides are the parts of a daemon a test replaces, and the listener `legion start` inherited;
+// the zero value is the real daemon binding its own address.
 type overrides struct {
 	// runtime builds the runtime over the worker stream in place of the configured one; nil is the
 	// configured runtime.
@@ -134,8 +135,11 @@ type overrides struct {
 	// required-checks reads and its issue branches' creates); empty, in production, is
 	// https://api.github.com.
 	githubAPI string
-	// listen opens the API listener; nil is net.Listen.
+	// listen opens the API listener; nil is net.Listen. A test's, unused with inherited.
 	listen func(network, address string) (net.Listener, error)
+	// inherited is the API listener Run is handed: the socket `legion start` adopted from
+	// LEGION_LISTEN_FD, served on in place of binding cfg's bind and port. nil binds them.
+	inherited net.Listener
 	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
 	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
@@ -188,8 +192,13 @@ type Build struct {
 //
 // build is the binary's own build (Build), which the boot compares against the open production
 // checks of the repository it is built from.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger) error {
-	return run(ctx, cfg, build, log, overrides{})
+//
+// listener, when not nil, is the API listener the daemon serves on in place of binding cfg's bind
+// and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
+// Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
+// listener is taken leaves it to the caller to close.
+func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, cfg, build, log, overrides{inherited: listener})
 }
 
 func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
@@ -291,16 +300,19 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
-	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
-	listen := net.Listen
-	if o.listen != nil {
-		listen = o.listen
-	}
-	listener, err := listen("tcp", address)
-	if err != nil {
-		workflow.stop()
-		st.Close()
-		return fmt.Errorf("listen on %s: %w", address, err)
+	// The API serves on the socket it was handed (Run's listener) or binds cfg's address here.
+	listener := o.inherited
+	if listener == nil {
+		address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
+		listen := net.Listen
+		if o.listen != nil {
+			listen = o.listen
+		}
+		if listener, err = listen("tcp", address); err != nil {
+			workflow.stop()
+			st.Close()
+			return fmt.Errorf("listen on %s: %w", address, err)
+		}
 	}
 
 	var apps appauth.Tokens
@@ -422,7 +434,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		case err == nil:
 			log.Info("legion daemon started",
 				"project", cfg.Project,
-				"address", address,
+				"address", listener.Addr().String(),
 				"workerStream", s.stream.Addr(),
 				"runtime", cfg.Runtime.Name,
 				"admissionCap", cfg.AdmissionCap,

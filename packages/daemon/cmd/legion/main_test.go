@@ -206,6 +206,139 @@ func TestStartRefusesTheStateDirectoryAnotherTeamIsRunningOn(t *testing.T) {
 	}
 }
 
+// A harness hands `legion start` the socket it holds as LEGION_LISTEN_FD, and legion.yaml's bind
+// and port must name that socket: the registry entry, the default daemon_url and `legion state`
+// dial them. A socket they do not name, or a descriptor that is no listening socket, is refused
+// naming the variable and the setting, before the team is claimed and so before the daemon opens
+// its store or binds anything.
+func TestStartRefusesAnInheritedSocketLegionYAMLDoesNotName(t *testing.T) {
+	for _, probe := range []struct {
+		name string
+		// bind is legion.yaml's bind; empty leaves its 127.0.0.1 default.
+		bind string
+		// otherPort gives legion.yaml a port next to the held socket's.
+		otherPort bool
+		// notSocket hands a regular file in place of the held socket.
+		notSocket bool
+		want      func(held, configured int) []string
+	}{
+		{
+			name: "another port", otherPort: true,
+			want: func(held, configured int) []string {
+				return []string{fmt.Sprintf("port=%d does not match", configured), "LEGION_LISTEN_FD=3", "127.0.0.1:" + strconv.Itoa(held)}
+			},
+		},
+		{
+			name: "another bind", bind: "0.0.0.0",
+			want: func(held, _ int) []string {
+				return []string{"bind=0.0.0.0 does not match", "LEGION_LISTEN_FD=3", "127.0.0.1:" + strconv.Itoa(held)}
+			},
+		},
+		{
+			name: "no socket", notSocket: true,
+			want: func(int, int) []string { return []string{"LEGION_LISTEN_FD=3 is not a socket"} },
+		},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			legions := legionState(t)
+			descriptor, port := heldSocket(t)
+			if probe.notSocket {
+				var err error
+				if descriptor, err = os.CreateTemp(t.TempDir(), "not-a-socket"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configured := port
+			if probe.otherPort {
+				if configured++; configured > 65535 {
+					configured = port - 1
+				}
+			}
+			config := legionConfig(t, "LEGION", configured)
+			if probe.bind != "" {
+				appendTo(t, config, "bind: "+probe.bind+"\n")
+			}
+
+			code, stderr := startOnDescriptor(t, config, descriptor)
+
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1; stderr = %q", code, stderr)
+			}
+			for _, want := range probe.want(port, configured) {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr = %q, want it to name %q", stderr, want)
+				}
+			}
+			if _, ok, err := registry.Find(legions, "LEGION"); err != nil || ok {
+				t.Fatalf("Find(LEGION) = %v, %v; want the refused start to have claimed nothing", ok, err)
+			}
+		})
+	}
+}
+
+// heldSocket listens on a loopback port the kernel chooses and returns a descriptor of its own for
+// the socket, which stays listening once the listener is closed, and the port.
+func heldSocket(t *testing.T) (*os.File, int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
+	}
+	file, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		t.Fatalf("take the held socket's descriptor: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file, listener.Addr().(*net.TCPAddr).Port
+}
+
+// startOnDescriptor runs `legion start --config <config>` as its own process, handed descriptor
+// as its descriptor 3 and LEGION_LISTEN_FD=3, as a harness starts it, and returns its exit code
+// and stderr once it exits. The test's copy of descriptor is closed once the process has started.
+func startOnDescriptor(t *testing.T, config string, descriptor *os.File) (int, string) {
+	t.Helper()
+	command := exec.Command(os.Args[0], "start", "--config", config)
+	command.Env = append(os.Environ(), testMainEnv+"=1", "LEGION_LISTEN_FD=3")
+	command.ExtraFiles = []*os.File{descriptor}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	err := command.Start()
+	_ = descriptor.Close()
+	if err != nil {
+		t.Fatalf("start legion: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = command.Wait()
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(30 * time.Second):
+		_ = command.Process.Kill()
+		<-exited
+		t.Fatalf("legion start did not exit within 30s; stderr = %q", stderr.String())
+	}
+	return command.ProcessState.ExitCode(), stderr.String()
+}
+
+// appendTo appends text to the file at path.
+func appendTo(t *testing.T, path, text string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	if _, err := file.WriteString(text); err != nil {
+		_ = file.Close()
+		t.Fatalf("write %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close %s: %v", path, err)
+	}
+}
+
 // A daemon that died without cleaning up leaves an entry naming a pid nothing holds. A stop is
 // then the record's own repair, not an error.
 func TestStopRemovesTheEntryOfADaemonThatIsGone(t *testing.T) {
