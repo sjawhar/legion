@@ -2,30 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-190",
-  "completed": "2026-10-26T09:46:30Z",
-  "round": 4,
-  "headSha": "1125ea109c0ffed63d50ee9aef37fe9f35522830",
-  "codeHeadSha": "733ebfdbd51b2e227203bbd0a71ff6cabc761900",
-  "fullRoundReason": "Code changed since round 3 (733ebfdb rewrote how a title's line feed is written), so this is a full round.",
-  "ci": "At 733ebfdbd51b (read 2026-10-26T09:46Z with gh run list --commit): Tests 40300984181, Legion Envoy and Contracts 40300984353, Docs 40300984204 and PR Title 40300984232 queued; Worker Image 40300984190 pending. Not waited on; no lane rerun here.",
+  "completed": "2026-10-26T11:11:00Z",
+  "round": 5,
+  "headSha": "94806bd11f54aaf078230ad4c08ddf19db109d21",
+  "codeHeadSha": "999f2d4b98c7060dc38f0b90c69c29abdb6d19b3",
+  "fullRoundReason": "Code changed since round 4 (ad3351ac render rewrite, e8dbdc4c churn-gate definition, forward merge 999f2d4b), so this is a full round.",
+  "ci": "At 999f2d4b98c7 (read 2026-10-26T11:10Z with gh run list --commit): Tests 40310570149, Legion Envoy and Contracts 40310570053, Docs 40310570062, PR Title 40310569991 and Worker Image 40310569983 all queued. Not waited on; no lane rerun here.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at code head 733ebfdb from a fresh git archive (/legion/scratch/tmp/infra190/tester/head-r6), tester lane. R2 cases: my four refused writes now answer HTTP 201 on the real API with the link kept and &#10; in the heading, table cell and setext heading (tester/live/r6head.out); red test TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak passes. A3: linked-images.e2e.ts chromium + iphone 16 passed (tester/e2e-head-r6.log). The implementer's A4 run covers the deployment's export plus tester/corpus with every GATE 0; my adversarial run over the same head (tester/diff-r6-adv.log) reports regressions 0, misreads 0, refused writes 0, lost whole-image links 0, linked image kept 234/234. Its churn rows are the failure below."
+    "how": "Re-ran at code head 999f2d4b from a fresh git archive (/legion/scratch/tmp/infra190/tester/head-r7), tester lane. A3: linked-images.e2e.ts chromium + iphone 16 passed (tester/e2e-head-r7.log). A4/R2/R3: differential.sh --base 748e8d952a76 --head 999f2d4b over tester/corpus, corpus-r5, corpus-r6 (589 documents): every GATE 0, linked image kept 234/234, exit 0 (tester/diff-r7-adv.log); over 29 new container and multi-image shapes (corpus-r7: footnote definition, emphasis, task, 10./1000. items, nested lists and quotes, lines opening blocks, several raw titles per paragraph or list): every GATE 0 (tester/diff-r7-ctx.log). Red tests TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote and TestParseTakesALinkedImageWhoseLinkTitleHoldsALineBreak pass. The churn-gate change (e8dbdc4c) moves only the two carriage-return rows to the new ungated class 'churn of base bytes a write reads otherwise', the case round 3 judged outside R3; no other row moved."
   },
   "failures": [
     {
-      "criterion": "R3: no document the server stores correctly today changes its bytes (A4: the differential reports 0 churn)",
-      "evidence": "Round 6 writes a title's line feed as &#10; in every block but a top-level paragraph, including list items and block quotes, where the base writes it raw and reads it back as held (the next line is the paragraph's lazy continuation). This applies to an unlinked image, so documents already stored change their bytes at their next write. Real server (tester/live/r6head.out vs r6base.out): POST /api/v1/issues/LIVE-1/artifacts with '- ![x](i.png \"a\\nb\")', '1. ![x](i.png \"a\\nb\")' and '> ![x](i.png \"a\\nb\")' -> base 748e8d95 /text returns each byte for byte; head 733ebfdb /text returns '- ![x](i.png \"a&#10;b\")' and the same for the other two. differential.sh --base 748e8d952a76 --head 733ebfdbd51b --corpus tester/corpus-r6 (177 title line-feed shapes) --corpus tester/corpus-r5 --corpus tester/corpus: GATE churn 12, GATE engine-tree churn 12, GATE lost fixed points 4 (list, ordered list, quote and nested list>quote image titles), exit 1 (tester/diff-r6-adv.log, report.jsonl). Red test TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote in packages/envoy/internal/dispatch/pmdoc/render_test.go, commit 47d7f3f1bf6c10a3d01556fa108d98fde2dea79f, fails with `cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote` (4 cases: 'want the stored bytes kept'). The same test passes against base 748e8d95. The implementer's TestRenderWritesEachImageFieldSoItReadsBackAsHeld (render_test.go:627-657) pins the block-quote row to &#10;, which is this churn; that row must change with the fix."
+      "criterion": "No write or save of a document the element limit admits takes server time quadratic in its size (the change must add no availability regression; R2's writes must be taken, not hang)",
+      "evidence": "Round 7's render (ad3351ac, render.go: the loop over misreadRawTitle) writes each title line feed raw, parses the whole rendered document back, and renders the whole document again with one more image escaped for each misread image. So a document of n images whose titles hold a blank line costs n full parses and renders. pmdoc at 999f2d4b (tester/head-r7, a throwaway scale test, now removed): 250 / 500 / 1000 / 2000 such images (7 / 14 / 28 / 56 KB) take ParseForWrite 2.1 s / 11 s / 36 s / 2 min 35 s and Render 2.2 s / 8.9 s / 41 s / 2 min 30 s; 2000 images with plain titles take 0.11 s and 0.04 s. Real server (tester/live/timed.sh, r7time.out): POST /api/v1/issues/LIVE-1/artifacts of 1000 '![x](i.png \"a&#10;&#10;b\")' paragraphs (28 KB) -> HTTP 201 after 70.8 s, and the next plain 18 KB write waited 5.9 s behind it. Base 748e8d95 (r7basetime.out) answers the same POST HTTP 400 in 0.055 s. One write may hold 65,536 elements, about 32,000 such images, so at this rate a single upload costs hours of server CPU. Round 6 (733ebfdb) rendered the 2000 in 0.10 s. Red test TestRenderIsLinearInImagesWhoseTitlesHoldABlankLine in packages/envoy/internal/dispatch/pmdoc/linear_test.go, commit e39b6dd5f7abc0dd32f6dd5bd33ebbfac811d200, fails with `cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run 'TestRenderIsLinearInImagesWhoseTitlesHoldABlankLine$'` ('took more than 30s'); the same test passes at 733ebfdb in 0.10 s."
     }
   ],
   "failed": 1,
   "checked": [
-    "177 title line-feed shapes (tester/corpus-r6/titles-r6.jsonl): image and link titles whose second line opens an ATX or setext heading, a thematic break, a bullet, plus, star, ordered (1. 2. 1)) or task item, a quote, a fence, an HTML block (div, comment, pre, span), a footnote or reference definition, a table delimiter or row, indented 2/4/tab, $$, :::, trailing spaces or tab before the line feed, a whitespace-only line, a trailing backslash, a leading or trailing line feed; each in a top-level paragraph alone, mid-text and as raw line feeds. No regression, misread, refused write or lost link: rawTitlesReadBack falls back to &#10; wherever Go would misread, and the engine read every head rendering back as held.",
-    "The two image-title shapes the base refuses (a blank line, a line feed in a table cell) are now taken: '![x](i.png \"a&#10;&#10;b\")' answers HTTP 201 and reads back with &#10;&#10; (base HTTP 400).",
-    "Ungated and unchanged since round 3: &nGt; and &nLt; (two code points each) in a src or title count as 'lost fixed point of a misread' (4), as in round 3's run.",
-    "CR churn (img-title-cr-ref, crlf) unchanged since round 3: base stores a raw CR that a write reads back as LF, so R3 does not cover it."
+    "Correctness of round 7's output: no regression, misread, churn, refused write or lost link over 618 adversarial documents (corpus, corpus-r5, corpus-r6, corpus-r7); raw line feeds kept in list items, quotes, footnote definitions and paragraphs wherever they read back; &#10; where a title line opens a block, loses indentation or holds a blank line.",
+    "Real API at head (round 4's churn cases): '- ![x](i.png \"a\\nb\")', '1. …' and '> …' are stored byte for byte, as at base.",
+    "Ungated and unchanged: &nGt; and &nLt; 'lost fixed point of a misread' (4); the carriage-return rows (now 'churn of base bytes a write reads otherwise'); an emphasis mark around an image is dropped at base and head alike."
   ],
   "previousRounds": [
+    {
+      "round": 4,
+      "headSha": "733ebfdbd51b2e227203bbd0a71ff6cabc761900",
+      "verdict": "fail",
+      "failure": "An image title's line feed in a list item or block quote was written &#10;, so stored documents changed their bytes (R3; red test TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote, 47d7f3f1). Fixed at ad3351ac and verified in round 5: the red test passes and the differential's churn gate is 0."
+    },
     {
       "round": 3,
       "headSha": "18e756469fe4cc53056f32750f035a737b55ae84",
