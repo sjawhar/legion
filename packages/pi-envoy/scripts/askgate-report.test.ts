@@ -160,7 +160,12 @@ describe("readSessions and computeStats", () => {
     const s = computeStats(records);
     expect(s.gatedCalls).toBe(11);
     expect(s.reviews).toBe(8);
-    expect(s.sentBack).toBe(4);
+    // Every call the gate did not pass as sent: four revises, and the two it could not read,
+    // which never reached a review (a6 ran in warn mode, a8 was refused in block mode).
+    expect(s.sentBack).toBe(6);
+    // Every write that posted with no review behind it: the warn-mode unreadable call and the
+    // timeout. A revise in warn mode posted, but a review stands behind it.
+    expect(s.unreviewed).toBe(2);
     // Review latencies 100..800: nearest-rank median is the 4th, p90 the 8th.
     expect(s.latencyMedian).toBe(400);
     expect(s.latencyP90).toBe(800);
@@ -169,15 +174,16 @@ describe("readSessions and computeStats", () => {
     // a1 (a revise in block mode) and a8 (unreadable in block mode); a6, unreadable in warn, ran.
     expect(s.refusals).toBe(2);
     expect(s.perTool).toEqual([
-      { tool: "dispatch_ask", reviews: 5, sentBack: 2 },
-      { tool: "dispatch_comment", reviews: 3, sentBack: 2 },
+      { tool: "dispatch_ask", calls: 8, reviews: 5, sentBack: 4 },
+      { tool: "dispatch_comment", calls: 3, reviews: 3, sentBack: 2 },
     ]);
     const lines = formatReport(s, 42);
-    expect(lines).toContain("sent back: 50.0% (4 of 8 reviews)");
+    expect(lines).toContain("sent back: 54.5% (6 of 11 gated calls)");
+    expect(lines).toContain("unreviewed sends: 2");
     expect(lines).toContain("review latency median: 400 ms");
     expect(lines).toContain("review latency p90: 800 ms");
     expect(lines).toContain("review cost median: $0.0200 (4 reviews with a cost)");
-    expect(lines).toContain("tool dispatch_ask: 5 reviews, sent back 40.0% (2)");
+    expect(lines).toContain("tool dispatch_ask: 8 gated calls, 5 reviews, sent back 50.0% (4)");
     expect(lines.at(-1)).toBe("seed: 42");
   });
 
@@ -186,7 +192,7 @@ describe("readSessions and computeStats", () => {
     expect(lines).toContain("review latency median: n/a");
     expect(lines).toContain("review latency p90: n/a");
     expect(lines).toContain("review cost median: n/a");
-    expect(lines).toContain("sent back: n/a (0 of 0 reviews)");
+    expect(lines).toContain("sent back: n/a (0 of 0 gated calls)");
   });
 });
 
@@ -201,10 +207,25 @@ describe("outcome counts and the sessions whose gate did not review", () => {
   test("a session with an unreviewed write is named with its counts", () => {
     const lines = formatReport(computeStats(records), 1);
     const named = lines.filter((line) => line.startsWith("session "));
-    // Session A holds one timeout; session B's entries are all reviews or revises.
+    // Session A holds one timeout and one unreadable call warn mode ran; session B's entries are
+    // all reviews or revises, each of which a review stands behind.
     expect(named).toHaveLength(1);
     expect(named[0]).toContain("sessA.jsonl");
     expect(named[0]).toContain("timeout 1");
+    expect(named[0]).toContain("unreadable 1");
+  });
+
+  test("a rebuttal and a breaker trip name their session too", () => {
+    const unreviewed = parseSessionText(
+      [
+        gate({ id: "rb", outcome: "rebuttal", decision: "allow", mode: "block" }),
+        gate({ id: "bk", outcome: "breaker", decision: "allow", mode: "block" }),
+      ].join("\n"),
+      "sessC.jsonl"
+    );
+    const stats = computeStats(unreviewed);
+    expect(stats.unreviewed).toBe(2);
+    expect(formatReport(stats, 1)).toContain("session sessC.jsonl: breaker 1, rebuttal 1");
   });
 
   test("no unreviewed write names no session", () => {

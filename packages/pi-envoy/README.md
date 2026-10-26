@@ -325,8 +325,11 @@ limit and the review's limit. It still reviews each write.
 
 `OMP_ASKGATE_DUMP` names a file that gets each review's two prompts. Every gated call writes one
 `advisor-gate` entry into the session's transcript, and `scripts/askgate-report.ts` reports over
-those entries: what the reviews sent back and cost, a count for each outcome, and every session
-that had a write the gate did not review, with its counts. The report counts a write as **sent
-back** when the gate did not pass it as sent (a revise verdict, a call it could not read, or a
-gate that did not load), and as a **refusal** when the write did not post (one sent back in block
-mode, and `no-model-role` and `load-failed`, which refuse in warn mode too).
+those entries: what the gate sent back and what the reviews cost, a count for each outcome, and
+every session that had a write the gate did not review, with its counts. The report counts a
+write as **sent back** when the gate did not pass it as sent (a revise verdict, a call it could
+not read, or a gate that did not load), over every gated call, since two of those three never
+reach a review; as a **refusal** when the write did not post (one sent back in block mode, and
+`no-model-role` and `load-failed`, which refuse in warn mode too); and as **unreviewed** when it
+posted with no review behind it, which is every `allow` whose outcome is no verdict (the table
+above, a rebuttal and a breaker trip included).

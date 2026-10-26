@@ -27,6 +27,8 @@ export interface GateRecord {
 
 export interface ToolShare {
   tool: string;
+  /** Every gated call of the tool, reviewed or not. */
+  calls: number;
   reviews: number;
   sentBack: number;
 }
@@ -40,7 +42,10 @@ export interface SessionOutcomes {
 export interface Stats {
   gatedCalls: number;
   reviews: number;
+  /** Every gated call the gate did not pass as sent, reviewed or not (`isSentBack`). */
   sentBack: number;
+  /** Every write that posted with no review behind it (`isUnreviewed`). */
+  unreviewed: number;
   latencyMedian: number | null;
   latencyP90: number | null;
   costMedian: number | null;
@@ -194,27 +199,34 @@ export function percentile(values: number[], p: number): number | null {
 }
 
 /**
- * The outcomes where the gate reviewed nothing: it failed, gave up, was paused, or had no model
- * for the session. A reader cannot tell "no writes" from "no gate" without them.
+ * A write that posted with no review behind it: the gate failed, gave up, was paused, had no
+ * model for the session's provider, took a rebuttal or tripped its breaker, or could not read the
+ * call and warn mode ran it. Every one of them is an `allow` whose outcome is not a verdict, and
+ * only a reader who counts them can tell "no writes" from "no gate".
  */
-const UNREVIEWED_OUTCOMES = ["halted", "skipped", "timeout", "error", "no-verdict", "load-failed"];
+export function isUnreviewed(record: GateRecord): boolean {
+  return record.decision === "allow" && record.outcome !== "verdict";
+}
 
 export function computeStats(records: GateRecord[]): Stats {
   const reviews = records.filter(isReview);
   const latencies = reviews.flatMap((r) => (r.latencyMs === null ? [] : [r.latencyMs]));
   const costs = reviews.flatMap((r) => (r.cost === null ? [] : [r.cost]));
   const byTool = new Map<string, ToolShare>();
-  for (const review of reviews) {
-    const share = byTool.get(review.tool) ?? { tool: review.tool, reviews: 0, sentBack: 0 };
-    share.reviews += 1;
-    if (isSentBack(review)) share.sentBack += 1;
-    byTool.set(review.tool, share);
+  // Every gated call of the tool, not its reviews alone: a call the gate could not read, and one
+  // a gate that did not load refused, was sent back without any review.
+  for (const record of records) {
+    const share = byTool.get(record.tool) ?? { tool: record.tool, calls: 0, reviews: 0, sentBack: 0 };
+    share.calls += 1;
+    if (isReview(record)) share.reviews += 1;
+    if (isSentBack(record)) share.sentBack += 1;
+    byTool.set(record.tool, share);
   }
   const byOutcome = new Map<string, number>();
   const bySession = new Map<string, Map<string, number>>();
   for (const record of records) {
     byOutcome.set(record.outcome, (byOutcome.get(record.outcome) ?? 0) + 1);
-    if (!UNREVIEWED_OUTCOMES.includes(record.outcome)) continue;
+    if (!isUnreviewed(record)) continue;
     const counts = bySession.get(record.session) ?? new Map<string, number>();
     counts.set(record.outcome, (counts.get(record.outcome) ?? 0) + 1);
     bySession.set(record.session, counts);
@@ -222,7 +234,8 @@ export function computeStats(records: GateRecord[]): Stats {
   return {
     gatedCalls: records.length,
     reviews: reviews.length,
-    sentBack: reviews.filter(isSentBack).length,
+    sentBack: records.filter(isSentBack).length,
+    unreviewed: records.filter(isUnreviewed).length,
     latencyMedian: percentile(latencies, 50),
     latencyP90: percentile(latencies, 90),
     costMedian: percentile(costs, 50),
@@ -255,20 +268,24 @@ export function formatReport(stats: Stats, seed: number): string[] {
   return [
     "A gated call is any advisor-gate entry. A review is one where the model gave a verdict.",
     "Sent back means the gate did not pass the write as sent: a revise verdict, a call it could",
-    "not read, or a gate that did not load. A refusal is a write that did not post: one sent back",
+    "not read, or a gate that did not load. It is counted over every gated call, since two of",
+    "those three never reach a review. A refusal is a write that did not post: one sent back",
     "in block mode, and `no-model-role` and `load-failed`, which refuse in warn mode too.",
-    "A session named below had at least one write the gate did not review, with each outcome's count.",
+    "Unreviewed is a write that posted with no review behind it: every allow whose outcome is no",
+    "verdict, a rebuttal, a breaker trip and a warn-mode unreadable call among them.",
+    "A session named below had at least one such write, with each outcome's count.",
     `gated calls: ${stats.gatedCalls}`,
     `reviews: ${stats.reviews}`,
-    `sent back: ${share(stats.sentBack, stats.reviews)} (${stats.sentBack} of ${stats.reviews} reviews)`,
+    `sent back: ${share(stats.sentBack, stats.gatedCalls)} (${stats.sentBack} of ${stats.gatedCalls} gated calls)`,
     `review latency median: ${ms(stats.latencyMedian)}`,
     `review latency p90: ${ms(stats.latencyP90)}`,
     `review cost median: ${cost}`,
     `refusals: ${stats.refusals}`,
+    `unreviewed sends: ${stats.unreviewed}`,
     ...stats.byOutcome.map(([outcome, count]) => `outcome ${outcome}: ${count}`),
     ...stats.perTool.map(
       (t) =>
-        `tool ${t.tool}: ${t.reviews} reviews, sent back ${share(t.sentBack, t.reviews)} (${t.sentBack})`
+        `tool ${t.tool}: ${t.calls} gated calls, ${t.reviews} reviews, sent back ${share(t.sentBack, t.calls)} (${t.sentBack})`
     ),
     ...stats.unreviewedSessions.map(
       ({ session, counts }) =>
