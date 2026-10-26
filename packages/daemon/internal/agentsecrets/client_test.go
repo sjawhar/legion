@@ -55,6 +55,7 @@ type fakeBroker struct {
 	mu           sync.Mutex
 	logins       []tokenLogin   // every POST /v1/launcher-credentials/token, refused ones included, in order
 	refuseLogins []enrollAnswer // answered, in order, to the next logins instead of accepting them
+	dropLogins   int            // this many next logins get their connection closed with no answer
 	lifetime     time.Duration  // each accepted login's credential lives this long; an hour by default
 	holdLogins   chan struct{}  // when set, every login waits for it to close before answering
 
@@ -69,6 +70,7 @@ type tokenLogin struct {
 	iss        string
 	identifier string
 	service    string
+	at         time.Time // when the broker read it
 }
 
 type enrollAnswer struct {
@@ -117,16 +119,29 @@ func (b *fakeBroker) handleTokenLogin(w http.ResponseWriter, r *http.Request) {
 	b.logins = append(b.logins, tokenLogin{
 		token: body.Token, iss: fmt.Sprint(payload["iss"]),
 		identifier: fmt.Sprint(detail["identifier"]), service: fmt.Sprint(detail["service"]),
+		at: time.Now(),
 	})
 	seq := len(b.logins)
 	held := b.holdLogins
+	drop := b.dropLogins > 0
 	var refused *enrollAnswer
-	if len(b.refuseLogins) > 0 {
+	if drop {
+		b.dropLogins--
+	} else if len(b.refuseLogins) > 0 {
 		refused = &b.refuseLogins[0]
 		b.refuseLogins = b.refuseLogins[1:]
 	}
 	lifetime := b.lifetime
 	b.mu.Unlock()
+	if drop {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			b.t.Errorf("hijack the token login's connection: %v", err)
+			return
+		}
+		_ = conn.Close()
+		return
+	}
 	if held != nil {
 		select {
 		case <-held:
@@ -209,6 +224,15 @@ func withLoginRetry(t *testing.T, initial, most time.Duration) {
 	oldInitial, oldMax := loginRetryInitial, loginRetryMax
 	loginRetryInitial, loginRetryMax = initial, most
 	t.Cleanup(func() { loginRetryInitial, loginRetryMax = oldInitial, oldMax })
+}
+
+// withUnansweredRetry sets the wait after a login the broker gave no answer to, and the most it
+// doubles to, for one test.
+func withUnansweredRetry(t *testing.T, initial, most time.Duration) {
+	t.Helper()
+	oldInitial, oldMax := unansweredRetryInitial, unansweredRetryMax
+	unansweredRetryInitial, unansweredRetryMax = initial, most
+	t.Cleanup(func() { unansweredRetryInitial, unansweredRetryMax = oldInitial, oldMax })
 }
 
 // tokenFile writes token to a fresh file, as the kubelet projects the daemon's ServiceAccount
@@ -531,6 +555,57 @@ func TestAFailedLoginIsRetriedAfterItsWait(t *testing.T) {
 	}
 	if got := strings.Count(logged.String(), "the token login failed"); got != 2 {
 		t.Fatalf("log = %s, want each refused login logged once", logged.String())
+	}
+}
+
+// TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer: logins the broker closes the connection
+// on without an answer, as while it is down, are retried on the short schedule, not the long one
+// a refusal waits: with a minute's wait after a refusal, the daemon still logs in within seconds
+// once the broker answers again, after several unanswered attempts.
+func TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer(t *testing.T) {
+	withLoginRetry(t, time.Minute, time.Minute)
+	withUnansweredRetry(t, 20*time.Millisecond, 100*time.Millisecond)
+	broker, server := newFakeBroker(t)
+	broker.dropLogins = 4
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	err := c.Start(ctx)
+	var unanswered *unansweredError
+	if !errors.As(err, &unanswered) {
+		t.Fatalf("the first login = %v, want it unanswered", err)
+	}
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "a login to succeed once the broker answers, well before a refusal's minute")
+	if n := broker.loginCount(); n < 5 {
+		t.Fatalf("%d logins, want the four unanswered and the one that succeeded", n)
+	}
+}
+
+// TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses: a login the broker answers with a refusal waits
+// the long schedule's first wait before the next attempt, not the short one an unanswered login
+// waits, and is then retried.
+func TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses(t *testing.T) {
+	withLoginRetry(t, 300*time.Millisecond, 300*time.Millisecond)
+	withUnansweredRetry(t, 10*time.Millisecond, 10*time.Millisecond)
+	broker, server := newFakeBroker(t)
+	broker.refuseLogins = []enrollAnswer{{http.StatusUnauthorized, `{"code":"TOKEN_EXPIRED","error":"the token has expired"}`}}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	err := c.Start(ctx)
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != http.StatusUnauthorized {
+		t.Fatalf("the first login = %v, want the broker's 401", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	// A sleep a loaded machine stretches past the 300 ms wait may see the retry; the gap below
+	// still pins that wait.
+	if n := broker.loginCount(); n != 1 && time.Since(broker.login(0).at) < 300*time.Millisecond {
+		t.Fatalf("%d logins 150 ms after a refusal, want only the refused one before the 300 ms wait", n)
+	}
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "the refused login to be retried")
+	if gap := broker.login(1).at.Sub(broker.login(0).at); gap < 300*time.Millisecond {
+		t.Fatalf("the retry came %v after the refusal, want the long schedule's 300 ms wait at least", gap)
 	}
 }
 
