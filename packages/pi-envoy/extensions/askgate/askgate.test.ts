@@ -1859,6 +1859,64 @@ console.log(JSON.stringify(args, null, 2));
         )?.block
       ).toBe(true);
     });
+  // Outside review of #2159 at 31c5cca3b, finding 3: a word whose value only bash knows was taken
+  // as proof that a conditional write was out of scope. In a call AskGate cannot read, such a word
+  // on `issue` or `artifact` may be the spec or a markdown name, and such a subcommand after
+  // `dispatch` or after a program an expansion names may be any subcommand.
+  const UNRESOLVED: Array<[string, string, string]> = [
+    [
+      "a spec flag from a variable",
+      "F='--spec=hello'; dispatch issue --project P --title t $F",
+      "dispatch_issue",
+    ],
+    [
+      "a quoted spec flag from a variable",
+      `F='--spec=hello'; dispatch issue --project P --title t "$F"`,
+      "dispatch_issue",
+    ],
+    [
+      "an upload's name flag from a variable",
+      "dispatch artifact --issue X-1 $NAME --path b.md",
+      "dispatch_artifact",
+    ],
+    [
+      "a program and a subcommand both from variables",
+      `D=dispatch; S=comment; "$D" "$S" --issue X-1 --body hi`,
+      "dispatch_unknown",
+    ],
+    [
+      "a subcommand from a brace expansion",
+      "dispatch {comment,} --issue X-1 --body hi",
+      "dispatch_unknown",
+    ],
+    [
+      "a program and a subcommand from bash -c's own arguments",
+      `bash -c '"$0" "$1" --issue X-1 --body hi' "$P" "$S"`,
+      "dispatch_unknown",
+    ],
+  ];
+  for (const [form, command, tool] of UNRESOLVED)
+    test(`F3: an unresolved word is not proof that a write is out of scope: ${form}`, async () => {
+      expect(unreadableDispatchWrite(command)).toMatchObject({ tool });
+      for (const mode of ["warn", "block"]) {
+        const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+        unreadableText(await g.bash("u", command), mode);
+        expect(g.dryRuns).toHaveLength(0);
+        expect(g.calls).toHaveLength(0);
+        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+      }
+    });
+  test("F3: the reason for an unknown program and subcommand says to call dispatch by name with the subcommand written out", async () => {
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+    const reason =
+      (await g.bash("u", `D=dispatch; S=comment; "$D" "$S" --issue X-1 --body hi`))?.reason ?? "";
+    expect(reason).toContain("its program's name and the word after it hold `$`");
+    expect(reason).toContain("calling `dispatch` by name, with its subcommand written out");
+    // The literal grammar is unchanged: an issue with no spec and literal words is no write.
+    expect(await g.bash("plain", "dispatch issue --project P --title t")).toBeUndefined();
+    expect(await g.bash("unscoped", "$D search --query x")).toBeUndefined();
+    expect(g.entries.map((e) => e.toolCallId)).toEqual(["u"]);
+  });
   test("the text scan reads a write it cannot run, and says to keep such text off the command line", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     const result = await g.bash("t", "grep -n 'dispatch comment --issue' notes.md");

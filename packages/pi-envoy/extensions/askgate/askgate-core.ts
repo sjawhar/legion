@@ -39,16 +39,23 @@
 //     nature.
 //   - A `bash` call that holds a scoped `dispatch` write in any other form — after another
 //     command, with an expansion, a redirect or a pipe, sent to the background, beside a second
-//     reviewed write, or calling `dispatch` by a path the shell expands (`$HOME/…/dispatch`) — or
-//     a scoped subcommand run by a program an expansion names (`$D comment …`, `"${D}" ask …`,
-//     `$(command -v dispatch) …`), or a `dispatch` whose subcommand an expansion names (`dispatch
-//     $SUB …`), is `unreadable`. In `block` mode the call is refused before anything in it runs;
-//     in `warn` mode it runs and the same explanation comes back as additional context, with the
-//     entry's decision `allow`. The explanation states the literal grammar and tells the agent to
-//     send that `dispatch` command on its own; when the word that runs it or names its subcommand
-//     is what AskGate cannot read, it names the characters in it (`unreadableDispatchWrite`, a
-//     scan aware of quotes, here-documents and command substitutions, for a scoped write at a
-//     command position, and of the call's own text for a write another command would run). The
+//     reviewed write, or calling `dispatch` by a path the shell expands (`$HOME/…/dispatch`) or
+//     by a name with a backslash in it (`d\ispatch`) — or a scoped subcommand run by a program an
+//     expansion names (`$D comment …`, `"${D}" ask …`, `$(command -v dispatch) …`), or a
+//     `dispatch`, or a program an expansion names, whose subcommand an expansion names
+//     (`dispatch $SUB …`, `"$D" "$S" …`), is `unreadable`. So is an `issue` or an `artifact` that
+//     holds a word only bash resolves (`$F`, a glob, a brace), since that word may be its
+//     `--spec` or its markdown name; and so is a write in text another command would run
+//     (`bash -c '…'`, `eval '…'`, a here-document `bash` reads, `xargs dispatch …`), its quotes
+//     removed as that command removes them. In `block` mode the call is refused before anything
+//     in it runs; in `warn` mode it runs and the same explanation comes back as additional
+//     context, with the entry's decision `allow`. The explanation states the literal grammar and
+//     tells the agent to send that `dispatch` command on its own; when the word that runs it or
+//     names its subcommand is what AskGate cannot read, it names the characters in it
+//     (`unreadableDispatchWrite`, a scan aware of quotes, backslashes, here-documents and command
+//     substitutions, for a scoped write at a command position, then of each word, `eval`
+//     argument list and here-document body as a script of its own, four levels deep, then of
+//     the call's own text for a write another command would run). The
 //     entry reads `unreadable`; it never counts toward the halt. A halt, or a session the gate
 //     would skip (a primary on another provider), lets it run; a session with no model role
 //     refuses it in both modes, as a gate that did not load does: neither can review anything,
@@ -620,6 +627,27 @@ function reviewedWrite(name: string, flags: readonly Word[]): boolean {
 const flagName = (flag: Word) => flag.value.split("=", 1)[0];
 
 /**
+ * The characters that leave a word's value to bash alone: an expansion, a glob or a brace. A
+ * backslash or a quote is not one: bash removes it, and the scan removes it the same way.
+ */
+const UNRESOLVED = "$`*?[{";
+const unresolvedCharacters = (word: Word): string[] =>
+  [...new Set(scanWord(word.raw, 0).unread)].filter((char) => UNRESOLVED.includes(char));
+
+/**
+ * `reviewedWrite` for a call AskGate cannot read, where a word only bash can resolve is no proof
+ * that a conditional write is out of scope: on `issue` it may be `--spec`, and on `artifact` it may
+ * be inline text or a markdown name or path (`F='--spec=x'; dispatch issue … $F`). The literal
+ * grammar keeps `reviewedWrite`: none of its words is unresolved.
+ */
+function mayBeReviewedWrite(name: string, flags: readonly Word[]): boolean {
+  if (reviewedWrite(name, flags)) return true;
+  if (name !== SPEC_ONLY_COMMAND && name !== UPLOAD_COMMAND) return false;
+  if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) return false;
+  return flags.some((flag) => unresolvedCharacters(flag).length > 0);
+}
+
+/**
  * Whether an upload's words leave it possibly a markdown document: inline text, a name or path read
  * from a file, or a name or path that is not literal (an expansion, a glob), or that is markdown's.
  * Only an upload whose literal name and literal path are both no markdown's is not one. An upload
@@ -1178,7 +1206,7 @@ function textDispatchWrite(command: string): FoundWrite | undefined {
     const from = (match.index ?? 0) + match[0].length;
     const lineEnd = command.indexOf("\n", from);
     const flags = commandWords(command.slice(from, lineEnd === -1 ? command.length : lineEnd))[0];
-    if (!reviewedWrite(name, flags ?? [])) continue;
+    if (!mayBeReviewedWrite(name, flags ?? [])) continue;
     return writeNamed(name);
   }
   return undefined;
@@ -1196,8 +1224,8 @@ const writeNamed = (name: string): FoundWrite => ({
  */
 const NESTED_DEPTH = 4;
 
-/** The write without the fields that say where it sits: a nested write is always `wrapped`. */
-type FoundWrite = Pick<UnreadableCommand, "tool" | "label" | "subcommand">;
+/** The write without the field that says where it sits: a nested write is always `wrapped`. */
+type FoundWrite = Omit<UnreadableCommand, "wrapped">;
 
 /**
  * A scoped `dispatch` write in a `bash` command AskGate does not read. In order: a write at a
@@ -1231,16 +1259,15 @@ function findWrite(command: string, depth: number): UnreadableCommand | undefine
     const unread = [...new Set(scanWord(program.raw, 0).unread)];
     const expansions = unread.filter((char) => EXPANSIONS.includes(char));
     if (!named && expansions.length === 0) continue;
-    if (!reviewedWrite(name.value, flags)) {
-      // `dispatch $SUB …` may be any subcommand, a write among them.
-      const subcommand = [...new Set(scanWord(name.raw, 0).unread)].filter((char) =>
-        EXPANSIONS.includes(char)
-      );
-      if (named && subcommand.length > 0)
+    if (!mayBeReviewedWrite(name.value, flags)) {
+      // `dispatch $SUB …`, or `$D $SUB …`, may be any subcommand, a write among them.
+      const subcommand = unresolvedCharacters(name);
+      if (subcommand.length > 0)
         unknownSubcommand ??= {
           tool: "dispatch_unknown",
           label: "dispatch",
           subcommand: { unread: subcommand },
+          ...(named ? {} : { program: { namesDispatch: false, unread: expansions } }),
         };
       continue;
     }
@@ -1272,7 +1299,7 @@ function nestedWrite(
       if (
         word.value.split("/").at(-1) === "dispatch" &&
         name !== undefined &&
-        reviewedWrite(name.value, words.slice(index + 2))
+        mayBeReviewedWrite(name.value, words.slice(index + 2))
       )
         return writeNamed(name.value);
     }
@@ -1292,12 +1319,9 @@ function nestedWrite(
     }
   for (const script of scripts) {
     const found = findWrite(script, depth + 1);
-    if (found !== undefined)
-      return {
-        tool: found.tool,
-        label: found.label,
-        ...(found.subcommand === undefined ? {} : { subcommand: found.subcommand }),
-      };
+    if (found === undefined) continue;
+    const { wrapped: _, ...write } = found;
+    return write;
   }
   return undefined;
 }
@@ -1792,22 +1816,29 @@ function renderUnreadable(
       `AskGate ${ran ? "did not review" : "did not run"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${ending}`
     );
   }
+  // `$D $S …`: neither the program nor its subcommand is known, so either may be a write.
+  const unknownProgram =
+    subcommand !== undefined && program !== undefined && !program.namesDispatch;
   const opening =
     subcommand === undefined
       ? `AskGate ${ran ? "did not review" : "did not run"} this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
-      : `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
+      : unknownProgram
+        ? `AskGate ${ran ? "did not review" : "did not run"} this call: its program's name and the word after it hold ${characters([...new Set([...program.unread, ...subcommand.unread])])}, so AskGate cannot tell which program or subcommand would run, and either may be \`dispatch\` and a write AskGate reviews before it is sent.`
+        : `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
+  // A write in the call's text is named as such first: a resend of it in the same wrapper is
+  // refused again, whatever its program word holds.
   const why =
-    program !== undefined
-      ? program.namesDispatch
-        ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
-        : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
-      : wrapped === true
-        ? ` Here \`${label}\` is in this call's text, where another command (\`bash -c\`, \`sh -c\`, \`eval\`, \`xargs\`, a function or a variable) can run it.`
+    wrapped === true
+      ? ` Here \`${label}\` is in this call's text, where another command (\`bash -c\`, \`sh -c\`, \`eval\`, \`xargs\`, a function or a variable) can run it.`
+      : program !== undefined && !unknownProgram
+        ? program.namesDispatch
+          ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
+          : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
         : "";
   const resend =
     subcommand === undefined
       ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling `dispatch` by name"}.`
-      : " Send the `dispatch` command again with its subcommand written out.";
+      : ` Send the \`dispatch\` command again${unknownProgram ? ", calling `dispatch` by name," : ""} with its subcommand written out.`;
   return note(
     `${opening} ${LITERAL_GRAMMAR}${why} ${ending}${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`
   );
