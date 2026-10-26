@@ -37,6 +37,31 @@ interface FakeInterest {
  *  ended. `unreadable` is the bucket read that did not answer at all. */
 type SessionRecord = "present" | "absent" | "unreadable";
 
+/** How the listener answers its two list reads, `GET /v1/sessions` and `GET /v1/interests/`.
+ *  `ok` answers them from the fixture. `refilling` is the real listener's answer while its copy
+ *  of a bucket cannot be served (packages/envoy/cmd/listener writeListRefilling): 503,
+ *  `Retry-After: 5` and code `refilling`, which Dispatch reports as ENVOY_REFILLING. `down` is a
+ *  listener that could not answer the read at all: a 503 that carries no code, which Dispatch
+ *  reports as ENVOY_UNAVAILABLE - a plain status without the code is never the refilling answer.
+ *  Every other route answers as it does in `ok`. */
+type ListsState = "ok" | "refilling" | "down";
+
+const LISTS_STATES: readonly ListsState[] = ["ok", "refilling", "down"];
+
+/** The listener's list answer for a state other than `ok`. */
+function listRefusal(lists: Exclude<ListsState, "ok">): Response {
+  if (lists === "refilling") {
+    return Response.json(
+      { code: "refilling", error: "envoy: the agent list is refilling; try again in a moment" },
+      { headers: { "Retry-After": "5" }, status: 503 }
+    );
+  }
+  return Response.json(
+    { error: "envoy: the message bus did not answer: nats: no responders available" },
+    { status: 503 }
+  );
+}
+
 /** Every piece of fixture state this listener holds. `PUT /__fixture/reset` replaces it whole, so
  *  a field added here is reset with the rest without being listed anywhere else. A session reseed
  *  replaces it whole too, so a handler reads its request body before it touches `state`: a write
@@ -55,11 +80,13 @@ interface FakeEnvoyState {
    *  duplicate window for the life of the fixture. Cleared with the session seed. */
   readonly publishedKeys: Set<string>;
   readonly unsubscribeCalls: unknown[];
+  lists: ListsState;
 }
 
 function emptyState(): FakeEnvoyState {
   return {
     interests: [],
+    lists: "ok",
     liveSessions: new Set(),
     publishedKeys: new Set(),
     records: new Map(),
@@ -95,6 +122,7 @@ Bun.serve({
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/sessions") {
+      if (state.lists !== "ok") return listRefusal(state.lists);
       const now = Date.now();
       return Response.json(
         state.sessions
@@ -169,19 +197,29 @@ Bun.serve({
       return Response.json({ ok: true });
     }
     // A reseed starts the sessions over (their live set, send statuses, sends and duplicate
-    // window) and keeps the persisted subscriptions, which a test seeds on their own.
+    // window) and keeps the persisted subscriptions and the list answer, which a test sets on
+    // their own.
     if (request.method === "PUT" && url.pathname === "/__fixture/sessions") {
       const sessions = (await request.json()) as FakeSession[];
       const ids = sessions.map((session) => session.session_id);
       state = {
         ...emptyState(),
         interests: state.interests,
+        lists: state.lists,
         liveSessions: new Set(ids),
         sendStatuses: new Map(ids.map((id) => [id, 200] as const)),
         sessions,
         unsubscribeCalls: state.unsubscribeCalls,
       };
       return Response.json({ ok: true });
+    }
+    if (request.method === "PUT" && url.pathname === "/__fixture/lists") {
+      const body = (await request.json()) as { state?: ListsState };
+      if (body.state === undefined || !LISTS_STATES.includes(body.state)) {
+        return Response.json({ error: "state must be ok, refilling or down" }, { status: 400 });
+      }
+      state.lists = body.state;
+      return Response.json({ state: state.lists });
     }
     if (request.method === "PATCH" && url.pathname.startsWith("/__fixture/sessions/")) {
       const sessionID = decodeURIComponent(url.pathname.slice("/__fixture/sessions/".length));
@@ -226,6 +264,7 @@ Bun.serve({
       return Response.json(state.sentMessages);
     }
     if (request.method === "GET" && url.pathname === "/v1/interests/") {
+      if (state.lists !== "ok") return listRefusal(state.lists);
       return Response.json(state.interests);
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/interests") {
