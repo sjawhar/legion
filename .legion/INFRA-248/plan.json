@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-248",
-  "completed": "2026-10-25T23:42:21Z",
+  "completed": "2026-10-26T18:48:24Z",
   "planDocument": "dispatch://INFRA-248/artifact/plan-md",
   "summary": "One pull request on sjawhar/legion: vendor skills/ce-dogfood (upstream 8a776c13, MIT) into pi-legion's partition with one Legion paragraph; add skills/legion-worker/references/dogfood.md (the tester's adaptation: no fixes, failures with red tests back to the implementer, report as a Dispatch artifact on the slice's issue, decisions to the architect) linked from legion-worker; add the try-the-options bullet after line 15 of skills/dispatch-brainstorming, framed as a question weighed after the clarifying questions; pin agent-browser v0.39.2 in the worker image as the GitHub release's linux-x64 binary by SHA-256; regenerate packages/claude-envoy/legion; update release lists, docs and both CHANGELOGs; prove the image in a gVisor Job in namespace builds; run both before/after experiments before the merge and record them on INFRA-245.",
   "tasks": [
@@ -22,12 +22,48 @@
     "14 PR body evidence, ce-simplify-code on the Dockerfile hunk, implement.json proof per acceptance line"
   ],
   "acceptance": [
-    {"id": "A1", "criterion": "The Legion skills guard passes with ce-dogfood in pi-legion", "surface": "staged partitions and the real Oh My Pi", "command": "bun test packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/scripts/prepack.test.ts packages/pi-shared/test/skills-partition.test.ts packages/pi-envoy/src/skills-guard.test.ts; cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test ./internal/daemon -run 'TestTheRealPluginsOnTheRealOhMyPi|TestThePromptReferenceProbeOnTheRealOhMyPi' -count=1", "negativeControl": "a missing skill://ce-dogfood/... path fails the guard; a missing skill directory fails the real-OMP gate by name"},
-    {"id": "A2", "criterion": "The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back", "surface": "worker-image.yaml on the PR head; a Job in namespace builds on the branch digest", "command": "kubectl create -f <job> (plan.md Task 9) with command 'id -u; agent-browser --version; agent-browser open https://example.com; agent-browser get title; agent-browser close'", "negativeControl": "main's digest prints 'agent-browser: not found'; a wrong SHA-256 fails sha256sum --check --strict"},
-    {"id": "A3", "criterion": "A tester run on a slice with a browser page posts a ce-dogfood report on the slice's Dispatch issue and sends its findings back to the implementer", "surface": "the child fixture issue and the with-step arm of the dogfood experiment", "command": "dispatch read --issue <child> (artifact dogfood-report.md); the arm's test.json failures and red tests; the implementer agent's fixing commits", "negativeControl": "the control arm posts no report"},
-    {"id": "A4", "criterion": "The try-the-options step is tested against a run without it; result recorded on INFRA-245", "surface": "six runs (three specs x two arms)", "command": "manifest, ask_person JSONL, decision-block files under $TMPDIR/infra-248-options; dispatch comment --issue INFRA-245", "negativeControl": "the control arms"},
-    {"id": "A5", "criterion": "The tester's ce-dogfood step is tested the same way; defects fixed before the reviewer counted; result recorded on INFRA-245", "surface": "two arms on the fixture slice", "command": "per-arm counts scored with the sealed key's agent-browser assertions; dispatch comment --issue INFRA-245", "negativeControl": "the control arm"},
-    {"id": "A6", "criterion": "The with-step runs asked the person their questions before building (architect's addition)", "surface": "ask_person JSONL and transcripts", "command": "first ask_person timestamp vs first builder launch per with-step run", "negativeControl": "a run that builds before asking fails the measure and is reported"}
+    {
+      "id": "A1",
+      "criterion": "The Legion skills guard passes with ce-dogfood in pi-legion",
+      "surface": "staged partitions and the real Oh My Pi",
+      "command": "bun test packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/scripts/prepack.test.ts packages/pi-shared/test/skills-partition.test.ts packages/pi-envoy/src/skills-guard.test.ts; cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test ./internal/daemon -run 'TestTheRealPluginsOnTheRealOhMyPi|TestThePromptReferenceProbeOnTheRealOhMyPi' -count=1",
+      "negativeControl": "a missing skill://ce-dogfood/... path fails the guard; a missing skill directory fails the real-OMP gate by name"
+    },
+    {
+      "id": "A2",
+      "criterion": "The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
+      "surface": "worker-image.yaml on the PR head; a Job in namespace builds on the branch digest",
+      "command": "kubectl create -f <job> (plan.md Task 9) with command 'id -u; agent-browser --version; agent-browser open https://example.com; agent-browser get title; agent-browser close'",
+      "negativeControl": "main's digest prints 'agent-browser: not found'; a wrong SHA-256 fails sha256sum --check --strict"
+    },
+    {
+      "id": "A3",
+      "criterion": "A tester run on a slice with a browser page posts a ce-dogfood report on the slice's Dispatch issue and sends its findings back to the implementer",
+      "surface": "the child fixture issue and the with-step arm of the dogfood experiment",
+      "command": "dispatch read --issue <child> (artifact dogfood-report.md); the arm's test.json failures and red tests; the implementer agent's fixing commits",
+      "negativeControl": "the control arm posts no report"
+    },
+    {
+      "id": "A4",
+      "criterion": "The try-the-options step is tested against a run without it; result recorded on INFRA-245",
+      "surface": "six runs (three specs x two arms)",
+      "command": "manifest, ask_person JSONL, decision-block files under $TMPDIR/infra-248-options; dispatch comment --issue INFRA-245",
+      "negativeControl": "the control arms"
+    },
+    {
+      "id": "A5",
+      "criterion": "The tester's ce-dogfood step is tested the same way; defects fixed before the reviewer counted; result recorded on INFRA-245",
+      "surface": "two arms on the fixture slice",
+      "command": "per-arm counts scored with the sealed key's agent-browser assertions; dispatch comment --issue INFRA-245",
+      "negativeControl": "the control arm"
+    },
+    {
+      "id": "A6",
+      "criterion": "The with-step runs asked the person their questions before building (architect's addition)",
+      "surface": "ask_person JSONL and transcripts",
+      "command": "first ask_person timestamp vs first builder launch per with-step run",
+      "negativeControl": "a run that builds before asking fails the measure and is reported"
+    }
   ],
   "decisionsForArchitect": [
     "Proxy measures for the try-the-options experiment against the person's recorded answers (recommended) rather than six live sessions with the person.",
@@ -58,27 +94,67 @@
   },
   "gapAnalysis": {
     "findings": [
-      {"finding": "The try-the-options experiment has no observable definition of a human decision: time to a settled answer, overturn, and asked-before-building cannot be human outcomes with no live person.", "answer": "Task 12 steps 3-5: an ask_person stand-in tool answers from a recorded answer sheet and logs timestamps to JSONL; clocks, settlement, overturn and asked-before-building are defined and labelled proxies; briefs exclude the block's options, recommendation and answer; the proxy choice goes to the architect as decision 1."},
-      {"finding": "The dashboard experiment needs an actual fixture, a blind comparison and a repair cutoff.", "answer": "Task 11: fixture slice on the Dispatch project page with three named planted defects in a throwaway clone (patch on the child issue, never pushed); sealed defect key with one agent-browser assertion each; independent clones and databases per arm; fresh tester+implementer agents; cutoff at the tester's second round; fixed = failed on fixture head and passes at cutoff; found, sent back and fixed reported separately."},
-      {"finding": "Vendoring ce-dogfood requires a complete tester override, not merely 'instead of committing fixes'.", "answer": "Task 3: skills/legion-worker/references/dogfood.md covers when, target checkout and diff scope, data and persona, the fix loop replaced by failures with red tests, the report as a Dispatch artifact, decisions to the architect, CI instead of the suite, absent CE helpers, cache placement and the browser; Task 2 puts a pointer paragraph in the vendored SKILL.md so every read path meets it; provenance and licence kept."},
-      {"finding": "'The slice's Dispatch issue' must be bound to a real issue before the experiment starts.", "answer": "Task 10: a child issue of INFRA-248 the architect creates (backlog, unlabelled, never released) from the implementer's brief; the slice report goes there, the aggregate results on INFRA-245."},
-      {"finding": "The experiments have no adoption rule for a tie, loss or inconclusive result.", "answer": "Task 12 step 6 and decision 2: results recorded whatever they show; pre-declared ship rules; below them the architect decides before the implementer completes."},
-      {"finding": "The proposed image proof uses the wrong namespace claim and has unmeasured egress.", "answer": "Task 9 runs in namespace builds (measured), on the branch build's digest, gVisor and uid 1000 pinned in the manifest, with egress and admission proven on that surface and refusals reported to the architect, never substituted."},
-      {"finding": "Passing the skills guard does not prove ce-dogfood resolves at boot (hidden-skill frontmatter).", "answer": "Task 2 and Task 6: frontmatter decided by TestTheRealPluginsOnTheRealOhMyPi on the real Oh My Pi and the image's probe-image; a missing-skill negative control; the boot gate is not weakened."},
-      {"finding": "The new skill reaches release selection, generated copies and instruction budgets beyond the named source directories.", "answer": "Files table and Tasks 1, 3, 5, 7: partition and prepack test, both release.yaml lists, claude-envoy mirror regenerated, the detail in a linked reference under the 500-line cap, both CHANGELOGs, every doc list found by grep for the last member."},
-      {"finding": "The browser pin needs an installation, provenance and notices choice.", "answer": "Task 8: the GitHub release linux-x64 binary pinned by version and SHA-256 in the toolchain stage, LICENSE and crates note in the notices stage, smoke --version, no image ENV; wrong-digest negative control."},
-      {"finding": "The post-merge production check must cover the deployed instructions and image.", "answer": "Production check section: read the skill paths the deployed session resolves, hash them against the merge, plugin versions, agent-browser in the deployed image; pending until the deployment carries the merge; record on the PR."},
-      {"finding": "Two planning-context assertions were wrong: Dispatch's local harness runs on a rootless loopback Postgres in a pod, and INFRA-258 #e2d6212f has four options.", "answer": "Task 11 step 2 uses the documented rootless Postgres harness with a loopback DATABASE_URL; Task 12 step 1 drops #e2d6212f for INFRA-258 #113f0f1a (three options) with INFRA-25 #delivery as the named substitute."},
-      {"finding": "packs-resolve.py tries /tmp before TMPDIR for its cache.", "answer": "Task 3 point 9: set CE_PACKS_CACHE_ROOT under $TMPDIR (packs-resolve.py:139)."}
+      {
+        "finding": "The try-the-options experiment has no observable definition of a human decision: time to a settled answer, overturn, and asked-before-building cannot be human outcomes with no live person.",
+        "answer": "Task 12 steps 3-5: an ask_person stand-in tool answers from a recorded answer sheet and logs timestamps to JSONL; clocks, settlement, overturn and asked-before-building are defined and labelled proxies; briefs exclude the block's options, recommendation and answer; the proxy choice goes to the architect as decision 1."
+      },
+      {
+        "finding": "The dashboard experiment needs an actual fixture, a blind comparison and a repair cutoff.",
+        "answer": "Task 11: fixture slice on the Dispatch project page with three named planted defects in a throwaway clone (patch on the child issue, never pushed); sealed defect key with one agent-browser assertion each; independent clones and databases per arm; fresh tester+implementer agents; cutoff at the tester's second round; fixed = failed on fixture head and passes at cutoff; found, sent back and fixed reported separately."
+      },
+      {
+        "finding": "Vendoring ce-dogfood requires a complete tester override, not merely 'instead of committing fixes'.",
+        "answer": "Task 3: skills/legion-worker/references/dogfood.md covers when, target checkout and diff scope, data and persona, the fix loop replaced by failures with red tests, the report as a Dispatch artifact, decisions to the architect, CI instead of the suite, absent CE helpers, cache placement and the browser; Task 2 puts a pointer paragraph in the vendored SKILL.md so every read path meets it; provenance and licence kept."
+      },
+      {
+        "finding": "'The slice's Dispatch issue' must be bound to a real issue before the experiment starts.",
+        "answer": "Task 10: a child issue of INFRA-248 the architect creates (backlog, unlabelled, never released) from the implementer's brief; the slice report goes there, the aggregate results on INFRA-245."
+      },
+      {
+        "finding": "The experiments have no adoption rule for a tie, loss or inconclusive result.",
+        "answer": "Task 12 step 6 and decision 2: results recorded whatever they show; pre-declared ship rules; below them the architect decides before the implementer completes."
+      },
+      {
+        "finding": "The proposed image proof uses the wrong namespace claim and has unmeasured egress.",
+        "answer": "Task 9 runs in namespace builds (measured), on the branch build's digest, gVisor and uid 1000 pinned in the manifest, with egress and admission proven on that surface and refusals reported to the architect, never substituted."
+      },
+      {
+        "finding": "Passing the skills guard does not prove ce-dogfood resolves at boot (hidden-skill frontmatter).",
+        "answer": "Task 2 and Task 6: frontmatter decided by TestTheRealPluginsOnTheRealOhMyPi on the real Oh My Pi and the image's probe-image; a missing-skill negative control; the boot gate is not weakened."
+      },
+      {
+        "finding": "The new skill reaches release selection, generated copies and instruction budgets beyond the named source directories.",
+        "answer": "Files table and Tasks 1, 3, 5, 7: partition and prepack test, both release.yaml lists, claude-envoy mirror regenerated, the detail in a linked reference under the 500-line cap, both CHANGELOGs, every doc list found by grep for the last member."
+      },
+      {
+        "finding": "The browser pin needs an installation, provenance and notices choice.",
+        "answer": "Task 8: the GitHub release linux-x64 binary pinned by version and SHA-256 in the toolchain stage, LICENSE and crates note in the notices stage, smoke --version, no image ENV; wrong-digest negative control."
+      },
+      {
+        "finding": "The post-merge production check must cover the deployed instructions and image.",
+        "answer": "Production check section: read the skill paths the deployed session resolves, hash them against the merge, plugin versions, agent-browser in the deployed image; pending until the deployment carries the merge; record on the PR."
+      },
+      {
+        "finding": "Two planning-context assertions were wrong: Dispatch's local harness runs on a rootless loopback Postgres in a pod, and INFRA-258 #e2d6212f has four options.",
+        "answer": "Task 11 step 2 uses the documented rootless Postgres harness with a loopback DATABASE_URL; Task 12 step 1 drops #e2d6212f for INFRA-258 #113f0f1a (three options) with INFRA-25 #delivery as the named substitute."
+      },
+      {
+        "finding": "packs-resolve.py tries /tmp before TMPDIR for its cache.",
+        "answer": "Task 3 point 9: set CE_PACKS_CACHE_ROOT under $TMPDIR (packs-resolve.py:139)."
+      }
     ]
   },
-  "planReview": {"verdict": "approved", "rounds": 2},
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
   "specDepartures": [],
   "trickyParts": [
     "This pod's default namespace is builds; kubectl -n legion auth can-i create jobs answers no.",
-    "agent-browser 0.39.2 (release binary, sha256 0f68e74e…638e) opened https://example.com under gVisor as uid 1000 with the image's chromium and no flags; state lands in $HOME/.agent-browser.",
+    "agent-browser 0.39.2 (release binary, sha256 0f68e74e\u2026638e) opened https://example.com under gVisor as uid 1000 with the image's chromium and no flags; state lands in $HOME/.agent-browser.",
     "skills/legion-worker/SKILL.md is 485 lines; the guard refuses 500.",
-    "The boot gate's regexes match agent=\"…\" and skill://… anywhere in pi-legion's dist/skills, code fences included; the vendored text has neither.",
+    "The boot gate's regexes match agent=\"\u2026\" and skill://\u2026 anywhere in pi-legion's dist/skills, code fences included; the vendored text has neither.",
     "The workspace's found working-copy commit luvrqqyp holds only .legion/INFRA-248/workspace-recovered.json (written by the recovery, not committed); the planner left it as found and committed on the branch tip."
-  ]
+  ],
+  "generation3": "Generation 3 restarted the tree from planning after the daemon's contract-37 drain; the architect directed no re-plan (Envoy 2026-10-26T18:48Z). The plan of d99947e4 and dispatch://INFRA-248/artifact/plan-md stands. Checked at branch head efde11ad: skills/ce-dogfood (SKILL.md, references, scripts, LICENSE) in pi-legion's partition (scripts/pi-plugin-prepack.sh:44); skills/legion-worker/references/dogfood.md; the try-the-options bullet in skills/dispatch-brainstorming/SKILL.md:16; AGENT_BROWSER_VERSION=0.39.2 and its SHA-256 in worker.Dockerfile:106-107. One settled change to Task 2: review round 2 replaced upstream's disable-model-invocation: true with hide: true on ce-dogfood and both thermonuclear skills (Oh My Pi keeps them hidden; Claude Code still loads them). Remaining implementer steps per the architect: the PR body's Size and Change lines, the gVisor image Job on efde11ad's worker image (namespace builds), and its handoff."
 }
