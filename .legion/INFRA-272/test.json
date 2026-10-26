@@ -2,15 +2,16 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-272",
-  "completed": "2026-10-26T03:54:30Z",
-  "round": 2,
-  "headSha": "307f166c09f786859d3270c472bc11b74b42be37",
-  "evidence": "round 1 https://github.com/sjawhar/legion/pull/2223#issuecomment-6407172561; round 2 https://github.com/sjawhar/legion/pull/2223#issuecomment-6407835261",
-  "ci": "At 307f166c: Docs 40265420616 success, PR Title 40265528130 success; Tests 40265420504 and Worker Image 40265420528 in progress, Legion Envoy and Contracts 40265420551 queued when read (not waited for). sjawhar/legion main requires lint, typecheck, test, pr-title.",
-  "round2Scope": "No daemon runtime Go changed between 4e0bf68c and 307f166c (classify, record, workflow, projection, api: 0 files); the round changes the architect prompt and skill wording, the docs, and the e2e harness (scripts/e2e/lib/live-daemon-proof.sh, internal/daemon/live_proof_test.go). The round-1 runtime probes below therefore still apply.",
+  "completed": "2026-10-26T04:36:00Z",
+  "round": 3,
+  "headSha": "02d355ae3b435782d278deaebe9d51e686cedf03",
+  "evidence": "round 1 https://github.com/sjawhar/legion/pull/2223#issuecomment-6407172561; round 2 https://github.com/sjawhar/legion/pull/2223#issuecomment-6407835261; round 3 https://github.com/sjawhar/legion/pull/2223#issuecomment-6408322378",
+  "ci": "At 02d355ae when read: Worker Image 40268917727 in progress; Tests 40268917605, PR Title 40269011106, Docs 40268917700, Legion Envoy and Contracts 40268917767 queued (not waited for). PR MERGEABLE. sjawhar/legion main requires lint, typecheck, test, pr-title.",
+  "round3Scope": "Forward merge of main (b7a02899, main af460a46) after a GitHub-reported conflict, plus a test-only harness cleanup (02d355ae). The fingerprint changed, so this is a full round. wake-routing.md at 02d355ae differs from main af460a46 only by this PR's two clauses in the pr-blocked row (line 29), and the claude-envoy row is identical. The PR's runtime files (classify, record, workflow, projection, api, prompts) are byte-identical between 307f166c and 02d355ae, so the round-1 runtime probes still apply.",
+  "round2Scope": "No daemon runtime Go changed between 4e0bf68c and 307f166c; that round changed the architect prompt and skill wording, the docs, and the e2e harness.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2: re-ran both commands at 307f166c on my own Postgres 16 and the pinned nats-server v2.10.22: bash scripts/e2e/merged-root-waits.sh -> 'merged root waits e2e: PASS in 44s' (7 steps ok); bash scripts/e2e/no-required-checks.sh -> 'no required checks e2e: PASS in 374s', all four steps as the implementer recorded. Round 1 (4e0bf68c): no-required-checks.sh PASS in 575s."
+    "how": "Round 3: re-ran both commands at 02d355ae on my own Postgres 16 and the pinned nats-server v2.10.22: merged-root-waits.sh -> 'merged root waits e2e: PASS in 37s' (7 steps ok); no-required-checks.sh -> 'no required checks e2e: PASS in 374s', all four steps as the implementer recorded. Earlier rounds: 307f166c PASS 44s/374s; 4e0bf68c PASS 575s."
   },
   "failures": [],
   "failed": 0,
@@ -46,6 +47,14 @@
       "observed": "all three architect-common.md sentences and both wake-routing.md sentences say 'a settled head whose base branch requires no check and no workflow', which is nothingRequired (settled(pr) && Required != nil && len(Required) == 0 && len(Workflows) == 0); the claude-envoy row is identical to the skill's",
       "headSha": "307f166c09f786859d3270c472bc11b74b42be37",
       "negativeControl": "at 4e0bf68c the same grep found 'a head whose base branch requires no check' with neither 'settled' nor 'no workflow', the wording the reviewer flagged"
+    },
+    {
+      "criterion": "Round 3: Acceptance 1 and 2 hold on the forward-merged head, the conflict resolution keeps main's pr-blocked row and the PR's rule, and the cleaned harness still proves both live proofs",
+      "surface": "the whole daemon (run, via startDaemonWithin) over my own Postgres 16 and the pinned nats-server v2.10.22, through scripts/e2e/lib/live-daemon-proof.sh; wake-routing.md compared character by character against main af460a46",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disable bash scripts/e2e/merged-root-waits.sh, then scripts/e2e/no-required-checks.sh; transcript https://github.com/sjawhar/legion/pull/2223#issuecomment-6408322378",
+      "observed": "merged root waits e2e: PASS in 37s (step1..step7 ok). no required checks e2e: PASS in 374s: no checksVerdict key on a base requiring nothing, still testing, no checks-red; red and implementing once ci is required ('CI is red at a1: ci'); green on a passing required ci; held red at b1 + one pr-blocked, base -> nothing, push b1->b2 fixAttempts 1, base -> ci, red at b2 -> implementing, 'CI is red at b2: ci'. wake-routing.md vs main differs only by the two 'settled head whose base branch requires no check and no workflow' clauses; claude-envoy row identical.",
+      "headSha": "02d355ae3b435782d278deaebe9d51e686cedf03",
+      "negativeControl": "HeadVerdict's guard set back to main's `if !ok {` (temporary, reverted): 'no required checks e2e: FAIL at proof after 25s', 'issues[TEST6395EF0F2509-1].pullRequest carries checksVerdict \"green\" on a base that requires nothing'; driver with LEGION_E2E_NATS_URL unset -> '--- SKIP' naming scripts/e2e/no-required-checks.sh"
     }
   ],
   "notes": [
