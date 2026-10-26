@@ -847,6 +847,11 @@ func payloadSummary(event model.Event, slug string) string {
 	case event.Type == "issue.claimed", event.Type == "issue.released":
 		// "claimed", "takeover", "forced", "released", or "closed": why the holder changed.
 		detail = payloadString(event.Payload, "reason")
+	case event.Type == "handoff.recorded":
+		// The phase and version (a JSON number decodes to float64, which %v prints as 2), never a
+		// body: the event carries none.
+		values, _ := event.Payload.(map[string]any)
+		detail = fmt.Sprintf("%v version %v", values["phase"], values["version"])
 	case strings.HasPrefix(event.Type, "ask."):
 		detail = text.HeadRunes(payloadString(event.Payload, "question"), 120)
 	case event.Type == "message.created", event.Type == "message.answered":

@@ -175,6 +175,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"events",
 		"user_issue_state",
 		"user_agent_state",
+		"handoffs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -288,6 +289,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"user_issue_state_pkey",
 		"user_issue_state_issue_key_fkey",
 		"user_agent_state_pkey",
+		"handoffs_pkey",
+		"handoffs_issue_key_fkey",
+		"handoffs_phase_check",
+		"handoffs_version_check",
+		"handoffs_issue_key_phase_version_key",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select conname

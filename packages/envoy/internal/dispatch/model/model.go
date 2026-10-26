@@ -1305,6 +1305,34 @@ type MessageAcceptedEventPayload struct {
 	Target     string `json:"target"`
 }
 
+// HandoffSummary is one phase handoff without its body: what GET /api/v1/issues/{key}/handoffs
+// lists, newest first, and what POST /api/v1/issues/{key}/handoffs/{phase} answers. Phase is a
+// lowercase slug (Legion writes plan, implement, test and review), Version counts from 1 within
+// the issue and phase, and Author is the session that wrote it.
+type HandoffSummary struct {
+	ID        string    `json:"id"`
+	IssueKey  string    `json:"issue_key"`
+	Phase     string    `json:"phase"`
+	Version   int       `json:"version"`
+	Author    Actor     `json:"author"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Handoff is one phase handoff with its body: Body is the exact text the session sent, one JSON
+// object, stored as text so a read answers the bytes written.
+type Handoff struct {
+	HandoffSummary
+	Body string `json:"body"`
+}
+
+// HandoffRecordedEventPayload is `handoff.recorded`: a session recorded Version of the issue's
+// Phase handoff, the record HandoffID. It never carries the body; a reader fetches the record.
+type HandoffRecordedEventPayload struct {
+	HandoffID string `json:"handoff_id"`
+	Phase     string `json:"phase"`
+	Version   int    `json:"version"`
+}
+
 // ReferencedBy identifies a post or artifact that mentions an artifact.
 type ReferencedBy struct {
 	Kind     string  `json:"kind"`
