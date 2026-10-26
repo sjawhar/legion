@@ -252,6 +252,24 @@ func parseArtifactSlug(value string) (string, bool) {
 // Its twin is MAX_BLOCK_ID_BYTES in @legion/contracts.
 const MaxBlockIDBytes = 256
 
+// MaxBlockTargetBytes bounds a block reference's target id, in bytes: the id refs.ToID writes for
+// it, `<issue key or project>/<document slug>#<block id>`, which refs.to_id and block_refs.to_id
+// store in B-tree keys (refs_pkey, refs_to, block_refs_pkey, block_refs_to) of at most 2704
+// bytes. MaxBlockIDBytes bounds the id, but a document's slug has no bound, so a block reference
+// past this names nothing (blockTargetFits): in text it is no reference, and a live document page
+// whose fragment names such a block names the document. At the bound the widest of those keys,
+// block_refs_pkey with an id of MaxBlockIDBytes, is about 2360 bytes. Its twin is
+// MAX_BLOCK_TARGET_BYTES in @legion/contracts.
+const MaxBlockTargetBytes = 2048
+
+// blockTargetFits reports whether block id of document, a parsed reference to an issue's or a
+// project's document, makes a target id of at most MaxBlockTargetBytes. The length is the one
+// refs.ToID writes: the document's owner (an issue key or a project; a reference names one, never
+// both), `/`, its slug (`spec` for an issue's spec), `#` and the id.
+func blockTargetFits(document Ref, id string) bool {
+	return len(document.IssueKey)+len(document.Project)+len("/")+len(document.ID)+len("#")+len(id) <= MaxBlockTargetBytes
+}
+
 // EncodeBlockID writes a block id as a reference's `#b-` fragment carries it: every UTF-8 byte
 // percent-encoded in upper-case hex except ASCII letters, digits and `-`, so no character a
 // reference ends at or the grammar trims, and no `@` a pin could be read from, is written bare.
@@ -279,8 +297,9 @@ func EncodeBlockID(id string) string {
 // id is read with any valid percent-encoding (EncodeBlockID writes one), so `%40` is an `@` in the
 // id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that does not start a
 // well-formed pin, a versioned document, an agent conversation's document, an item, or an id that
-// is empty, does not decode or is longer than MaxBlockIDBytes names nothing. A document version
-// shows only as an `@` in the document part: no key or slug holds one.
+// is empty, does not decode or is longer than MaxBlockIDBytes names nothing, as does a block whose
+// target id is past MaxBlockTargetBytes. A document version shows only as an `@` in the document
+// part: no key or slug holds one.
 func parseBlock(document, fragment string) (Ref, bool) {
 	encoded, ok := strings.CutPrefix(fragment, "b-")
 	if !ok || strings.Contains(document, "@") {
@@ -303,7 +322,7 @@ func parseBlock(document, fragment string) (Ref, bool) {
 		return Ref{}, false
 	}
 	ref, ok := parseDispatch(document)
-	if !ok || ref.Kind != "artifact" || ref.Session != "" {
+	if !ok || ref.Kind != "artifact" || ref.Session != "" || !blockTargetFits(ref, id) {
 		return Ref{}, false
 	}
 	ref.Kind, ref.Block, ref.Pin = "block", id, pin
@@ -414,17 +433,17 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 }
 
 // documentPage reads a document page of an issue or a project: the item its query names, as
-// documentItem reads it, else the block its `#b-<block id>` fragment names (blockID; a raw `@` is
-// no pin here, since pins are written only as `dispatch://` references), else the document. A
-// version page (`versionParam` set) is the document whatever its fragment: a version's stored
-// markdown carries no block ids to land on.
+// documentItem reads it, else the block its `#b-<block id>` fragment names (blockID and
+// blockTargetFits; a raw `@` is no pin here, since pins are written only as `dispatch://`
+// references), else the document. A version page (`versionParam` set) is the document whatever its
+// fragment: a version's stored markdown carries no block ids to land on.
 func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
 	ref, ok := documentItem(document, query)
 	if !ok || ref.Kind != "artifact" || query.Get(versionParam) != "" {
 		return ref, ok
 	}
 	if encoded, found := strings.CutPrefix(page.EscapedFragment(), "b-"); found {
-		if id, ok := blockID(encoded); ok {
+		if id, ok := blockID(encoded); ok && blockTargetFits(ref, id) {
 			ref.Kind, ref.Block = "block", id
 		}
 	}

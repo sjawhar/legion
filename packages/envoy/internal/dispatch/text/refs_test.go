@@ -210,6 +210,49 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 	}
 }
 
+// A block reference names a block only while its target id, `<owner>/<slug>#<block id>` as
+// refs.ToID writes it, holds at most MaxBlockTargetBytes, the id counted in its decoded bytes: one
+// byte more and the `dispatch://` text is no reference, and a dashboard page whose fragment names
+// that block is its document. The bound is the whole target's, for an issue's document and a
+// project's alike.
+func TestABlockReferenceIsBoundedByItsWholeTargetID(t *testing.T) {
+	const server = "https://dispatch.test"
+	const id, encoded = "é", "%C3%A9"
+	for _, document := range []struct {
+		owner, reference, page string
+		ref                    Ref
+	}{
+		{"CORE-1", "dispatch://CORE-1/artifact/", server + "/issues/CORE-1/artifacts/", Ref{Kind: "artifact", IssueKey: "CORE-1"}},
+		{"CORE", "dispatch://CORE/artifact/", server + "/projects/CORE/documents/", Ref{Kind: "artifact", Project: "CORE"}},
+	} {
+		atBound := strings.Repeat("a", MaxBlockTargetBytes-len(document.owner+"/#"+id))
+		for _, test := range []struct {
+			name, slug string
+			names      bool
+		}{
+			{"at the bound", atBound, true},
+			{"one byte past it", atBound + "a", false},
+		} {
+			t.Run(document.owner+" "+test.name, func(t *testing.T) {
+				doc := document.ref
+				doc.ID = test.slug
+				block := doc
+				block.Kind, block.Block = "block", id
+				want, page := []Ref{}, doc
+				if test.names {
+					want, page = []Ref{block}, block
+				}
+				if got := Extract(document.reference+test.slug+"#b-"+encoded, server); !reflect.DeepEqual(got, want) {
+					t.Errorf("the dispatch:// reference cites %#v; want %#v", got, want)
+				}
+				if got := Extract(document.page+test.slug+"#b-"+encoded, server); !reflect.DeepEqual(got, []Ref{page}) {
+					t.Errorf("the dashboard page cites %#v; want %#v", got, page)
+				}
+			})
+		}
+	}
+}
+
 // A body near the 1 MiB request cap that trails a reference with a run of closing parentheses,
 // alone or between the emphasis delimiters the trim also drops, or with a run of square brackets
 // after a dashboard URL, still cites that reference, in one pass over the run. The bound is

@@ -9,9 +9,12 @@
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
   `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
   pins it to version N of the document. A reference names a block id of at most 256 bytes,
-  decoded (`text.MaxBlockIDBytes`), and N of at most 9223372036854775807: a longer id or a larger
-  N is no reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every
-  version the document has is `404 NOT_FOUND` `no version N of <document>`. A seeded spec, an
+  decoded (`text.MaxBlockIDBytes`), a target id `<KEY or PROJECT>/<slug>#<block id>` of at most
+  2048 bytes (`text.MaxBlockTargetBytes`; a document's slug has no bound) and N of at most
+  9223372036854775807: a longer id or target or a larger N is no reference (a live document page
+  whose fragment names such a block names the document), `400 INVALID_REFERENCE` where the API
+  is given one, and a pin past every version the document has is `404 NOT_FOUND`
+  `no version N of <document>`. A seeded spec, an
   upload, an `insert` or an accepted suggestion that names a new block id past the bound is
   refused, naming the bound (`400 INVALID_MARKDOWN`, `400 INVALID_OP` for an insert); an id the
   document already holds is kept. A block carrying such an id, which a browser's edit can write,

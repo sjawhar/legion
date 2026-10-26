@@ -13916,6 +13916,15 @@ function decodeBlockId(encoded) {
   }
   return id === "" || hasControlCharacter(id) || new TextEncoder().encode(id).length > MAX_BLOCK_ID_BYTES ? undefined : id;
 }
+var MAX_BLOCK_TARGET_BYTES = 2048;
+function blockTargetFits(owner, slug, block) {
+  let bytes = 0;
+  for (const character of `${owner}/${slug}#${block}`) {
+    const code = character.codePointAt(0) ?? 0;
+    bytes += code < 128 ? 1 : code < 2048 ? 2 : code < 65536 ? 3 : 4;
+  }
+  return bytes <= MAX_BLOCK_TARGET_BYTES;
+}
 var MAX_BLOCK_PIN = 9223372036854775807n;
 function parseBlockFragment(encoded) {
   const at = encoded.indexOf("@");
@@ -15735,7 +15744,7 @@ function dispatchChildRef(ownerRef, kind, id) {
 function parseBlockRef(document, fragment) {
   const target = parseBlockFragment(fragment);
   const parsed = parseDispatchRef(document);
-  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact" || !blockTargetFits(parsed.owner.kind === "issue" ? parsed.owner.issue : parsed.owner.project, parsed.id, target.block)) {
     return null;
   }
   return {
@@ -16882,9 +16891,9 @@ function dispatchRefFromUrl(value, serverUrl) {
     const value2 = url2.searchParams.get(name);
     return value2 !== null && /^[1-9][0-9]*$/.test(value2) ? `@v${value2}` : "";
   };
-  const blockOf = (versionName) => {
+  const blockOf = (versionName, owner, slug2) => {
     const id = url2.hash.startsWith("#b-") ? decodeBlockId(url2.hash.slice(3)) : undefined;
-    return id === undefined || url2.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || url2.searchParams.get(versionName) || !blockTargetFits(owner, slug2, id) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -16900,11 +16909,12 @@ function dispatchRefFromUrl(value, serverUrl) {
     if (page === "spec" && version2 !== "")
       return `dispatch://${key}/artifact/spec${version2}`;
     if (page === "spec")
-      return `dispatch://${key}/spec${blockOf("v")}`;
+      return `dispatch://${key}/spec${blockOf("v", key, "spec")}`;
     if (page !== undefined)
       return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
-      return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version2}${blockOf("v")}`;
+      const slug2 = decodeURIComponent(artifact);
+      return `dispatch://${key}/artifact/${slug2}${version2}${blockOf("v", key, slug2)}`;
     }
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
@@ -16927,11 +16937,12 @@ function dispatchRefFromUrl(value, serverUrl) {
   if (!documentPage)
     return;
   const [, project, slug] = documentPage;
-  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}`;
+  const decodedSlug = decodeURIComponent(slug ?? "");
+  const document = `dispatch://${project}/artifact/${decodedSlug}`;
   const item = itemFromSearch(url2.search);
   if (item === null)
     return;
-  return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
+  return item === undefined ? `${document}${versionOf("version")}${blockOf("version", project ?? "", decodedSlug)}` : `${document}/${item.kind}/${item.id}`;
 }
 var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";

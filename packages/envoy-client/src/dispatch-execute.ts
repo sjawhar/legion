@@ -45,6 +45,7 @@ import {
   ASK_QUESTION_MAX,
   ASK_URGENCIES,
   actorLabel,
+  blockTargetFits,
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DISPATCH_BODY_MAX,
@@ -996,10 +997,15 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   };
   // The block a live document page lands on (`#b-<block id>`), written as `encodeBlockId` writes
   // it. A version page names the document whatever its fragment: a version's stored markdown
-  // carries no block ids to land on, and a pin is written only as a dispatch:// reference.
-  const blockOf = (versionName: string): string => {
+  // carries no block ids to land on, and a pin is written only as a dispatch:// reference. So does
+  // a page whose block's target id `<owner>/<slug>#<block id>` does not fit (`blockTargetFits`).
+  const blockOf = (versionName: string, owner: string, slug: string): string => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined ||
+      url.searchParams.get(versionName) ||
+      !blockTargetFits(owner, slug, id)
+      ? ""
+      : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(
     /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
@@ -1015,12 +1021,13 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       if (item !== undefined) return `dispatch://${key}/${item.kind}/${item.id}`;
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
-    if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
+    if (page === "spec") return `dispatch://${key}/spec${blockOf("v", key, "spec")}`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
-      return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version}${blockOf("v")}`;
+      const slug = decodeURIComponent(artifact);
+      return `dispatch://${key}/artifact/${slug}${version}${blockOf("v", key, slug)}`;
     }
     if (ask !== undefined) return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined) return `dispatch://${key}/comment/${comment}`;
@@ -1041,12 +1048,13 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   );
   if (!documentPage) return undefined;
   const [, project, slug] = documentPage;
-  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}`;
+  const decodedSlug = decodeURIComponent(slug ?? "");
+  const document = `dispatch://${project}/artifact/${decodedSlug}`;
   const item = itemFromSearch(url.search);
   if (item === null) return undefined;
   // An ask or comment has no version; the page's version selector names the document's.
   return item === undefined
-    ? `${document}${versionOf("version")}${blockOf("version")}`
+    ? `${document}${versionOf("version")}${blockOf("version", project ?? "", decodedSlug)}`
     : `${document}/${item.kind}/${item.id}`;
 }
 

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { MAX_BLOCK_TARGET_BYTES } from "@legion/contracts";
 
 import { parseDispatchRef } from "../dispatch-owner";
 
@@ -82,4 +83,27 @@ test.each([
   "dispatch://CORE/artifact/handbook-md/ask/aaaaaaaa-0000-4000-8000-000000000042#b-x",
 ])("%s names nothing", (ref) => {
   expect(parseDispatchRef(ref)).toBeNull();
+});
+
+// A block reference names its block only while the target id `<owner>/<slug>#<block id>`, the id
+// the server stores the edge under, holds at most MAX_BLOCK_TARGET_BYTES, the id counted in its
+// decoded UTF-8 bytes: one byte more names nothing, for an issue's document and a project's alike.
+test.each([
+  ["CORE-1", { kind: "issue", issue: "CORE-1" }],
+  ["CORE", { kind: "project", project: "CORE" }],
+] as const)("a block of a %s document is bounded by its whole target id", (owner, parsedOwner) => {
+  // `é` is two bytes, written %C3%A9.
+  const atBound = "a".repeat(
+    MAX_BLOCK_TARGET_BYTES - new TextEncoder().encode(`${owner}/#é`).length
+  );
+  const document = `dispatch://${owner}/artifact/${atBound}`;
+  expect(parseDispatchRef(`${document}#b-%C3%A9`)).toEqual({
+    owner: parsedOwner,
+    kind: "block",
+    id: atBound,
+    block: "é",
+    document,
+    ...(parsedOwner.kind === "project" ? { artifact: atBound } : {}),
+  });
+  expect(parseDispatchRef(`dispatch://${owner}/artifact/${atBound}a#b-%C3%A9`)).toBeNull();
 });

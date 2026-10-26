@@ -1,4 +1,4 @@
-import { encodeBlockId, parseBlockFragment } from "@legion/contracts";
+import { blockTargetFits, encodeBlockId, parseBlockFragment } from "@legion/contracts";
 
 import type { DispatchReferenceRoute } from "./routes";
 
@@ -14,7 +14,8 @@ export interface BlockTarget {
 
 /** `route` naming its document's block `block`, pinned to version `pin` when one is given: only a
  *  spec, an issue artifact or a project document, at no version and naming no item, holds blocks
- *  a reference can name; undefined for any other route. */
+ *  a reference can name, and only a block whose target id `<owner>/<slug>#<block>` fits
+ *  (`blockTargetFits`); undefined for any other route. */
 export function withBlock(
   route: DispatchReferenceRoute | undefined,
   block: string,
@@ -24,7 +25,12 @@ export function withBlock(
     route === undefined ||
     (route.kind !== "spec" && route.kind !== "artifact" && route.kind !== "document") ||
     (route.kind !== "spec" && route.version !== undefined) ||
-    (route.kind === "document" && route.item !== undefined)
+    (route.kind === "document" && route.item !== undefined) ||
+    !blockTargetFits(
+      route.kind === "document" ? route.project : route.key,
+      route.kind === "spec" ? "spec" : route.slug,
+      block
+    )
   ) {
     return undefined;
   }

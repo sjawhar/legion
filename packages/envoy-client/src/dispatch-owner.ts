@@ -1,4 +1,5 @@
 import {
+  blockTargetFits,
   dispatchDocumentSubject,
   dispatchIssueSubject,
   parseBlockFragment,
@@ -87,8 +88,9 @@ export interface ParsedDispatchRef {
 
 /**
  * `ref` as the block reference `<document ref>#b-<block id>[@v<N>]` names, or null when it is no
- * such reference: the fragment as `parseBlockFragment` reads it, and the document an issue's spec
- * or document, or a project's document, at no version.
+ * such reference: the fragment as `parseBlockFragment` reads it, the document an issue's spec
+ * or document, or a project's document, at no version, and the block's target id
+ * `<owner>/<slug>#<block id>` one that fits (`blockTargetFits`).
  */
 function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | null {
   const target = parseBlockFragment(fragment);
@@ -97,7 +99,12 @@ function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | 
     target === undefined ||
     parsed === null ||
     parsed.version !== undefined ||
-    (parsed.kind !== "spec" && parsed.kind !== "artifact")
+    (parsed.kind !== "spec" && parsed.kind !== "artifact") ||
+    !blockTargetFits(
+      parsed.owner.kind === "issue" ? parsed.owner.issue : parsed.owner.project,
+      parsed.id,
+      target.block
+    )
   ) {
     return null;
   }

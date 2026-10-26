@@ -132,7 +132,9 @@ Every paragraph, list, and other block in a document has a stable link. Put your
 block and choose **Copy link to block** in the Spec tab row. The link ends in `#b-` and the block's
 id. Opening it scrolls to that block and highlights it briefly. Dispatch gives each block its id.
 Markdown an agent writes can name one as `{#id}`, at most 256 bytes long; Dispatch refuses a
-longer new one.
+longer new one. A block link names its block only while the document's key and name and the
+block's id, `<KEY>/<name>#<id>`, come to at most 2048 bytes; a longer one names no block, and
+opening it opens the document.
 
 ## References
 

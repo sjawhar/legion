@@ -2,6 +2,8 @@ package refs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"reflect"
 	"strconv"
@@ -149,6 +151,59 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("references after clear = %d; want 0", count)
+	}
+}
+
+// The target id the grammar bounds is the one an edge stores, and every key holding it fits: a
+// block reference whose target is at text.MaxBlockTargetBytes, an issue's document's or a
+// project's, is written to refs from a comment, and to block_refs from a block whose id is
+// text.MaxBlockIDBytes long, the widest key either table has, each to_id exactly the bound. The
+// slug and the citing block's id are incompressible, so no index holds them by compressing them.
+func TestABlockTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	random := func(t *testing.T, length int) string {
+		t.Helper()
+		bytes := make([]byte, (length+1)/2)
+		if _, err := rand.Read(bytes); err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(bytes)[:length]
+	}
+	for _, owner := range []string{"CORE-1", "CORE"} {
+		t.Run(owner, func(t *testing.T) {
+			const server = "https://dispatch.example"
+			markdown := "See dispatch://" + owner + "/artifact/" + random(t, text.MaxBlockTargetBytes-len(owner+"/#x")) + "#b-x.\n"
+			located := text.ExtractAt(markdown, server)
+			if len(located) != 1 || located[0].Kind != "block" {
+				t.Fatalf("the reference at the bound parsed as %#v, want one block", located)
+			}
+			if id := ToID(located[0].Ref); len(id) != text.MaxBlockTargetBytes {
+				t.Fatalf("ToID is %d bytes, want the bound %d", len(id), text.MaxBlockTargetBytes)
+			}
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := replaceRefs(ctx, tx, "comment", "00000000-0000-4000-8000-000000000000", text.Extract(markdown, server), nil); err != nil {
+				t.Fatalf("write the reference at the bound from a comment: %v", err)
+			}
+			createReferenceProject(t, tx, "ACME")
+			citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
+			citingBlock := random(t, text.MaxBlockIDBytes)
+			blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
+			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+				t.Fatalf("write the reference at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
+			}
+			var fromComment, fromBlock int
+			if err := tx.QueryRow(ctx, `select length(to_id) from refs where to_kind = 'block'`).Scan(&fromComment); err != nil || fromComment != text.MaxBlockTargetBytes {
+				t.Fatalf("refs.to_id is %d bytes (%v), want %d", fromComment, err, text.MaxBlockTargetBytes)
+			}
+			if err := tx.QueryRow(ctx, `select length(to_id) from block_refs where block_id = $1 and to_kind = 'block'`, citingBlock).Scan(&fromBlock); err != nil || fromBlock != text.MaxBlockTargetBytes {
+				t.Fatalf("block_refs.to_id is %d bytes (%v), want %d", fromBlock, err, text.MaxBlockTargetBytes)
+			}
+		})
 	}
 }
 

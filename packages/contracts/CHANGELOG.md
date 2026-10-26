@@ -15,7 +15,10 @@
   `DISPATCH_BLOCK_ID_ENCODINGS`; `decodeBlockId` and `parseBlockFragment` read a fragment's id and
   pin back, for the dashboard and the client alike. As Go reads them, an id holds at most
   `MAX_BLOCK_ID_BYTES` (256 UTF-8 bytes, decoded; Go's `text.MaxBlockIDBytes`) and a pin at most
-  9223372036854775807, and a longer id or a larger pin names no block. `parseBlockFragment`'s `pin`
+  9223372036854775807, and a longer id or a larger pin names no block. A block's target id
+  `<KEY or PROJECT>/<slug>#<block id>` holds at most `MAX_BLOCK_TARGET_BYTES` (2048 UTF-8 bytes;
+  Go's `text.MaxBlockTargetBytes`), as `blockTargetFits` tests it: a block past it names nothing,
+  and a live document page whose fragment names one is its document. `parseBlockFragment`'s `pin`
   is N's decimal digits as a string, so no pin past 2^53 is rounded. `DISPATCH_TEXT_REFERENCES`
   gains the block and pin rows both reference readers are held to, the bounds included.
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`

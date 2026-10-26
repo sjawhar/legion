@@ -887,3 +887,50 @@ func TestAPinPastEveryVersionNumberAnswers404(t *testing.T) {
 		}
 	}
 }
+
+// A block reference whose target id, `<KEY>/<slug>#<block id>`, is exactly text.MaxBlockTargetBytes
+// long is a reference the graph holds: a comment citing it and a document citing it are written,
+// and the block lists both. The name is incompressible, so no index holds it by compressing it.
+// One byte more names nothing, so the API answers 400 INVALID_REFERENCE for it.
+func TestABlockReferenceAtTheTargetBoundIsWrittenAndRead(t *testing.T) {
+	_, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Cites a block at the target bound", "Context paragraph.\n")
+	// The slug of `<hex>.md` is `<hex>-md`, so the target id `<key>/<hex>-md#x` is the bound.
+	name := randomBlockID(t, text.MaxBlockTargetBytes-len(issue.Key+"/-md#x")) + ".md"
+	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": name, "content": boundCallout("x"),
+	}, "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the cited document: status=%d body=%.400s", uploaded.Code, uploaded.Body.String())
+	}
+	cited := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	if target := issue.Key + "/" + cited.Slug + "#x"; len(target) != text.MaxBlockTargetBytes {
+		t.Fatalf("the target id is %d bytes, want the bound %d", len(target), text.MaxBlockTargetBytes)
+	}
+	block := "dispatch://" + issue.Key + "/artifact/" + cited.Slug + "#b-x"
+
+	comment := createReferenceAPIComment(t, handler, issue.Key, "See "+block+".")
+	citerRef := "dispatch://" + issue.Key + "/artifact/citer-md"
+	if citer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": "citer.md", "content": "This document cites " + block + ".\n",
+	}, "alice"); citer.Code != http.StatusCreated {
+		t.Fatalf("upload a document citing the block: status=%d body=%.400s", citer.Code, citer.Body.String())
+	}
+
+	edges := graphEdges(t, handler, url.Values{"to": {block}}).Edges
+	var fromComment, fromCiter bool
+	for _, edge := range edges {
+		fromComment = fromComment || edge.Node.Kind == "comment" && edge.Node.ID == comment.ID
+		fromCiter = fromCiter || edge.Node.Kind == "block" && edge.Node.Document == citerRef
+	}
+	if len(edges) != 2 || !fromComment || !fromCiter {
+		t.Fatalf("links to the block = %#v, want the comment's and the citing document's block's", edges)
+	}
+	for _, direction := range []string{"to", "from"} {
+		if read := graphRequest(t, handler, url.Values{direction: {block + "y"}}); read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_REFERENCE" {
+			t.Fatalf("?%s= a block one byte past the bound: status=%d body=%.400s, want 400 INVALID_REFERENCE", direction, read.Code, read.Body.String())
+		}
+	}
+}

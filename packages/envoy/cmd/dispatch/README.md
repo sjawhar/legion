@@ -904,7 +904,8 @@ Each block of a document is a node of the graph too (migration `0117`; `packages
 percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
 `dispatch://PROJECT/artifact/<slug>#b-<id>`. A reference's id holds at most 256 bytes decoded
-(`text.MaxBlockIDBytes`): a longer one is no reference. A block carrying a longer id, which a
+(`text.MaxBlockIDBytes`), and its target id `<KEY or PROJECT>/<slug>#<id>` at most 2048 bytes
+(`text.MaxBlockTargetBytes`): a longer one is no reference. A block carrying a longer id, which a
 browser's edit can write, is no node; the server logs a warning naming the document, the longest
 id's length and the bound, and writes the version. An API write naming a new such id is refused
 `400`, naming the bound. A mention written inside a block starts at the
