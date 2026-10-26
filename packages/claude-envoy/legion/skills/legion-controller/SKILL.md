@@ -83,8 +83,8 @@ by a person's decision: they set the label from the issue header, or ask you to 
 message, a Slack request that asks Legion to do the work, their answer to a finding ask, or a
 ruling the weekly plan records with its link). The one exception is a clear defect a role hands
 you whose code no running tree owns: you file it with the label, because its fix is how to do work
-a person already wants, and humans decide what, agents decide how (the operator's answer on that
-case: dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355). A defect whose code a running
+a person already wants, and humans decide what, agents decide how (the operator's answer on one
+such case: a clear defect is fixed, not asked about). A defect whose code a running
 tree owns is that tree's, and you file nothing for it. Label an issue only then, because
 a labelled root in `todo` is admitted, so an unasked label starts unasked work. Never take a
 person's label off, because it is their decision. Label an issue before you `set_status` it to

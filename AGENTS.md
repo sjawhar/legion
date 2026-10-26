@@ -185,8 +185,8 @@ tree touches or depends on is fixed in that tree's own pull request, while the r
 other defect with a clear fix goes to the controller with its evidence, and the controller gives
 it to the running tree whose code it is. Only when no tree owns that code does it file a Legion
 root, with the label and a `Filed for Legion from <role> on <issue>: <evidence>` line, which its
-triage admits (the operator's answer on that case:
-dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355). A finding that needs a person's
+triage admits (the operator's answer on one such case: a clear defect is fixed, not asked
+about). A finding that needs a person's
 authority, taste or risk appetite is a Dispatch ask, and a person decides whether it needs an
 issue (`skills/legion-worker/references/findings.md`).
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes

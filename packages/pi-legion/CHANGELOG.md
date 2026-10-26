@@ -168,7 +168,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- A finding outside a role's own issue takes the first of three steps that fits (INFRA-140). A
+- A finding outside a role's own issue takes the first of three steps that fits. A
   defect with a clear fix in code the role's own tree touches or depends on is fixed in that
   tree's own pull request, while the role is there. Any other clear defect goes to the controller
   over Envoy with its evidence, and the controller gives it to the running tree whose code it is,
@@ -186,33 +186,31 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   controller's rule never to label work nobody asked for names as its one exception a clear defect
   no running tree owns: such a fix is "how" inside work a person already wants, as `STRATEGY.md`
   puts the split. The design follows the deciding facts of the operator's answers on four such
-  cases: dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355 ("This should not have been
-  asked of me. You found a clear architectural issue. Fix it. Done."),
-  dispatch://INFRA-49/ask/45a6f3eb-8be9-49a6-9b55-61dffa69e463 ("This did not need to be an ask
-  for me."), dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830 ("you and your agents
-  keep deferring fixes to other issues instead of just fixing it while you're there"), and his
-  answer of 2026-10-23 to agents that had filed 78 of a project's 158 issues ("Maybe stop
-  manufacturing work I didn't ask for?"). Step 1 answers the last of those: the fix lands in the
-  tree that is already in the code, so no new issue is made for it.
-  The root `AGENTS.md` Handover paragraph carries the first link.
+  cases: 2026-10-25, on filing a clear architectural defect ("This should not have been asked of
+  me. You found a clear architectural issue. Fix it. Done."); 2026-10-25, on where three children
+  belong ("This did not need to be an ask for me."); 2026-10-26, on the design gate ("you and your
+  agents keep deferring fixes to other issues instead of just fixing it while you're there"); and
+  2026-10-23, to agents that had filed 78 of a project's 158 issues ("Maybe stop manufacturing
+  work I didn't ask for?"). Step 1 answers the last of those: the fix lands in the tree that is
+  already in the code, so no new issue is made for it.
   `legion-worker/references/findings.md` holds the three steps. `legion-controller` (its "Free
   slots", triage row, report wake and daily-report text), `legion-architect`, `legion-worker`,
   the production check's `fail` in `merge-gate.md`, `dispatch`, `dispatch-first`,
   `skills/AGENTS.md`, and the daemon's role prompts and production-check task say the same. The
-  learning `docs/solutions/legion/fix-a-clear-defect-where-you-are-…-INFRA-140.md` supersedes
+  learning `docs/solutions/legion/fix-a-clear-defect-where-you-are-…-ask-only-for-a-decision.md` supersedes
   the #2130 learning that made every finding an ask. This reverses part of #2130: the owner had to
   approve every clear defect by hand.
-- Every rule above sits on #2197's rewrite of the Legion skills (INFRA-353), which merged first
+- Every rule above sits on #2197's rewrite of the Legion skills, which merged first
   and rewrote `legion-architect`, `legion-worker`, `legion-controller` and `legion-retro` with
-  their references (INFRA-140). The merge takes #2197's text in each conflicted file, and the
+  their references. The merge takes #2197's text in each conflicted file, and the
   rules return in the fewest words beside it: the clear-defect exception beside #2197's "a
   problem outside the tree is a `dispatch ask`" sentence, the spec's two reviews in
   `legion-architect/references/design-gate.md`, the acceptance hold in its `acceptance.md`, the
   forward-merge triggers in `legion-worker/references/conflicts-and-rewrites.md`, and the
   controller's clear-defect filing and catch-up in
   `legion-controller/references/finding-asks.md`.
-- The reviewer waits for its own prose head's required checks to be green before it approves
-  (INFRA-140). The daemon marks any push by the review App beyond `.legion/` a planned red
+- The reviewer waits for its own prose head's required checks to be green before it approves.
+  The daemon marks any push by the review App beyond `.legion/` a planned red
   (`classify.ApplyPush`), and `RedSendsBack` ignores a planned red, so nothing sends that head
   back: the reviewer's own read is the only one, and GitHub then holds the merge under the base
   branch's required checks. `merge-gate.md`, the reviewer's role prompt, its core part and the Go
@@ -220,7 +218,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   later red sends the issue back are corrected for this one head. In the round after a READY
   refusal the reviewer fixes no prose itself, since that round's approval needs the tester's `E2E`
   line to name the head with only `.legion/` changed since.
-- A finding no controller takes ends where a live reader handles it (INFRA-140). The controller
+- A finding no controller takes ends where a live reader handles it. The controller
   topic is a live wake, and a publish to it with no live holder fails (`no holder for role …`) and
   delivers nothing, so `envoy_publish`'s own answer tells the role. The role then makes the
   finding an ask, on the first of three places that holds: the report issue when it is open, with
@@ -253,17 +251,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   forbids the old one).
 - `legion-worker`: a role requests a secret from the agent-secrets broker only to use it for its
   own issue's work, never to find out whether it exists or resolves, since a request for a secret
-  its role does not hold reaches a person's Inbox (INFRA-140). A planner read the rule to check
+  its role does not hold reaches a person's Inbox. A planner read the rule to check
   for credentials before reporting a read unreachable as leave to probe a key an e2e script named,
   and the owner got an approval request for it.
 - `leading-a-work-stream`, "What a lead does": a lead keeps the stream's record of what each agent
   accepted and reads it against the agents' issues and open asks at each check-in. An item that is
   neither done, in progress, nor an open ask is dropped work, and the lead has its owner record it
-  at once (INFRA-140). Agents sat on blockers outside Dispatch and dropped work, and leads did not
+  at once. Agents sat on blockers outside Dispatch and dropped work, and leads did not
   catch it.
 - The reviewer fixes a prose-only finding itself — wording, a count, a tense, a citation — in its
   own commit on the pull request and lists it in its review, and sends the work back only for a
-  finding that touches code or behaviour (INFRA-140). On one issue, six of nine review rounds were
+  finding that touches code or behaviour. On one issue, six of nine review rounds were
   one- or two-line prose fixes, each costing a full implement-test-review cycle. The reviewer
   pushes that commit before it submits the round's review and approves the head the push made: a
   change pushed above an approved head leaves the approval standing for nothing and the round goes
@@ -276,8 +274,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   no other reader. `legion-worker`, `merge-gate.md`, `legion-architect` and the reviewer's role
   prompt say the same.
 - The base is merged forward only when the pull request conflicts, when the change needs something
-  that exists only on the base (a fix for its only red check among them), or after a retarget
-  (INFRA-140). A merge without a conflict makes a new head, reruns CI and can void a review.
+  that exists only on the base (a fix for its only red check among them), or after a retarget.
+  A merge without a conflict makes a new head, reruns CI and can void a review.
   One tree merged main forward five times in a day, four of
   them needlessly, and each merge cost a full round. Before racing another tree on shared files, a
   role asks that tree on Envoy when its next push lands. After any forward merge the branch is

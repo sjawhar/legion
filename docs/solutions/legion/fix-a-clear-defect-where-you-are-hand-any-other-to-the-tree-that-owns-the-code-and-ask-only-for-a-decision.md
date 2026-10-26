@@ -49,12 +49,12 @@ follows:
 
 - 2026-10-23, to agents that had filed 78 of a project's 158 issues: "Maybe stop manufacturing work
   I didn't ask for?"
-- dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355: "This should not have been asked of
-  me. You found a clear architectural issue. Fix it. Done."
-- dispatch://INFRA-49/ask/45a6f3eb-8be9-49a6-9b55-61dffa69e463: "you can either keep 115 open or
-  you can move them to separate roots. This did not need to be an ask for me."
-- dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830: "you and your agents keep deferring
-  fixes to other issues instead of just fixing it while you're there."
+- 2026-10-25, on filing a clear architectural defect: "This should not have been asked of me. You
+  found a clear architectural issue. Fix it. Done."
+- 2026-10-25, on whether three children stay in their tree or become roots: "This did not need to
+  be an ask for me."
+- 2026-10-26, on the design gate: "you and your agents keep deferring fixes to other issues instead
+  of just fixing it while you're there."
 
 What differs between the first and the rest is the volume of new issues, not whether he is asked.
 Step 1 is what holds that volume down: the fix lands in the tree already in the code, so it makes

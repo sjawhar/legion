@@ -146,8 +146,8 @@ and the tester's proof below are both this proof.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
   `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
   is made in the running round, because a later round costs a CI pass and a re-read of the whole
-  change (the operator's answer on that case:
-  dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830). The `Fast-follow:` line reads
+  change (the operator's answer on that case: fix it while you are there, and defer no fix to
+  another issue). The `Fast-follow:` line reads
   `none`, or names only cleanup in files this pull request does not touch.
   A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
