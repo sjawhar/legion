@@ -163,7 +163,8 @@
 //     project values) send the third attempt at it unasked, and say so; the second refusal
 //     already warns that it will. A thing is each new ask a call opens, or the call as a whole
 //     when it opens none: a charter refusal counts on each thing of the call, a rules refusal on
-//     the asks it refused. A call trips when one of its own things has been refused twice, so the
+//     the asks it refused, and neither on an ask block an upload's stored version already holds
+//     (`refusalThings`). A call trips when one of its own things has been refused twice, so the
 //     pass goes to the thing that was refused and nothing else: an ask refused once, or never, on
 //     a target whose other ask was refused twice is reviewed as usual. Only a refusal counts: a
 //     warn-mode charter revise sends the call, so it never advances the breaker, while a rules
@@ -251,6 +252,7 @@ import {
   matchLines,
   type RuleName,
   type RuleOutcome,
+  type RulesCheck,
   renderRuleRefusal,
   runRulesCheck,
 } from "./rules-check";
@@ -2517,6 +2519,35 @@ const breakerThings = (asks: readonly NewAsk[]): string[] =>
   asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);
 
 /**
+ * The things one refusal counts on its target, the same for a rules refusal and a charter one: a
+ * refusal never counts an ask block the stored version of an upload already holds. An upload's scan
+ * (`breakerThings`) carries every block of its document, the stored ones included, so counting them
+ * would make every later upload of that document trip on a block no check read, and send its own new
+ * asks out unreviewed.
+ *
+ * A rules refusal counts the asks it matched, each numbered on the list the check judged, which for
+ * an upload already leaves the stored blocks out. A charter refusal of any other call counts its
+ * things, its scan holding only asks it opens. A charter refusal of an upload counts the asks the
+ * rules check judged, the ones its read found new; where nothing tells them apart from the stored
+ * blocks (the check judged none, its read failed and it judged only part of them, or it did not
+ * run), it counts the call as a whole, which an upload opening an ask never trips on, so that
+ * upload is reviewed again rather than passed. Each thing counted is one the same call's scan
+ * holds, so an upload sent again unchanged trips on its judged asks.
+ */
+const refusalThings = (
+  toolName: string,
+  callAsks: () => readonly NewAsk[],
+  ruled: RulesCheck | undefined
+): string[] => {
+  if (ruled !== undefined && ruled.matches.length > 0)
+    return ruled.matches.map((match) => askIdentity(ruled.judged[match.ask - 1]));
+  if (toolName !== "dispatch_artifact") return breakerThings(callAsks());
+  return ruled === undefined || ruled.asksPartial || ruled.judged.length === 0
+    ? [WHOLE_CALL]
+    : ruled.judged.map(askIdentity);
+};
+
+/**
  * What the gate has said on one target since the breaker last reset it. `refusals` counts, per
  * thing (`breakerThings`), the calls the gate did not send; `revises` counts every revise,
  * the warn-mode charter ones that sent the call included; `charter` keeps the charter's reasons.
@@ -3400,12 +3431,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         const charterReason = verdict?.decision === "revise" ? verdict.reason : undefined;
         // The refusal is the rules check's in either mode, so it counts on the asks that check
         // refused, and a charter revise beside it adds its reason only: a rules refusal counts the
-        // same in warn and block mode. A match numbers an ask of the list the check judged, never of
-        // this call's scan: an upload's judged list leaves out the asks its stored version holds,
-        // which no check read and so none refused.
+        // same in warn and block mode.
         const tripsNext = breaker.revised(
           key,
-          matches.map((match) => askIdentity(ruled.judged[match.ask - 1])),
+          refusalThings(event.toolName, callAsks, ruled),
           charterReason
         );
         const delivered = [
@@ -3480,7 +3509,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const refused = base.verdictMode === "block";
       const tripsNext = breaker.revised(
         key,
-        refused ? breakerThings(callAsks()) : [],
+        refused ? refusalThings(event.toolName, callAsks, ruled) : [],
         verdict.reason
       );
       return {

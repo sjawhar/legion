@@ -6122,6 +6122,70 @@ describe("rules check", () => {
       Array(3).fill(["dispatch_artifact", "verdict", "revise", "no_change"])
     );
   });
+  /** A block-mode gate whose charter revises and whose rules check matches nothing, uploading `brief.md` over its stored version, which holds `#window`. */
+  const charterRefusingUploads = () => {
+    const served = dispatchServing([
+      { id: "doc-brief", name: "brief.md", slug: "brief", markdown: BRIEF },
+    ]);
+    let content = "";
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      complete: bySystem(REVISE, RULES_NONE),
+      dispatch: served.session,
+      dryRun: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ issue: "X-1", name: "brief.md", content }),
+        stderr: "",
+        timedOut: false,
+      }),
+      // A directory that exists: the gate reads the stored version through its Dispatch.
+      cwd: SUITE_TMP,
+    });
+    const upload = (callId: string, id: string) => {
+      content = `${BRIEF}\n:::ask{#${id}}\nShould I change the ${id} cache path?\n:::\n`;
+      return g.bash(
+        callId,
+        `dispatch artifact --issue X-1 --name brief.md --content-file - <<'EOF'\n${content}EOF`
+      );
+    };
+    return { g, upload };
+  };
+  test("an upload's charter refusals count only the asks the rules check judged, never a block its stored version holds, so a third upload with a new ask is reviewed", async () => {
+    // The rules check judges each upload's own ask and matches nothing; the charter refuses each.
+    // `#window`, which every upload carries from the stored version, is counted by neither refusal.
+    const { g, upload } = charterRefusingUploads();
+    const refused = [await upload("alpha", "alpha"), await upload("beta", "beta")];
+    const third = await upload("gamma", "gamma");
+    expect(third?.additionalContext ?? "").not.toContain('outcome="breaker"');
+    expect(third?.block).toBe(true);
+    // Each refusal was its own ask's first, so neither warned that a resend goes out unasked.
+    for (const result of refused) {
+      expect(result?.block).toBe(true);
+      expect(result?.reason).not.toContain(SECOND);
+    }
+    expect(g.calls.filter(isCharter)).toHaveLength(3);
+    expect(g.calls.filter(isRules)).toHaveLength(3);
+    expect(g.entries.map((e) => [e.tool, e.outcome, e.decision, e.ruleOutcome])).toEqual(
+      Array(3).fill(["dispatch_artifact", "verdict", "revise", "none"])
+    );
+  });
+  test("an upload sent again unchanged after two charter refusals goes out on the breaker, its judged new ask the thing refused", async () => {
+    const { g, upload } = charterRefusingUploads();
+    expect((await upload("a", "alpha"))?.reason).not.toContain(SECOND);
+    const second = await upload("b", "alpha");
+    expect(second?.block).toBe(true);
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const asked = g.calls.length;
+    const third = await upload("c", "alpha");
+    expect(third?.block).toBeUndefined();
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual([
+      ["verdict", "revise"],
+      ["verdict", "revise"],
+      ["breaker", "allow"],
+    ]);
+  });
   test("a doc-edit whose document read fails still judges every ask it inserts", async () => {
     const check = await checkRules(
       {
