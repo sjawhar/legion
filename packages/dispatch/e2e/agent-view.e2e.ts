@@ -394,8 +394,8 @@ test("the conversation view replays what the session held, streams its next turn
 
     // The next turn arrives as snapshots of one message. The host delivers a message's last few
     // updates AFTER its end, so the late streaming snapshot carries the HIGHER sequence number;
-    // it must not rewind the settled text or leave the turn looking like it is still running,
-    // which is what disables the composer.
+    // it must not rewind the settled text or leave the finished turn rendered as still
+    // streaming.
     await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Ther", true));
     await expect(page.getByTestId("agent-message-assistant").last()).toContainText("Ther");
     await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "There are two.", false));
@@ -410,9 +410,6 @@ test("the conversation view replays what the session held, streams its next turn
 
     // Talking to the agent is the delivery the Agents page already uses, not a new write path,
     // and its default is Send - Enter at the session's terminal - since the session takes a steer.
-    // Send being usable here is also what the late-snapshot rule above buys: a thread left
-    // looking like it is still running disables the composer, and a viewer who opens a finished
-    // session cannot talk to it.
     await expect(page.getByRole("combobox", { name: "Delivery mode" })).toHaveValue("steer");
     await page.getByTestId("agent-composer").locator("textarea").fill("try the other branch");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
@@ -1129,6 +1126,8 @@ test("sending a message from the live view while scrolled back takes the reader 
     await page.getByRole("button", { name: "Send" }).click();
     refuse();
     await expect(page.getByTestId("agent-send-error")).toBeVisible();
+    // A refused message is not lost: it is back in the box, to send again.
+    await expect(input).toHaveValue("and this one is refused");
     expect((await liveViewLayout(page)).threadScrollTop).toBe(1_200);
   } finally {
     await context.close();
