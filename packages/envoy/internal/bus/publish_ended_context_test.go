@@ -27,9 +27,8 @@ import (
 // Each case subscribes before it publishes and flushes the publisher's connection after, so a
 // message that was sent has reached the server, and been handed on, before the subscriber is read.
 // A context ends two ways, and both are refused: a deadline already past, the case above, and a
-// cancel with the deadline still ahead, which only publishCoreTo's own reads of the context catch
-// (the one at its entry first), since publishConfirmed's own check reads the deadline alone. The
-// control is the same call with a live context, which must publish and be received.
+// cancel with the deadline still ahead; publishConfirmed's check of the context before it publishes
+// sees both. The control is the same call with a live context, which must publish and be received.
 func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -121,13 +120,12 @@ func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 	}
 }
 
-// publishConfirmed refuses a deadline already spent before it calls publish, and answers it with
-// the spent-window text it has always had. publishCoreTo refuses a context ended at its entry, so
-// a deadline reaches publishConfirmed spent only when it ran out in between - the check here is
-// what closes that gap, and nothing end to end can time it, so it is pinned on its own: publish
-// must not be called at all. The text is pinned because a deployed filter may match it; the check
-// moved ahead of the publish, the answer did not change. The control is the same call with a
-// deadline ahead, which publishes, flushes and confirms.
+// publishConfirmed refuses an ended context before it calls publish, a deadline already spent or a
+// cancel with the deadline still ahead, and answers it with the spent-window text wrapping the
+// context's error. A context reaches publishConfirmed ended when it ended during the wait for a
+// connection or just after it - nothing end to end can time that, so it is pinned on its own:
+// publish must not be called at all. The text is pinned because a deployed filter may match it.
+// The control is the same call with a deadline ahead, which publishes, flushes and confirms.
 func TestAPublishConfirmedWithASpentDeadlinePublishesNothing(t *testing.T) {
 	client, err := ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
@@ -142,15 +140,31 @@ func TestAPublishConfirmedWithASpentDeadlinePublishesNothing(t *testing.T) {
 		return conn.PublishMsg(msg)
 	}
 
-	err = client.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: []byte("{}")}, time.Now().Add(-time.Second), publish)
-	if want := `bus: window elapsed before the publish to "` + subject + `" was flushed`; err == nil || err.Error() != want {
-		t.Fatalf("publishConfirmed with a spent deadline = %v, want %q", err, want)
-	}
-	if published != 0 {
-		t.Fatalf("publishConfirmed called publish %d times with its deadline already spent, want none", published)
+	past, cancelPast := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelPast()
+	cancelled, cancel := context.WithTimeout(context.Background(), time.Minute)
+	cancel()
+	for _, ended := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+	}{
+		{"a spent deadline", past, context.DeadlineExceeded},
+		{"a cancelled context", cancelled, context.Canceled},
+	} {
+		err = client.publishConfirmed(ended.ctx, conn, &nats.Msg{Subject: subject, Data: []byte("{}")}, publish)
+		want := `bus: window elapsed before the publish to "` + subject + `" was flushed: ` + ended.err.Error()
+		if err == nil || err.Error() != want || !errors.Is(err, ended.err) {
+			t.Fatalf("publishConfirmed with %s = %v, want %q wrapping %v", ended.name, err, want, ended.err)
+		}
+		if published != 0 {
+			t.Fatalf("publishConfirmed with %s called publish %d times, want none", ended.name, published)
+		}
 	}
 
-	if err := client.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: []byte("{}")}, time.Now().Add(5*time.Second), publish); err != nil {
+	live, cancelLive := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelLive()
+	if err := client.publishConfirmed(live, conn, &nats.Msg{Subject: subject, Data: []byte("{}")}, publish); err != nil {
 		t.Fatalf("publishConfirmed with a deadline ahead: %v", err)
 	}
 	if published != 1 {

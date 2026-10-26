@@ -106,12 +106,11 @@ func (f *reconnectWaitFixture) requireNothingReceived(t *testing.T, what string,
 }
 
 // A core publish whose context is cancelled while it waits for NATS to reconnect, with its
-// deadline still ahead, sends nothing even when the reconnect lands right after the cancel. The
-// check at publishCoreTo's entry cannot see it, since it reads the context before that wait, and
-// publishConfirmed is handed only the deadline. What answers it here is ensureConnWithContext's
-// wait, whose select consults the context between ticks and so returns the cancellation while the
-// connection is still down; publishCoreTo's read of the context after that wait is the backstop,
-// pinned on its own by TestAPublishCancelledAsTheReconnectCompletesSendsNothing.
+// deadline still ahead, sends nothing even when the reconnect lands right after the cancel. What
+// answers it here is ensureConnWithContext's wait, whose select consults the context between ticks
+// and so returns the cancellation while the connection is still down; publishConfirmed's read of
+// the context immediately before the publish is the backstop, pinned on its own by
+// TestAPublishCancelledAsTheReconnectCompletesSendsNothing.
 //
 // The cancel lands only once the publish is inside the wait: the wait's first tick closes waiting,
 // and the test cancels once waiting is closed, then lets the link forward again so the reconnect
@@ -169,9 +168,9 @@ func TestAPublishCancelledWhileWaitingForAReconnectSendsNothing(t *testing.T) {
 // A core publish whose context is cancelled at the moment its wait for a reconnect ends, after the
 // wait's last look at the context and with the connection already back, sends nothing.
 // ensureConnWithContext then returns nil, since a usable connection is all it checks once its wait
-// has ended, and publishConfirmed is handed only the deadline, which is still ahead; publishCoreTo's
-// read of the context between the two is the only thing that can refuse it. Without that read the
-// message goes out to a caller that had been told nothing and had gone.
+// has ended; publishConfirmed's read of the context immediately before the publish is the only
+// thing that can refuse it. Without that read the message goes out to a caller that had been told
+// nothing and had gone.
 //
 // The wait's first tick is where it happens: the tick lets the link forward again, waits for the
 // client to reconnect, and then cancels, so the wait reads a connected connection next and returns.

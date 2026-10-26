@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -18,8 +19,8 @@ var ErrPublishDenied = errors.New("NATS denied the publish")
 // confirm: not known to be denied, and not known to be accepted either.
 var errPublishUnconfirmed = errors.New("publish not known to have been accepted")
 
-// publishConfirmed publishes msg on conn with publish, flushes within deadline, and confirms the
-// server accepted it (confirmPublished). A nil error means the server accepted the publish;
+// publishConfirmed publishes msg on conn with publish, flushes within ctx's deadline, and confirms
+// the server accepted it (confirmPublished). A nil error means the server accepted the publish;
 // otherwise the error is a window already spent (errWindowElapsed), nats.go's refusal before
 // sending (refused), a flush that failed or ran out of the window, ErrPublishDenied, or one
 // wrapping errPublishUnconfirmed. publish is conn.PublishMsg, bound to the same conn: both callers
@@ -27,15 +28,23 @@ var errPublishUnconfirmed = errors.New("publish not known to have been accepted"
 // connection observe and confirmPublished judge. It is a parameter so a test can make the server's
 // answer arrive before publish returns, which is the case the state read before it exists for.
 //
-// A deadline already spent is refused before publish is called, never after: a core publish is
-// on its way to the subject the moment publish returns, so answering failure behind it tells the
-// caller a message failed that its subscribers receive - and a core subject has no duplicate
-// window, so the caller's retry delivers it twice. The check after publish stays for a window that
-// runs out during publish itself; that publish is not known to have left this process, the same
-// ambiguity a flush that runs out of the window has, and is answered the same way.
-func (c *Client) publishConfirmed(conn *nats.Conn, msg *nats.Msg, deadline time.Time, publish func(*nats.Msg) error) error {
-	if time.Until(deadline) <= 0 {
-		return errWindowElapsed(msg.Subject)
+// A ctx that has ended - cancelled, or its deadline spent - is refused before publish is called,
+// never after: a core publish is on its way to the subject the moment publish returns, so
+// answering failure behind it tells the caller a message failed that its subscribers receive - and
+// a core subject has no duplicate window, so the caller's retry delivers it twice. The deadline is
+// also read off the clock, since it can pass before ctx's timer marks ctx done; a ctx with no
+// deadline has the zero one, already spent, though both callers bound theirs. The check after
+// publish stays for a window that runs out during publish itself; that publish is not known to
+// have left this process, the same ambiguity a flush that runs out of the window has, and is
+// answered the same way. A cancel that lands after the check goes unseen: the publish is made.
+func (c *Client) publishConfirmed(ctx context.Context, conn *nats.Conn, msg *nats.Msg, publish func(*nats.Msg) error) error {
+	deadline, _ := ctx.Deadline()
+	err := ctx.Err()
+	if err == nil && !time.Now().Before(deadline) {
+		err = context.DeadlineExceeded
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", errWindowElapsed(msg.Subject), err)
 	}
 	before := observe(conn)
 	if err := publish(msg); err != nil {
