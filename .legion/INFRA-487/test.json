@@ -2,37 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T20:55:04Z",
-  "round": 3,
-  "headTested": "0accff8e67e3cc0bfba44ff9b0d3dd5086d13d6f (code head 6df6138d5af1)",
+  "completed": "2026-10-26T21:17:55Z",
+  "round": 4,
+  "scope": "Narrowed by the INFRA-115 architect at review_round_cap=3 (Envoy 6178bd5861f5ba6bceeb96feb72d70b7): check the give-back deletion and its 401, 401, 429 test, re-run the real-binary outage test once, read the first full CI run on the PR.",
+  "headTested": "7dcf3ff9a18cb79a369529fbc3cfe574bed0980b (code head fa1312aac8e9)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the daemon-login criterion's database half on the real surface, not the in-process tests alone: the daemon's agentsecrets.Client with default schedules against the broker binary built at 0accff8e, behind a reverse-proxy front door, on the tester's Postgres 16 stopped for 170 s with pg_ctl (throwaway rig, removed). My round-2 red test TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket is byte-identical at head (md5 equal at bcf37482 and 0accff8e) and passes, with the implementer's TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket, TestARefusedTokenLoginStillSpendsItsAccountBucket, TestAForgedTokenFloodIsLimitedByAddress and TestAVerifiedAccountSpendsItsOwnBucketToo (`cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -run 'TestATokenLogin|TestARefusedTokenLogin|TestAVerifiedAccountSpendsItsOwnBucketToo|TestAForgedTokenFloodIsLimitedByAddress' ./internal/broker/api` ok) and ratelimit's TestAGivenBackRequestCanBeTakenAgain and TestARefusedTakeSpendsNothing ok. The pod path (enroll, requests, migration, serving clock) is unchanged since round 2, where the outage acceptance test passed at the merged head."
+    "how": "Read fa1312aa: handlers_launcher.go now calls writeTokenLoginRefusal(w, err) with no give-back when VerifyServiceToken fails; giveBackAddress is called only after a verified token's TokenLogin answers 5xx (with giveBackAccount). Ran the new TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway with every token-login limit test: `cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run 'TestATokenThatDoesNotVerify|TestATokenLogin|TestARefusedTokenLogin|TestAForgedTokenFlood|TestAVerifiedAccountSpends' ./internal/broker/api` -> 9 PASS, ok. The new test is the architect's shape: store closed, tokens claiming the daemon's account signed by an unpublished key, PerAddress burst 2, expects 401, 401, 429. Re-ran the real-binary outage test once at the head (proof below)."
   },
-  "failures": [
-    {
-      "criterion": "A token that does not verify always spends its token-login buckets (required change from the INFRA-115 architect, Envoy message 432b32b430cb8fb9b3a8a58840ea5f2c, 2026-10-26T20:50:32Z)",
-      "evidence": "packages/envoy/internal/broker/api/handlers_launcher.go:68-71 at 0accff8e (added in 6df6138d) calls giveBackAddress() when VerifyServiceToken's error is written as a 500. Today no verify error reaches 500: machine/token.go:63-85 maps every VerifyAccount error to ErrTokenExpired or ErrTokenInvalid (401), so the path is dead. But it is the path the address bucket guards (a token that does not verify makes the verifier refetch the issuer's keys): a later change answering a key-fetch failure 500 would refund every forged-token attempt. Required fix: delete that give-back, so only the give-backs after a successful verification (handlers_launcher.go:80-84) stay; add a test with the database closed, tokens signed by an unknown key and PerAddress burst 2, expecting 401, 401, 429. No red test is committed for it: with every verify error mapped to 4xx, no test can fail on today's code."
-    }
+  "failures": [],
+  "failed": 0,
+  "ci": "First full CI run at 7dcf3ff9 (Tests 40402742456, Legion Envoy and Contracts 40402741229, Docs 40402741064, Worker Image 40402740955) was queued or pending at 21:17:47Z; read as queued, not waited for. Every earlier head's Tests and Legion Envoy and Contracts runs were cancelled by a later push before they ran. This handoff push carries skip-checks: true, so it starts no run and cancels none.",
+  "limits": [
+    "The new 401, 401, 429 test passes with or without the deleted give-back on today's code, since VerifyServiceToken maps every verify error to 4xx (machine/token.go:63-85); it locks the behaviour against a later change that answers a verify failure 5xx, as the architect asked."
   ],
-  "failed": 1,
-  "ci": "At 0accff8e every run is queued or pending (Tests, Legion Envoy and Contracts, Docs, Worker Image), read 2026-10-26T20:54Z; not waited for. The runs at 7d770fb5 and 89a29f14 were cancelled when a later push superseded them, so no full suite has completed on any head of #2269 yet. PR is MERGEABLE.",
   "proof": [
     {
-      "criterion": "The daemon logs in again within about 10 s of its broker's database coming back after an outage",
-      "surface": "the daemon's agentsecrets.Client, default schedules, against the real broker binary built at 0accff8e behind a real httputil.ReverseProxy front door, on real Postgres 16 stopped with pg_ctl -m fast",
-      "command": "throwaway TestZZDaemonLoginWhileBrokerDatabaseDown with ZZ_OUTAGE=170s (ZZ_BROKER_BIN, ZZ_PGCTL, ZZ_DB_URL)",
-      "observed": "19 logins answered 500 INTERNAL at 2 s doubling to 10 s (20:51:03 to 20:53:47), none 429; daemon login issued 3.792 s after Postgres was back; answers {500:19, 200:1}",
-      "headSha": "0accff8e67e3cc0bfba44ff9b0d3dd5086d13d6f",
-      "negativeControl": "round 2, the same 170 s rig on 7d770fb5's broker: after five 500s the broker answered 429 RATE_LIMITED, the client waited 30 s and 60 s, and the login came 17.8 s after Postgres was back (up to about a minute by its schedule)"
+      "criterion": "After an outage longer than the lease, a pod fetches again within one renewal interval of the broker serving, with no relaunch and no person; an ended enrollment stays ended",
+      "surface": "the real broker binary twice on one real Postgres 16 database and the real agent-secrets binary (keygen, renew --pod-token-file, NAME -- cmd) behind one forwarded address",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54488/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
+      "observed": "--- PASS (85.94s), 0 '--- SKIP'; survivor held 39.949s at the stop; first fetch served 89ms after the second broker listened; renewer (never exited) renewed to 44.915s past now 5.987s after; 'gave back the time no broker was serving ... gap=58.359271s ... enrollments=2'; revoked and lapsed pods refused 401, mismatch pod refused 403 with its lease unmoved",
+      "headSha": "7dcf3ff9a18cb79a369529fbc3cfe574bed0980b",
+      "negativeControl": "round 1: the same test on a git-archive export of eee16056 failed 'agent-secrets: proof invalid: not live (PROOF_INVALID)'"
     },
     {
-      "criterion": "The daemon logs in again within about 10 s of a broker serving behind its front door after an outage (daemon client unchanged since round 2)",
-      "surface": "same rig, broker absent behind the front door for 40 s",
-      "command": "round 2: throwaway TestZZDaemonLoginThroughFrontDoorWhileBrokerDown",
-      "observed": "502 at 2 s doubling to 10 s; login issued 3.4 s after the broker listened",
-      "headSha": "7d770fb5496db78dca02d6db149cad34fb25ef36",
-      "negativeControl": "b7e7ff14's client on the same rig: 502 at 30 s, issued 49.25 s after the broker listened"
+      "criterion": "A token that does not verify always spends its address's token-login bucket, even while the database is away and verified logins are refunded",
+      "surface": "the broker's api.Register on an httptest server with its real pod verifier against a local OIDC issuer, store closed",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -run TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway ./internal/broker/api",
+      "observed": "--- PASS: forged tokens answered 401, 401, then 429 at PerAddress burst 2",
+      "headSha": "7dcf3ff9a18cb79a369529fbc3cfe574bed0980b",
+      "negativeControl": "in the same run TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket passes: verified logins with the store closed answer 5xx four times past the same burst of 2, so the 429 above is the unverified token's spend, not a closed store"
+    },
+    {
+      "criterion": "The daemon logs in again within about 10 s of the broker answering (front door 502; database away 500)",
+      "surface": "the daemon's agentsecrets.Client against the real broker binary behind a reverse-proxy front door, real Postgres 16 (rounds 2 and 3; daemon client unchanged since, broker change this round touches only unverified tokens)",
+      "command": "rounds 2-3 throwaway TestZZDaemonLoginThroughFrontDoorWhileBrokerDown and TestZZDaemonLoginWhileBrokerDatabaseDown (ZZ_OUTAGE=170s)",
+      "observed": "front door: issued 3.4 s after the broker listened (at 7d770fb5); database: 19x500, no 429, issued 3.792 s after Postgres was back (at 0accff8e)",
+      "headSha": "0accff8e67e3cc0bfba44ff9b0d3dd5086d13d6f",
+      "negativeControl": "b7e7ff14's client: issued 49.25 s after the broker listened; 7d770fb5's broker: 429 after five 500s, login 17.8 s after Postgres was back"
     }
   ]
 }
