@@ -1,4 +1,4 @@
-import type { DeliveryCapability } from "../../api/types";
+import type { Actor, DeliveryCapability } from "../../api/types";
 
 /** The composer's data model: where a draft goes, what kind it is, and what it carries. The
  *  composer (`MentionComposer.tsx`), the request it freezes (`send-request.ts`) and every host read
@@ -31,7 +31,8 @@ export type ComposerAnchor =
     };
 
 export interface ReplyTarget {
-  readonly author: string;
+  /** The parent's author, which the Replying-to chip draws through `AgentName`. */
+  readonly actor: Actor;
   readonly excerpt: string;
   readonly id: string;
   readonly parentKind: "comment" | "message";
@@ -41,7 +42,6 @@ export interface ReplyTarget {
   readonly thread?: {
     readonly delivery: DeliveryCapability;
     readonly target: string;
-    readonly title: string;
   };
   readonly to?: string;
 }

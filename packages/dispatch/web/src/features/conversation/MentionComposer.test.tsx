@@ -7,7 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
 import type { Agent, Comment, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
-import type { ComposerOwner } from "./composer-model";
+import type { ComposerOwner, ReplyTarget } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
 import { SEND_DEADLINE_MS } from "./send-request";
 
@@ -36,6 +36,10 @@ const worker: Agent = {
   session_id: "B",
   title: "Worker",
 };
+
+/** A reply parent's author: a user, drawn as plain text, so a quote reads `Replying to Planner`
+ *  with no registry read. */
+const plannerAuthor = { id: "Planner", kind: "user" } as const;
 
 const createdComment: Comment = {
   anchor: null,
@@ -67,14 +71,7 @@ interface ComposerOptions {
   onKindChange?: (kind: "ask" | "comment" | "suggestion") => string | undefined;
   onSent?: () => void;
   owner?: ComposerOwner;
-  replyTo?: {
-    author: string;
-    excerpt: string;
-    id: string;
-    parentKind?: "comment" | "message";
-    thread?: { delivery: "btw" | "steer"; target: string; title: string };
-    to?: string;
-  } | null;
+  replyTo?: (Omit<ReplyTarget, "parentKind"> & { parentKind?: ReplyTarget["parentKind"] }) | null;
 }
 
 /** Renders the composer, and hands back `rerender` for a host that changes its props on the live
@@ -237,19 +234,13 @@ test("a session title cannot make its mention text impersonate a different sessi
 
 test("reopening the same reply restores its canonical prefills after cancel", async () => {
   const ReplyHarness = () => {
-    const [replyTo, setReplyTo] = useState<{
-      author: string;
-      excerpt: string;
-      id: string;
-      mentions: { target: string; title: string }[];
-      parentKind: "comment";
-    } | null>(null);
-    const target = {
-      author: "Planner",
+    const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
+    const target: ReplyTarget = {
+      actor: plannerAuthor,
       excerpt: "Question",
       id: "comment-1",
       mentions: [{ target: "role:Planner", title: "Planner" }],
-      parentKind: "comment" as const,
+      parentKind: "comment",
     };
     return (
       <>
@@ -351,10 +342,10 @@ test("a direct-session reply inherits its thread delivery", async () => {
   const { view } = renderComposer({
     owner: { kind: "session", sessionId: "A" },
     replyTo: {
-      author: "Planner",
+      actor: plannerAuthor,
       excerpt: "Question",
       id: "message-9",
-      thread: { delivery: "btw", target: "session:A", title: "Planner" },
+      thread: { delivery: "btw", target: "session:A" },
     },
   });
 
@@ -379,12 +370,12 @@ test("a legacy targeted-message reply keeps the message endpoint while a comment
   const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
-      author: "Planner",
+      actor: plannerAuthor,
       excerpt: "Question",
       id: "message-9",
       parentKind: "message",
-      thread: { delivery: "btw", target: "session:A", title: "Planner" },
-    } as never,
+      thread: { delivery: "btw", target: "session:A" },
+    },
   });
 
   try {
@@ -410,11 +401,11 @@ test("a command overrides a targeted legacy reply's inherited delivery", async (
   const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
-      author: "Planner",
+      actor: plannerAuthor,
       excerpt: "Question",
       id: "message-9",
       parentKind: "message",
-      thread: { delivery: "btw", target: "session:A", title: "Planner" },
+      thread: { delivery: "btw", target: "session:A" },
     },
   });
 
@@ -439,7 +430,7 @@ test("a command on a plain legacy reply stays verbatim and sends no delivery", a
   const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
-      author: "Planner",
+      actor: plannerAuthor,
       excerpt: "Question",
       id: "message-9",
       parentKind: "message",
@@ -465,11 +456,11 @@ test("a token-only targeted legacy reply cannot submit, and Send says why", asyn
   const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
-      author: "Planner",
+      actor: plannerAuthor,
       excerpt: "Question",
       id: "message-9",
       parentKind: "message",
-      thread: { delivery: "btw", target: "session:A", title: "Planner" },
+      thread: { delivery: "btw", target: "session:A" },
     },
   });
 
@@ -636,6 +627,46 @@ test("an accepted mention survives its target going offline before Send", async 
   }
 });
 
+// INFRA-440 (exclusion E2). Each suggestion is one option inside a listbox, which may own only
+// options, so the agent in it is drawn by `AgentName` with its running state and no link: a
+// session option's name, and a role option's holder in its detail line.
+test("the mention picker draws each agent with its state and no link", async () => {
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([planner]);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <MentionComposer
+          onClose={() => {}}
+          onSent={() => {}}
+          owner={{ issueKey: "CORE-1", kind: "issue" }}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.change(screen.getByLabelText<HTMLTextAreaElement>("Comment"), {
+      target: { value: "@" },
+    });
+    const listbox = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    const session = await within(listbox).findByRole("option", { name: "Planner" });
+    const role = within(listbox).getByRole("option", { name: "legion-planner" });
+    for (const option of [session, role]) {
+      const agent = option.querySelector('[data-agent-name="A"]');
+      expect(agent?.textContent).toBe("Planner");
+      await waitFor(() => expect(agent?.getAttribute("data-agent-state")).toBe("running"));
+    }
+    expect(role.textContent).toContain("Planner · /workspaces/planner");
+    expect(listbox.querySelector("a")).toBeNull();
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+  }
+});
+
 test("two accepted mentions receive one comment-level delivery mode", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
   const { view } = renderComposer({ agents: [planner] });
@@ -772,7 +803,7 @@ test("reply mode shows the quote, sends reply_to, and cancels by chip or Escape"
       cancelled += 1;
     },
     replyTo: {
-      author: "Planner",
+      actor: plannerAuthor,
       excerpt: "Once the build is green.",
       id: "comment-9",
       parentKind: "comment",
@@ -781,9 +812,9 @@ test("reply mode shows the quote, sends reply_to, and cancels by chip or Escape"
   });
 
   try {
-    expect(screen.getByRole("link", { name: /Replying to Planner/ }).textContent).toContain(
-      "Once the build is green."
-    );
+    // The author is drawn outside the quote's link, which holds the quoted body.
+    expect(screen.getByText("Replying to Planner").closest("a")).toBeNull();
+    expect(screen.getByRole("link", { name: /^— Once the build is green\./ })).toBeDefined();
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
@@ -1342,7 +1373,7 @@ test("a refused reply keeps the reply its send started with until the server ans
   };
   const { view } = renderComposer({
     onCancelReply: cancelReply,
-    replyTo: { author: "Bob", excerpt: "Earlier", id: "comment-0" },
+    replyTo: { actor: { id: "Bob", kind: "user" }, excerpt: "Earlier", id: "comment-0" },
     seedMentions: [plannerMention],
   });
 
@@ -1399,11 +1430,11 @@ test("a host that re-addresses the composer in Send's task cannot re-address the
         kind: "ask",
         owner: { kind: "session", sessionId: "A" },
         replyTo: {
-          author: "Planner",
+          actor: plannerAuthor,
           excerpt: "Can this ship?",
           id: "message-0",
           parentKind: "message",
-          thread: { delivery: "btw", target: "session:A", title: "Planner" },
+          thread: { delivery: "btw", target: "session:A" },
         },
       });
     });
@@ -1874,7 +1905,7 @@ function renderRemountedReply() {
             onClose={() => {}}
             onSent={() => {}}
             owner={{ issueKey: "CORE-1", kind: "issue" }}
-            replyTo={{ author: "", excerpt: "", id: "root", parentKind: "comment" }}
+            replyTo={{ actor: plannerAuthor, excerpt: "", id: "root", parentKind: "comment" }}
           />
         ) : null}
       </>

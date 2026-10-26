@@ -37,7 +37,12 @@ function Composer({
       replyTo={
         props.replyTo === undefined
           ? null
-          : { author: "", excerpt: "", id: props.replyTo, parentKind: "comment" }
+          : {
+              actor: { id: "alice", kind: "user" },
+              excerpt: "",
+              id: props.replyTo,
+              parentKind: "comment",
+            }
       }
     />
   );
