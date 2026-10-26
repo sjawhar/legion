@@ -7,7 +7,7 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 ## The aim
 
-Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec: it sends decisions to its architect (`skill://legion-worker`).
+Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec (`skill://legion-worker`).
 
 ## The outline
 
@@ -35,7 +35,7 @@ For each spec, ask, comment and message:
 - Write about the design, never the person. Never quote people, repeat an answered ask, or upload their words.
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
-- Explain each name or term a new reader may not know. Name an issue by its `dispatch://` link, and say in a clause what it does for this reader. Never write a bare key.
+- Explain each name or term a new reader may not know. Name an issue by its `dispatch://` link, and say in a clause what it does for this reader.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
@@ -43,12 +43,12 @@ For each spec, ask, comment and message:
 - Propose an answer to each point, numbers included, with a reason.
 - A choice inside what the person asked for, or one their messages favour, is settled: decide it.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
-- Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks) at the end of its section: 2 to 4 options with costs, your recommendation, answerable on a phone.
-- Chat reaches nobody: use an ask or approval request.
+- Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options with costs, your recommendation, answerable on a phone.
+- With clarifying questions answered and options known, ask yourself: is trying them quicker than choosing? It is if each builds in hours and how it works decides, not how it reads. Then fresh agents build each from the brief alone: ce-bakeoff without its judge, ce-prototype for a page or flow, or, where neither is loaded, a `task` agent. Run each through the same check. Show builds and results side by side in the ask block. Recommend one only if the check settles it; else the person picks.
 
 ## Each version
 
-1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Write what is true now. Never narrate an edit or what used to be here; versions and comments hold the history. Reply in a comment's thread; resolve the ask it answers.
+1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Never narrate an edit or what used to be here; versions and comments hold the history. Reply in a comment's thread.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent's assignment. It lists gaps, conflicts, uncheckable requirements, unclear text, and missing or needless questions. Fix or record each.
 3. Before each approval request, a read-only agent checks its facts (`task(agent="scout")`; `plan-gap-analyst` in Legion).
 4. Name each version with `dispatch doc-edit --summary`.
@@ -58,7 +58,7 @@ For each spec, ask, comment and message:
 - Each design choice no source states is a `###` entry: choice, reason, options weighed, parts shaped.
 - An unsure entry adds an `Unsure:` paragraph: what would change your mind.
 - A replaced entry moves under a final `### Replaced`.
-- A person's decision is their answered ask block. Each part it shapes links it.
+- A person's decision is their answered ask block.
 
 ## Old specs
 

@@ -112,6 +112,8 @@ and the tester's proof below are both this proof.
   rerun as evidence. A lane GitHub shows `queued` or `in progress` is read as such: the tester
   never waits for it, since a required red that settles sends the work back from `testing` and
   the reviewer reads the head's checks before it approves.
+  For a slice with a browser page the tester also drives the page with `skill://ce-dogfood`, as
+  `skill://legion-worker/references/dogfood.md` says.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns

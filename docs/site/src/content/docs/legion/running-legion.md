@@ -199,7 +199,8 @@ Dispatch read them, delete the files, then install every App from
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
 (`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
-Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl) and the client tools a
+Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl), Chromium with
+`agent-browser` (the browser driver the tester's `ce-dogfood` skill runs) and the client tools a
 role's own work needs (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`): `apt` cannot write a system
 prefix in an unprivileged container, unpacking
 one by hand works for some tools and not others, and what rules out a client a role unpacks onto

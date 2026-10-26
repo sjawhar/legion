@@ -9,7 +9,7 @@ Dispatch holds the open issues, their specs and people's answers. A duplicate is
 
 ## Search before you act
 
-- Before you plan, file an issue, ask, post a finding or start work, run `dispatch search`.
+- Run `dispatch search` first.
 - Each query word must match. Use two or three words: the thing and what is wrong with it. Never paste a draft.
 
 ```bash
@@ -42,6 +42,6 @@ A person does not watch your chat. Reach them through an ask, an ask block or an
 | Before you | Read |
 | --- | --- |
 | run your first `dispatch` command in this session | `skill://dispatch` |
-| write or change a spec, or write an ask, comment or message a person reads | `skill://dispatch-writing-specs` (in a session with Dispatch it replaces superpowers' `brainstorming`) |
-| plan work whose spec a person approved | superpowers' `writing-plans`, stored as the issue's `plan.md` (`skill://dispatch-writing-specs`, "The plan") |
+| write or change a spec, ask, comment or message a person reads | `skill://dispatch-writing-specs` |
+| plan work whose spec a person approved | `skill://dispatch-writing-specs`, "The plan" |
 | write a Legion architect's own spec | `skill://legion-architect` too |

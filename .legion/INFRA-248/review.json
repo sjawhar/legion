@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-248",
+  "completed": "2026-10-26T20:04:39Z",
+  "round": 4,
+  "scope": "Narrowed by the architect to the delta efde11ad..3264771a: the Fast-follow 9d01535e (unhiddenSkills in pi-shared's skills guard, named in pi-legion's AGENTS.md), the try-the-options step moved into dispatch-writing-specs with 91 words of repetition cut in the three Dispatch skills (decision A, INFRA-140's 2,000-word acceptance line), and the merge 3264771a keeping both sides.",
+  "reviewedCodeHead": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head 3264771a: Tests 40389772616 queued (lint, typecheck, test queued), PR Title 40389992325 queued. A request for changes does not wait on CI. Compare 3264771a...head touches only .legion/.",
+  "thermonuclear": "Narrow pair at 3264771a: deep-review APPROVE with 2 Minor; code-quality CHANGES. Adjudicated: 3 findings stand (below); placement of the step and its recommend-only-if-settled rule are the approved spec wording, not reopened; withScratchOmpHome vs ompRoot is not a defect (different harnesses: ompRoot also builds an agent dir, a workspace and a sessions dir for session cases, on a Cleanup list). Provider not verified (the subagent transcripts show no provider or model per turn).",
+  "checked": "The merge keeps both sides (main's gcc and dpkg-notices lines beside agent-browser; outside the PR's 43 files the tree equals main d1f4b8a6). 12 of the 13 cuts restate a rule still stated where the PR body says. The step keeps every element of spec v4 change 1 except the explicit condition (finding 3) and names no person. No cut edits the three lines #2160 changes; #2160 will meet a textual conflict in skills/dispatch/SKILL.md:28-29 (resolution: this PR's :28 plus #2160's :29).",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 0,
+  "minor": 3,
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/pi-shared/AGENTS.md", "description": "The 'Skills guard rules' row (:109) enumerates every rule test/skills-guard.ts exports, bundledAgents included, but not the new unhiddenSkills (skills-guard.ts:315)."},
+    {"severity": "minor", "file": "skills/dispatch-writing-specs/SKILL.md", "description": "Cut 12 ('; resolve the ask it answers', :51) is not fully restated: dispatch/SKILL.md:52 covers only an ask you opened, so an ask another session opened (an earlier architect generation) and a person answers in a comment thread now stays open."},
+    {"severity": "minor", "file": "skills/dispatch-writing-specs/SKILL.md", "description": "The step (:47) says 'Then fresh agents build each', which reads as the next step rather than the approved 'If so'; the person asked that agents not be pushed to build by default."}
+  ]
+}

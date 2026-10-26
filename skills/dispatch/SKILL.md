@@ -25,7 +25,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 :::
 ```
 
-- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
+- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`.
 - In a Legion session, a finding outside your own issue is an ask as `skill://legion-worker/references/findings.md` says, never an issue you file.
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
@@ -54,7 +54,7 @@ A claim delivers no comments: in the same turn, `dispatch issue-update --route s
 
 ## Structure over stream
 
-- One issue per deliverable, its content the issue's document. Decisions are asks. A message only announces.
+- One issue per deliverable, its content the issue's document.
 - A message replies to a person, or tells them a change they must know now.
 - Text a person must read to decide is a section of the spec. An artifact is a real file.
 

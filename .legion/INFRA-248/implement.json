@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-248",
+  "completed": "2026-10-26T19:48:31Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2219",
+  "codeHead": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+  "proof": [
+    {
+      "criterion": "A1 The Legion skills guard passes with ce-dogfood in pi-legion",
+      "surface": "the staged plugin partitions and the real Oh My Pi (/opt/omp/bin/omp) loading both plugins packed from the branch",
+      "command": "bun test packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/scripts/prepack.test.ts packages/pi-shared/test/skills-partition.test.ts packages/pi-envoy/src/skills-guard.test.ts; LEGION_TEST_OMP=/opt/omp/bin/omp bun test packages/pi-envoy/src/skills-guard.test.ts; cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test ./internal/daemon -run 'TestTheRealPluginsOnTheRealOhMyPi|TestThePromptReferenceProbeOnTheRealOhMyPi' -count=1; and `legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models` inside the head's image (Job in namespace <namespace>, gVisor, uid 1000)",
+      "observed": "At efde11ad: pi-legion skills guard incl. the hide test 13 pass; claude-envoy build --check 'dist/ and legion/ match a fresh build'; ok github.com/sjawhar/legion/daemon/internal/daemon 57.428s; in the head's image (sha256:eee8fadfce84a7dc4a23bb0a0314a69cc90a6915c656cf1ea031a67821bb8358) legion probe-image 'OK … daemon-api-version=38', rc 0. CI at efde11ad: Tests 40368294287 success.",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+      "negativeControl": "Scratch copy with legion-worker linking skill://ce-dogfood-missing: TestTheRealPluginsOnTheRealOhMyPi/both FAIL 'finds no skill ce-dogfood-missing (loaded by dist/skills/legion-worker/SKILL.md)'; with skill://ce-dogfood/references/missing.md: skills-guard.test.ts 1 fail '… names no file'."
+    },
+    {
+      "criterion": "A Legion phase worker on Claude Code can load every skill Legion's prompts name (the tester's red test 0459804d; the reviewer's finding 1)",
+      "surface": "real Claude Code 2.1.310 (npm @anthropic-ai/claude-code under $TMPDIR/claude-cc) loading the generated packages/claude-envoy/legion plugin",
+      "command": "claude -p --plugin-dir packages/claude-envoy/legion --output-format stream-json --allowedTools Skill --max-turns 4 'Use the Skill tool to load the skill legion:<name>. Then reply with only its first heading line, or the exact error the Skill tool returned.' for thermonuclear-deep-review, thermonuclear-code-quality, ce-dogfood; cd packages/claude-envoy && bun test tests/legion-plugin-fresh.test.ts && bun run typecheck",
+      "observed": "With hide: true in place of disable-model-invocation (efde11ad): each tool_result 'Launching skill: legion:<name>' (no error) for thermonuclear-deep-review, thermonuclear-code-quality and ce-dogfood, results '# Thermonuclear Deep Review', '# Thermonuclear Code Quality', '# Dogfood'; red test 0459804d 5 pass; claude-envoy typecheck clean",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+      "negativeControl": "a scratch copy of the plugin with disable-model-invocation: true put back on thermonuclear-deep-review: the Skill tool refuses it, 'cannot be used with Skill tool due to disable-model-invocation'"
+    },
+    {
+      "criterion": "Ce-dogfood and the thermonuclear pair stay hidden from Oh My Pi's skill listing (review round 2, finding 1)",
+      "surface": "the pinned Oh My Pi (/opt/omp/bin/omp) running its own loadSkills over the staged pi-legion partition",
+      "command": "LEGION_TEST_OMP=/opt/omp/bin/omp bun test packages/pi-legion/src/skills-guard.test.ts",
+      "observed": "13 pass 0 fail: each of ce-dogfood, thermonuclear-deep-review, thermonuclear-code-quality is found by Oh My Pi's loader with hide === true; the head's image carries hide: true in all three",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+      "negativeControl": "with hide: true removed from thermonuclear-code-quality: 'thermonuclear-code-quality is listed by Oh My Pi (hide: false)', 1 fail"
+    },
+    {
+      "criterion": "The real-Oh-My-Pi hide check, moved into the shared skills guard, behaves as before; the three Dispatch skills stay under INFRA-140's 2,000 words with the try-the-options step in dispatch-writing-specs",
+      "surface": "the pinned Oh My Pi (/opt/omp/bin/omp) loading the staged pi-legion partition through unhiddenSkills; the staged pi-envoy partition's word-total guard",
+      "command": "LEGION_TEST_OMP=/opt/omp/bin/omp bun test packages/pi-envoy/src/skills-guard.test.ts packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/scripts/prepack.test.ts packages/pi-shared/test/",
+      "observed": "40 pass 0 fail at 3264771a; the word-total guard passes unmodified (1,996 words); cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test ./internal/daemon -run 'TestTheRealPluginsOnTheRealOhMyPi|TestThePromptReferenceProbeOnTheRealOhMyPi' ok 85.002s; claude-envoy build --check clean",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "with hide: true removed from thermonuclear-deep-review (moved test, 9d01535e): 'thermonuclear-deep-review is listed by Oh My Pi (hide: false)', 1 fail; restored"
+    },
+    {
+      "criterion": "A2 The worker image builds; in a worker pod (gVisor, uid 1000) agent-browser --version prints the pin and agent-browser open https://example.com loads the page with its title read back",
+      "surface": "Worker Image run 40368294581 on the head, and a Job in namespace <namespace> (runtimeClassName gvisor, runAsUser 1000, compute class <compute class>) on its digest",
+      "command": "/legion/scratch/tmp/infra-248-job/run-job.sh ghcr.io/sjawhar/legion-worker@sha256:eee8fadfce84a7dc4a23bb0a0314a69cc90a6915c656cf1ea031a67821bb8358 branch-efde11adb5a8",
+      "observed": "pod runtimeClassName=gvisor imageID=…@sha256:eee8fadfce84a7dc4a23bb0a0314a69cc90a6915c656cf1ea031a67821bb8358; 1000; 4.19.0-gvisor; agent-browser 0.39.2; [agent-browser] launched browser / ✓ Example Domain; get title → Example Domain; ✓ Browser closed; skill hashes eb3c34e9…, 68d27719…, 563735f2… equal to the branch files; hide: true in the three skills; probe-image OK rc 0; Job deleted by its trap, sequence: exit 0.",
+      "headSha": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
+      "negativeControl": "Same Job on main's image sha256:60562f59… (sha-a9c9542fb738): 'sh: agent-browser: not found', ce-dogfood/SKILL.md and dogfood.md absent. The Dockerfile's download/check/install lines with a wrong AGENT_BROWSER_SHA256: 'FAILED … 1 computed checksum did NOT match', exit 1."
+    },
+    {
+      "criterion": "A3 A tester run on a slice with a browser page posts a ce-dogfood report on the slice's Dispatch issue and sends its findings back to the implementer",
+      "surface": "fixture slice INFRA-441 (Dispatch project page status strip, 3 planted defects) on a seeded local Dispatch stack with real Chromium via agent-browser; fresh tester agent on the branch's tester contract, fresh implementer agent",
+      "command": "dispatch read --issue INFRA-441 --artifact dogfood-report-md; git -C /legion/scratch/tmp/infra-248-dogfood/arm-step log --oneline; key/assert.sh http://127.0.0.1:18830",
+      "observed": "dispatch://INFRA-441/artifact/dogfood-report-md versions 1 and 2 posted by the with-step tester; round-1 test.json with 4 failures and red tests ebd74d8d8, dd175a94b, 58fd4e2d9, e01e03963; the implementer's fix bf9c43a68 makes them pass; sealed assertions at the cutoff: D1 PASS, D2 PASS, D3 PASS (fixture head: 3 FAIL).",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "The control tester on main's contract (arm-control) posted no Dispatch report (its only Dispatch call was dispatch read --issue INFRA-441)."
+    },
+    {
+      "criterion": "A4 The try-the-options step is tested against a run without it; result recorded on INFRA-245",
+      "surface": "six runs (INFRA-224 #numbers-per-row, INFRA-204 #bf4fb1f3, INFRA-258 #113f0f1a; control and with-step), stand-in ask_person tool answering from recorded answer sheets",
+      "command": "/legion/scratch/tmp/infra-248-options/{manifest.md, ask_person.jsonl, coordinator.jsonl, launches.json, <spec>/<arm>/decision-block.md}; dispatch comment --issue INFRA-245 (comment 0c252bba-d40e-4954-8f08-78f5c4c1bec7)",
+      "observed": "settled in one round (proxy): control 1/3, step 0/3 (all with-step blocks end 'the person picks', as the approved text says); recorded answer offered: control 2/3, step 3/3; overturn 3/3; with-step wall time 2-3x. Below the pre-declared rule; the architect decided to ship as written (Envoy 2026-10-26T01:58Z), recorded in the INFRA-245 comment with the costs.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "The control arms (main's dispatch-brainstorming, no coordinator tool, clean re-runs) built nothing."
+    },
+    {
+      "criterion": "A5 The tester's ce-dogfood step is tested the same way; defects fixed before the reviewer counted; result recorded on INFRA-245",
+      "surface": "two arms on the fixture slice, each its own clone, database and lane; cutoff at the end of tester round 2",
+      "command": "/legion/scratch/tmp/infra-248-dogfood/key/assert.sh on each lane at the cutoff (key/assert-control-cutoff.txt, key/assert-step-cutoff.txt); dispatch comment --issue INFRA-245 (comment cb088ae4-c77f-42c8-b406-763c9ce8449e)",
+      "observed": "control: found 3/3, sent back 3/3, fixed 3/3, 1 unplanted finding; with step: found 3/3, sent back 3/3, fixed 3/3, 3 unplanted findings. Rule (step fixes at least as many as control) met.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "Every sealed assertion fails on the fixture head 11e9e2d8 (key/assert-fixture.txt: D1 FAIL clipped, D2 FAIL Not Found, D3 FAIL no message)."
+    },
+    {
+      "criterion": "A6 The with-step runs asked the person their questions before building",
+      "surface": "ask_person JSONL and the with-step arms' transcripts (history://opt-INFRA-224-step, opt-INFRA-204-step, opt-INFRA-258-step)",
+      "command": "ordering of ask_person, coordinator and builder task calls in each transcript; ask_person.jsonl timestamps against step-judgment.md and check.md times",
+      "observed": "INFRA-224: 2 asks (00:11:40Z) → judgment 00:11:59Z → builders; INFRA-204: 4 asks (00:12:56Z) → judgment 00:13:41Z → builders; INFRA-258: 1 ask (00:16:27Z) → judgment 00:16:54Z → builders. 3 of 3 asked before building.",
+      "headSha": "a8a963219106c464ca64034e37578d224fbc5fb0",
+      "negativeControl": "A run that builds before asking would fail this measure; none did. The control arms' question counts (0, 1, 1) show the stand-in log records control runs too."
+    }
+  ],
+  "filesChanged": [
+    "skills/ce-dogfood/** (new, vendored from sjawhar/compound-engineering-plugin 8a776c13 with LICENSE and one Legion paragraph)",
+    "skills/legion-worker/references/dogfood.md (new), skills/legion-worker/SKILL.md",
+    "skills/dispatch-brainstorming/SKILL.md",
+    "packages/daemon/docker/worker.Dockerfile",
+    "packages/claude-envoy/legion/** (regenerated)",
+    "scripts/pi-plugin-prepack.sh, packages/pi-legion/scripts/prepack.test.ts, .github/workflows/release.yaml, .github/workflows/envoy-and-contracts.yaml",
+    "skills/AGENTS.md, packages/pi-legion/{AGENTS.md,README.md,CHANGELOG.md}, packages/pi-envoy/CHANGELOG.md, packages/claude-envoy/{README.md,CHANGELOG.md}, .dispatch/architecture/pi-legion.md, docs/kubernetes.md, docs/site/src/content/docs/legion/running-legion.md"
+  ],
+  "trickyParts": [
+    "The diff scope in dogfood.md uses jj's fork_point(<default>@origin | @-): a plain --from <default>@origin shows the default branch's later commits as deletions once it has moved.",
+    "agent-browser embeds axe-core (MPL-2.0); its two licence files are in the image notices. Its Rust lockfile is cli/Cargo.lock, so crates() takes an optional lockfile path.",
+    "Image proof namespace is the pod's workload namespace (compute class <compute class>); legion refuses Job creation from this pod.",
+    "The eval kernel's default completion model is refused by the gateway (context_management); the stand-in ran on the 'slow' model, the arms on the default agent model."
+  ],
+  "deviations": [
+    "Control arms of the try-the-options experiment were re-run: run 1 was given the coordinator tool by mistake (INFRA-258's run 1 called it and built; invalid). Kept on disk as control-run1-tool-visible / control-invalid-run1.",
+    "Dogfood tester round 2 ran as a fresh tester agent given its round-1 handoff (the round-1 agent's handle had expired), not the same session.",
+    "Leak check edits to four brief/answer-sheet passages before any arm ran (manifest.md).",
+    "The fixture child issue INFRA-441 is in triage, not backlog (architect's call: a status written on its own tree is set back by the daemon).",
+    "Simplify pass: 0 applied; the efficiency reviewer's split-RUN suggestion was skipped (file convention, build cost only)."
+  ],
+  "dogfoodExperiment": {
+    "fixtureHead": "11e9e2d84ce0af7651ee788c8e0333957e268c99",
+    "fixturePatch": "dispatch://INFRA-441/artifact/fixture-patch",
+    "key": "D1 StatusCounts.tsx:24 w-14 overflow-hidden clips 'In progress'/'Needs review'; D2 StatusCounts.tsx:63 Done links to /projects/<KEY>/issues/done (Not Found); D3 StatusCounts.tsx:39-41 returns null on an empty project so its message never shows. Assertions in /legion/scratch/tmp/infra-248-dogfood/key/assert.sh.",
+    "report": "dispatch://INFRA-441/artifact/dogfood-report-md"
+  },
+  "infra245Comments": [
+    "dispatch://INFRA-245/comment/0c252bba-d40e-4954-8f08-78f5c4c1bec7",
+    "dispatch://INFRA-245/comment/cb088ae4-c77f-42c8-b406-763c9ce8449e"
+  ],
+  "resultsArtifact": "dispatch://INFRA-248/artifact/experiment-results-md",
+  "openQuestions": [],
+  "round": 7,
+  "round2": {
+    "tester failure answered": "PR #2219 was CONFLICTING against main@origin 167e30b9 (INFRA-140's asd-ste100 in pi-envoy's partition). Forward merge 600bb549 (jj new legion/INFRA-248 main@origin), conflicts in .github/workflows/release.yaml, docs/kubernetes.md, packages/pi-legion/CHANGELOG.md and skills/AGENTS.md resolved keeping both sides; GitHub now MERGEABLE.",
+    "fingerprint": "b145300cb0d6d344a260836a410d8d97da7ca13f0491a247aaea54a1e70b510c -> 9ae5ce5ebdbddf768bfac7529bcf547d59c1df57faad073b32a52d4d077a9bd7, changed only in the two skills/AGENTS.md lines where the branch's edit now applies to main's new text (asd-ste100 beside ce-dogfood; Envoy five, Legion nine); posted https://github.com/sjawhar/legion/pull/2219#issuecomment-6406793017"
+  },
+  "round3": {
+    "tester failure answered": "PR #2219 conflicted again after main moved to 135d22e0 (#2216 rewrote two worker.Dockerfile comments). Forward merge bba53cf0 resolves both comments keeping both sides; GitHub MERGEABLE; no code line changed.",
+    "fingerprint": "9ae5ce5ebdbddf768bfac7529bcf547d59c1df57faad073b32a52d4d077a9bd7 -> 6107421c509bbcd39b0224a6edeb76e5aeb0550e681649589a7752a6856d992f, changed only in those two Dockerfile comments; posted https://github.com/sjawhar/legion/pull/2219#issuecomment-6407175150"
+  },
+  "round4": {
+    "review answered": "Review round 1 (changes_requested, 4 Important, 4 Minor) at 68231a48. Fixes: 7a171b69 (ce-dogfood without disable-model-invocation; dogfood.md scope from the PR base, intended contradictions to the architect, screenshot upload, absent agent-browser step; changelogs narrowed), 475e6472 (notices name agent-browser's embedded dashboard npm packages via pnpm-lock.yaml), 8951bec2 (pr-body.md's tester rule names the dogfood step after main slimmed SKILL.md). All 7 threads answered 'Fixed in <commit>' and resolved one by one; finding 8 fixed in the PR body (namespace and compute class elided).",
+    "merge": "GitHub reported CONFLICTING after 475e6472: forward merge 9124c280 of main c8974e2e, taking main's slimmed skills/legion-worker/SKILL.md plus this branch's References row; fingerprint 0d7ddffb… -> 208d7692…, changed only in that tester sentence; https://github.com/sjawhar/legion/pull/2219#issuecomment-6408319336",
+    "ci": "Tests 40269794430, PR Title 40269794345, Docs 40269794493, Worker Image 40269794333 success; Legion Envoy and Contracts 40269794534 green but envoy-smoke, which failed pulling mirror.gcr.io/library/nats:2.10 ('unknown blob' x3) before any test; its failed job re-run once."
+  },
+  "round5": {
+    "tester failure answered": "The tester's red test 0459804d (every skill of the Legion plugin loads through Claude Code's Skill tool) failed on thermonuclear-deep-review and thermonuclear-code-quality. 6335ac62 drops their disable-model-invocation (skills/AGENTS.md and both changelogs record it); the red test passes unmodified.",
+    "deviation": "a7f72b00 changes the tester's test by one type-only fallback (`?? \"\"` on line 82) because CI's claude-envoy typecheck failed on it (TS2345, run 40275058329); what the test reads and asserts is unchanged. The tester accepted it (Envoy 06:47Z).",
+    "merge": "GitHub reported CONFLICTING: forward merge 4209950d of main 0587774a (#2222 added gcc to the worker image; changelogs gained entries). Both sides kept; fingerprint 3f6145b7… -> 8e53a11e…, changed only in the Dockerfile header, the docs/kubernetes.md image check and running-legion.md's image paragraph; https://github.com/sjawhar/legion/pull/2219#issuecomment-6420083021",
+    "ci": "Tests 40350573001, PR Title 40350572892, Docs 40350572820, Worker Image 40350572969 success; Legion Envoy and Contracts 40350572891 queued."
+  },
+  "round6": {
+    "review answered": "Review round 2 (changes_requested, 1 Important, 4 Minor) at aa9695a3, narrowed by the architect to those five. efde11ad: hide: true in place of disable-model-invocation in ce-dogfood, thermonuclear-deep-review and thermonuclear-code-quality (skills/AGENTS.md and changelogs say hidden from Oh My Pi's listing, loadable through Claude Code's Skill tool) with a real-Oh-My-Pi test in packages/pi-legion/src/skills-guard.test.ts; dogfood.md states the contradiction rule once, drops ce-setup and the history phrase; the claude-envoy CHANGELOG files the frontmatter change under Changed and logs the try-the-options step; the PR body's Size and Change lines corrected. Threads PRRT_kwDORFy7ds6wIKRO, …wXqn2, …wXqn7, …wXqoC answered 'Fixed in efde11adb5a8' and resolved one by one.",
+    "relaunch": "The pod and its disk were replaced at the 18:12Z daemon upgrade; efde11ad was pushed before it. The image Job was re-run from a recreated script on the head's digest.",
+    "ci": "Tests 40368294287, PR Title 40368369534, Docs 40368294263, Worker Image 40368294581 success at efde11ad; Legion Envoy and Contracts 40368294303 queued."
+  },
+  "round7": {
+    "task": "Acceptance held back for the reviewer's Fast-follow: move the real-Oh-My-Pi hide probe into packages/pi-shared/test/skills-guard.ts beside bundledAgents, name it in packages/pi-legion/AGENTS.md, set the PR body's Fast-follow to none.",
+    "done": "9d01535e: unhiddenSkills(omp, skillsDir, names) in packages/pi-shared/test/skills-guard.ts, sharing the scratch-HOME runner withScratchOmpHome with bundledAgents; pi-legion's test calls it with its name, skip rule, list and timeout unchanged; packages/pi-legion/AGENTS.md names it in the skills-guard row and the LEGION_TEST_OMP checks line. PR body Fast-follow: none.",
+    "merge": "GitHub then reported CONFLICTING: main's #2136 (INFRA-140) deleted skills/dispatch-brainstorming for skills/dispatch-writing-specs and capped the three Dispatch skills at 2,000 words (INFRA-140 spec acceptance, guard in packages/pi-envoy/src/skills-guard.test.ts), and added leading-a-work-stream to pi-legion. Architect decision A (Envoy 19:21Z): forward merge 3264771a keeps both sides of the mechanical conflicts (ten Legion skills); the approved try-the-options step is ported into dispatch-writing-specs 'Questions' in STE (88 tokens) with every element kept; 91 words of repetition removed across dispatch, dispatch-first, dispatch-writing-specs (listed in the PR body; #2160's three lines untouched); total 1,996, guard unmodified. Fingerprint ad955b5f… -> 15175da8…, https://github.com/sjawhar/legion/pull/2219#issuecomment-6425730454",
+    "image": "Not re-run: the merge changes no image input from this branch (the architect's task says the image Job does not need to run again)."
+  }
+}

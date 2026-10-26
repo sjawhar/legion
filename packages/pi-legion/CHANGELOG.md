@@ -7,6 +7,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The plugin ships `ce-dogfood`, Legion's copy of the MIT-licensed Compound Engineering skill (from
+  `skills/ce-dogfood` at `8a776c13` of sjawhar/compound-engineering-plugin, `LICENSE` beside it).
+  The `legion-worker` skill's tester drives a slice's browser page with it, as its new
+  `references/dogfood.md` says: it reports what it finds to the implementer as `failures` with red
+  tests, commits only those tests and its handoff, sends a contradiction the branch intends to the
+  architect, and posts the report on the slice's Dispatch issue rather than committing it
+  (INFRA-248).
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
@@ -172,6 +179,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `thermonuclear-deep-review` and `thermonuclear-code-quality` skills carry `hide: true` in
+  place of upstream's `disable-model-invocation: true`, as `ce-dogfood` does: still hidden from Oh
+  My Pi's skill listing, and now loadable through Claude Code's Skill tool by a Legion worker on
+  Claude Code (INFRA-248).
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` for a spec's outline, its questions, its approval and
   the rules for text a person reads, and `legion-architect` drops its own copy of those rules. The

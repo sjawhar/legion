@@ -6,7 +6,16 @@
 // limit, no line-length cap), so the file's own byte count is the measure. Reads by filesystem path
 // stop at 300 lines, which is why every reference is linked as `skill://<name>/<path>`, and why each
 // such link must resolve (the daemon's boot gate checks only the name before the first `/`).
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { linkOmpNatives } from "./omp-natives";
@@ -220,31 +229,116 @@ export function agentDispatches(roots: readonly string[]): AgentDispatch[] {
     );
 }
 
+/** A fresh HOME for the Oh My Pi binary, and the means to run it there; see `withScratchOmpHome`. */
+interface ScratchOmpHome {
+  /** The scratch directory: it holds `home` and anything else the caller writes. */
+  dir: string;
+  /** The fresh HOME, `<dir>/home`, holding only the binary's natives. */
+  home: string;
+  /** Runs the binary with `args` from `cwd` under `home`, with `env` beside HOME and PATH. */
+  run(
+    args: string[],
+    options?: { cwd?: string; env?: Record<string, string> }
+  ): { exitCode: number; stderr: string };
+}
+
+/**
+ * Runs `body` with a scratch directory under the system temporary directory, named from `prefix`,
+ * whose `home` holds only the binary `omp`'s natives (hardlinks to the shared copy, omp-natives.ts).
+ * The binary's environment names no profile or config directory, so it reads and writes under that
+ * HOME where a person's does. The scratch directory is removed when `body` settles.
+ */
+async function withScratchOmpHome<T>(
+  omp: string,
+  prefix: string,
+  body: (scratch: ScratchOmpHome) => T | Promise<T>
+): Promise<T> {
+  const dir = mkdtempSync(path.join(os.tmpdir(), prefix));
+  try {
+    const home = path.join(dir, "home");
+    await linkOmpNatives(omp, home);
+    const run: ScratchOmpHome["run"] = (args, options = {}) => {
+      const ran = Bun.spawnSync([omp, ...args], {
+        cwd: options.cwd,
+        env: { HOME: home, PATH: "/usr/local/bin:/usr/bin:/bin", ...options.env },
+      });
+      return { exitCode: ran.exitCode, stderr: ran.stderr.toString() };
+    };
+    return await body({ dir, home, run });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /**
  * The task agents the Oh My Pi binary `omp` resolves with no plugin installed: the names of the
- * files `omp agents unpack` writes under a fresh HOME. That HOME is a temporary directory holding
- * only the binary's natives (hardlinks to the shared copy, omp-natives.ts), and the binary's
- * environment names no profile or config directory, so it writes where a person's does. The
- * directory is removed before returning.
+ * files `omp agents unpack` writes under a fresh HOME (`withScratchOmpHome`). The directory is
+ * removed before returning.
  */
 export async function bundledAgents(omp: string): Promise<string[]> {
-  const home = mkdtempSync(path.join(os.tmpdir(), "omp-bundled-agents-"));
-  try {
-    await linkOmpNatives(omp, home);
-    const unpacked = Bun.spawnSync([omp, "agents", "unpack"], {
-      env: { HOME: home, PATH: "/usr/local/bin:/usr/bin:/bin" },
-    });
+  return withScratchOmpHome(omp, "omp-bundled-agents-", ({ home, run }) => {
+    const unpacked = run(["agents", "unpack"]);
     if (unpacked.exitCode !== 0) {
-      throw new Error(
-        `${omp} agents unpack exited ${unpacked.exitCode}:\n${unpacked.stderr.toString()}`
-      );
+      throw new Error(`${omp} agents unpack exited ${unpacked.exitCode}:\n${unpacked.stderr}`);
     }
     return files(path.join(home, ".omp"))
       .filter((file) => file.endsWith(".md"))
       .map((file) => path.basename(file, ".md"));
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
+  });
+}
+
+// The extension `unhiddenSkills` hands `omp models`: it runs Oh My Pi's own `loadSkills` with the
+// directory LEGION_HIDE_PROBE_SKILLS names as its one custom directory, and writes each skill's
+// name and `hide` to stderr on one `LEGION_HIDE_PROBE=` line.
+const HIDE_PROBE = `export default async function probeSkillsHide() {
+  // The module exists only inside the Oh My Pi binary that loads this extension.
+  const { loadSkills } = await import("@oh-my-pi/pi-coding-agent/extensibility/skills");
+  const { skills } = await loadSkills({
+    cwd: process.cwd(),
+    customDirectories: [process.env.LEGION_HIDE_PROBE_SKILLS],
+  });
+  const answer = skills.map((skill) => ({ name: skill.name, hide: skill.hide }));
+  process.stderr.write("LEGION_HIDE_PROBE=" + JSON.stringify(answer) + "\\n");
+}
+`;
+
+/**
+ * The skills of `names` that Oh My Pi's skill loader does not find in `skillsDir`, or finds but
+ * lists, each as one sentence naming the skill. Oh My Pi hides a skill from its listing on
+ * `hide: true` (or `disable-model-invocation: true`), and `skill://` still resolves a hidden skill
+ * by name, so each must be found. The loader is Oh My Pi's own, `loadSkills` run inside the binary
+ * `omp` as the daemon's load probe runs it (packages/daemon/internal/daemon/probe.mjs): an
+ * extension handed to `omp models`, under a fresh HOME holding only the binary's natives
+ * (`withScratchOmpHome`), from an empty working directory, with `skillsDir` as its one custom
+ * directory.
+ */
+export async function unhiddenSkills(
+  omp: string,
+  skillsDir: string,
+  names: readonly string[]
+): Promise<string[]> {
+  return withScratchOmpHome(omp, "omp-skills-hide-", ({ dir, run }) => {
+    const cwd = path.join(dir, "cwd");
+    mkdirSync(cwd);
+    const probe = path.join(dir, "probe.mjs");
+    writeFileSync(probe, HIDE_PROBE);
+    const { exitCode, stderr } = run(["models", "--extension", probe, "--json"], {
+      cwd,
+      env: { LEGION_HIDE_PROBE_SKILLS: skillsDir },
+    });
+    const line = stderr.split("\n").find((entry) => entry.startsWith("LEGION_HIDE_PROBE="));
+    if (exitCode !== 0 || line === undefined) {
+      throw new Error(`${omp} models with the probe exited ${exitCode}:\n${stderr}`);
+    }
+    const loaded: { name: string; hide: boolean }[] = JSON.parse(
+      line.slice("LEGION_HIDE_PROBE=".length)
+    );
+    return names.flatMap((name) => {
+      const skill = loaded.find((entry) => entry.name === name);
+      if (skill === undefined) return [`${name} is not found by Oh My Pi's skill loader`];
+      return skill.hide === true ? [] : [`${name} is listed by Oh My Pi (hide: ${skill.hide})`];
+    });
+  });
 }
 
 /** The task agents the plugin at `packageRoot` ships: the `*.md` under its `agents/`, if any. */

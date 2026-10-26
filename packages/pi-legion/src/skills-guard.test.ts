@@ -11,6 +11,7 @@ import {
   REPO_ROOT,
   skillLinks,
   stageSkills,
+  unhiddenSkills,
 } from "@legion/pi-shared/test/skills-guard";
 
 // The rules (`@legion/pi-shared/test/skills-guard`) over the skills this package stages into
@@ -22,6 +23,11 @@ import {
 // partition is valid because the Envoy plugin, installed beside this one, ships it.
 const repoSkillsRoot = path.join(REPO_ROOT, "skills");
 const promptsRoot = path.join(REPO_ROOT, "packages/daemon/internal/prompts");
+// LEGION_TEST_OMP names the pinned Oh My Pi binary, as in extensions/legion-phase-stall-omp.test.ts:
+// the fork pin CI's pi-legion job installs (.github/actions/install-omp). A run without one skips the
+// rule that reads it, except on GitHub Actions.
+const omp = process.env.LEGION_TEST_OMP;
+const onActions = process.env.GITHUB_ACTIONS === "true";
 let staged: string;
 
 beforeAll(() => {
@@ -60,6 +66,23 @@ test("every skill://<name>/<path> link names a file that exists, and its #anchor
 test("every relative link resolves to a file inside the staged partition", () => {
   expect(brokenRelativeLinks(staged)).toEqual([]);
 });
+
+// The three skills upstream marks `disable-model-invocation: true` carry `hide: true` in its place:
+// Claude Code's Skill tool refuses only `disable-model-invocation`, so the Claude Code plugin's
+// copies load, and Oh My Pi hides a skill from its listing on either key. The loader is Oh My Pi's
+// own, run inside the pinned binary by `unhiddenSkills` (`@legion/pi-shared/test/skills-guard`)
+// with the staged partition as its one custom directory. Each skill must still be found, since
+// `skill://` resolves a hidden skill by name.
+const HIDDEN_SKILLS = ["ce-dogfood", "thermonuclear-deep-review", "thermonuclear-code-quality"];
+
+test.skipIf(omp === undefined && !onActions)(
+  "Oh My Pi's skill loader finds ce-dogfood and the thermonuclear pair, each hidden",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    expect(await unhiddenSkills(omp, staged, HIDDEN_SKILLS)).toEqual([]);
+  },
+  120_000
+);
 
 // Reads by filesystem path stop at 300 lines, so a worker reaches a reference only through a
 // `skill://legion-worker/<path>` link from somewhere it reads.

@@ -4,6 +4,11 @@
 
 ### Added
 
+- The `dispatch-writing-specs` skill this plugin ships asks, once the clarifying questions are
+  answered and the options are known, whether trying them is quicker than choosing between them;
+  where it is, fresh agents build each from the brief alone, each runs through the same check, and
+  the ask block shows what was built and how each did, side by side. The words it adds come from
+  repetition cut elsewhere in the three Dispatch skills, which stay under 2,000 words (INFRA-248).
 - `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
 
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live

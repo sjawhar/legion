@@ -1,7 +1,7 @@
 ---
 name: thermonuclear-deep-review
 description: Use when asked for a thermonuclear or deep review, or for a security and correctness audit of a branch or PR diff. Covers bugs, breaking changes, security issues, developer-experience regressions and feature-gate leaks.
-disable-model-invocation: true
+hide: true
 ---
 
 # Thermonuclear Deep Review

@@ -4,6 +4,15 @@
 
 ### Added
 
+- The generated `legion/` plugin carries the new `ce-dogfood` skill and `legion-worker`'s
+  `references/dogfood.md`. A tester on Claude Code runs under `runtime: tmux`, where nothing
+  installs `agent-browser`, so the reference tells it to report the missing browser to its
+  architect (see `packages/pi-legion/CHANGELOG.md`, INFRA-248).
+- The `dispatch-writing-specs` skill this plugin ships (through its `skills/dispatch-writing-specs`
+  symlink) asks, once the clarifying questions are answered and the options are known, whether
+  trying them is quicker than choosing between them; where it is, fresh agents build each from the
+  brief alone, each runs through the same check, and the ask block shows what was built and how
+  each did, side by side (INFRA-248).
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
@@ -26,6 +35,10 @@
 
 ### Changed
 
+- The generated `legion/` plugin's three skills that upstream marks `disable-model-invocation`
+  (`ce-dogfood`, `thermonuclear-deep-review` and `thermonuclear-code-quality`) carry `hide: true`
+  in its place, so each loads through Claude Code's Skill tool and stays hidden from Oh My Pi's
+  skill listing (see `packages/pi-legion/CHANGELOG.md`, INFRA-248).
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and

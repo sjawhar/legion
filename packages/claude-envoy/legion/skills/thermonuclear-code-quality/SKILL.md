@@ -1,7 +1,7 @@
 ---
 name: thermonuclear-code-quality
 description: Use when asked for a thermonuclear code-quality review or a deep maintainability audit of a branch or PR diff. Also use when asked to review abstraction quality, oversized files or ad-hoc branching growth.
-disable-model-invocation: true
+hide: true
 ---
 
 # Thermonuclear Code Quality

@@ -33,6 +33,7 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 | When | Read |
 | --- | --- |
 | You write or edit the PR body, record or verify a proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
+| You test a slice with a browser page | `skill://legion-worker/references/dogfood.md` |
 | Before a push, to check your commits' App identity | `skill://legion-worker/references/default-branch-check.md` |
 | You reply on, list or resolve review threads, or judge a bot's finding | `skill://legion-worker/references/review-threads.md` |
 | A conflict, a retarget, comparing heads after a conflict merge, or rewriting a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |

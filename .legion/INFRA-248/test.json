@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-248",
+  "completed": "2026-10-26T19:52:13Z",
+  "round": 7,
+  "testedHead": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+  "prHead": "9456058ea78722e7212c464b99ae98274d4ea407",
+  "scope": "Set by the architect (Envoy 2026-10-26T19:49Z): the delta since efde11ad only — the Fast-follow 9d01535e, decision A (the try-the-options step moved into dispatch-writing-specs after #2136), the 91 cut words, stale dispatch-brainstorming references and the claude-envoy mirror, required CI. No image Job unless the image's skill files differ.",
+  "mergeable": "gh pr view 2219: MERGEABLE at 9456058e",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the moved test with LEGION_TEST_OMP=/opt/omp/bin/omp and added a negative control; checked each of the PR body's 13 'Still stated in' rows against the head's text; counted the Dispatch skills' words at the head and at main d1f4b8a6; checked the moved step against spec v4 change 1 element by element; ran claude-envoy's build --check."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "Fast-follow: the real-Oh-My-Pi hide check lives in packages/pi-shared/test/skills-guard.ts (unhiddenSkills) and packages/pi-legion/AGENTS.md names it",
+      "surface": "the pinned Oh My Pi binary (/opt/omp/bin/omp) loading pi-legion's staged partition through its own loadSkills, from the shared guard",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test src/skills-guard.test.ts",
+      "observed": "14 pass, 0 fail; the 'each hidden' test is one call to unhiddenSkills(omp, staged, HIDDEN_SKILLS); AGENTS.md's guard row names unhiddenSkills and its Checks line adds src/skills-guard.test.ts to the LEGION_TEST_OMP run",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "with 'hide: true' removed from skills/thermonuclear-code-quality/SKILL.md (restored with jj restore afterwards) -> the test fails: Received [\"thermonuclear-code-quality is listed by Oh My Pi (hide: false)\"], expected []"
+    },
+    {
+      "criterion": "Decision A: the approved try-the-options step, now in skills/dispatch-writing-specs, keeps every element of spec v4 change 1 and names no person",
+      "surface": "skills/dispatch-writing-specs/SKILL.md:47 (Questions) at the head, against dispatch://INFRA-248/artifact/spec v4",
+      "command": "element-by-element read of the bullet; grep -rnE 'Sami|Jawhar|sami@' skills/ packages/claude-envoy/legion/ packages/daemon/internal/prompts/",
+      "observed": "present: once clarifying questions are answered and options known, ask whether trying is quicker than choosing (each builds in hours; how it works decides, not how it reads); fresh agents build each from the brief alone (ce-bakeoff without its judge, ce-prototype for a page or flow, else a task agent); each through the same check; builds and results side by side in the ask block (dispatch's name for the decision block, dispatch/SKILL.md:17); recommend one only if the check settles it, else the person picks. Name grep rc 1.",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "the spec's own text names a person ('Show Sami', 'he picks'); the shipped bullet contains neither"
+    },
+    {
+      "criterion": "The 91 cut words remove repetition only, and pi-envoy's 'fewer than 2,000 words' guard passes unmodified",
+      "surface": "the three Dispatch skills at the head and at main d1f4b8a6; packages/pi-envoy/src/skills-guard.test.ts (no diff against main)",
+      "command": "grep -nF of each 'Still stated in' sentence in skills/dispatch, dispatch-first and dispatch-writing-specs; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f -exec cat {} + | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts -t '2,000'",
+      "observed": "all 13 rows found word for word (dispatch-first description and heading; writing-specs description 'It replaces superpowers' brainstorming there.' and 'The plan'; dispatch-first:37 'A Legion phase worker sends decisions to its architect instead.'; dispatch:28, :58, :80, :17 'at the end of its section', :52 resolve-ask; dispatch-first:35 chat rule; writing-specs:33 and :34). Words: 1,996 at the head, 1,999 at main. Guard: 1 pass.",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "four words appended to skills/dispatch-first/SKILL.md (restored afterwards) -> 'Expected: < 2000, Received: 2000', 1 fail"
+    },
+    {
+      "criterion": "No reference to dispatch-brainstorming this PR added is left; the claude-envoy mirror equals the source",
+      "surface": "the PR's diff against its fork point; packages/claude-envoy",
+      "command": "jj diff --from fork_point(main@origin | 3264771a) --to 3264771a | grep '^+.*dispatch-brainstorming'; jj file annotate of the remaining CHANGELOG mentions; cd packages/claude-envoy && bun scripts/build.ts --check && bun test tests/legion-plugin-fresh.test.ts; readlink -f of skills/<five Dispatch skills>",
+      "observed": "added lines naming dispatch-brainstorming exist only in .legion/INFRA-248 handoffs (removed at retro); the tree's other mentions are main's own CHANGELOG entries; 'dist/ and legion/ match a fresh build'; 5 pass; all five symlinks resolve to skills/",
+      "headSha": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+      "negativeControl": "the legion-plugin-fresh test that compares legion/ with a fresh build failed at 0459804d on a real difference (round 4)"
+    }
+  ],
+  "ci": "3264771a1719: Tests 40389772616, Legion Envoy and Contracts 40389772658, Docs 40389772715, Worker Image 40389772633, PR Title 40389992325 all queued (read as queued, not waited for; a required red that settles sends the issue back)",
+  "image": "No image Job, as the architect set: the branch's own worker.Dockerfile lines equal round 6's (equal context-0 diff against each fork point); the Dockerfile's other changes since efde11ad are main's; the merge head's Worker Image build is queued, so its skill files could not be compared with the branch.",
+  "notes": [
+    "/opt/omp/bin/omp in this pod is 18.12.2 built before main's new pin (#2260, 18.12.2-sami.20261026-135627); CI installs the new pin for the same test."
+  ]
+}

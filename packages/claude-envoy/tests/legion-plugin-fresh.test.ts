@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
+import { readdir, readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { claudeAgent, legionPluginDifferences } from "../scripts/build"
 
@@ -69,4 +69,19 @@ test("an agent naming a tool with no Claude Code mapping, or keeping none, is re
     "b.md keeps no tool Claude Code has",
   )
   expect(() => claudeAgent("c.md", "no frontmatter\n")).toThrow("c.md has no frontmatter")
+})
+
+// A phase worker on Claude Code loads a skill a Legion prompt names (`skill://<name>`) with the
+// Skill tool, and Claude Code's Skill tool refuses a skill whose frontmatter sets
+// `disable-model-invocation: true` ("cannot be used with Skill tool due to
+// disable-model-invocation"): such a skill is one no Claude Code worker can read.
+test("every skill of the Legion plugin loads through Claude Code's Skill tool", async () => {
+  const skills = join(packageRoot, "legion", "skills")
+  const hidden: string[] = []
+  for (const name of (await readdir(skills)).sort()) {
+    const frontmatter =
+      (await readFile(join(skills, name, "SKILL.md"), "utf8")).split("\n---")[0] ?? ""
+    if (/^disable-model-invocation:\s*true\s*$/m.test(frontmatter)) hidden.push(name)
+  }
+  expect(hidden).toEqual([])
 })

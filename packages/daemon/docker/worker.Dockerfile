@@ -26,7 +26,8 @@
 # typescript-language-server with TypeScript's tsc and tsserver, pyright with its pyright-langserver,
 # and trixie's python3, curl, wget, jq, openssh-client (ssh-keygen), util-linux (flock),
 # postgresql-client (psql), redis-tools (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils
-# (dig) and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
+# (dig) and chromium (the browser Oh My Pi finds on PATH); agent-browser, the browser driver
+# ce-dogfood (the tester's skill) runs, which launches that chromium; and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and
 # corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
 # each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party piece of
@@ -72,8 +73,8 @@ ARG GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 # gopls, which the go stage builds static from golang.org/x/tools/gopls at this tag (gopls/v<version>).
 ARG GOPLS_VERSION=0.23.0
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
-# stage fetches for it (an archive, or kubectl's single binary), which the build checks before unpacking
-# or installing anything.
+# stage fetches for it (an archive, or kubectl's or agent-browser's single binary), which the build
+# checks before unpacking or installing anything.
 ARG UV_VERSION=0.12.21
 ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
 # Node 24 LTS.
@@ -95,6 +96,15 @@ ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6f
 # bump repeats both checks.
 ARG KUBECTL_VERSION=1.35.9
 ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
+# agent-browser (github.com/vercel-labs/agent-browser): the browser driver ce-dogfood, the tester's
+# skill, runs; it launches the image's chromium. The pin is the release's own linux-x64 binary, not
+# the npm package: the image needs that one binary (18 MB, against the npm package's 120 MB of every
+# platform's binary), and the npm wrapper chmods its binary at run time, which fails as uid 1000 on a
+# root-owned /opt. AGENT_BROWSER_SHA256 is GitHub's digest of the release's agent-browser-linux-x64
+# asset; a version bump reads it from the release again and checks it with `sha256sum` on the
+# download.
+ARG AGENT_BROWSER_VERSION=0.39.2
+ARG AGENT_BROWSER_SHA256=0f68e74e792bf7d0814c58ee4b86dbcacfd3997c27805cd12c2d15e0ca38638e
 # The language servers Oh My Pi's LSP tools start for TypeScript and Python install from the
 # committed lockfile at packages/daemon/docker/language-servers (COPY'd into the toolchain stage),
 # with scripts off (`npm ci --ignore-scripts`): a reproducible install off that lockfile, no ARG
@@ -261,14 +271,15 @@ RUN test -n "$LEGION_REVISION" \
 # ------------------------------------------------------------------------------------------------
 # toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
 # installs each project's own Python from its `.python-version` or `requires-python`; the image's own
-# python3 is trixie's, installed by the runtime-base stage for Oh My Pi's Python eval), Node with npm and
-# corepack, the AWS CLI v2, kubectl, the Go toolchain at go.work's version (the release the go stage
-# builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and Python language
-# servers Oh My Pi's LSP tools start. All five downloads are checked against their pinned SHA-256
-# before any is unpacked or installed. uv, uvx and kubectl are single binaries, copied to /usr/local/bin
-# as gh and jj are; Node, Go and the AWS CLI keep their own trees under /opt, and /out/bin holds the
-# symlinks into them that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir`
-# writes its two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
+# python3 is trixie's, installed by the runtime-base stage for Oh My Pi's Python eval), Node with npm
+# and corepack, the AWS CLI v2, kubectl, agent-browser (which drives the runtime-base stage's
+# chromium), the Go toolchain at go.work's version (the release the go stage builds `legion` with, so a
+# worker builds the daemon as CI does), and the TypeScript and Python language servers Oh My Pi's LSP
+# tools start. All six downloads are checked against their pinned SHA-256 before any is unpacked or
+# installed. uv, uvx, kubectl and agent-browser are single binaries, copied to /usr/local/bin as gh and
+# jj are; Node, Go and the AWS CLI keep their own trees under /opt, and /out/bin holds the symlinks into
+# them that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir` writes its
+# two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
 # beside node, which the runtime user cannot: each runs the version a project's `packageManager`
 # names, or else the default this corepack ships (COREPACK_DEFAULT_TO_LATEST=0, the runtime stage's
 # ENV), fetched on first use into the user's own corepack cache. The language servers install from
@@ -302,6 +313,8 @@ ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
 ARG GO_VERSION
 ARG GO_SHA256
+ARG AGENT_BROWSER_VERSION
+ARG AGENT_BROWSER_SHA256
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -314,13 +327,16 @@ RUN set -eu; \
     curl -fsSLo "$t/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip"; \
     curl -fsSLo "$t/go.tar.gz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
     curl -fsSLo "$t/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
+    curl -fsSLo "$t/agent-browser" \
+      "https://github.com/vercel-labs/agent-browser/releases/download/v${AGENT_BROWSER_VERSION}/agent-browser-linux-x64"; \
     printf '%s  %s\n' "$UV_SHA256" "$t/uv.tar.gz" "$NODE_SHA256" "$t/node.tar.xz" \
       "$AWS_CLI_SHA256" "$t/awscli.zip" "$GO_SHA256" "$t/go.tar.gz" \
-      "$KUBECTL_SHA256" "$t/kubectl" > "$t/SHA256SUMS"; \
+      "$KUBECTL_SHA256" "$t/kubectl" "$AGENT_BROWSER_SHA256" "$t/agent-browser" > "$t/SHA256SUMS"; \
     sha256sum --check --strict "$t/SHA256SUMS"; \
     tar -xzf "$t/uv.tar.gz" -C /out/bin --strip-components=1 --no-same-owner \
       uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
     install -m 0755 "$t/kubectl" /out/bin/kubectl; \
+    install -m 0755 "$t/agent-browser" /out/bin/agent-browser; \
     tar -xJf "$t/node.tar.xz" -C /opt/node --strip-components=1 --no-same-owner; \
     for tool in node npm npx corepack; do ln -s "/opt/node/bin/$tool" "/out/bin/$tool"; done; \
     for shim in pnpm pnpx yarn yarnpkg; do \
@@ -455,19 +471,23 @@ RUN dpkg-query -W -f '${db:Status-Status} ${Package}\n' > /tmp/dpkg-packages \
 # files beside them. What this checkout builds carries notices generated from what the build included
 # (the go stage's, the packed plugin's); a prebuilt tool carries the license files its distribution
 # ships (Node's LICENSE, the AWS CLI's THIRD_PARTY_LICENSES) and those its source repository holds at
-# the pinned release, fetched here. jj and uv link Rust crates whose license texts neither release
-# ships, so their sections name the Cargo.lock that lists those crates; gopls, which the go stage
-# compiles, links Go modules the same way, and its section names the go.mod that lists them rather
-# than a go-licenses report like `legion`'s, because go-licenses (go-third-party-notices.sh's
-# v2.0.1, under Go 1.27.1) finds no license for one of them, github.com/segmentio/asm, and would fail
-# the build. kubectl's section names the go.mod of the Kubernetes release its binary is built from,
-# the same way. The k8s.io modules that go.mod replaces with ./staging/src, kubectl itself among them,
-# are that release's own source, each with its license file under staging/src/k8s.io at the release's
-# tag; the repository keeps the license text of every other module it links under LICENSES/vendor
-# there. The language servers' own LICENSE files come from their installed trees in the toolchain
-# stage; TypeScript's ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with
-# them. A missing or empty file fails the build. The fetches depend only on the pins, so they come
-# first, in a layer a source change reuses; the assembly reads the other stages' outputs after them.
+# the pinned release, fetched here. jj, uv and agent-browser link Rust crates whose license texts
+# none of their releases ships, so their sections name the Cargo.lock that lists those crates
+# (agent-browser's is cli/Cargo.lock); agent-browser also embeds axe-core, whose two license files
+# its repository keeps beside the copy it embeds, fetched here too, and a static build of its
+# dashboard web app, whose section names the pnpm-lock.yaml that lists the app's npm packages.
+# gopls, which the go stage compiles, links Go modules the same way, and its section names the
+# go.mod that lists them rather than a go-licenses report like `legion`'s, because go-licenses
+# (go-third-party-notices.sh's v2.0.1, under Go 1.27.1) finds no license for one of them,
+# github.com/segmentio/asm, and would fail the build. kubectl's section names the go.mod of the
+# Kubernetes release its binary is built from, the same way. The k8s.io modules that go.mod
+# replaces with ./staging/src, kubectl itself among them, are that release's own source, each with
+# its license file under staging/src/k8s.io at the release's tag; the repository keeps the license
+# text of every other module it links under LICENSES/vendor there. The language servers' own
+# LICENSE files come from their installed trees in the toolchain stage; TypeScript's
+# ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with them. A missing or
+# empty file fails the build. The fetches depend only on the pins, so they come first, in a layer
+# a source change reuses; the assembly reads the other stages' outputs after them.
 FROM tools AS notices
 ARG BUN_VERSION
 ARG JJ_TOOL
@@ -478,9 +498,10 @@ ARG KUBECTL_VERSION
 ARG CODEGRAPH_VERSION
 ARG GO_VERSION
 ARG GOPLS_VERSION
+ARG AGENT_BROWSER_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
 COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
-# The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
+# The twenty-two reads below (sixteen LICENSE/NOTICE fetches, six HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
 # rarely), and running unauthenticated GitHub raw-content requests in parallel risks tripping its
@@ -512,12 +533,19 @@ RUN set -eu; \
     fetch nodejs/node "$codegraph_node_tag" LICENSE codegraph-node-LICENSE; \
     fetch golang/go "go${GO_VERSION}" LICENSE go-LICENSE; \
     fetch golang/tools "gopls/v${GOPLS_VERSION}" LICENSE gopls-LICENSE; \
+    fetch vercel-labs/agent-browser "v${AGENT_BROWSER_VERSION}" LICENSE agent-browser-LICENSE; \
+    fetch vercel-labs/agent-browser "v${AGENT_BROWSER_VERSION}" cli/src/native/a11y/LICENSE-axe-core.txt agent-browser-LICENSE-axe-core.txt; \
+    fetch vercel-labs/agent-browser "v${AGENT_BROWSER_VERSION}" cli/src/native/a11y/LICENSE-axe-core-THIRD-PARTY.txt agent-browser-LICENSE-axe-core-THIRD-PARTY.txt; \
     crates() { \
-      curl -fsSIo /dev/null "$(gh_raw_url "$1" "$2" Cargo.lock)"; \
-      printf '%s links Rust crates whose license texts its release does not ship. They are the packages listed in\nhttps://github.com/%s/blob/%s/Cargo.lock, the lockfile of the release this image installs; the\nlicense of each is published with it on crates.io.\n' "$3" "$1" "$2" > "/in/$4"; \
+      lock="${5:-Cargo.lock}"; \
+      curl -fsSIo /dev/null "$(gh_raw_url "$1" "$2" "$lock")"; \
+      printf '%s links Rust crates whose license texts its release does not ship. They are the packages listed in\nhttps://github.com/%s/blob/%s/%s, the lockfile of the release this image installs; the\nlicense of each is published with it on crates.io.\n' "$3" "$1" "$2" "$lock" > "/in/$4"; \
     }; \
     crates "$jj_repo" "$jj_tag" jj jj-crates; \
     crates astral-sh/uv "$UV_VERSION" uv uv-crates; \
+    crates vercel-labs/agent-browser "v${AGENT_BROWSER_VERSION}" agent-browser agent-browser-crates cli/Cargo.lock; \
+    curl -fsSIo /dev/null "$(gh_raw_url vercel-labs/agent-browser "v${AGENT_BROWSER_VERSION}" pnpm-lock.yaml)"; \
+    printf 'agent-browser embeds a static build of its packages/dashboard web app. The npm packages it is built from are the\ndependencies listed under the packages/dashboard importer of\nhttps://github.com/vercel-labs/agent-browser/blob/v%s/pnpm-lock.yaml, the lockfile of the release this image\ninstalls, and the packages that lockfile resolves them to; the license of each is published with it on npmjs.com.\n' "$AGENT_BROWSER_VERSION" > /in/agent-browser-dashboard-npm; \
     curl -fsSIo /dev/null "$(gh_raw_url golang/tools "gopls/v${GOPLS_VERSION}" gopls/go.mod)"; \
     printf 'gopls links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/golang/tools/blob/gopls/v%s/gopls/go.mod, the module file of the release this image builds; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$GOPLS_VERSION" > /in/gopls-modules; \
     curl -fsSIo /dev/null "$(gh_raw_url kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod)"; \
@@ -556,6 +584,11 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "AWS CLI v2: the THIRD_PARTY_LICENSES its installer archive ships" /in/aws-cli-THIRD_PARTY_LICENSES \
       "kubectl v${KUBECTL_VERSION}, /usr/local/bin/kubectl: LICENSE of github.com/kubernetes/kubernetes at v${KUBECTL_VERSION}" /in/kubectl-LICENSE \
       "kubectl: the Go modules it links" /in/kubectl-modules \
+      "agent-browser v${AGENT_BROWSER_VERSION}, /usr/local/bin/agent-browser: LICENSE of github.com/vercel-labs/agent-browser at v${AGENT_BROWSER_VERSION}" /in/agent-browser-LICENSE \
+      "agent-browser: the Rust crates it links" /in/agent-browser-crates \
+      "agent-browser: the axe-core it embeds, LICENSE-axe-core.txt of github.com/vercel-labs/agent-browser at v${AGENT_BROWSER_VERSION} (cli/src/native/a11y)" /in/agent-browser-LICENSE-axe-core.txt \
+      "agent-browser: axe-core's LICENSE-axe-core-THIRD-PARTY.txt of github.com/vercel-labs/agent-browser at v${AGENT_BROWSER_VERSION} (cli/src/native/a11y)" /in/agent-browser-LICENSE-axe-core-THIRD-PARTY.txt \
+      "agent-browser: the npm packages of the dashboard it embeds" /in/agent-browser-dashboard-npm \
       "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE \
       "Go ${GO_VERSION}, /opt/go (go and gofmt at /usr/local/bin): LICENSE of github.com/golang/go at go${GO_VERSION}" /in/go-LICENSE \
       "gopls v${GOPLS_VERSION}, /usr/local/bin/gopls: LICENSE of github.com/golang/tools at gopls/v${GOPLS_VERSION}" /in/gopls-LICENSE \
@@ -714,7 +747,7 @@ RUN set -eu; \
     test "$(env -u CGO_ENABLED go env CGO_ENABLED)" = 0; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
-    python3 --version; curl --version; wget --version; jq --version; chromium --version; \
+    python3 --version; curl --version; wget --version; jq --version; chromium --version; agent-browser --version; \
     socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
     ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
     flock --version; \
