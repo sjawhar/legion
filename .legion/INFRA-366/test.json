@@ -2,53 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T01:30:23Z",
-  "headSha": "ff8cd6cd9115856e4094a4f18c308a9cbd0c6e12",
-  "round": 2,
+  "completed": "2026-10-26T03:41:20Z",
+  "headSha": "c914a72349e08dba8cbe9ac2b4852e6ea68c831d",
+  "round": 3,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2: drove the implementer's new proof independently against my own build of the head (run-server.sh at ff8cd6cd, code of 73e2394d, on my database infra366_tester): ?to= and ?from= of the overflow pins answer 404 'no version N of <doc ref>', dispatch read --ref of @v2147483648 exits 1 with that message, and block-graph.sh passes (37 PASS). Round 1 (acdf007b) verified the earlier entries: the driver, the browser suite red at main 81a3b5ef and green at the head, and A12 on binaries I built from git archives."
+    "how": "Drove the round-3 proof independently against my own build of the head (run-server.sh at c914a723, database infra366_t3): a spec, an insert and an upload naming a 3200-character block id are refused naming the 256-byte bound; a 256-byte id is a node and 257 bytes is 400 INVALID_REFERENCE; a comment citing the 3200-byte id posts. Re-ran block-graph.sh (37 PASS) and e2e/block-references.e2e.ts (4 passed on chromium, the new two-blocks row among them), and A12 on my builds of 81a3b5ef, c914a723 and 371d6c87 (all PASS)."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Pin reading (plan design 1, 'Reading a pin'; A15, R1): a pin to a version the document lacks, including one past the largest version number Postgres stores, answers 404 NOT_FOUND 'no version N of <doc ref>' (round 1's failure)",
-      "surface": "Local Dispatch harness: the real Go server built by packages/dispatch/e2e/run-server.sh at ff8cd6cd on port 8801, Postgres 17 + pgvector, and the real dispatch CLI",
-      "command": "curl -H 'Authorization: Bearer e2e-token' 'http://127.0.0.1:8801/api/v1/references?{to,from}=<uri-encoded dispatch://CORE-2/spec#b-ship%5Fit@v{2147483646,2147483647,2147483648,4294967296,9223372036854775807,9223372036854775808,1,3}>'; bun packages/envoy-client/bin/dispatch.ts read --ref 'dispatch://CORE-2/spec#b-ship%5Fit@v2147483648'",
-      "observed": "@v2147483646 through @v9223372036854775807: 404 NOT_FOUND 'no version N of dispatch://CORE-2/spec' on ?to= and ?from=; @v9223372036854775808: 400 INVALID_REFERENCE; @v1: 200 pin.state unchanged; @v3: 200 changed; dispatch read --ref …@v2147483648 exits 1 printing 'no version 2147483648 of dispatch://CORE-2/spec'; a comment holding the overflow pin writes one edge to the block; TestAPinPastEveryVersionNumberAnswers404 passes unmodified; no ERROR in the server log",
-      "headSha": "ff8cd6cd9115856e4094a4f18c308a9cbd0c6e12",
-      "negativeControl": "Round 1, the server built at acdf007b: the same ?to=…@v2147483648 answered 500 INTERNAL, log 'unable to encode 2147483648 into binary format for int4'. At this head, unauthenticated GET /api/v1/references?to=<block>@v2147483648 and GET /api/v1/block-links → 401 NO_IDENTITY; Authorization: Bearer nope → 401 UNAUTHORIZED"
-    },
-    {
-      "criterion": "A1, A2 (with the pinned clause), A4, A5, R6, R7, A10 and A15 (document halves) and the older document references route",
-      "surface": "Local Dispatch harness: the real Go server at ff8cd6cd on port 8801 and the real dispatch CLI",
-      "command": "DISPATCH_URL=http://127.0.0.1:8801 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh",
-      "observed": "exit 0, 37 PASS lines, 'PASS: setup created CORE-6 in CORE' to 'PASS: close CORE-6 is done' (round 1 at acdf007b: 37 PASS too)",
-      "headSha": "ff8cd6cd9115856e4094a4f18c308a9cbd0c6e12",
-      "negativeControl": "Unauthenticated GET /api/v1/block-links?from=<spec>&to=<spec> → 401 NO_IDENTITY"
-    },
-    {
-      "criterion": "The Referenced by panel keeps its shape, two citing blocks show two rows, a block of another document shows as that document's row, and a pinned link keeps its version's text, says how the block stands since and opens that version (deployment instructions: a browser test that fails before the change and passes at its head)",
-      "surface": "Dispatch's own browser suite (Playwright, chromium and iphone) against the real server and a signed-in dashboard",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_t_e2e?sslmode=disable DISPATCH_E2E_PORT=8821 FAKE_ENVOY_PORT=9121 FAKE_GITHUB_PORT=9122 FAKE_BROKER_PORT=9124 bun run e2e -- e2e/block-references.e2e.ts",
-      "observed": "6 passed (31.6s) at ff8cd6cd; round 1 at acdf007b: with e2e/references.e2e.ts, 26 passed",
-      "headSha": "ff8cd6cd9115856e4094a4f18c308a9cbd0c6e12",
-      "negativeControl": "Round 1: the head's block-references.e2e.ts alone in a fresh git archive of main 81a3b5ef (bun install --frozen-lockfile, database infra366_t_e2e_base, port 8831): 6 failed, each on a new-behaviour assertion (no 'Artifact · CORE-1' link at line 89, no 'Referenced by (3)' toggle at line 115, no pinned link 'P ships on Monday.' at line 162)"
-    },
-    {
-      "criterion": "A12: every build answers on one database, an older build skips the block kind it does not know, and the new build indexes older text and what an older build writes during the roll with no command run",
-      "surface": "Three server builds I made from git archives on one Postgres database (infra366_a12_tester): main 81a3b5ef (contains INFRA-364's merge d5a8e37a), the head acdf007b, and 371d6c87 (lacks it); the implementer's throwaway driver on my own ports",
-      "command": "OLD=$TMPDIR/t366/dispatch-81a3b5ef NEW=$TMPDIR/t366/dispatch-head NEG=$TMPDIR/t366/dispatch-371d6c879565 WORKSPACE=$LEGION_WORKSPACE bash $TMPDIR/t366/a12.sh",
-      "observed": "Round 1 at acdf007b (round 2 changes only refs.BlockTextAt, which no A12 read calls): exit 0; old build 200 on every read, no block node, referenced_by_count 3 = list 3; head listed the old comment and dashboard-URL message under ?to=X 1 s after its start; old build's edit of Q and its #b- comment listed on head 26 s later; with old stopped, block-links (cites.md -> spec, spec -> spec: [\"x_block\"]) and dispatch read --ref X pass",
-      "headSha": "acdf007b667ce556559326eafd6fede6e7c10f15",
-      "negativeControl": "371d6c87 on the same database: ?to=dispatch://ACME-1 answered HTTP 500, log 'graph node kind \"block\" is not addressable'"
+      "criterion": "Review round 1's Important finding, as the round-3 proof states it: 'a version write succeeds whatever its block ids are' - a write main accepts must not fail because the block index cannot key a block (no regression against main; the reconciler must not retry a document forever)",
+      "evidence": "A block node's id is `<ref_key>#<block id>` (document_blocks.node_id, unique), and the 256-byte bound covers only the block id, so a long reference key still overflows the key. Uploading a document named with 2680 random hex characters (`dispatch artifact --issue CORE-3 --name <2680 hex>.md --path f`): main 81a3b5ef (port 8841) stores version 1; the head (port 8801) answers 500, log 'record the blocks version 1 of … changed: ERROR: index row size 2744 exceeds btree version 4 maximum 2704 for index \"document_blocks_node_id_key\"'. After rolling main's database onto the head build, the document main stored cannot be edited (`dispatch doc-edit` → 500, same index), and the block-index loop logs 'block index skipped a document it could not index' for it on every pass. A 2690-character name fails on main too (artifacts_ref_key_key), so the gap is the ~36-260 bytes the node id adds. Red test: TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten in packages/envoy/internal/dispatch/api/block_id_bound_test.go (commit 8eda5b76); `cd packages/envoy && go test ./internal/dispatch/api/ -run TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten -count=1 -v` fails with 'upload a document named with 2680 characters: status=500 … want 201 as main answers'. With a 2000-character name the same test passes, so its later assertions hold. The implementer's comment dispatch://INFRA-366/comment/85ee2d5a-64ec-4fe7-9a2e-2c55ee09f44f names this gap as outside the issue; it is a regression this pull request introduces (main writes these documents), unlike the refs_pkey overflow there, which main already has."
     }
   ],
+  "failed": 1,
   "attempted": [
-    "Round 2: overflow pins in both directions and through the CLI, small pins unchanged, a comment holding an overflow pin; driver; browser file.",
-    "Round 1 (all held except the overflow pin): malformed pins → 400; missing, unindexed and pre-existence versions → their own 404s; changed/removed/restored states; dashboard-URL, lower-case hex, ask, issue message, comment and project-document sources; ask edit dropping its link; CLI refusals; block-links input and auth errors; 12 concurrent edits (24 blocks = 24 part_of, count 15 = list 15); a 2000-paragraph document (2000 part_of, count 2005 = list); rebuild-refs then the loop; block-coverage.sh and its healed control."
+    "Census: comment, suggest, doc-edit and doc-read given a `#b-` dashboard URL each refuse naming the block and the issue/artifact arguments; doc-read of the URL without the fragment reads the document.",
+    "Block id bound: spec, insert and upload naming 3200 bytes refused with the bound; 256 bytes a node, 257 bytes 400; a comment citing 3200 and 256 bytes posts and lists under the 256-byte block.",
+    "Dashboard: a pin of 9007199254740993 links ?v=9007199254740993 and its card requests that pin digit for digit; a pin of 9223372036854775808 stays plain text (throwaway Playwright check, deleted).",
+    "Browser file e2e/block-references.e2e.ts: 4 passed on chromium.",
+    "block-graph.sh: 37 PASS. A12 (81a3b5ef, c914a723, 371d6c87): all PASS.",
+    "A comment citing a block, or the document itself, of a document with a 2640-character name answers 500 at the head via refs_pkey; the document-citation form fails on main too (the pre-existing gap the implementer escalated), so it is not recorded as this pull request's failure."
   ],
-  "harnessNote": "At 01:25:52Z my setup.sh, run from the tester container, stopped the implementer container's Postgres on the shared /legion/harness data directory: the containers have separate PID namespaces, so the new postmaster read the running one's lock file as stale. Crash recovery completed at 01:26:19Z with no data lost; the implementer was told on Envoy.",
-  "ci": "At 73e2394d: Tests 40253982535 queued, Legion Envoy and Contracts 40253982539 queued, Docs 40253982638 and Worker Image 40253982623 in progress, PR Title 40253982543 and 40254054965 success. At 042c0195: Tests 40249820589 success (lint, typecheck, test)."
+  "ci": "At 9d4fb04e: Tests 40264090190 failure in job test (TestFetchKeepsAFeedAfterGitGC/killed_during_repack, packages/daemon/internal/workspace, untouched by this pull request), lint and typecheck success; Docs 40264090270 and Worker Image 40264090191 success; PR Title 40264143799 success; Legion Envoy and Contracts 40264090163 queued."
 }
