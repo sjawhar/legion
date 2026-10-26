@@ -11,7 +11,7 @@ import {
   replyToMessageDelivery,
   setAgentStreamResponder,
 } from "./api";
-import { consecutiveLinkClearance, expectUncovered } from "./layout";
+import { expectConsecutiveLinksClear, expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
 import { navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -829,23 +829,10 @@ test("on a phone the live view keeps a reasoning link's padded box off the line 
     const body = page.getByTestId("agent-reasoning");
     // The first paint can be the plain-text fallback, which has no links: wait for the link.
     await expect(body.getByRole("link", { name: "Lower reasoning" })).toBeVisible();
-    const measured = await consecutiveLinkClearance(body, "Upper reasoning", "Lower reasoning");
-    expect(
-      Math.abs(measured.fontSize - 12),
-      `the reasoning text is ${measured.fontSize}px, not 12px, so this row measures another pitch`
-    ).toBeLessThanOrEqual(0.1);
-    expect(
-      Math.abs(measured.lineHeight - 16),
-      `the reasoning lines are ${measured.lineHeight}px, not 16px, so this row measures another pitch`
-    ).toBeLessThanOrEqual(0.1);
-    expect(
-      Math.abs(measured.linePitch - measured.lineHeight),
-      `the links are ${measured.linePitch}px apart, not one ${measured.lineHeight}px line, so they are not on consecutive lines`
-    ).toBeLessThanOrEqual(0.5);
-    expect(
-      measured.clearance,
-      "the lower reasoning link's padded box starts above the upper link's own text, so a tap on the upper line can open the lower link"
-    ).toBeGreaterThanOrEqual(0);
+    await expectConsecutiveLinksClear(body, "Upper reasoning", "Lower reasoning", {
+      fontSize: 12,
+      lineHeight: 16,
+    });
   } finally {
     await context.close();
   }

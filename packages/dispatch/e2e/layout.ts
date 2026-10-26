@@ -20,16 +20,18 @@ export async function expectUncovered(pill: Locator, region: Locator): Promise<v
   }).toPass({ timeout: 5_000 });
 }
 
-/** Two links on consecutive lines of one body: how far the lower link's padded box starts below
- *  the upper link's own text (negative: padding over letters a reader taps), with the text
- *  metrics that say which pitch was measured. */
-export async function consecutiveLinkClearance(
+/** Fails unless two links on consecutive lines of one body, set in `pitch`, keep the lower link's
+ *  padded box off the upper link's own text: a padded box over those letters takes a tap a
+ *  reader meant for the upper line. The text size, line height and line pitch are checked first,
+ *  so the clearance is known to be the one at that pitch. */
+export async function expectConsecutiveLinksClear(
   scope: Locator,
   upper: string,
-  lower: string
-): Promise<{ clearance: number; linePitch: number; lineHeight: number; fontSize: number }> {
+  lower: string,
+  pitch: { fontSize: number; lineHeight: number }
+): Promise<void> {
   // One synchronous read: the geometry is relative, so a scroll between reads cannot skew it.
-  return scope.evaluate(
+  const measured = await scope.evaluate(
     (element, names) => {
       const links = [...element.querySelectorAll("a")];
       const named = (text: string) => {
@@ -54,4 +56,20 @@ export async function consecutiveLinkClearance(
     },
     { lower, upper }
   );
+  expect(
+    Math.abs(measured.fontSize - pitch.fontSize),
+    `"${upper}" is set at ${measured.fontSize}px, not ${pitch.fontSize}px, so this measures another pitch`
+  ).toBeLessThanOrEqual(0.1);
+  expect(
+    Math.abs(measured.lineHeight - pitch.lineHeight),
+    `"${upper}" sits on ${measured.lineHeight}px lines, not ${pitch.lineHeight}px, so this measures another pitch`
+  ).toBeLessThanOrEqual(0.1);
+  expect(
+    Math.abs(measured.linePitch - measured.lineHeight),
+    `"${upper}" and "${lower}" are ${measured.linePitch}px apart, not one ${measured.lineHeight}px line, so they are not on consecutive lines`
+  ).toBeLessThanOrEqual(0.5);
+  expect(
+    measured.clearance,
+    `the padded box of "${lower}" starts above the own text of "${upper}", so a tap on the upper line can open the lower link`
+  ).toBeGreaterThanOrEqual(0);
 }

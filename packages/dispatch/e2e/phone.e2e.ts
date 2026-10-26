@@ -16,7 +16,7 @@ import {
   patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
-import { consecutiveLinkClearance } from "./layout";
+import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -652,9 +652,6 @@ test("an inline link keeps its line and grows its hit box without covering its n
         secondTop: secondRect.y,
       };
     });
-    // Two choices a hard break puts on consecutive lines of the card's 15px text on 24.375px
-    // lines (`text-[15px] leading-relaxed`).
-    const choices = await consecutiveLinkClearance(card, "Upper choice", "Lower choice");
 
     // The probe, the two trial clicks and the tap are asserted above, each beside what it
     // measures. What is left:
@@ -669,24 +666,13 @@ test("an inline link keeps its line and grows its hit box without covering its n
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
-    // 5. Two choices on consecutive lines of the card: the lower one's padded box starts at or
-    //    below the upper one's own text.
-    expect(
-      Math.abs(choices.fontSize - 15),
-      `the card's text is ${choices.fontSize}px, not 15px, so this measures another pitch`
-    ).toBeLessThanOrEqual(0.1);
-    expect(
-      Math.abs(choices.lineHeight - 24.375),
-      `the card's lines are ${choices.lineHeight}px, not 24.375px, so this measures another pitch`
-    ).toBeLessThanOrEqual(0.1);
-    expect(
-      Math.abs(choices.linePitch - choices.lineHeight),
-      `the choices are ${choices.linePitch}px apart, not one ${choices.lineHeight}px line, so they are not on consecutive lines`
-    ).toBeLessThanOrEqual(0.5);
-    expect(
-      choices.clearance,
-      "the lower choice's padded box starts above the upper choice's own text, so a tap on the upper choice can open the lower one"
-    ).toBeGreaterThanOrEqual(0);
+    // 5. Two choices a hard break puts on consecutive lines of the card's 15px text on 24.375px
+    //    lines (`text-[15px] leading-relaxed`): the lower one's padded box starts at or below
+    //    the upper one's own text.
+    await expectConsecutiveLinksClear(card, "Upper choice", "Lower choice", {
+      fontSize: 15,
+      lineHeight: 24.375,
+    });
   } finally {
     await context.close();
   }
