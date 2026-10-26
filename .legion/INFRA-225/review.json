@@ -2,27 +2,38 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-225",
-  "completed": "2026-10-25T19:48:00Z",
-  "round": 3,
+  "completed": "2026-10-26T05:16:03Z",
+  "round": 4,
   "decision": "changes_requested",
-  "reviewedCodeHead": "689ec07553c9e0e7975d889e3d91f9b1c33ec098",
-  "scope": "Narrowed by the architect to the forward merge of main 0aa3aa04 and the controller-skill move (e53eaa80), plus whatever the merge disturbs.",
-  "ci": "Every check run on 689ec075, read as conclusions at 19:45Z: all completed success or skipped (pi-legion 18:45:38Z, claude-envoy 18:46:53Z, dispatch 19:45:21Z, last to settle); its five pull_request workflow runs all completed success. Second source: gh pr view at 19:46Z reports mergeable CONFLICTING / mergeStateStatus DIRTY, so those runs judged a merge ref with main 4ceb3aa9 that no longer exists, and GitHub runs no checks on a conflicting head.",
+  "reviewedCodeHead": "e2c36e932c9e367d065b7ecd2afd02c9aac9a308",
+  "scope": "The architect's scope: the testnats adoption (d7e29553), the forward merges of main (e8710925, e2c36e93), the blockers.Holds / WaveReleaseResponse cleanup (1a3d0b9e), and one required skill change (park guidance) the architect named from the tester's observation under dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830.",
+  "fingerprint": "e6afd3d7 (round 3's review commit, code head 689ec075): a96877e4; e2c36e93: 94bfc590. Changed, so a new round with the thermonuclear pair. Per-file diff of the two normalized diffs: changed are api/architect.go, blockers/blockers.go, workflow/engine.go, workflow/linger.go (1a3d0b9e), the restated skill text in skills/legion-architect and skills/legion-controller with their claude-envoy copies, and testnats/nats.go, which left the branch's diff (main's taken whole).",
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title; branch protection none. CI head e2c36e93 (newest pull_request run; compare e2c36e93...ff167c1b is .legion/ only). At 05:13Z: lint success, typecheck success, pr-title success (one earlier run cancelled), test FAILURE in Tests run 40270142639 job 121400980796 at step 'Pull the NATS test container images': docker pull mirror.gcr.io/library/nats@sha256:2ae57dfb... 'unknown blob' three times. A registry failure, not the code; the reviewer re-ran the failed job (gh run rerun 40270142639 --failed). The non-required dispatch job of run 40270142660 failed the same way (Docker pull failed with exit code 1).",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/internal/testnats/nats.go",
-      "description": "The pull request conflicts with main@origin decf80f9 (#2203, feat(daemon): wake a production check at each deploy workflow run after the merge, 19:26Z). git merge-tree of 689ec075 with decf80f9: CONFLICT (content) in packages/daemon/internal/testnats/nats.go; auto-merges in files where both sides changed daemon code and contract artifacts: AGENTS.md, claude-envoy CHANGELOG and dist/envoy-channel.js, contracts state.json and legion-api.ts, api/state.go and state_golden_test.go, daemon/workflow.go, intake/decode.go, facts.go, intake_test.go, record/outbox.go, workflow/engine.go, pi-legion/package.json. main still holds DaemonAPIVersion 36 and migrations up to 0050, so no number collides."
+      "file": "skills/legion-architect/SKILL.md",
+      "description": "Line 35 tells the architect to link a child to each child it depends on with `dispatch issue-update --issue <child> --blocked-by <other>`, one call per dependency. Dispatch replaces the whole list on every call (dispatch issue-update --help: 'Replacement list of issue keys'; packages/envoy/internal/dispatch/api/issue_parent.go:335 deletes every blocked_by row before inserting the new targets). A child that depends on A and B ends up blocked by B alone, and StartUnblockedChildren starts it when B closes while A is still open. Fix: one call naming every issue it waits on (`--blocked-by <a> --blocked-by <b>`, the list replacing the old one), or the links at creation with `dispatch issue --blocked-by`; and reconcile the two older procedures that still say to wait and release by hand: decomposition.md:58-61 (a dependency on another repository's change is released only after its merge, naming the merged commit, which a held child that starts at the close cannot get) and wake-routing.md:29 ('released with release_children once this issue closes'). Same text in packages/claude-envoy/legion/."
+    },
+    {
+      "severity": "important",
+      "file": "skills/legion-architect/SKILL.md",
+      "description": "The architect's required change. Line 36's park guidance (and the child-closed row of wake-routing.md) does not say that a child parked with park_child (backlog: stopped, not finished) leaves every sibling --blocked-by it held at admitted with no notice; the architect finds out only from SIGNOFF_CHILD_IN_WORKFLOW or read_record. Add: when you park a child, take its --blocked-by link off each dependent sibling that should still run, or park that sibling too. Within the skill size guard; same text in packages/claude-envoy/legion/."
     }
   ],
+  "fastFollow": "Cleanup in the same corrective push: (a) move the Dispatch blocker re-read (applyControllerTick, blockerReadFanout, observeWaitedOn, waitedOn, readObserved; daemon/workflow.go:897-1012) to a file of its own, since the change takes workflow.go from 951 to 1075 lines; (b) engine.go:980 `!blockers.Holdable(issue) || len(blockers.Holds(rows, issue)) > 0` asks Holdable twice: state the positive predicate once or keep Unfinished there; (c) 'Only a person finishes a blocker (or takes the link off)' is not true when the blocker is a sibling child (its merge closes it) or the architect sets the link: correct it in skills/legion-controller/references/{admission.md:11,daily-report.md:65,wakes.md:47}, packages/contracts/src/legion-api.ts:294 and packages/daemon/internal/record/outbox.go:201-203, keeping 'take nothing'.",
   "verifiedThisRound": [
-    "e53eaa80 moves the controller skill's Architect escalation section verbatim into skills/legion-controller/references/architect-escalation.md; the only line differences are three links re-pointed to skill://legion-controller/SKILL.md#findings-and-the-issues-you-file and #new-issue-triage, both anchors present. The SKILL.md pointer keeps the #architect-escalation heading the wake table's links land on and names the held/escalated wake that row 410 routes there.",
-    "SKILL.md is 477 lines and 38671 bytes; bun test packages/pi-legion/src/skills-guard.test.ts passes 11/11 locally at the merged head; claude-envoy/legion copies of SKILL.md and the new reference are byte-identical to their sources.",
-    "Free-slot correction from round 1 intact (SKILL.md line 257-260).",
-    "Forward merge 689ec075 of main 0aa3aa04: the branch's changed lines (git diff --context 0, index and hunk headers dropped) are identical from 56ba79b8 to e53eaa80 and from 0aa3aa04 to 689ec075 — the merge disturbed nothing of the change."
+    "1a3d0b9e is behaviour-neutral: Holds = Holdable then Unfinished (blockers.go:161-166). Blocked's child half, advanceAdmittedTree and StartUnblockedChildren compute the same predicate as before; the two sites that gained a Holdable gate cannot move a decision: enterChild builds the child at phase.Admitted with Tree root.Tree and Key fact.Key (engine.go:432), claim.IsTreeRoot is issue == tree; settleUnfinished calls Holds only for member.Phase == Admitted after skipping root.Key (linger.go:268-278).",
+    "The WaveReleaseResponse doc comment (api/architect.go:45-51) matches releaseOutcome (startedByRelease, blockers.UnfinishedOf over view.BlockedBy).",
+    "testnats after d7e29553: the branch's diff no longer touches testnats; the daemon package's TestMain returns testnats.Main and the driven proof takes the server through testnats.URL before starting Dispatch (thermonuclear-deep-review, cited files).",
+    "Migrations 0051/0052 follow main's 0050; DaemonAPIVersion 37 on the branch, 36 on main; skills/ and packages/claude-envoy/legion/ copies byte-identical; build.ts --check matches; skills-guard 11/11 (thermonuclear-deep-review's runs at e2c36e93).",
+    "Restated skill text otherwise matches the daemon: free-slot formula vs admit.go slotFree, tick `blocked` vs record.ControllerNotice.Blocked, child-status reasons vs ChildUnblockedNotice, acceptance.md's never-started hand-over vs readmit.",
+    "All six review threads resolved; each carries the reviewer's answer from round 2. No bot threads."
   ],
-  "acceptedRisks": "The two event-lag windows stay on the PR's Not proven / risk line, as the architect ruled."
+  "notADefect": "intake/decode.go passes blocked_by keys without claim.IsIssueKey, while the plugin parses admission.blocked strictly; Dispatch's writeBlockedBy refuses a key that is not an existing same-project issue (issue_parent.go:315-326), so no malformed key reaches the mirror.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality once at e2c36e93: both CHANGES on the --blocked-by replacement finding; the quality pass's other items are the fast-follow.",
+  "acceptedRisks": "The two event-lag windows and the whole-mirror read stay on the PR's Not proven / risk line, as the architect ruled."
 }
