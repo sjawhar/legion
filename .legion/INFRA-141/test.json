@@ -2,45 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T10:45:00Z",
+  "completed": "2026-10-26T11:25:00Z",
   "generation": 3,
-  "round": "review 5650228351's round: fix 38feffb0 (GET /v1/sessions lists a session whose interest key the bucket refuses), head 1476cbdc",
+  "round": "review 5650773083's round: fix f804579e (an interest read counts as answered only for its named answers), head 31173bae",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove its refused-key case on my own rig (real binary, real natsd, a 3,987-byte legacy session id written into envoy_sessions with my own nats.go writer, curl), and its bus-down case in four modes rather than one: relay frozen, NATS SIGTERM, NATS SIGKILL, and the interest stream deleted under the listener. Its negative control re-run independently with the listener built from git archive of 76e46d40."
+    "how": "Drove its named-answer and stopped-bus cases on my own rig (real binary, real natsd, my own nats.go writer, curl), widened to four bus-failure modes and to every malformed-record read and write path from the last two rounds. Re-ran its overlay control myself: TestAnInterestReadFailingWithARawSocketErrorIsTheBusNotAnswering passes at this head and fails on /v1/sessions with api.go from 1476cbdc."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review 5650228351's finding fixed: a session whose id the interest bucket refuses as a key is listed by GET /v1/sessions with no topics instead of refusing the whole listing; the per-session routes answer the refusal as the caller's 413/400",
-      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd); sessions ses_ok (subscribed), ses_miss (no interest record) and a 3,987-byte legacy id written into envoy_sessions; curl",
-      "command": "GET /v1/sessions; GET /v1/registry/<3987-byte id>; GET /v1/interests/<3987-byte id>",
-      "observed": "sessions 200 [{<3987-byte id>, topics null}, {ses_miss, topics null}, {ses_ok, [notifications.agent.ses_ok, notifications.role.r7]}] with one WARN 'session listed with no topics: its interest record could not be read'; registry and interests 413 {\"error\":\"too large to publish whole: a key of 3987 bytes, past 3974\"}, no Retry-After",
-      "headSha": "1476cbdcfa53eb856b3f5283d74a1bc5b8e5d8e3",
-      "negativeControl": "the listener built from 76e46d40 on the same rig: GET /v1/sessions 413 with no rows, before and after the relay was frozen"
+      "criterion": "Review 5650773083: an interest read counts as answered only for its named answers (no key, a key the bucket refuses, a record this build cannot decode); every other error refuses GET /v1/sessions with the bus-unavailable 503",
+      "surface": "the real envoy-listener binary at this head against a real NATS (internal/testnats/cmd/natsd); a 3,987-byte legacy id, ses_miss (no interest record) and ses_ok (subscribed) in envoy_sessions; four bus-failure modes",
+      "command": "GET /v1/sessions, /v1/registry/<id> with the bus up; then (a) freeze a TCP relay with the connection open, (b) SIGTERM natsd, (c) SIGKILL natsd, (d) delete KV_envoy_interests under the listener, and GET /v1/sessions, /v1/registry/ses_miss, /v1/registry/ses_ok",
+      "observed": "bus up: sessions 200 [{<3987-byte id>, null}, {ses_miss, null}, {ses_ok, [notifications.agent.ses_ok, notifications.role.r7]}]; registry and interests of the long id 413 with no Retry-After. (a) 503 in 1.002 s 'read ses_miss's interest record: context deadline exceeded'; (b) and (c) 503 'nats: outbound buffer limit exceeded'; (d) 503 'nats: no responders available for request'; every 503 Retry-After: 1 with the busUnansweredPrefix body; registry/ses_ok (cached interest) 200 in every mode",
+      "headSha": "31173bae89574840119b6b56a5a2043f7e680081",
+      "negativeControl": "every request answered 200 or 413 before each failure; the implementer's broken-pipe test re-run with 1476cbdc's api.go (go test -overlay) fails 'GET /v1/sessions with the interest read failing on a broken pipe: status 200 ... topics null'"
     },
     {
-      "criterion": "The allow-list of 'did not answer' errors still catches every way the bus failed here: GET /v1/sessions and GET /v1/registry/<miss> answer 503 with Retry-After: 1 and never list a session as subscribed to nothing",
-      "surface": "the same real binary and rig, the refused-key session present, in four bus-failure modes",
-      "command": "after the bus-up reads: (a) freeze a TCP relay with the connection open; (b) SIGTERM natsd; (c) SIGKILL natsd; (d) delete stream KV_envoy_interests under the running listener; then GET /v1/sessions, GET /v1/registry/ses_miss, GET /v1/registry/ses_ok",
-      "observed": "(a) 503 in 1.004 s and 1.002 s 'read ses_miss's interest record: context deadline exceeded'; (b) and (c) 503 in ~2 ms 'nats: outbound buffer limit exceeded'; (d) 503 'nats: no responders available for request'; every one Retry-After: 1 with the busUnansweredPrefix body; GET /v1/registry/ses_ok (cached interest) 200 with its topics in every mode",
-      "headSha": "1476cbdcfa53eb856b3f5283d74a1bc5b8e5d8e3",
-      "negativeControl": "the identical requests before each failure answered 200 (and 413 for the refused key), so each 503 comes from the bus failure"
+      "criterion": "Unreadable interest records keep the answers of the last two rounds",
+      "surface": "the same real binary; 'not json at all' and a wrong-typed record written into envoy_interests; a fake session server counting prompt_async posts",
+      "command": "the unreadable-record driver of the previous round: reads, a send to such a session, DELETE, subscribe, role claim and unsubscribe over such records, and the frozen bus with one present",
+      "observed": "sessions 200 listing the four unreadable sessions with topics null; registry/interests 500 'envoy: the interest record of session <id> is unreadable: malformed interest record: ...' with no Retry-After; send pushed once; DELETE 204 then 404; subscribe 200 and the record decodes; role claim 200 and the role resolves; unsubscribe 200 with the record left; frozen: 503 in 1.003 s with Retry-After: 1",
+      "headSha": "31173bae89574840119b6b56a5a2043f7e680081",
+      "negativeControl": "the readable session ses_sub is served 200 with its topics on the same rig"
     },
     {
       "criterion": "Earlier behaviour unchanged: frozen send/publish/lookup, unreadable role claims, A1-A6 and A6'",
-      "surface": "the real binary on the frozen-relay rig; scripts/e2e-local.sh and out/e2e/; go test of the named tests",
-      "command": "the round-four roles driver on this head's binary; bash scripts/e2e-local.sh with the A6' jq; go test ./cmd/listener of my four tests, the implementer's list, read and write interest tests and the A1/A2 cold-cache tests",
-      "observed": "frozen: sends, publishes and lookups 503 within 3.53 s, 20 concurrent sends and 20 concurrent lookups all 503; unreadable role claims 500 on both routes, 4 role_claim_unreadable records; e2e exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (10:31:02.955Z, 10:31:06.748Z, 10:31:10.505Z) after 'Initiating Shutdown...' at 10:30:59.418Z; every named test --- PASS, ok 21.702 s. My test files and delivery.go/unplaceable_delivery.go have no diff since 83135449, so the delivery paths verified last round are untouched",
-      "headSha": "1476cbdcfa53eb856b3f5283d74a1bc5b8e5d8e3",
+      "surface": "the real binary on the frozen-relay rig; scripts/e2e-local.sh; go test of the named tests",
+      "command": "the round-four roles driver; bash scripts/e2e-local.sh and the A6' jq; go test ./cmd/listener of my four tests, the implementer's interest tests and the A1/A2 cold-cache tests",
+      "observed": "frozen: sends, publishes and lookups 503 within 3.53 s, 20 concurrent sends and 20 concurrent lookups all 503; unreadable role claims 500; e2e exit 0, both PASS lines, client EnvoyApiError 503; A6' three WARN bus_unavailable records (11:11:57.687Z, 11:12:01.617Z, 11:12:05.373Z) after 'Initiating Shutdown...' at 11:11:54.150Z; every named test --- PASS, ok 21.642 s. My test files, delivery.go, unplaceable_delivery.go and internal/ have no diff since ce91be67",
+      "headSha": "31173bae89574840119b6b56a5a2043f7e680081",
       "negativeControl": "the e2e send answered 200 before NATS was stopped; the frozen-rig requests answered 200 before the freeze"
     }
   ],
-  "ci": "At 1476cbdc: Tests 40307652165, Legion Envoy and Contracts 40307651876 and Docs 40307651870 queued, Worker Image 40307651932 pending when read, cited unsettled and not waited for. At 76e46d40 Docs succeeded and Tests and Legion Envoy and Contracts were cancelled by the next push.",
   "notes": [
-    "PR body is 52,569 characters (GitHub's limit 65,536); this round's E2E (tester) section was shortened and points to this file instead of inlining its evidence."
+    "I could not produce a raw socket write error (*net.OpError) from outside nats.go on the real binary; that case rests on the implementer's fault-injected test, whose control I re-ran.",
+    "PR body is 54,750 characters (GitHub's limit 65,536)."
   ],
+  "ci": "At 31173bae: Tests 40312870357, Legion Envoy and Contracts 40312870299 and Docs 40312870108 queued, Worker Image 40312870355 pending when read, cited unsettled and not waited for.",
   "regressionLocksAdded": []
 }
