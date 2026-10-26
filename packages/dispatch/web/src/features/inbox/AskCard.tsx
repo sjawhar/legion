@@ -701,6 +701,7 @@ export function AskCard({
         followers={threadQuery.data?.followers ?? []}
         owner={displayedAsk}
         route={threadQuery.data?.route ?? null}
+        routeHolder={threadQuery.data?.route_holder ?? null}
       />
     </article>
   );

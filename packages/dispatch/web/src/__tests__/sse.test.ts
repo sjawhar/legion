@@ -1,5 +1,8 @@
-import { expect, test } from "bun:test";
-import { QueryClient } from "@tanstack/react-query";
+import { expect, spyOn, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
+import { api } from "../api/client";
 import {
   architectureSourcesQuery,
   inboxQuery,
@@ -9,12 +12,17 @@ import {
 } from "../api/queries";
 import { coalescePrefixKeys, refreshQueries } from "../api/query-refresh";
 import {
+  askThreadKeysOnIssues,
+  askThreadsIssue,
   eventQueryKeys,
-  expandAskThreadsOnIssue,
+  markAskThreadsSeededByAnInFlightInbox,
   mergeEventPages,
   prependEventToLog,
 } from "../api/sse";
-import type { Event, EventType } from "../api/types";
+import type { Ask, AskRead, Event, EventType, InboxRow } from "../api/types";
+import { hasPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
+import { issueAsk } from "../features/inbox/inbox-fixture";
+import { useAskAnswerForm } from "../features/inbox/useAskAnswerForm";
 
 /**
  * The pre-#1248 reference implementation, copied verbatim from `main`'s
@@ -665,17 +673,18 @@ function answersPageAdditions(incoming: Event): unknown[][] {
   return [];
 }
 
-/** Every open ask card lists the issue's claimant and route among the sessions it reaches, read
- *  from its thread. A claim or a release moves the claimant and an issue update can move the
- *  route; the thread key holds only the ask id, so the event names its issue's threads by a
- *  marker the flush expands (`expandAskThreadsOnIssue`). */
-function askRecipientsAdditions(incoming: Event): unknown[][] {
-  return incoming.issue_key !== null &&
-    (incoming.type === "issue.claimed" ||
-      incoming.type === "issue.released" ||
-      incoming.type === "issue.updated")
-    ? [["ask-thread", { issue_key: incoming.issue_key }]]
-    : [];
+/** Every open ask card lists the issue's claimant and the session its route reaches, read from
+ *  its thread. A claim or a release moves the claimant, and an update or a close can move the
+ *  route (one PATCH that sets the route and closes the issue emits `issue.closed` alone); a deploy
+ *  moves neither. The thread key holds only the ask id, so no key names the issue's threads: the
+ *  event names the issue instead (`askThreadsIssue`), and the flush reads the cache for them. */
+function askThreadsIssueOracle(incoming: Event): string | null {
+  return incoming.type === "issue.claimed" ||
+    incoming.type === "issue.released" ||
+    incoming.type === "issue.updated" ||
+    incoming.type === "issue.closed"
+    ? incoming.issue_key
+    : null;
 }
 
 /** The Replies page, its count and every owner's unread set live under `["me", "replies"]`. Only
@@ -777,7 +786,6 @@ test.each(
     ...rollupAdditions(incoming),
     ...answersPageAdditions(incoming),
     ...repliesAdditions(incoming),
-    ...askRecipientsAdditions(incoming),
   ];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
@@ -787,6 +795,8 @@ test.each(
   expect(keySet(invalidatedKeys(incoming))).toEqual(
     keySet([...base, ...counted, ...references, ...lists])
   );
+  // No key names an issue's ask threads; the event names the issue beside its keys.
+  expect(askThreadsIssue(incoming)).toBe(askThreadsIssueOracle(incoming));
 });
 
 test("the corpus contains events the subtraction applies to", () => {
@@ -899,7 +909,7 @@ function cacheThread(client: QueryClient, id: string, issueKey: string | null): 
   client.setQueryData(["ask-thread", id], { ask: { id, issue_key: issueKey } });
 }
 
-test("a claim, a release or an update refreshes the ask threads on its issue and no other", () => {
+test("a claim, a release, an update or a close refreshes the ask threads on its issue and no other", () => {
   const client = new QueryClient();
   cacheThread(client, "ask-1", "CORE-1");
   cacheThread(client, "ask-2", "CORE-2");
@@ -908,19 +918,28 @@ test("a claim, a release or an update refreshes the ask threads on its issue and
     event("issue.claimed", { key: "CORE-1", claim: null }),
     event("issue.released", { key: "CORE-1", claim: null }),
     event("issue.updated", issuePayload("todo", null)),
+    // One PATCH that sets the route and closes the issue emits this alone.
+    event("issue.closed", { ...issuePayload("done", "2026-09-10T00:00:00Z"), route: "role:r" }),
   ];
   for (const incoming of onIssue) {
-    const threads = expandAskThreadsOnIssue(client, invalidatedKeys(incoming)).filter(
-      (key) => key[0] === "ask-thread"
-    );
-    expect(threads).toEqual([["ask-thread", "ask-1"]]);
+    expect(askThreadsIssue(incoming)).toBe("CORE-1");
+    // No key of its own names a thread: the issue does, beside the keys.
+    expect(invalidatedKeys(incoming).filter((key) => key[0] === "ask-thread")).toEqual([]);
   }
+  expect(askThreadKeysOnIssues(client, new Set(["CORE-1"]))).toEqual([["ask-thread", "ask-1"]]);
+  // A deploy is a line in the log: it moves no claimant and no route.
+  expect(
+    askThreadsIssue(event("issue.deployed", { repo: "acme/widgets", number: 501 }))
+  ).toBeNull();
 
   // Through the refresh the flush runs: the thread on another issue is never invalidated.
   for (const incoming of onIssue) {
     refreshQueries(
       client,
-      coalescePrefixKeys(expandAskThreadsOnIssue(client, invalidatedKeys(incoming)))
+      coalescePrefixKeys([
+        ...invalidatedKeys(incoming),
+        ...askThreadKeysOnIssues(client, new Set(["CORE-1"])),
+      ])
     );
   }
   expect(client.getQueryState(["ask-thread", "ask-1"])?.isInvalidated).toBe(true);
@@ -928,7 +947,7 @@ test("a claim, a release or an update refreshes the ask threads on its issue and
   expect(client.getQueryState(["ask-thread", "ask-doc"])?.isInvalidated).toBe(false);
 });
 
-test("an issue's thread marker reaches a thread on its first load, once, and alone matches nothing", async () => {
+test("an issue's thread refresh reaches a thread on its first load, and no issue reaches none", () => {
   const client = new QueryClient();
   cacheThread(client, "ask-1", "CORE-1");
   cacheThread(client, "ask-2", "CORE-2");
@@ -938,17 +957,99 @@ test("an issue's thread marker reaches a thread on its first load, once, and alo
     queryFn: () => firstLoad.promise,
     queryKey: ["ask-thread", "ask-3"],
   });
-  const marker = ["ask-thread", { issue_key: "CORE-1" }];
-  expect(
-    expandAskThreadsOnIssue(client, [marker, ["ask-thread", "ask-1"], ["issue", "CORE-1"]])
-  ).toEqual([
+  expect(askThreadKeysOnIssues(client, new Set(["CORE-1"]))).toEqual([
     ["ask-thread", "ask-1"],
     ["ask-thread", "ask-3"],
-    ["issue", "CORE-1"],
   ]);
-  // A marker that ever reached `invalidateQueries` unexpanded would invalidate nothing.
-  await client.invalidateQueries({ queryKey: marker, refetchType: "none" });
-  expect(client.getQueryState(["ask-thread", "ask-1"])?.isInvalidated).toBe(false);
+  expect(askThreadKeysOnIssues(client, new Set())).toEqual([]);
+});
+
+function threadOf(row: InboxRow, claimant: string | null = row.thread.claimant): AskRead {
+  return { ask: row, ...row.thread, claimant };
+}
+
+test("a claim that moves while the Inbox is in flight sends that issue's later cards to the ask endpoint, until a newer Inbox lands", async () => {
+  const onIssue = issueAsk({ id: "ask-1" });
+  const sibling = issueAsk({ id: "ask-3" });
+  const elsewhere = issueAsk({
+    id: "ask-2",
+    issue: { assignee: "alice", key: "CORE-2", title: "Other" },
+    issue_key: "CORE-2",
+  });
+  const rows = [onIssue, sibling, elsewhere];
+  const inFlight = Promise.withResolvers<InboxRow[]>();
+  const getInbox = spyOn(api, "getInbox").mockImplementationOnce(() => inFlight.promise);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const inboxKey = inboxQuery().queryKey;
+  const reads: string[] = [];
+  // The endpoint answers after the claim: every thread on CORE-1 names the new claimant.
+  const getAskThread = async (id: string): Promise<AskRead> => {
+    reads.push(id);
+    const row = rows.find((candidate) => candidate.id === id) as InboxRow;
+    return threadOf(row, row.issue_key === "CORE-1" ? "session-now" : null);
+  };
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  const mountCard = (row: InboxRow) =>
+    renderHook(
+      () =>
+        useAskAnswerForm({
+          answer: async () => row as Ask,
+          ask: row,
+          createReply: async () => {
+            throw new Error("no reply in this test");
+          },
+          getAskThread,
+          initialThread: threadOf(row),
+          initialThreadUpdatedAt: Date.now(),
+        }),
+      { wrapper }
+    );
+  const cards: { unmount: () => void }[] = [];
+  try {
+    void client.prefetchQuery(inboxQuery());
+    await waitFor(() => expect(client.getQueryState(inboxKey)?.fetchStatus).toBe("fetching"));
+    const claimed = event("issue.claimed", {
+      claim: { actor: { kind: "session", id: "session-now" }, at: "2026-09-24T06:00:00Z" },
+      reason: "claimed",
+    });
+    markAskThreadsSeededByAnInFlightInbox(
+      client,
+      eventQueryKeys(claimed, "alice"),
+      askThreadsIssue(claimed)
+    );
+    // The in-flight body was composed before the claim.
+    inFlight.resolve(rows);
+    await waitFor(() => expect(client.getQueryState(inboxKey)?.fetchStatus).toBe("idle"));
+    expect(hasPendingAskThreadInvalidation(client, onIssue)).toBe(true);
+    expect(hasPendingAskThreadInvalidation(client, elsewhere)).toBe(false);
+
+    const first = mountCard(onIssue);
+    cards.push(first);
+    await waitFor(() =>
+      expect(first.result.current.threadQuery.data?.claimant).toBe("session-now")
+    );
+    const other = mountCard(elsewhere);
+    cards.push(other);
+    expect(other.result.current.threadQuery.data?.claimant).toBeNull();
+    // One card's own read leaves the issue's mark for the next card on it.
+    const second = mountCard(sibling);
+    cards.push(second);
+    await waitFor(() =>
+      expect(second.result.current.threadQuery.data?.claimant).toBe("session-now")
+    );
+    expect([...reads].sort()).toEqual(["ask-1", "ask-3"]);
+
+    // A newer Inbox, composed after the claim, clears the issue's mark.
+    getInbox.mockResolvedValueOnce(rows);
+    await client.refetchQueries({ queryKey: inboxKey });
+    expect(hasPendingAskThreadInvalidation(client, onIssue)).toBe(false);
+    expect(hasPendingAskThreadInvalidation(client, sibling)).toBe(false);
+  } finally {
+    for (const card of cards) card.unmount();
+    getInbox.mockRestore();
+  }
 });
 
 /** The payload of an `issue.*` event as `issue_patch.go` sends it: `model.NewIssueEventPayload`

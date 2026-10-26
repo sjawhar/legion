@@ -68,17 +68,86 @@ export interface AskRecipientsProps {
   removeFollower?: (askId: string, sessionId: string) => Promise<void>;
   /** The ask's issue's route (`session:<id>` or `role:<name>`), from the same thread read. */
   route: string | null;
+  /** The live session the route reaches now (the routed session, or the role's holder), from the
+   *  same thread read; null when nobody holds the route or the listener did not say. */
+  routeHolder: string | null;
 }
 
 /** A row the ask reaches through its issue rather than through a follow or a subscription: the
  *  claimant (`via claim`) or the route (`via route`). Neither is removable from the card; the
  *  claim and the route change on the issue. */
-interface IssueReachRow {
-  /** A session id, or the route itself (`role:<name>`) when the route names a role. */
+export interface IssueReachRow {
+  /** The session the row reaches, or the route itself (`role:<name>`) while no session holds it. */
   id: string;
-  label: string;
-  live: boolean;
-  via: "claim" | "route";
+  /** Whether a session receives through the row now. Only a role route that no session holds
+   *  does not: its row names the route, offline, and `Reaches N` leaves it out. */
+  reaches: boolean;
+  /** `via claim`, `via route`, or `via route (role:<name>)` on the session holding a role route. */
+  via: string;
+}
+
+/** Every row the card lists, each session once, and how many distinct sessions they reach. */
+export interface Reach {
+  /** Distinct sessions a person's answer and replies reach now: the `Reaches N` count. */
+  count: number;
+  issueRows: IssueReachRow[];
+  /** The session the route delivers to: its holder, else a `session:<id>` route's own session
+   *  (offline, since the listener does not list it). Undefined for no route or an unheld role. */
+  routeSession: string | undefined;
+  /** The owner's subscribers that are not followers, in the order the subscribers read lists them. */
+  subscribers: Subscriber[];
+}
+
+/**
+ * Lists each receiving session once: as a follower, else as a subscriber (both keep their
+ * control), else under `via claim`, else under `via route`. The route's receiving session goes
+ * through the same dedupe as the claimant's, so a role holder that is also the claimant, a
+ * follower or a subscriber is counted once. A role route no session holds is listed as the route
+ * itself and counted nowhere, since it reaches nobody now.
+ */
+export function reachRows({
+  claimant,
+  followers,
+  route,
+  routeHolder,
+  subscribers: subscriberRows,
+}: {
+  claimant: string | null;
+  followers: readonly AskFollower[];
+  route: string | null;
+  routeHolder: string | null;
+  subscribers: readonly Subscriber[];
+}): Reach {
+  const listed = new Set(followers.map((follower) => follower.session_id));
+  const subscribers = subscriberRows.filter((subscriber) => !listed.has(subscriber.session_id));
+  for (const subscriber of subscribers) {
+    listed.add(subscriber.session_id);
+  }
+  const issueRows: IssueReachRow[] = [];
+  const addIssueRow = (sessionId: string, via: string): void => {
+    if (listed.has(sessionId)) {
+      return;
+    }
+    listed.add(sessionId);
+    issueRows.push({ id: sessionId, reaches: true, via });
+  };
+  if (claimant !== null) {
+    addIssueRow(claimant, "via claim");
+  }
+  const role = route?.startsWith("role:") === true;
+  const routeSession =
+    routeHolder ?? (route?.startsWith("session:") ? route.slice("session:".length) : undefined);
+  if (routeSession !== undefined) {
+    addIssueRow(routeSession, role ? `via route (${route})` : "via route");
+  } else if (route !== null && role) {
+    issueRows.push({ id: route, reaches: false, via: "via route" });
+  }
+  return {
+    count: listed.size,
+    issueRows,
+    routeSession,
+    subscribers,
+  };
 }
 
 type Confirming =
@@ -88,15 +157,16 @@ type Confirming =
 /**
  * Every session the server routes this ask's answer and replies to, under `Reaches N`: the
  * ask's followers (every session that wrote to the ask, minus any that unfollowed); then the
- * session holding the issue's claim, under `via claim`, and the issue's route, under
- * `via route` (its session, or the `role:<name>` text for a role); then every session subscribed
- * to the owner's topic family, under `via issue subscription` (or `via document subscription`).
- * Each session is listed once: as a follower, else as a subscriber, else via the claim or the
- * route, so a session keeps the control it has. Each shows a live/offline dot and its title (or
- * shortened session id). A follower's Unfollow and a subscriber's Unsubscribe each confirm
- * first, name what still reaches the session (a subscription, the claim or the route), and then
- * cut the route that actually delivers; the claim and route rows have no control, since both
- * change on the issue. A subscriber whose only matching topic is
+ * session holding the issue's claim, under `via claim`, and the session the issue's route reaches,
+ * under `via route` (`via route (role:<name>)` for a role's holder; the bare `role:<name>`, offline
+ * and uncounted, while nobody holds the role); then every session subscribed to the owner's topic
+ * family, under `via issue subscription` (or `via document subscription`). Each session is listed
+ * and counted once (`reachRows`): as a follower, else as a subscriber, else via the claim, else
+ * via the route, so a session keeps the control it has. Each shows a live/offline dot and its
+ * title (or shortened session id). A follower's Unfollow and a subscriber's Unsubscribe each
+ * confirm first, name what still reaches the session (a subscription, the claim or the route),
+ * and then cut the route that actually delivers; the claim and route rows have no control, since
+ * both change on the issue. A subscriber whose only matching topic is
  * wider than this owner (e.g. `notifications.dispatch.>`) names that topic and has no control,
  * as the header's Subscribed agents panel does. When the subscribers fetch fails, the card says
  * so with a retry instead of passing the follower count off as the whole set.
@@ -108,6 +178,7 @@ export function AskRecipients({
   owner,
   removeFollower = removeAskFollower,
   route,
+  routeHolder,
 }: AskRecipientsProps): ReactNode {
   const queryClient = useQueryClient();
   const subscription = ownerSubscription(owner);
@@ -130,45 +201,16 @@ export function AskRecipients({
     staleTime: 30_000,
   });
   const subscriberRows = subscribersQuery.data ?? EMPTY_SUBSCRIBERS;
-  const routeSession = route?.startsWith("session:") ? route.slice("session:".length) : undefined;
   const { agents } = useAgents(followers.length > 0 || claimant !== null || route !== null);
   const followerLabel = (sessionId: string): string =>
     sessionLabel(sessionId, agents.find((agent) => agent.session_id === sessionId)?.title);
-  // Each session is listed and counted once: as a follower, else as a subscriber (both keep their
-  // control), else under `via claim` or `via route`.
-  const listed = new Set(followers.map((follower) => follower.session_id));
-  const subscribers = subscriberRows.filter((subscriber) => !listed.has(subscriber.session_id));
-  for (const subscriber of subscribers) {
-    listed.add(subscriber.session_id);
-  }
-  const issueRows: IssueReachRow[] = [];
-  const addIssueRow = (sessionId: string, via: IssueReachRow["via"]): void => {
-    if (listed.has(sessionId)) {
-      return;
-    }
-    listed.add(sessionId);
-    issueRows.push({
-      id: sessionId,
-      label: followerLabel(sessionId),
-      live: agents.some((agent) => agent.session_id === sessionId),
-      via,
-    });
-  };
-  if (claimant !== null) {
-    addIssueRow(claimant, "claim");
-  }
-  if (routeSession !== undefined) {
-    addIssueRow(routeSession, "route");
-  } else if (route?.startsWith("role:")) {
-    // A role route reaches whichever session holds the role, so the row names the route itself.
-    const role = route.slice("role:".length);
-    issueRows.push({
-      id: route,
-      label: route,
-      live: agents.some((agent) => agent.roles.includes(role)),
-      via: "route",
-    });
-  }
+  const { count, issueRows, routeSession, subscribers } = reachRows({
+    claimant,
+    followers,
+    route,
+    routeHolder,
+    subscribers: subscriberRows,
+  });
   const [confirming, setConfirming] = useState<Confirming | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const unfollow = useMutation({
@@ -195,7 +237,8 @@ export function AskRecipients({
   }
 
   const viaLabel = subscription === undefined ? "" : `via ${subscription.noun} subscription`;
-  // What still delivers to a session once its claim or route is all that is left.
+  // What still delivers to a session once its claim or route is all that is left; the route's
+  // session is a role's holder too.
   const issueReach = (sessionId: string): string | undefined => {
     if (sessionId === claimant) {
       return "A person's answer and replies still reach them through the claim.";
@@ -217,7 +260,7 @@ export function AskRecipients({
     <section aria-label="Recipients" className="mt-2">
       <DisclosureToggle
         expanded={open}
-        label={`Reaches ${followers.length + issueRows.length + subscribers.length}`}
+        label={`Reaches ${count}`}
         onToggle={() => setOpen((shown) => !shown)}
         textClassName={textMutedOnSurface}
       />
@@ -250,9 +293,11 @@ export function AskRecipients({
             <ul aria-label="Via claim or route" className="mt-1 flex flex-wrap gap-2">
               {issueRows.map((row) => (
                 <li className={sessionChipClassName} key={`${row.via}:${row.id}`}>
-                  <LiveDot live={row.live} />
-                  <span title={row.id}>{row.label}</span>
-                  <span className="text-xs italic">via {row.via}</span>
+                  <LiveDot
+                    live={row.reaches && agents.some((agent) => agent.session_id === row.id)}
+                  />
+                  <span title={row.id}>{row.reaches ? followerLabel(row.id) : row.id}</span>
+                  <span className="text-xs italic">{row.via}</span>
                 </li>
               ))}
             </ul>

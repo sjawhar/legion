@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 
 import { api } from "../../api/client";
 import type { Agent, AskFollower, Subscriber } from "../../api/types";
-import { AskRecipients, type AskRecipientsProps } from "./AskRecipients";
+import { AskRecipients, type AskRecipientsProps, reachRows } from "./AskRecipients";
 
 const followers: AskFollower[] = [
   { session_id: "0123456789abcdef", since: "2026-09-14T10:00:00Z" },
@@ -73,6 +73,7 @@ function renderRecipients({
         owner={{ artifact_id: null, issue_key: "CORE-1" }}
         removeFollower={removeFollower}
         route={null}
+        routeHolder={null}
         {...props}
       />
     </QueryClientProvider>
@@ -107,6 +108,7 @@ test("AskRecipients folds its routing list at rest and still names the count", a
         owner={{ artifact_id: null, issue_key: "CORE-1" }}
         removeFollower={async () => {}}
         route={null}
+        routeHolder={null}
       />
     </QueryClientProvider>
   );
@@ -360,6 +362,7 @@ test("AskRecipients never asks for subscribers unless the signed-in principal is
         followers={followers}
         owner={{ artifact_id: null, issue_key: "CORE-1" }}
         route={null}
+        routeHolder={null}
       />
     </QueryClientProvider>
   );
@@ -382,6 +385,7 @@ test("AskRecipients never asks for subscribers unless the signed-in principal is
 
 const claimant = "c1c1c1c1c1c1c1c1";
 const routed = "e2e2e2e2e2e2e2e2";
+const holder = "d3d3d3d3d3d3d3d3";
 
 function reachesText(section: HTMLElement): string | null {
   return within(section).getByRole("button", { name: /^Reaches/ }).textContent;
@@ -439,10 +443,10 @@ test("AskRecipients lists a session route's session via route", () => {
   }
 });
 
-test("AskRecipients lists a role route as the route itself, live while a session holds the role", async () => {
+test("AskRecipients names a role route's holder via the route, live, and counts it", async () => {
   const page = renderRecipients({
-    agents: [{ ...agent("d3d3d3d3d3d3d3d3", "Reviewer"), roles: ["reviewer"] }],
-    props: { route: "role:reviewer" },
+    agents: [{ ...agent(holder, "Reviewer"), roles: ["reviewer"] }],
+    props: { route: "role:reviewer", routeHolder: holder },
   });
 
   try {
@@ -451,12 +455,89 @@ test("AskRecipients lists a role route as the route itself, live while a session
     const row = within(within(section).getByRole("list", { name: "Via claim or route" })).getByRole(
       "listitem"
     );
-    expect(within(row).getByText("role:reviewer").getAttribute("title")).toBe("role:reviewer");
-    expect(within(row).getByText("via route")).toBeTruthy();
+    expect((await within(row).findByText("Reviewer")).getAttribute("title")).toBe(holder);
+    expect(within(row).getByText("via route (role:reviewer)")).toBeTruthy();
     expect(await within(row).findByTitle("Live")).toBeTruthy();
     expect(within(row).queryByRole("button")).toBeNull();
   } finally {
     page.unmount();
+  }
+});
+
+test("AskRecipients lists a role route nobody holds as the route itself, offline and uncounted", () => {
+  const page = renderRecipients({ props: { route: "role:reviewer" } });
+
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    expect(reachesText(section)).toBe("Reaches 2");
+    const row = within(within(section).getByRole("list", { name: "Via claim or route" })).getByRole(
+      "listitem"
+    );
+    expect(within(row).getByText("role:reviewer").getAttribute("title")).toBe("role:reviewer");
+    expect(within(row).getByText("via route")).toBeTruthy();
+    expect(within(row).getByTitle("Not live")).toBeTruthy();
+    expect(within(row).queryByRole("button")).toBeNull();
+  } finally {
+    page.unmount();
+  }
+});
+
+test("AskRecipients counts a role route's holder once when it also holds the claim", async () => {
+  const page = renderRecipients({
+    agents: [{ ...agent(claimant, "Implementer"), roles: ["reviewer"] }],
+    props: { claimant, route: "role:reviewer", routeHolder: claimant },
+  });
+
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    expect(reachesText(section)).toBe("Reaches 3");
+    const rows = within(
+      within(section).getByRole("list", { name: "Via claim or route" })
+    ).getAllByRole("listitem");
+    expect(rows).toHaveLength(1);
+    expect(await within(rows[0] as HTMLElement).findByText("Implementer")).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText("via claim")).toBeTruthy();
+    expect(within(section).queryByText("role:reviewer")).toBeNull();
+  } finally {
+    page.unmount();
+  }
+});
+
+test("AskRecipients tells the human an unfollowed or unsubscribed role holder still hears the ask through the route", async () => {
+  const page = renderRecipients({
+    props: { route: "role:reviewer", routeHolder: "fedcba9876543210" },
+    subscribers: [subscriber("b0b0b0b0b0b0b0b0", "Platform PO")],
+  });
+
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    await waitFor(() => expect(reachesText(section)).toBe("Reaches 3"));
+    expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
+    const unfollow = within(section).getAllByRole("button", { name: "Unfollow" });
+    fireEvent.click(unfollow[1] as HTMLElement);
+    const routedDialog = screen.getByRole("dialog", { name: "Unfollow" });
+    expect(routedDialog.textContent).toContain(
+      "Unfollow session:fedcba98… from this ask? A person's answer and replies still reach them through the route. They will be told."
+    );
+    fireEvent.click(within(routedDialog).getByRole("button", { name: "Cancel" }));
+  } finally {
+    page.unmount();
+  }
+
+  const subscribed = renderRecipients({
+    props: { route: "role:reviewer", routeHolder: "b0b0b0b0b0b0b0b0" },
+    subscribers: [subscriber("b0b0b0b0b0b0b0b0", "Platform PO")],
+  });
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    await waitFor(() => expect(reachesText(section)).toBe("Reaches 3"));
+    expect(within(section).queryByRole("list", { name: "Via claim or route" })).toBeNull();
+    fireEvent.click(within(section).getByRole("button", { name: "Unsubscribe" }));
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "A person's answer and replies still reach them through the route. They will be told."
+    );
+  } finally {
+    subscribed.unmount();
   }
 });
 
@@ -545,4 +626,60 @@ test("AskRecipients tells the human an unfollowed claimant or route session stil
   } finally {
     page.unmount();
   }
+});
+
+const roleRoute = { route: "role:reviewer", routeHolder: holder };
+const noReach = { claimant: null, followers: [], route: null, routeHolder: null, subscribers: [] };
+
+test("reachRows counts a role route held by the claimant once, under the claim", () => {
+  const reach = reachRows({ ...noReach, ...roleRoute, claimant: holder });
+  expect(reach.issueRows).toEqual([{ id: holder, reaches: true, via: "via claim" }]);
+  expect(reach.count).toBe(1);
+  expect(reach.routeSession).toBe(holder);
+});
+
+test("reachRows counts a role route held by a follower once, as the follower", () => {
+  const reach = reachRows({
+    ...noReach,
+    ...roleRoute,
+    followers: [{ session_id: holder, since: "2026-09-14T10:00:00Z" }],
+  });
+  expect(reach.issueRows).toEqual([]);
+  expect(reach.count).toBe(1);
+  expect(reach.routeSession).toBe(holder);
+});
+
+test("reachRows counts a role route held by a subscriber once, as the subscriber", () => {
+  const reach = reachRows({ ...noReach, ...roleRoute, subscribers: [subscriber(holder, "R")] });
+  expect(reach.issueRows).toEqual([]);
+  expect(reach.subscribers.map((row) => row.session_id)).toEqual([holder]);
+  expect(reach.count).toBe(1);
+});
+
+test("reachRows names a role route's holder beside the route when nothing else lists it", () => {
+  const reach = reachRows({ ...noReach, ...roleRoute, claimant });
+  expect(reach.issueRows).toEqual([
+    { id: claimant, reaches: true, via: "via claim" },
+    { id: holder, reaches: true, via: "via route (role:reviewer)" },
+  ]);
+  expect(reach.count).toBe(2);
+});
+
+test("reachRows lists a role route nobody holds as the bare route, reaching and counting nobody", () => {
+  const reach = reachRows({ ...noReach, claimant, route: "role:reviewer" });
+  expect(reach.issueRows).toEqual([
+    { id: claimant, reaches: true, via: "via claim" },
+    { id: "role:reviewer", reaches: false, via: "via route" },
+  ]);
+  expect(reach.count).toBe(1);
+  expect(reach.routeSession).toBeUndefined();
+});
+
+test("reachRows counts an offline session route's own session, which the listener does not name", () => {
+  const reach = reachRows({ ...noReach, route: `session:${routed}` });
+  expect(reach.issueRows).toEqual([{ id: routed, reaches: true, via: "via route" }]);
+  expect(reach.count).toBe(1);
+  expect(reach.routeSession).toBe(routed);
+  // Live, the server names the same session as the route's holder: still one row.
+  expect(reachRows({ ...noReach, route: `session:${routed}`, routeHolder: routed })).toEqual(reach);
 });

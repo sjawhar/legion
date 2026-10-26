@@ -14,8 +14,9 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // A person's answer and replies on an ask reach the ask's followers, the session holding the
-// issue's claim, and the issue's route. The card lists all three under `Reaches N`, and a claim
-// or route change on the issue moves its rows without a reload.
+// issue's claim, and the session the issue's route reaches (a role route's holder). The card lists
+// each session once under `Reaches N`, and a claim or route change on the issue moves its rows
+// without a reload.
 const asker = { kind: "session" as const, id: "e2e-reach-asker" };
 const claimant = { kind: "session" as const, id: "e2e-reach-claimant" };
 const routed = "e2e-reach-routed";
@@ -136,14 +137,60 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
     await expect(recipients.getByRole("list", { name: "Followers" })).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 1");
 
-    // A role route set on the issue joins the card over SSE as the route itself.
+    // A role route set on the issue joins the card over SSE, naming the session holding the role.
     await patchIssue(issue.key, { route: "role:reviewer" });
     await expect(recipients).toContainText("Reaches 2");
     const roleRow = viaIssue
       .getByRole("listitem")
-      .filter({ has: page.locator("[title='role:reviewer']") });
-    await expect(roleRow).toContainText("via route");
+      .filter({ has: page.locator(`[title='${routed}']`) });
+    await expect(roleRow).toContainText("Reviewer (e2e)");
+    await expect(roleRow).toContainText("via route (role:reviewer)");
     await expect(roleRow.locator("[title='Live']")).toHaveCount(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a role route held by the claimant is counted once, under the claim that names its holder", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "The claimant holds the route" });
+  const ask = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
+    { actor: asker, as: "agent" }
+  );
+  await claimIssue(issue.key, { actor: claimant, as: "agent" });
+  await patchIssue(issue.key, { route: "role:e2e-reach-implementer" });
+  await setLiveSessions([
+    { session_id: asker.id, title: "Asker (e2e)" },
+    { roles: ["e2e-reach-implementer"], session_id: claimant.id, title: "Claimant (e2e)" },
+  ]);
+  const read = await getAsk(ask.id);
+  expect([read.claimant, read.route, read.route_holder]).toEqual([
+    claimant.id,
+    "role:e2e-reach-implementer",
+    claimant.id,
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    const recipients = card.getByRole("region", { name: "Recipients" });
+    // The asker and the claimant: the route reaches the claimant, already counted.
+    await expect(recipients).toContainText("Reaches 2");
+    await recipients.getByRole("button", { name: /^Reaches/ }).click();
+    const viaIssue = recipients.getByRole("list", { name: "Via claim or route" });
+    await expect(viaIssue.getByRole("listitem")).toHaveCount(1);
+    const holderRow = viaIssue.getByRole("listitem");
+    await expect(holderRow.locator(`[title='${claimant.id}']`)).toHaveText("Claimant (e2e)");
+    await expect(holderRow).toContainText("via claim");
+    await expect(holderRow.locator("[title='Live']")).toHaveCount(1);
+    await expect(recipients.locator("[title='role:e2e-reach-implementer']")).toHaveCount(0);
+    await expect(recipients.locator(`[title='${claimant.id}']`)).toHaveCount(1);
   } finally {
     await alice.close();
   }

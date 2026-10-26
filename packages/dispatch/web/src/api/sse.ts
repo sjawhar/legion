@@ -2,7 +2,10 @@ import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import { reaskHeldCredentialList } from "../features/credentials/pending";
-import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
+import {
+  markPendingAskThreadInvalidation,
+  markPendingAskThreadsOnIssue,
+} from "../features/inbox/ask-thread-freshness";
 
 import {
   EventStreamHttpError,
@@ -146,48 +149,45 @@ function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
 }
 
 /**
- * Every cached ask thread on one issue. A claim, a release or an update moves the claimant or the
- * route an ask card lists among the sessions it reaches, but the thread key holds only the ask id,
- * so no key names an issue's threads: the flush expands this marker into the exact key of each one
- * (`expandAskThreadsOnIssue`). Left unexpanded it matches no query, since TanStack never matches
- * the object it carries against an ask id.
+ * The issue whose every cached ask thread an event moves, or null. Each open ask card lists the
+ * issue's claimant and the session its route reaches among the sessions it reaches, read from its
+ * thread: a claim or a release moves the claimant, and an update or a close can move the route
+ * (one PATCH that sets the route and the status `done` emits `issue.closed` alone). A deploy moves
+ * neither. The thread key holds only the ask id, so no key names an issue's threads: the stream
+ * keeps these issues in a set of their own beside its pending keys, and the flush turns them into
+ * the exact key of each thread (`askThreadKeysOnIssues`).
  */
-function askThreadsOnIssueKey(issueKey: string): readonly unknown[] {
-  return ["ask-thread", { issue_key: issueKey }];
-}
-
-function markedIssue([family, scope]: readonly unknown[]): string | undefined {
-  if (family !== "ask-thread" || typeof scope !== "object" || scope === null) {
-    return undefined;
+export function askThreadsIssue(event: Event): string | null {
+  switch (event.type) {
+    case "issue.claimed":
+    case "issue.released":
+    case "issue.updated":
+    case "issue.closed":
+      return event.issue_key;
+    default:
+      return null;
   }
-  return "issue_key" in scope && typeof scope.issue_key === "string" ? scope.issue_key : undefined;
 }
 
 /**
- * Replaces each `askThreadsOnIssueKey` marker with the `["ask-thread", id]` key of every cached
- * thread whose ask is on that issue, and of every thread still on its first load, whose issue the
- * cache cannot tell yet. A thread on another issue is left alone. The result holds each key once,
- * as the pending set it is read from does.
+ * The `["ask-thread", id]` key of every cached thread whose ask is on one of `issues`, and of every
+ * thread still on its first load, whose issue the cache cannot tell yet. A thread on another issue
+ * is left alone.
  */
-export function expandAskThreadsOnIssue(
+export function askThreadKeysOnIssues(
   queryClient: QueryClient,
-  keys: readonly (readonly unknown[])[]
+  issues: ReadonlySet<string>
 ): (readonly unknown[])[] {
-  const expanded = new Map<string, readonly unknown[]>();
-  for (const key of keys) {
-    const issueKey = markedIssue(key);
-    const matches =
-      issueKey === undefined
-        ? [key]
-        : queryClient
-            .getQueriesData<AskRead>({ queryKey: ["ask-thread"] })
-            .filter(([, thread]) => thread === undefined || thread.ask.issue_key === issueKey)
-            .map(([queryKey]) => queryKey);
-    for (const match of matches) {
-      expanded.set(JSON.stringify(match), match);
-    }
+  if (issues.size === 0) {
+    return [];
   }
-  return [...expanded.values()];
+  return queryClient
+    .getQueriesData<AskRead>({ queryKey: ["ask-thread"] })
+    .filter(
+      ([, thread]) =>
+        thread === undefined || (thread.ask.issue_key !== null && issues.has(thread.ask.issue_key))
+    )
+    .map(([queryKey]) => queryKey);
 }
 
 /** The signed-in person's answers page lists every answer and every reply on an ask, so the
@@ -431,7 +431,8 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
 }
 
 // The live stream reads this directly (`useEventStream`), so every invalidation the app
-// performs is a key this returns.
+// performs is a key this returns, beside the issue whose ask threads an event moves
+// (`askThreadsIssue`), which no key can name.
 export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
   const keys = ownerQueryKeys(event, signedInLogin);
   // A write cites nodes on other issues, whose rows carry those nodes' backlink counts; the
@@ -585,12 +586,9 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // Components, parents and subtree rollups are resolved on read up and down the parent
     // chain, so an issue's own event alters ancestors and descendants that get no event of
     // their own: refetch every open issue. The sidebar's per-project open-ask badge moves
-    // with a close, a reopen and an assignment, so it refetches here too. An update can change
-    // the issue's route, which every open ask card on it lists among the sessions it reaches.
+    // with a close, a reopen and an assignment, so it refetches here too. Every open ask card on
+    // the issue refreshes too (`askThreadsIssue`), since an update or a close can move the route.
     keys.push(["issue"], projectsQuery().queryKey);
-    if (event.type === "issue.updated") {
-      keys.push(askThreadsOnIssueKey(event.issue_key));
-    }
     return keys;
   }
   if (
@@ -600,12 +598,9 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   ) {
     // A claim changes only who holds the issue: its detail, its log, the lists that render
     // the claim — `["issues"]` above covers every project list by prefix — and the recipients of
-    // every open ask card on it, which list the claimant. No rollup, ask count or component
-    // attachment moves with it. A deploy is a line in the issue's log and nothing the lists or
-    // rollups read.
-    if (event.type !== "issue.deployed") {
-      keys.push(askThreadsOnIssueKey(event.issue_key));
-    }
+    // every open ask card on it, which list the claimant (`askThreadsIssue`). No rollup, ask
+    // count or component attachment moves with it. A deploy is a line in the issue's log and
+    // nothing the lists or rollups read.
     return keys;
   }
   // The branches above name every `issue.*` type there is, so a type added later falls to the
@@ -742,11 +737,14 @@ export const WHOLE_CACHE_REFRESH_MS = 5_000;
  * mounts from the landing rows seeds that thread from a body composed before the event.
  * Cancelling a first load does not reach this - a body that lands inside the debounce window is
  * already committed - so the marker makes the card read the ask endpoint instead of trusting the
- * row it mounted from.
+ * row it mounted from. An event that moves every thread on an issue (`askThreadsIssue`) marks the
+ * issue the same way, since the flush can expand it only into the threads already cached.
+ * Exported for the tests, which hold an Inbox fetch open around it.
  */
-function markAskThreadsSeededByAnInFlightInbox(
+export function markAskThreadsSeededByAnInFlightInbox(
   queryClient: QueryClient,
-  keys: readonly (readonly unknown[])[]
+  keys: readonly (readonly unknown[])[],
+  issue: string | null
 ): void {
   if (queryClient.getQueryState(inboxQueryKey)?.fetchStatus !== "fetching") {
     return;
@@ -759,6 +757,9 @@ function markAskThreadsSeededByAnInFlightInbox(
     ) {
       markPendingAskThreadInvalidation(queryClient, key[1]);
     }
+  }
+  if (issue !== null) {
+    markPendingAskThreadsOnIssue(queryClient, issue);
   }
 }
 
@@ -798,6 +799,9 @@ export function useEventStream({
     let lastWholeCacheRefresh = Number.NEGATIVE_INFINITY;
     let wholeCacheTrailing: number | undefined;
     const pending = new Map<string, readonly unknown[]>();
+    // The issues whose every cached ask thread the next flush refreshes (`askThreadsIssue`): no
+    // key names an issue's threads, so the flush reads the cache for them then.
+    const pendingIssues = new Set<string>();
 
     const armWatchdog = () => {
       window.clearTimeout(watchdog);
@@ -839,11 +843,15 @@ export function useEventStream({
       }
       flush = window.setTimeout(() => {
         flush = undefined;
-        const keys = pendingAll
-          ? undefined
-          : coalescePrefixKeys(expandAskThreadsOnIssue(queryClient, [...pending.values()]));
+        if (!pendingAll) {
+          for (const key of askThreadKeysOnIssues(queryClient, pendingIssues)) {
+            pending.set(JSON.stringify(key), key);
+          }
+        }
+        const keys = pendingAll ? undefined : coalescePrefixKeys([...pending.values()]);
         pendingAll = false;
         pending.clear();
+        pendingIssues.clear();
         refreshQueries(queryClient, keys);
       }, INVALIDATION_DEBOUNCE_MS);
     };
@@ -873,11 +881,14 @@ export function useEventStream({
       }, remaining);
     };
 
-    const queueInvalidations = (keys: readonly (readonly unknown[])[]) => {
+    const queueInvalidations = (keys: readonly (readonly unknown[])[], issue: string | null) => {
       // A latched whole-cache refresh subsumes every key, so there is nothing to record.
       if (!pendingAll) {
         for (const key of keys) {
           pending.set(JSON.stringify(key), key);
+        }
+        if (issue !== null) {
+          pendingIssues.add(issue);
         }
       }
       scheduleFlush();
@@ -906,8 +917,9 @@ export function useEventStream({
       prependEventToLog(queryClient, event);
       const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
       const keys = eventQueryKeys(event, signedInLogin);
-      markAskThreadsSeededByAnInFlightInbox(queryClient, keys);
-      queueInvalidations(keys);
+      const issue = askThreadsIssue(event);
+      markAskThreadsSeededByAnInFlightInbox(queryClient, keys, issue);
+      queueInvalidations(keys, issue);
     };
 
     const open = () => {
