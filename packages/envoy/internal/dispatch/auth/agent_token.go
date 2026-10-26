@@ -137,7 +137,7 @@ func MatchesSharedAgentToken(r *http.Request, token string, tokens *SharedAgentT
 // its caller was logged within the window.
 func (t *SharedAgentTokens) notePreviousToken(r *http.Request, entry int) {
 	caller := previousTokenCaller{
-		address:   clipCallerField(forwardedAddress(r)),
+		address:   clipCallerField(ForwardedAddress(r)),
 		userAgent: clipCallerField(r.UserAgent()),
 	}
 	now := time.Now()
@@ -185,9 +185,10 @@ func clipCallerField(field string) string {
 	return strings.ToValidUTF8(field[:previousTokenCallerBytes], "")
 }
 
-// forwardedAddress is the rightmost X-Forwarded-For entry, the address the load balancer in front
+// ForwardedAddress is the rightmost X-Forwarded-For entry, the address the load balancer in front
 // of Dispatch saw, or the connection's own address without its port when the header names none.
-func forwardedAddress(r *http.Request) string {
+// The access log names a request's address with it too (accesslog.Handler).
+func ForwardedAddress(r *http.Request) string {
 	forwarded := r.Header.Values("X-Forwarded-For")
 	if len(forwarded) > 0 {
 		last := forwarded[len(forwarded)-1]

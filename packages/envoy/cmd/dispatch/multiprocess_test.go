@@ -803,7 +803,7 @@ func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string)
 // writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
 // client is told to. A write whose own room is failed or reloading is answered
 // 503 DOC_SERVICE_UNAVAILABLE, and the contract is that the caller repeats the same call
-// (skills/dispatch/references/documents.md, and the pull request's contract census). A rig that
+// (`dispatch doc-edit --help`, and the skills/dispatch/SKILL.md opening list). A rig that
 // read that 503 as a failure would report a correct contract as a defect, which one run of this
 // row's first draft did.
 func writeThroughRetrying503s(t *testing.T, p *dispatchProcess, artifactID, find, with string) int {
