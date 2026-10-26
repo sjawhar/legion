@@ -258,8 +258,8 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // connection before it learns whether the lease is held, so a pass that skips because the other
 // process holds the lease holds a connection for that round trip too. Nine names are leased: the
 // document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
-// GitHub webhook redelivery sweep, the architecture import, the delivery reconcile (INFRA-66),
-// the edit-notice sweep (INFRA-140), and one per delivery durable for the consumers'
+// GitHub webhook redelivery sweep, the architecture import, the delivery reconcile,
+// the edit-notice sweep, and one per delivery durable for the consumers'
 // reconciliation (delivery.consumerLease, a name each for delivery-events and delivery-jobs) -
 // taken by nine callers, since each delivery intake takes its own durable's name from a bind poll
 // of its own, so nine callers can be inside Exclusive at once. Nine connections are exactly those

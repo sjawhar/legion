@@ -33,7 +33,7 @@
 # (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. DISPATCH_USER_TURNS_OMP
 # names another Oh My Pi (a mise tool spec such as github:sjawhar/oh-my-pi@<version>) in place of the
 # pinned one. DISPATCH_USER_TURNS_ONLY=spec-edit runs `session-registers` and the two spec-edit
-# checks alone, then ends: INFRA-140's live check, which needs none of the others;
+# checks alone, then ends: the spec-edit live check, which needs none of the others;
 # DISPATCH_USER_TURNS_ONLY=spec-edit-card stops after the first of them, the card's arrival.
 # Everything the run creates is its own and goes on any exit: its scratch directory, the isolated
 # profile under the HOME it gives Oh My Pi (make_omp_home, lib/omp-home.sh), the key command a
@@ -402,12 +402,12 @@ forge_on_bus() {
     '.payload = $p | .payload_summary = $b | .dedupe_key = $k | .event_id = $k' <<<"$envelope")"
 }
 
-# ---- a person's spec edit (INFRA-140) --------------------------------------------------------------
+# ---- a person's spec edit --------------------------------------------------------------------------
 # The session writes a spec; a person edits it in the browser; once the document has been quiet for
 # 30 s, the session gets one artifact.human_edited card holding the diff, and rewrites the part the
 # edit left saying the old time. The quiet time is Dispatch's own: the rig sets no
 # DISPATCH_TEST_EDIT_NOTICE_QUIET.
-spec_title="INFRA-140 export $run"
+spec_title="Spec edit export $run"
 spec_old="The export runs at 02:00 UTC."
 spec_new="The export runs at 04:00 UTC."
 spec_ask="With \`dispatch issue\` in project UT, create an issue titled \"$spec_title\" whose spec's first section says \`$spec_old\` and whose second section repeats that time."

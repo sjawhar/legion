@@ -16,7 +16,7 @@ import type { Event, EventType } from "../api/types";
  * `packages/dispatch/web/src/api/sse.ts`. It is the oracle this PR's behaviour is compared
  * against: every event must invalidate exactly what main invalidated, except the single
  * documented subtraction (the Inbox query for plain messages and non-ask comments). One type is
- * newer than the copy: `artifact.human_edited` (INFRA-140), a person's edits of a document, which
+ * newer than the copy: `artifact.human_edited`, a person's edits of a document, which
  * refreshes what that document's `artifact.version` refreshes, so the copy maps it beside it.
  */
 function mainArtifactId(event: Event): string | undefined {

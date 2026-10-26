@@ -1,4 +1,4 @@
--- INFRA-140: a person's pending edit notice, one row per document. When a person's browser edit
+-- A person's pending edit notice, one row per document. When a person's browser edit
 -- settles into a version, the settlement opens this row, or moves it on, in its own transaction
 -- (docs.recordEditNotice): from_version is the version before the first person's version of the
 -- quiet window, to_version the last one, editors every person who wrote one, last_editor the

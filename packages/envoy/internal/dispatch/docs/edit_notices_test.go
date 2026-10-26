@@ -906,7 +906,7 @@ func TestEditNoticeAPersonsQuestionEditSendsOne(t *testing.T) {
 	}
 }
 
-// The outside review's first case (dispatch://INFRA-140/artifact/outside-review-2137-md): the
+// The outside review's first case, from its written review of this change: the
 // document is not loaded in this process, and an agent's version is written here. Zoe edits, then
 // Adam, and the notice must name Adam. The person who edited last comes from the database, the
 // document's latest person sender each landed append recorded (readLastPerson), and the agent's
@@ -974,7 +974,7 @@ func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
 	}
 }
 
-// The re-read's finding 1 (dispatch://INFRA-140/artifact/review-2137-md): two people are
+// The re-read's first finding, from its written review of this change: two people are
 // connected and only one of them edits. ygo does not say which connection sent an update, so the
 // room credits every connected peer and records no sender (creditContentChange). The notice must
 // then name nobody, rather than pick a person out of the credited names: no window names anyone.

@@ -1192,7 +1192,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		return VersionResult{}, err
 	}
 	// A person's credit in this version opens the edit notice: the owner lock this transaction
-	// holds keeps the sweep's lock order (INFRA-140 R8).
+	// holds keeps the sweep's lock order (RunEditNotices).
 	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
 		return VersionResult{}, err
 	}
