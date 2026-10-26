@@ -10,7 +10,7 @@
   names the two versions the quiet window spans, each person who edited, and the unified diff of
   the two versions, cut at its last line end within 4,096 bytes. It goes to the issue's route and
   to each session the document credits, never to a person. The quiet window is a row of the new
-  table `document_edit_notices` (migration 0120), so a notice still pending when a process stops
+  table `document_edit_notices` (migration 0121), so a notice still pending when a process stops
   is sent by the next sweep of either process; the sweep runs every 5 seconds under the
   `edit-notices` lease, and the lease pool grows from eight connections to nine for it. A notice
   on an issue closed inside its quiet window is dropped. The dashboard's issue log reads `Edited
@@ -21,6 +21,35 @@
   (same migration) keeps across processes; an edit made while two peers were connected names
   nobody: an open window keeps its actor and takes the edit in, and with no window open the edit
   holds the window until a later version names a person, whose notice covers both.
+- Dispatch writes one access-log line per served request, so the callers behind a load spike can
+  be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
+  pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
+  token's owner, a verified service-account subject, or the shared token with no owner to name),
+  the credential that named a session, the forwarded address and the user agent, the status, the
+  milliseconds it took and the response bytes. It covers every `/api/v1` route, the document and
+  delivery websockets, `/auth/*`, the GitHub proxy and the 404 of a path no route answers, still
+  writes its line when a handler panics, names the caller a websocket or stream was admitted as
+  however many heartbeats it lives, cuts every field a caller wrote to 256 bytes, and never
+  carries a token, a cookie, a query string, a request body or a response body. It is always on:
+  it costs about 2.6 µs and 12 allocations per request and makes no database call
+  (`internal/dispatch/api/access_log_bench_test.go`), and the question it answers is asked when a
+  deployment is already in trouble (`cmd/dispatch/README.md`, "Access log").
+- A release of a `github-app` secret can be narrowed: `POST /v1/grants/{id}/values` takes an
+  optional `github_app` body (`owner`, `repositories`, `read_only`) that mints the token of one
+  account `github-owners` lists alone, sent to GitHub as the `access_tokens` body, limited to
+  those repositories of the account (at most 100), to `contents: read` and `metadata: read`, or
+  to both; a token limited to repositories alone keeps every permission the App holds. It can
+  only narrow, applies to that release alone, and the answer names it as `github_app`, which the
+  broker releases only once GitHub's own answer shows the token holds no more, revoking at GitHub
+  a token whose answer holds more. A bad body, a `repositories` list present but empty among
+  them, is `400 INVALID_NARROWING`, a narrowing of a grant holding no `github-app` secret
+  `400 NARROWING_NOT_APPLICABLE`, one to an account its `github-owners` tag does not list
+  `403 NARROWING_OWNER_NOT_LISTED`, and one GitHub refuses (a repository the installation does not
+  reach) `422 NARROWING_REFUSED`; the last two are logged at WARN as `broker: narrowing refused`.
+  `agent-secrets`' exec form takes `--github-owner`, `--github-repo` and `--github-read-only`,
+  exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
+  and runs its command only once the broker names the narrowing it applied, so deploy the broker
+  before any caller passes `--github-owner`.
 - Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
   Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
   `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces
@@ -72,6 +101,30 @@
   that inherited a stale address reads a stale address. Such a message carries no `asked the
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
+- The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
+  block it retracted carries `restored: true`: the ask returns to the state it had, and the event
+  records no new answer, so a reader that takes an `ask.answered` for a person's answer can tell
+  the two apart. A restore the release before this one writes carries no mark - every one already
+  in the event log, and one written during a rollout or an image rollback - so a missing mark does
+  not prove a new answer.
+- Dispatch's approval read (`approval` on every document read) names the latest review's event
+  sequence, `seq`, beside its `at`: each review keeps the sequence of the `artifact.approved` or
+  `artifact.changes_requested` event it appended on its document's owner
+  (`artifact_reviews.event_seq`, migration 0120, written in the same transaction). The owner's row
+  lock orders those events as they commit, so `seq` places a review among them where `at`, its
+  transaction's start, cannot. Every read that picks a document's newest review now orders by that
+  sequence (`docs.ReviewOrder`), so two reviews written at once read back in the order they
+  committed. A review recorded before the migration reads with its `at` and no `seq`, and so does
+  every read the release before it serves during a rollout or a rollback, so a missing `seq` does
+  not prove an older review. A review the release before it writes while a rollout or a rollback
+  runs both releases gets its sequence too, from the migration's trigger at its commit, so it reads
+  as the newest review it is rather than ranking below every sequenced one. 0120 is additive (a
+  nullable column, a `not valid` check, an index in the reads' order and a trigger), so rolling
+  back past 0120 alone, to a build that already carries 0117, is an image rollback: the release
+  before it keeps writing reviews, and the trigger sequences each one. 0117's own rule still
+  forbids starting a release older than 0117. The index (`artifact_reviews_by_artifact_event_seq`)
+  is built in the migration's own transaction under the table lock it already holds, reading every
+  review once.
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
   and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
@@ -727,6 +780,11 @@
 
 ### Changed
 
+- A rate-limited answer to any minter call, a release with no narrowing and a Google login's
+  refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
+  its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
+  body naming a rate limit (GitHub's secondary limit, Google's `rateLimitExceeded`). A rate limit
+  is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
 - **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
   its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
   Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,

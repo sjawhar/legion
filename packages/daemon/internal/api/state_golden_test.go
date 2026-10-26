@@ -119,7 +119,7 @@ runtime:
         - {key: spot, operator: Exists, effect: NoExecute}
       priority_class: legion-workers
     resources:
-      implementer: {cpu: 1500m, memory: 8Gi}
+      issue: {cpu: 4, memory: 24Gi}
       controller: {cpu: 2, cpu_request: 1, memory: 6Gi, memory_request: 4Gi}
     pod:
       env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, OPERATOR_FIXTURE_FLAG: operator-fixture-value}
@@ -234,7 +234,7 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "planner", Generation: 2,
+									Container: "roles", Generation: 2,
 								},
 							},
 						},
@@ -251,7 +251,7 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "implementer", Generation: 5,
+									Container: "roles", Generation: 5,
 								},
 							},
 							// The session's capability report (LEGION-663), from the process the locator
@@ -349,8 +349,8 @@ func populatedState(t *testing.T) State {
 		// stale.
 		Capabilities: CapabilityStatesOf(capabilities.Deployment{
 			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
-			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
-			RolesWithoutResources: []claim.Role{claim.RoleTester},
+			Decided:        map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
+			UnreservedPods: []capabilities.Pod{capabilities.PodIssue},
 		}.Report()),
 		// The project maps three repositories of two owners; the review App is not installed on one,
 		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
