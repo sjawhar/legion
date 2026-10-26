@@ -91,22 +91,21 @@ until_true() {
 # starts its process with start_process (the service's log, <NAME>_pid) and keeps its port file
 # and keeper socket in $work.
 
-# await_port_file NAME FILE VAR waits, bounded, for FILE, the port file held-port.py writes before
-# it runs the service NAME, while NAME's process (<NAME>_pid) lives, and assigns VAR its port. The
-# locals' names are ones no caller passes: printf -v would otherwise assign the local.
+# shellcheck source-path=SCRIPTDIR source=port-file.sh
+. "$root/scripts/e2e/lib/port-file.sh"
+
+# await_port_file NAME FILE VAR waits, bounded (read_port_file, lib/port-file.sh), for FILE, the
+# port file held-port.py writes before it runs the service NAME, while NAME's process (<NAME>_pid)
+# lives, and assigns VAR its port. The locals' names are ones no caller passes.
 await_port_file() {
-  local _name=$1 _file=$2 _var=$3 _pid_var _port _i
+  local _name=$1 _file=$2 _var=$3 _pid_var _status=0
   _pid_var=${_name}_pid
-  for ((_i = 0; _i < 60; _i++)); do
-    if [ -s "$_file" ]; then
-      read -r _port <"$_file"
-      printf -v "$_var" '%s' "$_port"
-      return 0
-    fi
-    kill -0 "${!_pid_var}" 2>/dev/null || fail "$_name exited before it held a port; see $evidence/logs/$_name.log"
-    sleep 0.5
-  done
-  fail "timed out after 30s waiting for $_name to hold a port"
+  read_port_file "$_file" "${!_pid_var}" "$_var" || _status=$?
+  case $_status in
+    0) ;;
+    1) fail "$_name exited before it held a port; see $evidence/logs/$_name.log" ;;
+    *) fail "timed out after ${port_file_seconds}s waiting for $_name to hold a port" ;;
+  esac
 }
 
 # start_held NAME PORT_VAR FD_ENV [--env K=V]... -- COMMAND... starts COMMAND as the service NAME on

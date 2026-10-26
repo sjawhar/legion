@@ -213,7 +213,8 @@ func holdPortOn(t *testing.T, host string) int {
 
 // heldSocket holds a loopback port the kernel chooses and returns a descriptor of its own for the
 // listening socket, with that port: the socket stays listening once the listener is closed, so no
-// other process can take the port before whatever is handed the descriptor serves it.
+// other process can take the port before whatever is handed the descriptor serves it. The
+// descriptor is closed when t ends, if its caller has not closed it first.
 func heldSocket(t *testing.T) (*os.File, int) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -225,6 +226,7 @@ func heldSocket(t *testing.T) (*os.File, int) {
 	if err != nil {
 		t.Fatalf("take the held socket's descriptor: %v", err)
 	}
+	t.Cleanup(func() { _ = file.Close() })
 	return file, listener.Addr().(*net.TCPAddr).Port
 }
 
@@ -434,12 +436,10 @@ func TestRunServesTheSocketItIsHandedAndLogsItsAddress(t *testing.T) {
 	}
 	cfg.Port = socket.Addr().Port
 	cfg.DaemonURL = "http://" + address
+	// Run's listen: the handed socket in place of any bind. The socket still holds cfg's address, so
+	// a daemon that bound it rather than serve the socket would be refused, and never answer.
 	o := fakeRuntime(fake.NewRuntime(), &built{})
-	o.inherited = inherited
-	o.listen = func(_, address string) (net.Listener, error) {
-		t.Errorf("the daemon bound %s in place of serving the socket it was handed", address)
-		return nil, &net.AddrError{Err: "bound in place of the socket it was handed", Addr: address}
-	}
+	o.listen = handed(inherited)
 	logs := &syncBuffer{}
 
 	startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))

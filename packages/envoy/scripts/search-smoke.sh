@@ -50,6 +50,8 @@ if [[ -z "$binary" ]]; then
 fi
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 readonly root
+# shellcheck source-path=SCRIPTDIR source=../../../scripts/e2e/lib/port-file.sh
+. "${root}/scripts/e2e/lib/port-file.sh"
 
 # held-port.py opens 127.0.0.1:0 and hands the socket to the server, so the port the kernel chose
 # stays held until the server serves on it; it then runs as the server, so $! is the server's PID.
@@ -67,17 +69,18 @@ HOME="${workdir}/home" \
     -- "$binary" >"${workdir}/server.log" 2>&1 &
 server_pid=$!
 
-for _ in $(seq 1 100); do
-  [[ ! -s "${workdir}/port" ]] || break
-  if ! kill -0 "$server_pid" 2>/dev/null; then
+port=""
+waited=0
+read_port_file "${workdir}/port" "$server_pid" port || waited=$?
+case $waited in
+  0) ;;
+  1)
     printf 'the server exited before its port was held; its log:\n' >&2
     cat "${workdir}/server.log" >&2
     exit 1
-  fi
-  sleep 0.1
-done
-[[ -s "${workdir}/port" ]] || { printf 'no port was held for the server within 10 seconds\n' >&2; exit 1; }
-port="$(<"${workdir}/port")"
+    ;;
+  *) printf 'no port was held for the server within %d seconds\n' "$port_file_seconds" >&2; exit 1 ;;
+esac
 readonly base="http://127.0.0.1:${port}"
 
 # The held socket queues a request until the server serves it, so each poll is bounded.

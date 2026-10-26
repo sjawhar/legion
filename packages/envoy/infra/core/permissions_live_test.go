@@ -70,7 +70,7 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				// allows: the check below that the server refused nothing it was not provoked to
 				// covers that subscription too.
 				process := startListenerConfig(t, listener, uri, seed, held, core.ListenerConfig{
-					MachineID: liveMachineID, Port: port, HostBridge: "127.0.0.1", SubscribeAllTopics: true,
+					MachineID: liveMachineID, HostBridge: "127.0.0.1", SubscribeAllTopics: true,
 				})
 				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
@@ -233,7 +233,7 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 			seed, server, uri := startSplitServer(t, image.Ref)
 			held := cmdtest.HoldPort(t)
 			process := startListenerConfig(t, listener, uri, seed, held, core.ListenerConfig{
-				MachineID: liveMachineID, Port: held.Port, SubscribeAllTopics: true,
+				MachineID: liveMachineID, SubscribeAllTopics: true,
 			})
 			process.WaitExit(t, "its start")
 			output := process.Output.String()
@@ -389,16 +389,18 @@ func (p *servingPort) requirePrompt(t *testing.T, process *cmdtest.Process, item
 func startListener(t *testing.T, binary, uri, seed string) (*cmdtest.Process, int) {
 	t.Helper()
 	held := cmdtest.HoldPort(t)
-	return startListenerConfig(t, binary, uri, seed, held, core.ListenerConfig{MachineID: liveMachineID, Port: held.Port}), held.Port
+	return startListenerConfig(t, binary, uri, seed, held, core.ListenerConfig{MachineID: liveMachineID}), held.Port
 }
 
 // startListenerConfig runs the listener binary against uri with the environment config renders and
 // the user's seed, so a test that asks what a component's own ListenerConfig does to the running
 // listener starts it from that very config rather than from a hand-written environment. The
 // listener serves on held, which it inherits as ENVOY_LISTEN_FD, so no other program can take the
-// port before it serves; config's Port names held's port, and the listener checks the two agree.
+// port before it serves; config's Port is held's port, set here, and the listener checks the two
+// agree.
 func startListenerConfig(t *testing.T, binary, uri, seed string, held *cmdtest.HeldPort, config core.ListenerConfig) *cmdtest.Process {
 	t.Helper()
+	config.Port = held.Port
 	env, err := config.Env([]string{uri})
 	require.NoError(t, err)
 	cmd := exec.Command(binary)

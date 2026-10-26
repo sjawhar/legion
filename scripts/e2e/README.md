@@ -2132,6 +2132,21 @@ what it got — `nats-server -p -1`, a Bun fake, `kubectl port-forward :<port>` 
 rig reads its report with `report_port`. A port a person sets explicitly is used as given, and an
 occupied one fails with `address already in use`.
 
+## lib/port-file.sh
+
+The wait for the port file [`lib/held-port.py`](#libheld-portpy) writes, which `lib/rig.sh`'s
+`start_held` and `keep_port` and `packages/envoy/scripts/search-smoke.sh` and `searchbench.sh`
+share. Sourced, never run; it needs nothing of its caller's.
+
+```sh
+. "$root/scripts/e2e/lib/port-file.sh"
+read_port_file "$work/dispatch.port" "$server_pid" port || waited=$?
+```
+
+`read_port_file FILE PID VAR` polls FILE every tenth of a second while PID lives and assigns VAR
+the port it names. It prints nothing, so each caller words its own failure: it returns 0 once VAR
+is set, 1 when PID exits before FILE is written, and 2 after `port_file_seconds` (30).
+
 ## lib/built-from.sh
 
 Prints what a stage proof ran, so a run can be tied to a commit after its scratch directory, and

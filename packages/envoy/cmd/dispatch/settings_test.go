@@ -764,11 +764,14 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("unset: ListenSocket = %v, want none", boot.ListenSocket)
 			}
 			// Set, the server serves on the socket at its own address, with neither other setting
-			// set or with both naming that address.
+			// set, with both naming that address, or with both empty, which is unset: an empty
+			// DISPATCH_LISTEN_HOST does not ask for every interface of a socket on one address.
 			for _, overrides := range []map[string]string{
 				{"DISPATCH_LISTEN_FD": descriptor},
 				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port},
 				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " [127.0.0.1] ", "DISPATCH_PORT": " " + port + " "},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": ""},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " ", "DISPATCH_PORT": " "},
 			} {
 				boot := resolveWith(t, overrides)
 				if boot.ListenSocket == nil || boot.ListenAddr != address.String() || boot.ListenSocket.Addr().String() != address.String() {

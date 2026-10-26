@@ -142,9 +142,7 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	err := command.Start()
 	// The server holds its own copy of the socket from here on, so it releases the port when it
 	// exits.
-	for _, file := range command.ExtraFiles {
-		_ = file.Close()
-	}
+	cmdtest.CloseExtraFiles(command)
 	if err != nil {
 		t.Fatalf("start a Dispatch server: %v", err)
 	}

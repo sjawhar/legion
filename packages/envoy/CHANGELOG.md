@@ -7,12 +7,12 @@
 - `envoy-dispatch` serves on an inherited listening TCP socket that `DISPATCH_LISTEN_FD` names by
   its descriptor number, and binds nothing: a test harness opens the socket on port 0 and holds the
   port the kernel chose until Dispatch serves on it, so no other program can take it in between.
-  `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set, must name the socket's address, and
-  `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening TCP socket, or
-  a setting that names another address, refuses startup naming the variable, with nothing bound in
-  its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a loopback address. The
-  `dispatch: listening` line names the address the server is bound to, in both modes: a server on
-  every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
+  `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not empty, must name the socket's
+  address, and `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening
+  TCP socket, or a setting that names another address, refuses startup naming the variable, with
+  nothing bound in its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a
+  loopback address. The `dispatch: listening` line names the address the server is bound to, in
+  both modes: a server on every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
 - `envoy-listener` serves on an inherited listening TCP socket that `ENVOY_LISTEN_FD` names by its
   descriptor number, and binds nothing, for a process a test harness starts (not a container:
   Docker cannot pass a host descriptor in). `ENVOY_LISTEN_HOST` and `PORT`, when set, must name the

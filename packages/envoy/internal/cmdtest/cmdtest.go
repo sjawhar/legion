@@ -46,17 +46,14 @@ type Process struct {
 
 // Start starts cmd, which failures call name, with its standard output and error captured in
 // Output, and kills it when the test ends if it is still running. It closes every file in
-// cmd.ExtraFiles once cmd.Start returns, whether the process started or not: a started process
-// holds its own copies from then on, so a socket a HeldPort passed it is released when it exits.
+// cmd.ExtraFiles once cmd.Start returns, whether the process started or not (CloseExtraFiles).
 func Start(t testing.TB, name string, cmd *exec.Cmd) *Process {
 	t.Helper()
 	exited := make(chan struct{})
 	process := &Process{Cmd: cmd, Output: &LockedBuffer{}, Exited: exited, name: name}
 	cmd.Stdout, cmd.Stderr = process.Output, process.Output
 	err := cmd.Start()
-	for _, file := range cmd.ExtraFiles {
-		_ = file.Close()
-	}
+	CloseExtraFiles(cmd)
 	if err != nil {
 		t.Fatalf("start %s: %v", name, err)
 	}
@@ -69,6 +66,15 @@ func Start(t testing.TB, name string, cmd *exec.Cmd) *Process {
 		<-exited
 	})
 	return process
+}
+
+// CloseExtraFiles closes the test's copy of every file in cmd.ExtraFiles. Call it once cmd.Start
+// returns, whether the process started or not: a started process holds its own copies from then
+// on, so a socket a HeldPort passed it is released when it exits.
+func CloseExtraFiles(cmd *exec.Cmd) {
+	for _, file := range cmd.ExtraFiles {
+		_ = file.Close()
+	}
 }
 
 // Terminate sends the process SIGTERM, as a deploy stops it, and returns when it was sent.

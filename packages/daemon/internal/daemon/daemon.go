@@ -135,11 +135,10 @@ type overrides struct {
 	// required-checks reads and its issue branches' creates); empty, in production, is
 	// https://api.github.com.
 	githubAPI string
-	// listen opens the API listener; nil is net.Listen. A test's, unused with inherited.
+	// listen takes the API listener for cfg's bind and port; nil binds them with net.Listen. Run's
+	// serves the socket `legion start` inherited from LEGION_LISTEN_FD (handed); a test's hands
+	// over a listener it holds.
 	listen func(network, address string) (net.Listener, error)
-	// inherited is the API listener Run is handed: the socket `legion start` adopted from
-	// LEGION_LISTEN_FD, served on in place of binding cfg's bind and port. nil binds them.
-	inherited net.Listener
 	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
 	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
@@ -198,7 +197,16 @@ type Build struct {
 // Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
 // listener is taken leaves it to the caller to close.
 func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
-	return run(ctx, cfg, build, log, overrides{inherited: listener})
+	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+}
+
+// handed is the listen of a daemon handed listener: it takes listener, whatever address it is
+// asked for, and binds nothing. A nil listener hands nothing, and the daemon binds its own address.
+func handed(listener net.Listener) func(network, address string) (net.Listener, error) {
+	if listener == nil {
+		return nil
+	}
+	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
 func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
@@ -301,18 +309,16 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		}
 	}
 	// The API serves on the socket it was handed (Run's listener) or binds cfg's address here.
-	listener := o.inherited
-	if listener == nil {
-		address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
-		listen := net.Listen
-		if o.listen != nil {
-			listen = o.listen
-		}
-		if listener, err = listen("tcp", address); err != nil {
-			workflow.stop()
-			st.Close()
-			return fmt.Errorf("listen on %s: %w", address, err)
-		}
+	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
+	listen := net.Listen
+	if o.listen != nil {
+		listen = o.listen
+	}
+	listener, err := listen("tcp", address)
+	if err != nil {
+		workflow.stop()
+		st.Close()
+		return fmt.Errorf("listen on %s: %w", address, err)
 	}
 
 	var apps appauth.Tokens

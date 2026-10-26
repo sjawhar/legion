@@ -1027,9 +1027,11 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 
 // resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket
 // that names, at the socket's own address, and DISPATCH_LISTEN_HOST and DISPATCH_PORT, each only
-// when set, must name that address: no default stands in for one that is unset. Without it, it is
-// the address listenAddress builds, for main to bind. It only inspects the socket; main adopts it,
-// so nothing a caller of resolveBootConfig gets owns a descriptor.
+// when set, must name that address: no default stands in for one that is unset. An empty value
+// reads as unset: without the socket an empty one is its default, and the listener reads an empty
+// ENVOY_LISTEN_HOST or PORT as unset too. Without DISPATCH_LISTEN_FD, it is the address
+// listenAddress builds, for main to bind. It only inspects the socket; main adopts it, so nothing a
+// caller of resolveBootConfig gets owns a descriptor.
 func resolveListen(env settingValues) (string, *listenfd.Socket, error) {
 	descriptor, set := env.lookup("DISPATCH_LISTEN_FD")
 	if !set {
@@ -1041,8 +1043,8 @@ func resolveListen(env settingValues) (string, *listenfd.Socket, error) {
 		return "", nil, err
 	}
 	setting := func(name string) listenfd.Setting {
-		value, set := env.lookup(name)
-		return listenfd.Setting{Name: name, Value: strings.TrimSpace(value), Set: set}
+		value := strings.TrimSpace(env.get(name))
+		return listenfd.Setting{Name: name, Value: value, Set: value != ""}
 	}
 	if err := socket.CheckAgainst(setting("DISPATCH_LISTEN_HOST"), setting("DISPATCH_PORT")); err != nil {
 		return "", nil, err
