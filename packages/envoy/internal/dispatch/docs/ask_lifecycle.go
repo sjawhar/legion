@@ -317,21 +317,19 @@ const (
 //
 // A settlement that stops short is run again, up to issueSettleAttempts times for each document
 // and within issueSettleBudget for the whole issue, no retry starting once the budget is spent
-// (every document still gets its first attempt, as before the retries):
-// a timer's settlement would retry it later, but the close does not wait for later, and a block
-// left unindexed when it commits is no ask it can withdraw with a record. A settlement stops short
-// on a room that holds updates its persistence has not stored or made durable yet, which the next
-// attempt, after a pause of issueSettleRetryPause, finds stored; on one superseded by a write that
-// landed while it ran, which the next attempt settles with that write; and on a room behind its
-// durable head (ErrRoomBehindHead), because another envoy-dispatch process appended to the
-// document after this one loaded it. Retrying on that room can never pass the gate, so the
-// instance the attempt held, read before it, is closed, as the stale-room evictor closes one: only
-// while the room still holds it (evictInstance), so a room something else replaced meanwhile is
-// left to its browsers. The next attempt then warms the room from the head. A settlement still
-// short after its last attempt, or once ctx ends or the service stops, which no further attempt
-// would get past, is logged and returned, joined with the others: the document's
-// pending-settlement row keeps the debt, for the room's next load or the resumption
-// (RunSettlementResumption).
+// (every document still gets its first attempt, as before the retries): a timer's settlement
+// would retry it later, but the close does not wait for later, and a block left unindexed when it
+// commits is no ask it can withdraw with a record. A settlement stops short on a room that holds
+// updates its persistence has not stored or made durable yet, which the next attempt, after a
+// pause of issueSettleRetryPause, finds stored; on one superseded by a write that landed while it
+// ran, which the next attempt settles with that write; and on a room behind its durable head,
+// because another envoy-dispatch process appended to the document after this one loaded it. The
+// gate's refusal closes that room itself (reloadRoomBehindHead) and leaves the document owing its
+// settlement, so the next attempt warms the room from the head and settles every update, this
+// process's and the other's. A settlement still short after its last attempt, or once ctx ends
+// or the service stops, which no further attempt would get past, is logged and returned, joined
+// with the others: the document's pending-settlement row keeps the debt, for the room's next load
+// or the resumption (RunSettlementResumption).
 //
 // It opens a transaction of its own for each settlement, which takes the issue's row, so it is
 // refused inside a transaction: a joined context's, or, for a context the pool tracks, any
@@ -354,16 +352,8 @@ func (s *Service) SettleIssueDocuments(ctx context.Context, issueKey string) err
 			if attempt > 1 && (ctx.Err() != nil || s.stopping.Load()) {
 				break
 			}
-			live := s.srv.GetDoc(room)
 			if err = s.settleOwedNow(ctx, room, deadline); err == nil || attempt == issueSettleAttempts {
 				break
-			}
-			if errors.Is(err, ErrRoomBehindHead) && live != nil {
-				if _, evictErr := s.evictInstance(ctx, room, live); evictErr != nil {
-					err = errors.Join(err, fmt.Errorf("close the room behind its durable head: %w", evictErr))
-					break
-				}
-				continue
 			}
 			pause := time.NewTimer(min(issueSettleRetryPause, time.Until(deadline)))
 			select {
