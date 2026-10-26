@@ -36,10 +36,11 @@ func OutOfWorkflow(status string) bool {
 // A root that never ran, whose recorded parent is a live tree's member, is adopted into that tree
 // before admission reads the line (admit's adoptQueuedRoots), so it is not read as waiting there.
 // A root whose parent is not recorded, under an ancestor recorded in another live tree
-// (AncestorTree), waits for nothing either: it is that tree's unreleased work, which its
-// architect's release, or its parent's, brings into the tree. A tree is live here when its root
-// does not linger and holds a slot or is itself in the line this reads before leaving such roots
-// out; once that tree lingers or leaves the workflow, the root waits as its own again.
+// (RecordedAncestor, whose current tree is read here, so a hold follows that ancestor's adoption
+// into a tree), waits for nothing either: it is that tree's unreleased work, which its architect's
+// release, or its parent's, brings into the tree. A tree is live here when its root does not linger
+// and holds a slot or is itself in the line this reads before leaving such roots out; once that
+// tree lingers or leaves the workflow, the root waits as its own again.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	slotted := make(map[string]struct{}, len(slots))
 	for _, slot := range slots {
@@ -53,13 +54,15 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 			}
 		}
 	}
-	if slices.ContainsFunc(waiting, func(issue Issue) bool { return issue.AncestorTree != "" }) {
+	if slices.ContainsFunc(waiting, func(issue Issue) bool { return issue.RecordedAncestor != "" }) {
 		queued := make(map[string]struct{}, len(waiting))
 		for _, issue := range waiting {
 			queued[issue.Key] = struct{}{}
 		}
+		trees := make(map[string]string, len(issues))
 		live := make(map[string]struct{}, len(slots)+len(waiting))
 		for _, issue := range issues {
+			trees[issue.Key] = issue.Tree
 			_, holds := slotted[issue.Key]
 			_, waits := queued[issue.Key]
 			if (holds || waits) && !issue.Lingers() {
@@ -67,8 +70,12 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 			}
 		}
 		waiting = slices.DeleteFunc(waiting, func(issue Issue) bool {
-			_, under := live[issue.AncestorTree]
-			return under && issue.AncestorTree != issue.Key
+			tree, ok := trees[issue.RecordedAncestor]
+			if !ok || issue.RecordedAncestor == issue.Key {
+				return false
+			}
+			_, under := live[tree]
+			return under && tree != issue.Key
 		})
 	}
 	sort.Slice(waiting, func(i, j int) bool { return RankLess(waiting[i], waiting[j]) })

@@ -287,7 +287,7 @@ func TestReleaseAdoptsAHeldRootUnderAnUnreleasedChild(t *testing.T) {
 	const parent = "LEGION-169"
 	a := newAdoptionHarness(t, 2)
 	a.apply("queued", intake.DispatchIssue{Key: adoptionChild, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
-		Title: adoptionChild, Parent: parent, Rank: "B", HandedOver: true, AncestorTree: adoptionTree})
+		Title: adoptionChild, Parent: parent, Rank: "B", HandedOver: true, RecordedAncestor: adoptionTree})
 	if got := a.record(adoptionChild); got.Tree != adoptionChild || a.slotted(adoptionChild) || len(a.waiting()) != 0 {
 		t.Fatalf("%s = %#v, waiting %q; want it recorded as a root of its own that waits for no slot", adoptionChild, got, a.waiting())
 	}

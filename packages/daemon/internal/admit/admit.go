@@ -83,7 +83,9 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 // waiting roots while capacity remains, and wakes the controller when a slot it released is still
 // free after that (wakeForFreeSlot). The workflow handler runs first: it records every live-tree
 // child, leaving admission to record only a still-unrecorded root or orphan. A release's adoption
-// of children it cannot adopt (adoptChildren) is the one fact admission refuses.
+// of children it cannot adopt (adoptChildren) is the one fact admission refuses. A Dispatch issue
+// fact's Reread is written first (applyReread), and a fact whose Reread changed a record releases
+// and promotes even when it records nothing itself.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	done, err := a.releaseDoneSlots(ctx, tx)
 	if err != nil {
@@ -129,6 +131,18 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		_, err := a.promote(ctx, tx)
 		return nil, nil, err
 	}
+	reread, err := a.applyReread(ctx, tx, observation.Reread)
+	if err != nil {
+		return nil, nil, err
+	}
+	// settleReread is the release and promotion an observation that records nothing still owes the
+	// line when its Reread moved a root's recorded ancestor: the root it frees has no event of its own.
+	settleReread := func() ([]string, error) {
+		if !reread {
+			return nil, nil
+		}
+		return a.settle(ctx, tx)
+	}
 
 	stored, err := a.store.Issue(ctx, tx, observation.Key)
 	if err != nil {
@@ -160,20 +174,25 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// found it would have release admit on that stale information instead.
 		if observation.Status != "todo" {
 			a.refreshHeldSummary(observation)
-			return nil, nil, nil
+			released, err := settleReread()
+			return released, nil, err
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
+			released, err := settleReread()
+			if err != nil {
+				return nil, nil, err
+			}
 			// An issue in todo that nobody handed to Legion wakes the controller while a slot stands
 			// free; the controller takes nothing for it, since only a person hands Legion work
 			// (skill://legion-controller, "Free slots"). The notice waits todoWakeDelay, so the
 			// events of one edit burst find it pending and fold into it.
 			free, err := a.slotFree(ctx, tx)
 			if err != nil || !free {
-				return nil, nil, err
+				return released, nil, err
 			}
-			return nil, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
+			return released, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
 		}
 		a.mu.Lock()
 		summary, held := a.pending[observation.Key]
@@ -191,7 +210,8 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 			// event already acknowledged as processed. promote's own pending membership check —
 			// not this one — is what still holds the freshly recorded candidate back from a slot
 			// until pending is actually clear; a later pass once the hold clears promotes it.
-			return nil, nil, nil
+			released, err := settleReread()
+			return released, nil, err
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
 			return nil, nil, err
@@ -200,14 +220,47 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		return nil, nil, err
 	}
 
-	released, err := a.releaseInactiveSlots(ctx, tx)
+	released, err := a.settle(ctx, tx)
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := a.promote(ctx, tx); err != nil {
-		return nil, nil, err
-	}
 	return released, nil, nil
+}
+
+// settle releases the slots of trees no longer in the workflow (releaseInactiveSlots) and promotes
+// waiting roots into what stands free, and reports the issues whose slots it released.
+func (a *Admission) settle(ctx context.Context, tx pgx.Tx) ([]string, error) {
+	released, err := a.releaseInactiveSlots(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.promote(ctx, tx); err != nil {
+		return nil, err
+	}
+	return released, nil
+}
+
+// applyReread writes each recorded ancestor an unrecorded issue's preparation read again
+// (intake.DispatchIssue.Reread) to its root's record while that record is still a todo root, and
+// says whether any record changed. The read was taken outside the fact lock, so a root adopted or
+// moved on meanwhile is left as it now stands.
+func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[string]string) (bool, error) {
+	changed := false
+	for _, key := range slices.Sorted(maps.Keys(reread)) {
+		stored, err := a.store.Issue(ctx, tx, key)
+		if err != nil {
+			return false, fmt.Errorf("read admission issue %s: %w", key, err)
+		}
+		if stored == nil || stored.Status != "todo" || !claim.IsTreeRoot(stored.Key, stored.Tree) || stored.RecordedAncestor == reread[key] {
+			continue
+		}
+		stored.RecordedAncestor = reread[key]
+		if err := a.store.PutIssue(ctx, tx, *stored); err != nil {
+			return false, fmt.Errorf("record the recorded ancestor of %s: %w", key, err)
+		}
+		changed = true
+	}
+	return changed, nil
 }
 
 // wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left
@@ -360,22 +413,22 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		return nil
 	}
 	issue := record.Issue{
-		Key:             observation.Key,
-		Tree:            observation.Key,
-		Project:         a.project,
-		Title:           observation.Title,
-		Parent:          record.ParentOf(observation.Parent),
-		Phase:           phase.Admitted,
-		Generation:      1,
-		Status:          "todo",
-		Rank:            observation.Rank,
-		HandedOver:      observation.HandedOver,
-		LastDispatchSeq: observation.Seq,
-		DispatchStatus:  observation.Status,
-		Repo:            resolution.Repo,
-		DefaultBranch:   resolution.DefaultBranch,
-		GitHubRepo:      resolution.GitHubRepo,
-		AncestorTree:    observation.AncestorTree,
+		Key:              observation.Key,
+		Tree:             observation.Key,
+		Project:          a.project,
+		Title:            observation.Title,
+		Parent:           record.ParentOf(observation.Parent),
+		Phase:            phase.Admitted,
+		Generation:       1,
+		Status:           "todo",
+		Rank:             observation.Rank,
+		HandedOver:       observation.HandedOver,
+		LastDispatchSeq:  observation.Seq,
+		DispatchStatus:   observation.Status,
+		Repo:             resolution.Repo,
+		DefaultBranch:    resolution.DefaultBranch,
+		GitHubRepo:       resolution.GitHubRepo,
+		RecordedAncestor: observation.RecordedAncestor,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
@@ -462,7 +515,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	}
 	o := observed{
 		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-		Status: status, Shown: summary.Status, AncestorTree: summary.AncestorTree, HandedOver: handed, Seq: seq,
+		Status: status, Shown: summary.Status, RecordedAncestor: summary.RecordedAncestor, HandedOver: handed, Seq: seq,
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
 		return a.readmit(ctx, tx, *stored, o, false)
@@ -486,7 +539,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	handed := observation.HandedOver
 	o := observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
-		Status: observation.Status, Shown: observation.Status, AncestorTree: observation.AncestorTree, HandedOver: handed, Seq: observation.Seq,
+		Status: observation.Status, Shown: observation.Status, RecordedAncestor: observation.RecordedAncestor, HandedOver: handed, Seq: observation.Seq,
 	}
 	if observation.DaemonActor && observation.HandedOver && observation.Status == "todo" {
 		if handover, err := a.store.Handover(ctx, tx, stored.Key); err != nil || handover == nil {
@@ -543,7 +596,7 @@ func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.
 		a.log.Info("admission hand-over", "issue", fact.Issue, "tree", fact.Tree, "linger", fact.Generation, "via", "outbox")
 	})
 	return a.readmit(ctx, tx, *stored, observed{
-		Title: stored.Title, Parent: deref(stored.Parent), Rank: stored.Rank, AncestorTree: stored.AncestorTree, Seq: stored.LastDispatchSeq,
+		Title: stored.Title, Parent: deref(stored.Parent), Rank: stored.Rank, RecordedAncestor: stored.RecordedAncestor, Seq: stored.LastDispatchSeq,
 	}, startedRun(*stored))
 }
 
@@ -574,11 +627,11 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
 // the boot read: Shown is the status Dispatch showed, and Status the one the record takes, which is
 // Shown except from a boot listing no newer than the record, which keeps the record's own.
-// AncestorTree is the live tree its preparation read above an unrecorded parent.
+// RecordedAncestor is the recorded ancestor its preparation read above an unrecorded parent.
 type observed struct {
-	Title, Parent, Rank, Status, Shown, AncestorTree string
-	HandedOver                                       bool
-	Seq                                              int64
+	Title, Parent, Rank, Status, Shown, RecordedAncestor string
+	HandedOver                                           bool
+	Seq                                                  int64
 }
 
 // recordObservation is where admission writes a Dispatch observation to an issue record: a live
@@ -593,7 +646,7 @@ type observed struct {
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
 	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
 		stored.HandedOver == o.HandedOver && sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq &&
-		stored.AncestorTree == o.AncestorTree {
+		stored.RecordedAncestor == o.RecordedAncestor {
 		return nil
 	}
 	stored.Title = o.Title
@@ -603,7 +656,7 @@ func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored rec
 	stored.DispatchStatus = o.Shown
 	stored.HandedOver = o.HandedOver
 	stored.LastDispatchSeq = o.Seq
-	stored.AncestorTree = o.AncestorTree
+	stored.RecordedAncestor = o.RecordedAncestor
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record observation of %s: %w", stored.Key, err)
 	}
@@ -627,7 +680,7 @@ func startedRun(issue record.Issue) bool {
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
-// for a slot, taking o's title, parent, rank, ancestor tree and sequence. A root starts a fresh
+// for a slot, taking o's title, parent, rank, recorded ancestor and sequence. A root starts a fresh
 // generation: its facts clear across its whole tree, as do those of an orphan readmitted without
 // carry. An orphan readmitted with carry (one that started a phase) is the same work moving from a
 // finished root to a root of its own, so its phase, phase rows, gate and pull request (with its
@@ -657,7 +710,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Title = o.Title
 	stored.HandedOver = true
 	stored.Parent = record.ParentOf(o.Parent)
-	stored.AncestorTree = o.AncestorTree
+	stored.RecordedAncestor = o.RecordedAncestor
 	stored.Tree = stored.Key
 	if !orphan {
 		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
@@ -1042,7 +1095,7 @@ func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
 		Key: observation.Key, Title: observation.Title, Status: observation.Status,
 		Parent: record.ParentOf(observation.Parent), Rank: observation.Rank,
 		HandedOver: observation.HandedOver, LastSeq: observation.Seq, ResolvedRepo: observation.ResolvedRepo,
-		AncestorTree: observation.AncestorTree,
+		RecordedAncestor: observation.RecordedAncestor,
 	}
 }
 

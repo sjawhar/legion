@@ -62,12 +62,12 @@ func recordedOn(key, tree, status string) record.Issue {
 		HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"}
 }
 
-// A labelled todo issue under a parent the workflow does not record is prepared with the tree of
+// A labelled todo issue under a parent the workflow does not record is prepared with the key of
 // its nearest recorded ancestor, read up Dispatch's parent chain, whether the issue is unrecorded
 // or recorded as a root of its own; a recorded parent, a chain that ends or loops with nothing
 // recorded, and a child already in its tree carry none. A failed read of the chain retries the
-// event rather than applying it without the tree.
-func TestPrepareReadsTheLiveTreeAboveAnUnrecordedParent(t *testing.T) {
+// event rather than applying it without the ancestor.
+func TestPrepareReadsTheRecordedAncestorAboveAnUnrecordedParent(t *testing.T) {
 	const tree, parent, child, other = "LEGION-168", "LEGION-169", "LEGION-214", "LEGION-170"
 	event := intake.DispatchIssue{Key: child, Seq: 1, Type: "issue.updated", Status: "todo", Title: child, Parent: parent, Rank: "B", HandedOver: true, ResolvedRepo: "acme/widgets"}
 	for _, tc := range []struct {
@@ -120,8 +120,8 @@ func TestPrepareReadsTheLiveTreeAboveAnUnrecordedParent(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || got.AncestorTree != tc.want {
-				t.Fatalf("prepareRepository = %#v, %v; want AncestorTree %q", got, err, tc.want)
+			if err != nil || got.RecordedAncestor != tc.want {
+				t.Fatalf("prepareRepository = %#v, %v; want RecordedAncestor %q", got, err, tc.want)
 			}
 		})
 	}

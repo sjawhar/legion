@@ -50,13 +50,20 @@ type DispatchIssue struct {
 	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
 	// never records an issue from a fact still missing it.
 	ResolvedRepoMissing bool
-	// AncestorTree is the recorded tree of the nearest recorded Dispatch ancestor above the issue's
+	// RecordedAncestor is the key of the nearest recorded Dispatch ancestor above the issue's
 	// parent when that parent is not recorded (a backlog child of a live tree, never released),
 	// read from Dispatch when the fact is prepared, outside the fact lock; empty when the issue has
 	// no parent, its parent is recorded, no ancestor is, or the fact is no todo of an unrecorded
 	// issue or a recorded root. Admission records it, and keeps such a root out of its waiting line
-	// while that tree is live (record.Waiting).
-	AncestorTree string
+	// while that ancestor's current tree is live (record.Waiting).
+	RecordedAncestor string
+	// Reread is the RecordedAncestor read again, when an event of an issue the workflow does not
+	// record is prepared, of every recorded todo root whose recorded Dispatch parent is not
+	// recorded, keyed by that root, for each one the read changes ("" for none now): such an
+	// unrecorded issue may be the very ancestor a person moved, and the root under it has no event
+	// of its own. Nil when none changes. Admission writes each before anything else it applies;
+	// the workflow reads none of it.
+	Reread map[string]string
 	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
 	// fact was prepared (ObservedIssue), not from one event, so no actor is known to have written
 	// its state. It reaches only an issue still unrecorded when it applies: ApplyFact, under the fact
@@ -90,7 +97,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, AncestorTree: issue.AncestorTree}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, RecordedAncestor: issue.RecordedAncestor}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -759,9 +766,9 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 
 // settleObserved is the fact ApplyFact applies in fact's place, under the fact lock, and whether it
 // applies one: an Observed issue fact's view, as a plain observation, while the workflow records no
-// issue of its key, and once one is recorded the event it was prepared in place of (Delivered), or
-// nothing when it was prepared in place of none. Every other fact applies as it is, so no handler
-// sees Observed or Delivered.
+// issue of its key, and once one is recorded the event it was prepared in place of (Delivered),
+// carrying the view's Reread, or nothing when it was prepared in place of none. Every other fact
+// applies as it is, so no handler sees Observed or Delivered.
 func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, error) {
 	issue, ok := fact.(DispatchIssue)
 	if !ok || !issue.Observed {
@@ -778,7 +785,9 @@ func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, erro
 	case issue.Delivered == nil:
 		return nil, false, nil
 	default:
-		return *issue.Delivered, true, nil
+		delivered := *issue.Delivered
+		delivered.Reread = issue.Reread
+		return delivered, true, nil
 	}
 }
 
