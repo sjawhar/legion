@@ -1393,8 +1393,8 @@
   renews its lease through a broker, so while every broker process was down, or none could reach
   the database, no lease could be renewed, and the first sweep after the outage ended every
   enrollment whose lease ran out meanwhile: each such pod lost its grants and stayed locked out
-  until it was relaunched. Every serving broker now beats on a one-row `broker_serving` table
-  (migration 0019) every `BROKER_SWEEP_SECONDS`. A gap longer than three sweeps between beats is
+  until it was relaunched. Every serving broker now beats on its own row of a `broker_serving` table
+  (migration 0019) every `BROKER_SWEEP_SECONDS`. A gap longer than three sweeps after the latest beat is
   time no broker was serving, and until a broker beats again a lease that was still running at the
   last beat stays live, so the sweep does not end it. The next beat gives that gap back to every
   such lease that was not revoked, capped at `BROKER_LEASE_SECONDS` from then, and logs

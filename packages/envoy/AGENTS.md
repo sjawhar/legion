@@ -3835,26 +3835,34 @@ lookup each rather than a scan of `grants`.
 
 Time no broker was serving does not count against a lease. A session renews only through a
 broker, so while every broker process is down, or none can reach the database, no lease can be
-renewed. Migration 0019 adds `broker_serving`, one row of `last_serving_at` and
-`not_serving_after`, and the SQL function `enrollment_lease_live(lease)`, the one liveness test
-for a lease at every site that asks (proof lookup, `Renew`, `EndLapsed`, a grant's values): a lease
-is live while it has not run out, and also when no broker has beaten for longer than
-`not_serving_after` and the lease was still running at `last_serving_at`. It reads the row without
-a lock. `enroll.ServingClock` (`internal/broker/enroll/serving.go`), started in `cmd/broker`'s
-`main`, beats on the row every `BROKER_SWEEP_SECONDS` on every serving broker, with a threshold of
-three sweeps. A beat that finds a longer gap since the last one gives that gap back to every
-unrevoked lease that was still running at the last beat, capped at now plus
-`BROKER_LEASE_SECONDS`, and logs INFO `broker: gave back the time no broker was serving ...`; the
-beat locks the row before it reads the gap, so two brokers beating at once give it back once. Until
-then such a lease stays live, so the sweeper never ends it. A revoked enrollment, and one whose
+renewed. Migration 0019 adds `broker_serving`, one row per broker process (`process`, a random id
+the process draws, `last_serving_at`, `not_serving_after`), and the SQL function
+`enrollment_lease_live(lease)`, the one liveness test for a lease at every site that asks (proof
+lookup, `Renew`, `EndLapsed`, a grant's values): a lease is live while it has not run out, and also
+when the latest row (greatest `last_serving_at`) is further back than its `not_serving_after` and
+the lease was still running at that row's `last_serving_at`. It reads the rows without a lock.
+`enroll.ServingClock` (`internal/broker/enroll/serving.go`), started in `cmd/broker`'s `main` beside
+`srv.Serve`, so a boot that fails before it serves records no beat, beats on its own row every
+`BROKER_SWEEP_SECONDS` on every serving broker, with a threshold of three sweeps. Each beat is
+bounded by one sweep: a deadline, and `lock_timeout`, `statement_timeout` and
+`idle_in_transaction_session_timeout` set for its transaction, so a beat held up on its row fails
+and logs the WARN (`timed_out=true`) while the other brokers keep the latest row current. While a
+broker is serving one statement writes the beater's own row, locking only it. A beat that finds a
+longer gap takes an advisory lock, reads the latest row again, gives that gap back to every
+unrevoked lease that was still running at the latest beat, capped at now plus
+`BROKER_LEASE_SECONDS`, and logs INFO `broker: gave back the time no broker was serving ...`; a
+second broker that waited on the lock finds no gap, so two brokers beating at once give it back
+once. Until then such a lease stays live, so the sweeper never ends it. A beat deletes rows more
+than an hour behind the latest. A revoked enrollment, and one whose
 lease ran out while a broker was serving, stays ended, and a renewal with another pod's or service
 account's token is still refused 403 `POD_IDENTITY_MISMATCH` and moves the lease not at all. Its
 limits: a broker that runs but pods cannot reach (ingress, DNS, a NetworkPolicy, a stale
 `AGENT_SECRETS_URL`) still counts as serving, so leases still end then; grant lifetimes and
-pending requests still run on wall-clock time; the row starts with no threshold, so the first
+pending requests still run on wall-clock time; the table starts empty, so the first
 deploy restores nothing; and a pod whose renewer already exited 76 stays without one until it is
 relaunched. `internal/broker/enroll/serving_test.go`,
-`internal/broker/api/renew_liveness_test.go` and `cmd/broker/outage_test.go`
+`internal/broker/api/renew_liveness_test.go`, `cmd/broker/serving_start_test.go` and
+`cmd/broker/outage_test.go`
 (`TestABrokerOutageLongerThanALease`, the real broker and `agent-secrets` binaries across an outage
 longer than a lease) test it.
 

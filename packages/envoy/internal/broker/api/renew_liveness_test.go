@@ -56,7 +56,7 @@ func TestAPodWhoseLeaseRanOutWhileNoBrokerServedRenewsAndReadsItsGrant(t *testin
 		sql  string
 		args []any
 	}{
-		{`update broker_serving set last_serving_at = now() - interval '10 minutes', not_serving_after = interval '15 seconds'`, nil},
+		{`insert into broker_serving (process, last_serving_at, not_serving_after) values ('gone', now() - interval '10 minutes', interval '15 seconds')`, nil},
 		{`update enrollments set lease_expires_at = now() - interval '1 minute' where id=$1`, []any{id}},
 		{`update enrollments set lease_expires_at = now() - interval '20 minutes' where id=$1`, []any{lapsed}},
 	} {
