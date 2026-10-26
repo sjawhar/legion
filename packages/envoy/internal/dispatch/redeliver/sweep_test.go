@@ -14,11 +14,13 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -98,7 +100,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatalf("JetStream: %v", err)
 	}
-	state, err := redeliver.OpenState(js)
+	state, err := redeliver.OpenState(nc, js)
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}
@@ -488,9 +490,9 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 	h.fail("guid-newer", http.StatusServiceUnavailable, time.Minute)
 	h.webhook.Limit(http.MethodPost, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}})
 
-	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
+	paused := &pausedClaim{KeyValue: h.state.Legacy(), entered: make(chan struct{}), release: make(chan struct{})}
 	second := h.sweeper()
-	second.State = bus.KeyValue{KeyValue: paused}
+	second.State = bus.NewKeyValue(paused, h.state.WatchHandle(), h.state.Streams())
 	reports := make(chan redeliver.Report, 1)
 	go func() {
 		report, err := second.Sweep(context.Background(), redeliver.Options{})
@@ -662,8 +664,12 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 	if got := h.requests(); len(got) != 0 {
 		t.Fatalf("a dry run requested %v", got)
 	}
-	if keys, err := h.state.Keys(); err == nil && len(keys) != 0 {
-		t.Fatalf("a dry run wrote state %v", keys)
+	var written []string
+	if _, err := kvwatch.ScanExistingKeys(h.state, jetstream.AllKeys, "redelivery state", kvwatch.ScanIdleTimeout, slog.New(slog.DiscardHandler), func(entry kvwatch.Entry) error {
+		written = append(written, entry.Key)
+		return nil
+	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes()); err != nil || len(written) != 0 {
+		t.Fatalf("a dry run wrote state %v (listing: %v)", written, err)
 	}
 	if h.logs.count("webhook delivery refused terminally") != 0 {
 		t.Fatalf("a dry run logged the alarm line:\n%s", h.logs)

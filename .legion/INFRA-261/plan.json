@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-261",
+  "completed": "2026-10-26T18:50:00Z",
+  "planDocument": "dispatch://INFRA-261/artifact/plan-md",
+  "standingRule": "Human ruling 2026-10-26 (dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830): a defect found in code this tree touches or depends on, with a clear fix, is fixed in this tree's pull request; no finding ask and no new issue for it. A finding ask only for code the tree does not touch or a fix needing a person's authority. Implementer, tester and reviewer follow it.",
+  "summary": "kvwatch replaces emptying a cache on a re-read with a read protocol (BeginRead / Apply with per-read marks / CompleteRead sweep) shared by the session, interest and CI caches, an epoch guard for writes outside the watcher, and a serving state: never before the first complete read, and not once the copy stopped following (new read, watcher end, recreate flagged by Check, NATS disconnect hook) for longer than min(2 min, MaxAge/2). The listener's GET /v1/sessions and GET /v1/interests/ (and the closed start gate for those two reads) answer 503 + Retry-After: 5 + code refilling; envoy_active_sessions/interests publish no sample then. Dispatch maps it to 503 ENVOY_REFILLING and route_status unknown + route_status_reason refilling; every web view stops deriving absence, zero counts or 'no agents' from a read that is not current and shows the refilling text.",
+  "tasks": [
+    "1 kvwatch: Cache interface, read protocol and lock order (D1, D2), following/stale episode/bound with MaxAge and injected clock (D5), disconnect hook + NeedsRead repair (D5), self re-read of a timed-out scan (D6), StreamState.MaxAge, TimingOut fixture drops the later nil; tests synchronized on completion replace the reset tests",
+    "2 adapters: session, interest, CI caches implement marks (D4), epoch guard (D3), sweep; session retention vs Get eligibility (D7) and TTL follows recreate (D15); interest List returns error and Cached(id); two-phase Reap with authoritative per-id liveness (D10)",
+    "3 listener: listedSessions shared by handler and metric, cache-only join, 503 refilling answer with Retry-After and code, start gate answers the two list reads the same, optional-sample gauge read through a pointer published when /v1 opens, disconnect hook and NeedsRead in self-health",
+    "4 Dispatch server: envoy.ErrRefilling from the listener body, 503 ENVOY_REFILLING with Retry-After on agents and both subscriber routes, route_status_reason on list/pinned/detail reads, filter 503",
+    "5 contracts: IssueRouteReach.route_status_reason + CHANGELOG",
+    "6 web: isAgentListRefilling, useAgents refilling/current, per-consumer no-absence rule and refilling text (D12), issue-cache PATCH reset of the reason",
+    "7 browser e2e: fake-envoy list toggle ok/refilling/down, e2e/agent-list-refilling.e2e.ts over every named view, failing at the merge base and passing at the head",
+    "8 scripts: smoke-channel.sh wait_for_teardown and stage3-4b13b-acceptance.sh audit treat a non-200 as unreadable (D13); scripts/README note for listener-deploy-probe",
+    "9 rig packages/envoy/scripts/e2e-refill.sh (real listener + own NATS) with scenarios reread, interrupt, refuse, each reporting invalid when it missed its window",
+    "10 docs: envoy docs/architecture.md, envoy AGENTS.md rows, cmd/dispatch/README.md, INFRA-249 solution note, envoy and contracts CHANGELOGs"
+  ],
+  "proofs": [
+    {
+      "criterion": "Acceptance 1: a re-read keeps every record until it completes, then the new read's records",
+      "surface": "real listener binary on its own real NATS (rig)",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario reread",
+      "negativeControl": "same scenario on a build of the merge base shows a 200 missing rows mid-read"
+    },
+    {
+      "criterion": "Acceptance 2: an incomplete read removes nothing and the listener reads again itself",
+      "surface": "real listener binary on its own real NATS (rig)",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario interrupt",
+      "negativeControl": "merge-base build empties the list on the recreate"
+    },
+    {
+      "criterion": "Acceptance 3 (listener) and 4: 503 + Retry-After before first read and past the bound; metric no sample then, equal to the list otherwise, zero only for a complete empty copy",
+      "surface": "real listener binary on its own real NATS (rig)",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario refuse",
+      "negativeControl": "merge-base build answers 200 with its frozen copy and a count past the bound while NATS is down"
+    },
+    {
+      "criterion": "Acceptance 3: envoy_sessions fails with the refilling message",
+      "surface": "claude-envoy MCP server over stdio against the rig listener",
+      "command": "ENVOY_URL=<rig listener> bun packages/claude-envoy/dist/envoy-channel.js, JSON-RPC tools/call envoy_sessions during the refuse window",
+      "negativeControl": "merge-base listener returns its frozen list instead of failing"
+    },
+    {
+      "criterion": "Acceptance 3: every Dispatch view shows refilling, never absence; route status unknown with the issue page saying why",
+      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener) plus the real Dispatch server against the rig listener",
+      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling; curl -i <dispatch>/api/v1/agents during the rig's refuse window",
+      "negativeControl": "the e2e fails on a build of the merge base"
+    }
+  ],
+  "productionCheck": "After merge: production listener GET /v1/sessions complete 200 and envoy_active_sessions equal to its length; the deployment's dispatch-production-check.sh with --page /agents --route /api/v1/agents (and the issue page with --route /api/v1/issues). Refilling is proven pre-merge only, by choice: provoking it in production needs a destructive action on the production bucket or connection.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: references/pr-body.md for the proofs P1-P5, the PR body and the simplify pass; references/conflicts-and-rewrites.md for the forward merge if INFRA-141 (#2167) lands first",
+      "ce-simplify-code: the one simplify pass on the diff the PR rules require",
+      "dispatch: the production record on the issue after the merge"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md to verify the implementer's proof and add the tester's own on the rig, the claude-envoy tool host and the Dispatch browser suite, writing red tests for any break no test catches"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the review round and approval",
+      "ce-simplify-code: to judge the implementer's recorded simplify pass"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Stale allowance could renew on each retry; failed replacement setup unspecified",
+        "answer": "D5: staleSince is set only if zero, so one episode spans every failed or replaced read until a complete read; a Rewatch failing before install changes nothing (a healthy watcher stays following, an ended one already started the episode). Task 1 test crosses the bound over several failed generations."
+      },
+      {
+        "finding": "Completion, generation check, sweep and serving transition need one serialized protocol; Check can invalidate without a generation change",
+        "answer": "D2: complete takes applyMu, rechecks generation/stopped/Check error under mu, sweeps with mu released, then sets following only if still valid; hooks run with applyMu held and mu released; order cache mutex -> w.mu. Task 1 tests hold the nil across Rewatch, Check and Stop."
+      },
+      {
+        "finding": "Clearing the fence on recreate is unsafe while old-bucket reads/writes are in flight, for all three adapters",
+        "answer": "D3: kvwatch Epoch bumps only on a different stream; every write-through, read-through, delete and CI CAS captures (handle, epoch) and applies only if the epoch is unchanged under the adapter mutex. Task 2 interleaving tests."
+      },
+      {
+        "finding": "Seen-set marking relative to fence rejection and read-throughs was undefined",
+        "answer": "D4: mark every current-generation delivery before the fence comparison and every current-epoch write/read/delete; a D3-dropped result marks nothing; sweep removes unmarked entries. Task 2 tests assert values and membership for the five named cases."
+      },
+      {
+        "finding": "Timed-out scan retry lifecycle incomplete; fixture forwards a second nil",
+        "answer": "D6: rereadTimer armed through AfterFunc, cleared by install and Stop; watch(expect=G) compare-and-install; setup failure re-arms; TimingOut fixture drops the later nil. Premature end goes through the reconnect hook and the self-health rebuild, named and tested."
+      },
+      {
+        "finding": "Suspending expiry in Get/LastSeen changes single-session liveness, possibly forever",
+        "answer": "D7: only List retains expired rows while not following; Get keeps not-found for an expired row (so roleHolderSession falls through to Refresh); a row is never deleted during a read. Task 2 test."
+      },
+      {
+        "finding": "Metric deps==nil rule contradicts /v1 opening before deps.Store",
+        "answer": "D9: the metric reads a pointer openV1Routes publishes when /v1 opens; before that the gate answers refilling and the metric has no sample. Task 3 durable-bind-window test."
+      },
+      {
+        "finding": "One listing function must not add NATS reads to metrics; snapshot boundary and lock order",
+        "answer": "D8: listedSessions checks both Servable() (watcher state, no cache locks) then List(); the list join uses a cache-only Cached(id); the metric counts without the join. Task 3 tests: interest-only refusal, no NATS read with NATS stalled."
+      },
+      {
+        "finding": "Reaper guard ambiguous and racy",
+        "answer": "D10: Reap collects candidates under the interest lock without calling the session registry, then confirms each with the per-id authoritative liveness (roleHolderMayBeLive: cache hit, else bucket Refresh; error keeps) before deleting. Held-pass test."
+      },
+      {
+        "finding": "Bound tied to the TTL seen at Open; rebuild-count rationale unsupported",
+        "answer": "D5: bound = min(2 min, MaxAge/2) from the stream read before every install (StreamState.MaxAge); D15 session TTL follows a recreate; the rebuild-count claim was removed."
+      },
+      {
+        "finding": "Not every consumer of the list was covered (credentials, claim chip, filter, broadcast, conversation controls, list/board route status)",
+        "answer": "D12 enumerates every useAgents consumer and what each shows; title-only consumers keep a label fallback, stated explicitly; list/board render nothing for unknown and the issue page gives the reason, as the spec says."
+      },
+      {
+        "finding": "Retained earlier data can still authorize absence claims",
+        "answer": "D12 precedence: rows may stay but every absence claim requires current (the latest read succeeded). Task 7 e2e drives 200-nonempty->refilling->recovery, 200-empty->refilling and initial refilling."
+      },
+      {
+        "finding": "route_status_reason needs the issue-cache PATCH merge and fixtures",
+        "answer": "D11/task 6: reason moves through model, contracts, read responses, issue-cache.ts reset on route change, fixtures and tests together."
+      },
+      {
+        "finding": "Existing tests pin reset-time disappearance and timeout policy",
+        "answer": "Task 1/2/3 name the tests to replace (kvwatch_test.go :282-311, :348-356, :537-593; warmup_test.go :130-170; store/kv_test.go :1976-2023; listener gate expectations) and synchronize on a completed read."
+      },
+      {
+        "finding": "Acceptance 2 had no proof surface",
+        "answer": "P2: rig scenario interrupt (SIGSTOP past the idle timer, or kill/restart NATS) recording which path ran and marking a missed window invalid; per-outcome deterministic locks in task 1."
+      },
+      {
+        "finding": "Acceptance 1/3/4 clauses uncovered; count-only oracle weak",
+        "answer": "P1 asserts by identity with old/both/new sets, changed values, interest-bucket recreate and identical-record recreate; P3 covers boot, past-bound, recovery, empty zero; P5 covers both subscriber routes, ask card, route behaviour and the unreachable distinction; renewal across old expiry is a task 2 clock test."
+      },
+      {
+        "finding": "/healthz serving fields are not observable on the NATS-down paths",
+        "answer": "D16: /healthz unchanged and not an oracle; /v1/sessions and /metrics are."
+      },
+      {
+        "finding": "The claimed first-read ended-agents defect is unreachable (AgentsPage returns early)",
+        "answer": "Corrected: the reachable case is retained rows plus a non-current read, covered by D12's current rule."
+      },
+      {
+        "finding": "'A refill cannot be provoked in production without deleting the bucket' is wrong",
+        "answer": "Rephrased: pre-merge-only proof is a safety choice; same-bucket reads run on every reconnect and self-health rebuild."
+      },
+      {
+        "finding": "Standing ruling evidence not attached",
+        "answer": "Read dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830 (answered by the human 2026-10-26, Gate on, with the text quoted in standingRule); the controller's reply states the rule."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [],
+  "coordination": "dispatch://INFRA-141 PR #2167 (open) edits session/registry.go, cmd/listener/main.go and api.go; no shared hunk expected; whichever lands second merges forward.",
+  "generation": 3,
+  "generationNote": "Generation 3 of the tree, restarted after the contract-37 drain. Spec unchanged (approved v14). The architect ruled (Envoy, 2026-10-26T18:48Z): the plan stands as written at dispatch://INFRA-261/artifact/plan-md and in this file; no re-plan, so the gap analysis and plan review below are the original run's (no plan content changed, so neither check was run again).",
+  "implementerNote": "PR #2238 (https://github.com/sjawhar/legion/pull/2238) is in review round 4 under the architect's narrowed scope (dispatch://INFRA-261/comment/fc6cef36-ce91-4115-93d5-8bcd47ecac78). That round answers exactly: (1) the reviewer's six findings and its minor wording in https://github.com/sjawhar/legion/pull/2238#pullrequestreview-5656516981 (also .legion/INFRA-261/review.json keyFindings): Refresh returns an unapplied read uncached; one stream confirmation per probe interval or stop following when confirmations keep failing; bus.KeyValue no longer promotes nats.go's legacy watcher; pi-envoy smoke-btw.sh and smoke-registration-stall.sh treat a failed list as unreadable; agent route text branches on route_status_reason; a Contract change census in the PR body; (2) the reviewer's consolidation done in this PR: one shared kvwatch copy type for the session, interest and CI caches (entries, revision fence, marks, read epoch), the kvwatch.go and store/kv.go splits, the duplicate helpers, the refillrig/main.go split; the Fast-follow line becomes none. New structural preferences outside these do not reopen the round. Your unfinished round-4 edits are saved at legion/INFRA-261-wip (29499c35, child of 4f17991d, 15 files) and must be restored from there before new work."
+}

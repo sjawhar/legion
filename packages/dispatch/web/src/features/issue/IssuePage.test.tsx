@@ -5,7 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
-import { ApiError, api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
   Agent,
   Ask,
@@ -22,6 +22,7 @@ import { IssuePage } from "./IssuePage";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",
@@ -344,15 +345,42 @@ test("IssuePage's header warns when nobody holds the route, and adds nothing whe
     live();
   }
 
-  const unjudged = stubIssuePage({ ...issue, route: "role:sre", route_status: "unknown" });
+  const unjudged = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "unreachable",
+  });
   const unjudgedView = renderIssuePage();
   try {
     const row = await stateRow();
     expect(within(row).getByTestId("issue-route-unknown").textContent).toBe("Route reach unknown");
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
     expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
   } finally {
     unjudgedView.unmount();
     unjudged();
+  }
+
+  // A listener that is refilling its agent list says so: the route is unknown for that reason,
+  // never unheld.
+  const refilling = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "unknown",
+    route_status_reason: "refilling",
+  });
+  const refillingView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    expect(within(row).getByTestId("issue-route-refilling").textContent).toBe(
+      `Route reach unknown: ${AGENT_LIST_REFILLING}`
+    );
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+  } finally {
+    refillingView.unmount();
+    refilling();
   }
 });
 
@@ -606,6 +634,30 @@ test("IssuePage shows a retryable error and hides the section when the subscribe
       expect(screen.queryByRole("region", { name: "Subscribed agents" })).toBeNull()
     );
     await screen.findByText("Subscribed agents unavailable — Envoy listener unreachable.");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+// A refilling agent list is not an unreachable listener, and a failed read counts nobody: the
+// header's toggle drops its number rather than say the issue has no subscribers.
+test("IssuePage says the agent list is refilling and counts no subscribers from a failed read", async () => {
+  const restore = stubIssuePage(issue);
+  api.getIssueSubscribers = async () => {
+    throw new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+  };
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText(issue.title);
+    const notice = await screen.findByTestId("agent-list-refilling");
+    expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
+    expect(
+      screen.queryByText("Subscribed agents unavailable — Envoy listener unreachable.")
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Subscribers" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Subscribers: / })).toBeNull();
   } finally {
     view.unmount();
     restore();

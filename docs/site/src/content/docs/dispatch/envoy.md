@@ -233,6 +233,14 @@ subscription caches are loaded. Until then `/v1` answers `503` `service starting
 deploy the new listener therefore serves `/v1` while the old one still holds the durable consumer,
 and takes the consumer within two seconds of the old one exiting.
 
+The two list reads, `GET /v1/sessions` and `GET /v1/interests/`, answer `503` with
+`Retry-After: 5` and the code `refilling` whenever the listener cannot stand behind its copy of a
+bucket: before `/v1` opens, before the copy's first complete read, and once the copy has not
+followed its bucket for longer than 2 minutes (half the bucket's `MaxAge` when that is shorter),
+such as through a NATS outage. That answer is "try again", never an empty list: a session missing
+from it is not a session that ended. A read of the bucket again keeps every row until it
+completes.
+
 Give the listener about 30 seconds to stop after `SIGTERM`. It stops taking requests, lets
 deliveries in progress finish, then exits with a non-zero code so a restart policy brings it back.
 

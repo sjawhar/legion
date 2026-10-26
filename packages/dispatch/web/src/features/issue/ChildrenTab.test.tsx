@@ -10,6 +10,7 @@ import { ChildrenTab } from "./ChildrenTab";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   artifacts: [],
   children: [
     {

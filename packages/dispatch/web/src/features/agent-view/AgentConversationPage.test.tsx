@@ -9,7 +9,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import * as live from "../../api/live";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
 import { Sidebar } from "../sidebar/Sidebar";
@@ -91,6 +91,7 @@ interface LiveView {
  */
 function renderLiveView({
   agentState,
+  agents,
   capabilities = agent.capabilities,
   messages,
   other,
@@ -99,6 +100,8 @@ function renderLiveView({
   responding,
 }: {
   agentState: UserAgentStates;
+  /** What the agent list answers in place of SESSION alone: another list, or a failure. */
+  agents?: Agent[] | Error;
   capabilities?: string[];
   messages: MessageRead[];
   other?: { replay?: AgentStreamFrame[] };
@@ -108,12 +111,19 @@ function renderLiveView({
 }): LiveView {
   let stream: live.StreamHandlers | undefined;
   let thread = messages;
+  const listAgents = spyOn(api, "listAgents");
+  if (agents instanceof Error) listAgents.mockRejectedValue(agents);
+  else {
+    listAgents.mockResolvedValue(
+      agents ?? [
+        { ...agent, capabilities },
+        ...(other === undefined ? [] : [{ ...agent, session_id: OTHER, title: "Reviewer" }]),
+      ]
+    );
+  }
   spies.push(
     spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
-    spyOn(api, "listAgents").mockResolvedValue([
-      { ...agent, capabilities },
-      ...(other === undefined ? [] : [{ ...agent, session_id: OTHER, title: "Reviewer" }]),
-    ]),
+    listAgents,
     spyOn(live, "readEventStream").mockImplementation((url, handlers) => {
       if (!url.endsWith("/stream")) return new Promise<void>(() => undefined);
       stream = handlers;
@@ -495,6 +505,50 @@ test("the live view says a session advertising no delivery mode takes no message
   });
   await screen.findByRole("combobox", { name: "Delivery mode" });
   expect(screen.queryByTestId("agent-takes-no-messages")).toBeNull();
+});
+
+// Only a current agent list says a session is gone. One that is refilling says that instead, and
+// one Dispatch could not read says that; neither narrows the delivery modes to none.
+test("the live view says the session may have ended only from a current agent list", async () => {
+  const putAgentState = () => spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 });
+  const modes = async () =>
+    [
+      ...((await screen.findByRole("combobox", { name: "Delivery mode" })) as HTMLSelectElement)
+        .options,
+    ].map((option) => option.textContent);
+
+  renderLiveView({
+    agentState: {},
+    agents: new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING }),
+    messages: [],
+    putAgentState: putAgentState(),
+  });
+  expect((await screen.findByTestId("agent-list-refilling")).textContent).toBe(
+    AGENT_LIST_REFILLING
+  );
+  expect(screen.queryByText(/may have ended/)).toBeNull();
+  expect(await modes()).toEqual(["Send", "Aside", "BTW"]);
+
+  cleanup();
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  renderLiveView({
+    agentState: {},
+    agents: new ApiError(503, { code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+    messages: [],
+    putAgentState: putAgentState(),
+  });
+  await screen.findByTestId("agent-list-unreachable");
+  expect(screen.queryByTestId("agent-list-refilling")).toBeNull();
+  expect(screen.queryByText(/may have ended/)).toBeNull();
+  expect(await modes()).toEqual(["Send", "Aside", "BTW"]);
+
+  cleanup();
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  renderLiveView({ agentState: {}, agents: [], messages: [], putAgentState: putAgentState() });
+  expect((await screen.findByTestId("agent-not-listed")).textContent).toBe(
+    "Not in the live session list — it may have ended."
+  );
+  expect(screen.queryByTestId("agent-list-refilling")).toBeNull();
 });
 
 /** An assistant message the session streamed, optionally naming the model that produced it

@@ -1,7 +1,7 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
-import { api } from "../../api/client";
+import { api, isAgentListRefilling } from "../../api/client";
 import type { Agent } from "../../api/types";
 
 /**
@@ -109,6 +109,12 @@ export interface AgentRegistry {
   lastSeen(sessionId: string): number | undefined;
   /** Every listed session's registry title, for the contracts naming functions. */
   readonly titles: ReadonlyMap<string, string>;
+  /** The latest read failed: every state is `unknown`, and a view that would judge an absence
+   *  says it could not check instead. */
+  readonly isError: boolean;
+  /** The failed read's reason was Envoy answering that its agent list is refilling
+   *  (`isAgentListRefilling`), which a view says in place of an unreachable listener. */
+  readonly refilling: boolean;
 }
 
 /**
@@ -118,7 +124,7 @@ export interface AgentRegistry {
  */
 export function useAgentRegistry(enabled: boolean): AgentRegistry {
   useRegistryPolling(enabled);
-  const { data, isError, isPending } = useQuery({
+  const { data, error, isError, isPending } = useQuery({
     ...agentsQuery(),
     enabled,
     refetchOnMount: false,
@@ -127,9 +133,12 @@ export function useAgentRegistry(enabled: boolean): AgentRegistry {
   // A failed refetch keeps the last response's data, so the state goes back to unknown while
   // the cached titles go on naming agents.
   const known = !(isPending || isError);
+  const refilling = isError && isAgentListRefilling(error);
   return useMemo(
     () => ({
+      isError,
       lastSeen: (sessionId: string) => lookup.byId.get(sessionId)?.last_seen,
+      refilling,
       state: (sessionId: string): AgentState =>
         !known ? "unknown" : lookup.byId.has(sessionId) ? "running" : "not-running",
       title: (sessionId: string) => {
@@ -138,6 +147,6 @@ export function useAgentRegistry(enabled: boolean): AgentRegistry {
       },
       titles: lookup.titles,
     }),
-    [known, lookup]
+    [isError, known, lookup, refilling]
   );
 }

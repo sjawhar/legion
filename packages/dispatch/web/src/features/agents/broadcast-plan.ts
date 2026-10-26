@@ -1,5 +1,6 @@
 import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
 
+import { AGENT_LIST_REFILLING } from "../../api/client";
 import type { Agent, CreateBroadcastInput, MessageDeliveryMode } from "../../api/types";
 import { MODE_LABELS } from "../conversation/delivery";
 import type { AgentPart } from "../refs/AgentName";
@@ -14,12 +15,31 @@ export interface BroadcastExclusionPlan {
   readonly sessionID: string;
 }
 
+/** A recipient the agent list could not vouch for: a selected session missing from a list whose
+ *  latest read failed, with the composer-facing wording of that unknown. */
+export interface BroadcastUncheckedRecipient {
+  readonly reason: string;
+  readonly sessionID: string;
+}
+
 /** The sessions a broadcast of the current selection reaches, and the selected ones it leaves out. */
 export interface BroadcastPlan {
   readonly excluded: readonly BroadcastExclusionPlan[];
   /** The session ids the send will name, in the order it names them. A restored send can name
    *  a session the registry no longer holds, which no `Agent` stands for. */
   readonly recipients: readonly string[];
+  /** The recipients the list could not vouch for, because it is not current and does not hold
+   *  them. Each is still named in the send: the server reads each id's liveness itself. */
+  readonly unchecked: readonly BroadcastUncheckedRecipient[];
+}
+
+/** The agent list a plan is judged against, as `useAgents` answers it: the rows of its last
+ *  successful read, whether its latest read succeeded (`current`), and whether that read failed
+ *  because Envoy is refilling the list (`refilling`). */
+export interface BroadcastRoster {
+  readonly agents: readonly Agent[];
+  readonly current: boolean;
+  readonly refilling: boolean;
 }
 
 /** What the composer shows about the send it would make: Send's label, the one notice line, and
@@ -42,18 +62,38 @@ function sessionsById(agents: readonly Agent[]): Map<string, Agent> {
   return new Map(agents.map((agent) => [agent.session_id, agent]));
 }
 
-/** Why the live registry leaves a selected session out of a send in `delivery`, or undefined when
- *  it can take it. */
+/** That a list could not vouch for a selected session: it would have to claim an absence - that
+ *  the session has gone, or that it does not advertise the mode - and its latest read failed. */
+const UNCHECKED = "unchecked";
+
+/** Why the live registry leaves a selected session out of a send in `delivery`, undefined when
+ *  it can take it, or UNCHECKED when only an absence claim would leave it out and the list is
+ *  not `current`. A session the list does not hold and a capability its row does not carry are
+ *  both absences, and only a current list says either: a refilling list's rows are its last
+ *  successful read, which says nothing of what a session advertises now. */
 function liveExclusion(
   sessionID: string,
   agent: Agent | undefined,
-  delivery: MessageDeliveryMode
-): BroadcastExclusionPlan | undefined {
-  if (agent === undefined) return { agent: undefined, reason: "no live session", sessionID };
-  if (!agent.capabilities.includes(delivery)) {
-    return { agent, reason: `does not advertise ${MODE_LABELS[delivery]}`, sessionID };
-  }
-  return undefined;
+  delivery: MessageDeliveryMode,
+  current: boolean
+): BroadcastExclusionPlan | typeof UNCHECKED | undefined {
+  const reason =
+    agent === undefined
+      ? "no live session"
+      : agent.capabilities.includes(delivery)
+        ? undefined
+        : `does not advertise ${MODE_LABELS[delivery]}`;
+  if (reason === undefined) return undefined;
+  return current ? { agent, reason, sessionID } : UNCHECKED;
+}
+
+/** What the composer says of a selected session a list that is not current cannot vouch for:
+ *  whether it runs, and so what it takes, is unknown, not that it has gone or cannot take the
+ *  mode, and a refilling list says so in the shared words. */
+function uncheckedReason(refilling: boolean): string {
+  return refilling
+    ? `couldn't check whether it is running. ${AGENT_LIST_REFILLING}`
+    : "couldn't check whether it is running";
 }
 
 /**
@@ -61,22 +101,34 @@ function liveExclusion(
  * sessions it leaves out. A session that does not advertise the chosen mode is excluded
  * rather than switched to another one - the mode is part of what the sender said - and a
  * selection kept across a session going away excludes it too, which is exactly the judgment
- * the server repeats against its own registry read when the send arrives.
+ * the server repeats against its own registry read when the send arrives. Both are absences,
+ * judged only against a `current` list: a selected session missing from a list whose latest read
+ * failed (a refilling one, say), or listed there without the mode, is unknown, not left out, so
+ * it stays a recipient - `unchecked`, with that unknown as its wording - and the server, which
+ * reads each selected id's liveness and capabilities at send time, excludes it then if it really
+ * has gone or cannot take the mode.
  */
 export function broadcastPlan(
   selected: ReadonlySet<string>,
-  agents: readonly Agent[],
+  { agents, current, refilling }: BroadcastRoster,
   delivery: MessageDeliveryMode
 ): BroadcastPlan {
   const live = sessionsById(agents);
   const excluded: BroadcastExclusionPlan[] = [];
   const recipients: string[] = [];
+  const unchecked: BroadcastUncheckedRecipient[] = [];
   for (const sessionID of selected) {
-    const exclusion = liveExclusion(sessionID, live.get(sessionID), delivery);
-    if (exclusion === undefined) recipients.push(sessionID);
-    else excluded.push(exclusion);
+    const exclusion = liveExclusion(sessionID, live.get(sessionID), delivery, current);
+    if (exclusion === undefined) {
+      recipients.push(sessionID);
+    } else if (exclusion === UNCHECKED) {
+      recipients.push(sessionID);
+      unchecked.push({ reason: uncheckedReason(refilling), sessionID });
+    } else {
+      excluded.push(exclusion);
+    }
   }
-  return { excluded, recipients };
+  return { excluded, recipients, unchecked };
 }
 
 /** Why a selected session that has come back is left out of a restored send: it was not
@@ -89,13 +141,17 @@ const NOT_IN_RESTORED_SEND = "not in the refused send; edit to include it";
  * excluded, so the composer never shows as reached a session the request will not ask for: with
  * NOT_IN_RESTORED_SEND when it has come back since and an edit - which drops the restored request
  * for the live plan - would include it, and otherwise with the reason the live plan would give.
+ * A list that is not current says neither that a session it does not hold has gone nor that a
+ * session it lists lacks the mode, so such a session is NOT_IN_RESTORED_SEND too: the live plan an
+ * edit composes would name it, `unchecked`.
  * A named session that has left since is still a recipient here: the request asks for it, and the
- * server excludes it against its own registry and names it on the broadcast.
+ * server excludes it against its own registry and names it on the broadcast; one a list that is
+ * not current cannot vouch for is `unchecked`.
  */
 function restoredBroadcastPlan(
   restored: CreateBroadcastInput,
   selected: ReadonlySet<string>,
-  agents: readonly Agent[]
+  { agents, current, refilling }: BroadcastRoster
 ): BroadcastPlan {
   const live = sessionsById(agents);
   const named = new Set(restored.session_ids);
@@ -103,15 +159,19 @@ function restoredBroadcastPlan(
   for (const sessionID of selected) {
     if (named.has(sessionID)) continue;
     const agent = live.get(sessionID);
+    const exclusion = liveExclusion(sessionID, agent, restored.delivery, current);
     excluded.push(
-      liveExclusion(sessionID, agent, restored.delivery) ?? {
-        agent,
-        reason: NOT_IN_RESTORED_SEND,
-        sessionID,
-      }
+      exclusion === undefined || exclusion === UNCHECKED
+        ? { agent, reason: NOT_IN_RESTORED_SEND, sessionID }
+        : exclusion
     );
   }
-  return { excluded, recipients: [...restored.session_ids] };
+  const unchecked = restored.session_ids.flatMap((sessionID) =>
+    liveExclusion(sessionID, live.get(sessionID), restored.delivery, current) === UNCHECKED
+      ? [{ reason: uncheckedReason(refilling), sessionID }]
+      : []
+  );
+  return { excluded, recipients: [...restored.session_ids], unchecked };
 }
 
 /** What the composer would send, and the plan it shows for it. */
@@ -133,13 +193,13 @@ export function composedBroadcast(
     readonly selected: ReadonlySet<string>;
     readonly sendKey: string;
   },
-  agents: readonly Agent[]
+  roster: BroadcastRoster
 ): ComposedBroadcast {
   const { delivery, draft, restored, selected, sendKey } = composition;
   if (restored !== null) {
-    return { input: restored, plan: restoredBroadcastPlan(restored, selected, agents) };
+    return { input: restored, plan: restoredBroadcastPlan(restored, selected, roster) };
   }
-  const plan = broadcastPlan(selected, agents, delivery);
+  const plan = broadcastPlan(selected, roster, delivery);
   return {
     input: { body: draft, delivery, idempotency_key: sendKey, session_ids: plan.recipients },
     plan,

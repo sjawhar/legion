@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
+import { AgentListRefilling } from "../../components/QueryError";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -70,7 +71,7 @@ function emptyText(responding: boolean | undefined): string {
 
 export function AgentConversationPage(): ReactNode {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
-  const { agents } = useAgents(true, true);
+  const { agents, current, isPending, refilling } = useAgents(true, true);
   const agent = agents.find((candidate) => candidate.session_id === sessionId);
   // The page knows the route's session id and the registry, not a stamped title: the agent is
   // named by its registry title, else its short id.
@@ -82,7 +83,9 @@ export function AgentConversationPage(): ReactNode {
   // newest `settings` frame reports, or, for a session that reports none, the most recent
   // assistant turn's own model (LEGION-548), nothing guessed for a client that never sends one.
   const settings = sessionSettingsView(conversation, responding, replays);
-  const modes = deliveryModes(agent?.capabilities ?? []);
+  // Only a current list says what the session takes: while it is refilling or unreachable every
+  // mode is offered, as unknown, rather than narrowed to what an empty or earlier list says.
+  const modes = deliveryModes(current ? (agent?.capabilities ?? []) : DELIVERY_CAPABILITIES);
   // The human's pick holds only while the session still offers it: the session list loads after
   // the page, and a pick the session does not advertise would be refused.
   const [picked, setPicked] = useState<MessageDeliveryMode | null>(null);
@@ -211,15 +214,28 @@ export function AgentConversationPage(): ReactNode {
             {presence.label}
           </span>
         </span>
-        {agent === undefined ? (
-          <span className={`text-xs ${textMutedOnCanvas}`}>
-            Not in the live session list — it may have ended.
+        {current ? null : refilling ? (
+          <AgentListRefilling className={`text-xs ${textMutedOnCanvas}`} />
+        ) : isPending ? (
+          <span className={`text-xs ${textMutedOnCanvas}`} data-testid="agent-list-loading">
+            Loading the live session list…
           </span>
         ) : (
+          <span className={`text-xs ${dangerText}`} data-testid="agent-list-unreachable">
+            Could not check the live session list — Envoy listener unreachable.
+          </span>
+        )}
+        {/* Only a current list says the session is gone; one that failed or is refilling keeps
+            the details an earlier read gave and says nothing of what it lacks. */}
+        {agent !== undefined ? (
           <span className={`min-w-0 truncate text-xs ${textMutedOnCanvas}`}>
             {agent.host} · {agent.dir}
           </span>
-        )}
+        ) : current ? (
+          <span className={`text-xs ${textMutedOnCanvas}`} data-testid="agent-not-listed">
+            Not in the live session list — it may have ended.
+          </span>
+        ) : null}
         <label className={`ml-auto flex items-center gap-2 text-xs ${textMutedOnCanvas}`}>
           Send as
           <select
@@ -250,7 +266,7 @@ export function AgentConversationPage(): ReactNode {
           This Dispatch cannot reach the session's conversation.
         </p>
       ) : null}
-      {agent !== undefined && agent.capabilities.length === 0 ? (
+      {current && agent !== undefined && agent.capabilities.length === 0 ? (
         <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-takes-no-messages">
           This session advertises no delivery mode, so a message sent here records a failed attempt.
           A Claude Code session takes messages only when it was started with its Envoy channel.

@@ -34,6 +34,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
+import { AgentListRefilling } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
 import { useSending } from "../../hooks/useSending";
 import { compareTimestamps } from "../../lib/timestamps";
@@ -250,7 +251,7 @@ function AgentExchangeReply({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   reply: Message;
@@ -322,7 +323,7 @@ function AgentTargetedMessage({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   replyDisabled: boolean;
@@ -410,7 +411,7 @@ function AgentMessageList({
   replyDisabled,
 }: {
   agent: Agent;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   onReply: (reply: AgentReply) => void;
   /** Whether the row is open. Its list stays mounted while it is collapsed, and marks nothing read
    *  there: a reply is read once it is on screen. */
@@ -588,7 +589,9 @@ function AgentRow({
   /** A row in a closed fold, or one the filters exclude: still mounted, so a pin, a fold's toggle
    *  or a filter loses nothing it holds. */
   hidden: boolean;
-  liveAgents: readonly Agent[];
+  /** The roster a reply's delivery capabilities are judged against; `undefined` while the agent
+   *  list's read is not current, when every capability is unknown (`capabilitiesForTarget`). */
+  liveAgents: readonly Agent[] | undefined;
   /** Whether the page is at Tailwind's `md` or wider - the width the row's own `md:` classes
    *  switch at - answered once for the whole list rather than once per row: a list of two
    *  hundred rows must not hold two hundred media-query listeners. Below it, on a phone, there
@@ -808,7 +811,7 @@ function AgentRowDetails({
   expanded: boolean;
   hidden: boolean;
   id: string;
-  liveAgents: readonly Agent[];
+  liveAgents: readonly Agent[] | undefined;
   replyTo: AgentReply | null;
   setReplyTo: (reply: AgentReply | null) => void;
 }): ReactNode {
@@ -1015,7 +1018,9 @@ function SelectionHeader({
  * Send hands the request to the page's queue (`onSend`) at the press: `composed`, which
  * `composedBroadcast` decides - the restored request word for word while one is kept, else the
  * live plan under the composition's key - with the plan the composer shows for it, so a session
- * that has come back since a refused send is shown as not in the request being re-sent.
+ * that has come back since a refused send is shown as not in the request being re-sent. A
+ * selected session the agent list could not vouch for (`unchecked`: missing from a list that is
+ * not current) keeps its place in the send, and its chip says its state is unknown, not gone.
  */
 function BroadcastComposer({
   agents,
@@ -1042,7 +1047,7 @@ function BroadcastComposer({
   selected: ReadonlySet<string>;
 }): ReactNode {
   const { plan } = composed;
-  const { excluded, recipients } = plan;
+  const { excluded, recipients, unchecked } = plan;
   // The selection's own mode, named when it is not the broadcast's usual BTW, so the reader knows
   // what their words become: an Aside, because a selected session takes Aside and not BTW.
   const asideOnly =
@@ -1098,6 +1103,7 @@ function BroadcastComposer({
         {[...selected].map((sessionID) => {
           const agent = agents.find((candidate) => candidate.session_id === sessionID);
           const left = excluded.find((item) => item.sessionID === sessionID);
+          const note = left ?? unchecked.find((item) => item.sessionID === sessionID);
           return (
             <li className="narrow-or-short:shrink-0" key={sessionID}>
               {/* The deselect button keeps the name; the agent's live link sits beside it. */}
@@ -1111,7 +1117,7 @@ function BroadcastComposer({
                     type="button"
                   >
                     {name}
-                    {left === undefined ? "" : ` · ${left.reason}`} ✕
+                    {note === undefined ? "" : ` · ${note.reason}`} ✕
                   </button>
                 )}
                 kind="control"
@@ -1170,7 +1176,7 @@ function BroadcastComposer({
 
 export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
-  const { agents, error, isError, isPending } = useAgents(true, true);
+  const { agents, current, error, isError, isPending, refilling } = useAgents(true, true);
   // One listener for the list, not one per row: every row's directory reads the same answer.
   const mdViewport = useMediaQuery(MD_VIEWPORT_QUERY);
   const inbox = useQuery(inboxQuery());
@@ -1338,7 +1344,7 @@ export function AgentsPage(): ReactNode {
       agent={agent}
       hidden={!foldOpen || !matches(agent)}
       key={agent.session_id}
-      liveAgents={agents}
+      liveAgents={current ? agents : undefined}
       mdViewport={mdViewport}
       needsYou={needsYouBySession.get(agent.session_id) ?? 0}
       onPin={() => togglePin(agent.session_id)}
@@ -1381,8 +1387,9 @@ export function AgentsPage(): ReactNode {
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   // A refresh that fails keeps the list it has: unmounting every row would throw away what each
-  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep.
-  if (isError && agents.length === 0) {
+  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep. A list
+  // that is refilling is no failure to report, and the page says so in its place.
+  if (isError && agents.length === 0 && !refilling) {
     return <p className={dangerText}>Could not load agents: {error}</p>;
   }
 
@@ -1399,13 +1406,19 @@ export function AgentsPage(): ReactNode {
           </Link>
         </p>
       </header>
-      {isError ? (
+      {refilling ? (
+        <AgentListRefilling className={`mb-3 text-sm ${textSecondaryOnCanvas}`} />
+      ) : isError ? (
         <p className={`mb-3 text-sm ${dangerText}`} role="alert">
           Could not refresh agents: {error}
         </p>
       ) : null}
+      {/* Only a current list says nobody is connected: one that failed or is refilling keeps
+          the rows it had, and an empty one it had says nothing about now. */}
       {agents.length === 0 ? (
-        <EmptyState label="Agents empty state" message="No agents are connected." />
+        current ? (
+          <EmptyState label="Agents empty state" message="No agents are connected." />
+        ) : null
       ) : (
         <>
           <AgentFilterBar
@@ -1421,7 +1434,7 @@ export function AgentsPage(): ReactNode {
             onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}
           />
-          {matching.length === 0 ? (
+          {matching.length === 0 && current ? (
             <EmptyState
               label="Agents filtered empty state"
               message="No agent matches these filters."
@@ -1452,7 +1465,10 @@ export function AgentsPage(): ReactNode {
             <BroadcastComposer
               agents={agents}
               body={draft}
-              composed={composedBroadcast({ ...composition, delivery }, agents)}
+              composed={composedBroadcast(
+                { ...composition, delivery },
+                { agents, current, refilling }
+              )}
               defaulted={composition.delivery === null}
               delivery={delivery}
               onBody={composition.setDraft}
@@ -1467,7 +1483,8 @@ export function AgentsPage(): ReactNode {
           ) : null}
         </div>
       )}
-      <EndedAgentsWithReplies live={agents} />
+      {/* A session the list does not hold has ended only when the list is current. */}
+      {current ? <EndedAgentsWithReplies live={agents} /> : null}
     </section>
   );
 }

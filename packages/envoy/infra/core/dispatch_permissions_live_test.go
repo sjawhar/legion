@@ -61,7 +61,7 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireDurablesAcknowledge(t, live.js)
 				requireIssueEventPublished(t, live.process, live.conn, live.port)
 				requireAgentStreamRelayed(t, live.conn, live.port)
-				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
+				requireWebhookRedeliveryBucket(t, live.conn, live.js, live.process, live.github)
 
 				// Dispatch's grant, built on the listener's, publishes every notification topic: an ad-hoc
 				// topic outside every stream subject reaches its subscriber, with no violation.
@@ -359,20 +359,29 @@ func requireSSEFrame(t *testing.T, reader *bufio.Reader, want string) {
 	}
 }
 
-func requireWebhookRedeliveryBucket(t *testing.T, js natsgo.JetStreamContext, process *cmdtest.Process, github *dispatchGitHub) {
+// requireWebhookRedeliveryBucket checks the redelivery bucket Dispatch opened takes a write, a read
+// and a watch through the jetstream handle, the watch Dispatch's sweep scans its records with.
+func requireWebhookRedeliveryBucket(t *testing.T, conn *natsgo.Conn, js natsgo.JetStreamContext, process *cmdtest.Process, github *dispatchGitHub) {
 	t.Helper()
 	process.WaitForOutput(t, "dispatch: redelivering the GitHub App webhook's failed deliveries")
 	github.requireCalled(t, "GET /app/hook/deliveries")
-	kv, err := bus.OpenKeyValue(js, bus.WebhookRedeliveryBucket)
+	kv, err := bus.OpenKeyValue(conn, js, bus.WebhookRedeliveryBucket)
 	require.NoError(t, err)
 	_, err = kv.Put("test", []byte("value"))
 	require.NoError(t, err)
 	entry, err := kv.Get("test")
 	require.NoError(t, err)
 	require.Equal(t, []byte("value"), entry.Value())
-	watch, err := kv.Watch("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	watch, err := kv.WatchKeys(ctx, "test")
+	if err != nil {
+		cancel()
+	}
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = watch.Stop() })
+	t.Cleanup(func() {
+		_ = watch.Stop()
+		cancel()
+	})
 	select {
 	case update := <-watch.Updates():
 		require.NotNil(t, update)

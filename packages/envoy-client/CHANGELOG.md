@@ -78,6 +78,11 @@
 
 ### Fixed
 
+- `dispatch issues` and `dispatch read` say a route's status is unknown because the Envoy
+  listener's agent list is refilling (`route_status_reason: "refilling"`), so to try again in a
+  moment, where they used to say the listener did not answer, which they now say only of a
+  listener that did not (INFRA-261).
+
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file
   that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader

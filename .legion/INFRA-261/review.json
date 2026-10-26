@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-261",
+  "completed": "2026-10-26T17:45:39Z",
+  "round": 1,
+  "reviewedCodeHead": "724ed7ea10d84136a493101753d8e1d92de90198",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 5,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/session/registry.go:443",
+      "description": "Refresh drops a live bucket read when the epoch moves during kv.Get (MarkCurrent false), then answers r.Get from the cache, which can be ErrKeyNotFound. Every caller is about to take something away (GET /v1/registry -> Dispatch claim lapse, releaseExpiredRoleClaim, sessionMayBeLive for the interest reaper). Before this PR Refresh always applied its read. Fix: return the decoded read uncached when it is not applied (as store.Registry.Get does at store/kv.go:778-796), also when the revision fence drops it; add a test that moves the epoch during the Get."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/kvwatch/kvwatch.go:1325",
+      "description": "The stream-confirmation gate runs one synchronous STREAM.INFO (up to bus.RequestTimeout, 10 s) per delivered record whenever the last confirmation is older than 4 s; a failed or slow (>4 s) STREAM.INFO never advances confirmedAt, so under a degraded JetStream API every record waits its own read. The copy falls behind while Following() and Servable() stay true, and pruneLocked drops live rows whose heartbeats are queued: GET /v1/sessions answers 200 without them. Fix: never more than one confirmation per probe interval (records share the in-flight/last attempt), or stop following when confirmations keep failing so the stale episode and its refilling 503 apply."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/bus/kv.go:43",
+      "description": "The PR deleted bus.KeyValue's checked Watch/WatchFiltered/History wrappers but still embeds nats.KeyValue exported, so kv.Watch/History/Keys/ListKeys/WatchAll promote to nats.go's legacy watcher: unchecked keys (the type doc's promise) and the v1.50.0 init-timer panic the round-3 change exists to remove. bus/kv_key_test.go:193,202 already calls kv.Keys(). Fix: unexported embedding with forwarded Bucket/Status (or shadow methods that refuse), and drop the KeyValue{KeyValue: h} no-watch mode."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/scripts/smoke-btw.sh:127-136, packages/pi-envoy/scripts/smoke-registration-stall.sh:224-233",
+      "description": "Two consumers of the new refilling 503 read it as the session's absence: wait_for_session_clear returns 0 on any failed curl, and own_row leaves row_json empty on a non-200, which the delete-confirm and control arms take as 'unlisted' / 'stayed gone' (false verdict_pass). The PR fixed the same pattern in smoke-channel.sh and stage3-4b13b-acceptance.sh; apply it here."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "The PR adds refusals at process boundaries (listener GET /v1/sessions and /v1/interests/ 503 code refilling past the boot gate; Dispatch 503 ENVOY_REFILLING on /api/v1/agents and both subscriber routes; gauges with no sample) and carries no '## Contract change census'. Add it with the search commands, every hit and its disposition (incl. listener-deploy-probe.test.sh's 'service starting' fixture and internal/smoke/listener_test.go), and the rollout line."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/src/dispatch-execute.ts:1761",
+      "description": "Agent tools print route_status unknown as 'the Envoy listener did not answer' even when route_status_reason is refilling (the listener did answer); :3195 drops route_status_reason. Branch on the reason so the agent-facing text is true."
+    }
+  ],
+  "thermonuclear": {
+    "deepReview": "CHANGES at 724ed7ea (1 Important: Refresh; 3 Minor: confirm gate per record, pi-envoy smoke scripts, routeText). Provider from the run's transcript: mixed, anthropic claude-opus-5-5 757 assistant turns, openai gpt-6.1-sol 69.",
+    "codeQuality": "CHANGES at 724ed7ea (Important: legacy nats.KeyValue reachable on bus.KeyValue; structural: read protocol hand-written in three adapters, kvwatch.go 1383 lines and store/kv.go 1006 lines undecomposed). Provider from the run's transcript: mixed, anthropic claude-opus-5-5 228 assistant turns, openai gpt-6.1-sol 31.",
+    "census": "scout, anthropic claude-opus-5-5 38 assistant turns (single provider)."
+  },
+  "fastFollow": "kvwatch read-protocol consolidation: one generic kvwatch copy type owning entries, revision fence, marks and read epoch for the session, interest and CI adapters; split kvwatch.go (stream checks, shutdown, options, repair) and store/kv.go; dedupe drain/readStream/readInterestStream and the ReadHistory timeout; split refillrig/main.go. Where it lands is the architect's call.",
+  "ci": "At code head 724ed7ea at 17:23Z: typecheck success, build success, deploy skipped; lint, test, changes and pr-title queued, Worker Image build in progress. Not waited on: this round requests changes."
+}

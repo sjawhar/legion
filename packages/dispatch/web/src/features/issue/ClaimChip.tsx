@@ -1,6 +1,7 @@
 import { claimHolds } from "@legion/contracts";
 import type { ReactNode } from "react";
 
+import { AGENT_LIST_REFILLING } from "../../api/client";
 import type { IssueClaim } from "../../api/types";
 import { pillClassName } from "../../components/Pill";
 import { AgentName, useAgentText } from "../refs/AgentName";
@@ -14,12 +15,12 @@ import { Timestamp } from "../refs/Timestamp";
  * judgement is `claimHolds` in `@legion/contracts`, the one the agent tools print as
  * "not running" too.
  *
- * The loaded test is the whole point. A chip paints the stamped title before the registry
+ * The current test is the whole point. A chip paints the stamped title before the registry
  * answers, so "the registry has not arrived" and "the holder is gone" look identical to a bare
  * lookup; the registry's `unknown` state (no successful read yet, or the latest read failed) is
  * never lapsed, or every claim on the page would read free for a moment, and free for good
- * whenever the listener is unreachable. So `claimHolds` gets the registry's titles only once a
- * read has landed.
+ * whenever the listener is unreachable or refilling. So `claimHolds` gets the registry's titles
+ * only once a read has landed and the latest one succeeded.
  */
 export function claimHasLapsed(
   claim: IssueClaim,
@@ -68,12 +69,19 @@ export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
   const explains =
     "A claim marks who is implementing this issue, so two agents never take the same work.";
   const lapsedNote = lapsed ? " That session is no longer running, so anyone may claim it." : "";
+  // A session claim the registry could not judge says so, rather than pass for a held one.
+  const uncheckedNote =
+    claim.actor.kind === "session" && registry.isError
+      ? ` Couldn't check whether that session is still running: ${
+          registry.refilling ? AGENT_LIST_REFILLING : "Envoy listener unreachable."
+        }`
+      : "";
   return (
     <span
       className={`${pillClassName(lapsed ? "label" : "selected-label")} min-w-0 max-w-full gap-1`}
       data-testid="issue-claim"
       style={{ flexShrink: 1 }}
-      title={`${since} ${explains}${lapsedNote}`}
+      title={`${since} ${explains}${lapsedNote}${uncheckedNote}`}
     >
       <span className="shrink-0">Claimed by</span>
       <AgentName actor={claim.actor} className="min-w-0 truncate" inline />

@@ -19,7 +19,7 @@ import {
 import { ApiError, type ArtifactOwner, api, apiErrorMessage } from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
-import { QueryError } from "../../components/QueryError";
+import { AgentListRefilling, QueryError } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
@@ -525,6 +525,9 @@ export function MentionComposer({
     autocompleteOpen
   );
   const agents = suppliedAgents ?? live.agents;
+  // A host's own list is its answer; the composer's own read says who is absent only while it is
+  // current (`useAgents`).
+  const agentsCurrent = suppliedAgents !== undefined || live.current;
   const text = useAgentText();
   const options = useMemo(() => mentionOptions(agents, text), [agents, text]);
   const filteredOptions = useMemo(() => {
@@ -1156,9 +1159,24 @@ export function MentionComposer({
               </button>
             );
           })}
-          {filteredOptions.length === 0 ? (
-            <p className={`px-3 py-2 text-sm ${textMutedOnSurface}`}>No live agents match.</p>
-          ) : null}
+          {agentsCurrent ? (
+            filteredOptions.length === 0 ? (
+              <p className={`px-3 py-2 text-sm ${textMutedOnSurface}`}>No live agents match.</p>
+            ) : null
+          ) : live.refilling ? (
+            <AgentListRefilling className={`px-3 py-2 text-sm ${textMutedOnSurface}`} />
+          ) : live.isPending ? (
+            <p
+              className={`px-3 py-2 text-sm ${textMutedOnSurface}`}
+              data-testid="agent-list-loading"
+            >
+              Loading live agents…
+            </p>
+          ) : (
+            <p className={`px-3 py-2 text-sm ${dangerText}`} data-testid="agent-list-unreachable">
+              Could not load live agents — Envoy listener unreachable.
+            </p>
+          )}
         </div>
       )}
       {plainNotice.length > 0 ? (

@@ -192,7 +192,7 @@ func (k *writeKV) states(key string) []State {
 func wrapStore(t testing.TB, conn *natsgo.Conn, delay time.Duration) (*Store, *writeKV) {
 	t.Helper()
 	s := openStore(t, conn)
-	kv := &writeKV{KeyValue: s.watcher.KV(), delay: delay, written: map[string][]writtenState{}}
+	kv := &writeKV{KeyValue: s.watcher.KV().Legacy(), delay: delay, written: map[string][]writtenState{}}
 	useKV(t, s, kv)
 	return s, kv
 }

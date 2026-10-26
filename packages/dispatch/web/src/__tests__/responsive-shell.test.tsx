@@ -10,6 +10,7 @@ import { AuthGate } from "../app";
 const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   artifacts: [
     {
       created_at: "2026-09-10T00:00:00Z",
@@ -97,6 +98,7 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
       resolved_repo: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
       key: issue.key,
       open_asks: 0,
       progress: { tasks: null, children: null },

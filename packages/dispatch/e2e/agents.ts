@@ -76,6 +76,18 @@ export async function setSessionRecord(sessionID: string, record: SessionRecord)
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { record });
 }
 
+/** How the fake listener answers its two list reads (`GET /v1/sessions`, `GET /v1/interests/`):
+ *  `ok` from the fixture; `refilling` with the real listener's refilling answer (503,
+ *  `Retry-After: 5`, code `refilling`), which Dispatch reports as `ENVOY_REFILLING`; `down` with a
+ *  503 that carries no code, which Dispatch reports as `ENVOY_UNAVAILABLE`. Every other route
+ *  answers as before, and a session reseed keeps the state; `resetFakeEnvoy` puts it back to
+ *  `ok`. */
+export type ListsState = "ok" | "refilling" | "down";
+
+export async function setListsState(state: ListsState): Promise<void> {
+  await fixtureRequest("/__fixture/lists", "PUT", { state });
+}
+
 export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   return (await fixtureRequest("/__fixture/sends", "GET")).json() as Promise<
     Record<string, unknown>[]

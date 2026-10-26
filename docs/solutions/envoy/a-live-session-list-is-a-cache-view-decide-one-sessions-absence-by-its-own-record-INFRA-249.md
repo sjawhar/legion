@@ -18,6 +18,7 @@ applies_when:
 related_issues:
   - "INFRA-249"
   - "sjawhar/legion#2191"
+  - "INFRA-261"
 ---
 
 # A live-session list is a cache view: decide one session's absence by its own record
@@ -31,11 +32,22 @@ further out, where it has no way to see it.
 ## Rules
 
 - **A row missing from `GET /v1/sessions` is not evidence that the session ended.** That route
-  answers from `sessions.List()`, the watcher-fed cache alone. While the cache refills — which is
-  what recreating the session bucket does, and what rebuilding the hub machine does to it — a
-  working session is simply not in the list, and an absent row cannot tell "ended" from "not
-  refilled yet". Decide a session's absence only from an authority that answered about **that
-  session**: `GET /v1/registry/<session_id>`, which reads through to the bucket.
+  answers from `sessions.List()`, the watcher-fed cache alone, and that cache trails the bucket.
+  Since INFRA-261 the listener no longer empties the cache to read the bucket again (recreating the
+  session bucket, or rebuilding the hub machine, starts such a read): every row stays until the
+  new read completes. And it refuses the list, rather than answer from a copy it cannot stand
+  behind, before the copy's first complete read and once the copy has not followed the bucket for
+  longer than its stale bound. That closes the long window in which a working session was simply
+  not in a `200`; it does not make a `200` authoritative. A session another listener registered a
+  moment ago is in the bucket before it is in this copy, and a copy inside its bound may trail.
+  Decide a session's absence only from an authority that answered about **that session**:
+  `GET /v1/registry/<session_id>`, which reads through to the bucket.
+- **A refusal is no list at all.** The listener's `503` with `Retry-After: 5` and code
+  `refilling` (from the route, or from the closed `/v1` start gate) means "could not read", never
+  an empty list. Dispatch passes it on as `503 ENVOY_REFILLING`, and as route status `unknown` with
+  `route_status_reason: "refilling"`, never `no_holder`; every web view says the list is refilling
+  where it would have said an agent is absent. A script that reads the list does the same: a
+  non-200 is a list it could not read.
 - **A list cannot be made authoritative key by key, so do not try.** Leave `GET /v1/sessions`,
   the agents page, the issue subscribers and `route_status` as the cache views they are; they
   display a fleet and act on nobody. Change the *caller that acts*, not the list.

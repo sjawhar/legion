@@ -54,6 +54,7 @@ function header(issue: Issue): { unmount: () => void } {
   const details: IssueDetails = {
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     ...issue,
     artifacts: [],
     children: [],

@@ -130,6 +130,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
   const issue: IssueDetails = {
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     artifacts: [],
     children: [],
     closed_at: null,

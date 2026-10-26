@@ -14,7 +14,6 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -47,7 +46,7 @@ func captureJSONLogs(t *testing.T) func() []map[string]any {
 // collectorOf is the collector StartInterestMarkerCollector runs, without its ticker, so a test
 // drives its passes one at a time.
 func collectorOf(registry *Registry) *interestMarkerCollector {
-	return &interestMarkerCollector{registry: registry, log: registry.logger()}
+	return &interestMarkerCollector{registry: registry, log: registry.logger(), scanIdle: kvwatch.ScanIdleTimeout}
 }
 
 // jsonRecord returns the one record whose msg is msg, failing when there is none or more than one.
@@ -547,7 +546,7 @@ func TestAnUndecodableLiveValueIsKept(t *testing.T) {
 	}
 	seedLive(t, kv, 2)
 	registry := openRegistry(t, conn)
-	if _, cached := registry.cache["ses_undecodable"]; cached {
+	if _, cached := registry.Cached("ses_undecodable"); cached {
 		t.Fatal("the cache kept an undecodable value; this test needs the eviction that makes the cache incomplete")
 	}
 
@@ -566,7 +565,7 @@ func TestAnUndecodableLiveValueIsKept(t *testing.T) {
 	}
 }
 
-// A scan nats.go's idle timer gave up on is not a reading of the bucket: the keys it did not
+// A scan that stalled past its idle bound is not a reading of the bucket: the keys it did not
 // deliver are still there, and the lowest revision among those it did is no floor. The pass refuses
 // and says so, and the listener stays healthy: a timed-out warm-up is not a dead cache, so Ping,
 // WatchErr and the /healthz answer built on them report no fault and nothing rebuilds the watcher.
@@ -582,15 +581,28 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
+	interests, err := bus.WrapKeyValue(conn, kv)
+	if err != nil {
+		t.Fatalf("wrap the interest bucket: %v", err)
+	}
+	// Every watch of the bucket, the warm-up's and the pass's scan, stalls after two entries, and
+	// both idle bounds are short, so both time out.
+	const idle = 200 * time.Millisecond
 	records := captureJSONLogs(t)
-	registry := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
-	handle := bus.KeyValue{KeyValue: kvwatchtest.TimingOut(kv, 2)}
-	registry.watcher = kvwatch.New("interest registry", handle, registry.applyWatched, registry.resetCache)
+	roles, err := bus.WrapKeyValue(conn, roleKV)
+	if err != nil {
+		t.Fatalf("wrap the role bucket: %v", err)
+	}
+	registry := &Registry{roleKV: roles, now: time.Now, cache: newInterestCopy()}
+	handle := bus.NewKeyValue(kv, earlyEndKV{KeyValue: interests.WatchHandle(), after: 2}, interests.Streams())
+	registry.watcher = kvwatch.New("interest registry", handle, interestCache{registry}, kvwatch.WithScanIdleTimeout(idle))
 	t.Cleanup(registry.StopWatch)
 	registry.watcher.Start()
 	waitFor(t, 30*time.Second, registry.watcher.Ready)
 
-	purged, err := collectorOf(registry).pass(js, nil)
+	collector := collectorOf(registry)
+	collector.scanIdle = idle
+	purged, err := collector.pass(js, nil)
 	if err != nil {
 		t.Fatalf("pass: %v", err)
 	}

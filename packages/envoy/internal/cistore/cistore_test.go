@@ -141,12 +141,14 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 	return st
 }
 
-// useKV rebuilds the store's watcher over kv, a wrapper of its bucket handle, so the store writes
-// through kv from here on. The replaced watcher is stopped first.
+// useKV rebuilds the store's watcher over kv, a wrapper of its bucket handle that watches through
+// the handle's own jetstream one, so the store writes through kv from here on. The replaced watcher
+// is stopped first.
 func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
 	t.Helper()
+	base := s.watcher.KV()
 	s.watcher.Stop()
-	s.watcher = kvwatch.New("cistore", bus.KeyValue{KeyValue: kv}, s.applyWatched, s.resetCache)
+	s.watcher = kvwatch.New("cistore", bus.NewKeyValue(kv, base.WatchHandle(), base.Streams()), ciCache{s})
 	s.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -911,7 +913,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 	originalKV := s.watcher.KV()
 	var watcherRevision uint64
 	useKV(t, s, &interleavingKV{
-		KeyValue: originalKV,
+		KeyValue: originalKV.Legacy(),
 		afterUpdate: func(key string, _ []byte, _ uint64) {
 			entry, err := originalKV.Get(key)
 			if err != nil {
@@ -931,9 +933,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 			if err != nil {
 				t.Fatalf("write newer watcher state: %v", err)
 			}
-			s.mu.Lock()
-			s.cacheStateLocked(key, newer, watcherRevision)
-			s.mu.Unlock()
+			ciCache{s}.Apply(kvwatch.Entry{Key: key, Value: raw, Revision: watcherRevision}, kvwatch.Read{})
 		},
 	})
 
@@ -946,8 +946,8 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 	}
 	key := Key(owner, repo, pr, sha)
 	s.mu.RLock()
-	cached := s.cache[key]
-	cachedRevision := s.cacheRevisions[key]
+	cached, _ := s.cache.Get(key)
+	cachedRevision := s.cache.FenceFor(s.watcher.Epoch(), key)
 	s.mu.RUnlock()
 	if cached.Generation <= claimedState.Generation || cached.SettledEmitted {
 		t.Fatalf("cached state = %+v, want the newer watcher state", cached)

@@ -126,6 +126,7 @@ export function DocumentPage(): ReactNode {
         />
         {subscribers.isError ? (
           <QueryError
+            error={subscribers.error}
             message="Subscribed agents unavailable — Envoy listener unreachable."
             onRetry={() => subscribers.refetch()}
             retrying={subscribers.isFetching}

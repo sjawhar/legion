@@ -66,7 +66,9 @@ function BroadcastRecipientRow({
   recipient,
 }: {
   delivery: MessageDeliveryMode;
-  liveAgents: readonly Agent[];
+  /** `undefined` while the agent list's read is not current: every capability is then unknown
+   *  (`capabilitiesForTarget`), never "not supported". */
+  liveAgents: readonly Agent[] | undefined;
   recipient: BroadcastRecipient;
 }): ReactNode {
   const text = useAgentText();
@@ -168,7 +170,7 @@ export function BroadcastPage(): ReactNode {
   const { id = "" } = useParams<{ id: string }>();
   const location = useLocation();
   const excluded = exclusionsFromState(location.state);
-  const { agents } = useAgents(true, true);
+  const { agents, current } = useAgents(true, true);
   const broadcast = useQuery({
     queryFn: () => api.getBroadcast(id),
     // Keyed under ["broadcast"], the prefix every issue-less message event invalidates, so a
@@ -231,7 +233,7 @@ export function BroadcastPage(): ReactNode {
             <BroadcastRecipientRow
               delivery={sent.delivery}
               key={recipient.session_id}
-              liveAgents={agents}
+              liveAgents={current ? agents : undefined}
               recipient={recipient}
             />
           ))}

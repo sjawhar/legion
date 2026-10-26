@@ -69,6 +69,9 @@ type fakeListener struct {
 	sessions        []map[string]any
 	calls           []unsubscribeCall
 	failUnsubscribe bool
+	// refuseList, when set, answers a list read (its path: /v1/interests/ or /v1/sessions) in
+	// place of the rows when it returns true.
+	refuseList func(w http.ResponseWriter, path string) bool
 }
 
 type unsubscribeCall struct {
@@ -122,6 +125,9 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		if sessionID == "" {
+			if state.refuseList != nil && state.refuseList(w, r.URL.Path) {
+				return
+			}
 			rows := make([]map[string]any, 0, len(state.interests))
 			for id, topics := range state.interests {
 				rows = append(rows, map[string]any{"session_id": id, "topics": topics, "updated_at": 1700000000000})
@@ -139,6 +145,9 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
+		if state.refuseList != nil && state.refuseList(w, r.URL.Path) {
+			return
+		}
 		WriteJSON(w, http.StatusOK, state.sessions)
 	})
 	server := httptest.NewServer(mux)
@@ -260,6 +269,47 @@ func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/subscribers", nil, "alice")
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// Both subscriber reads need the listener's interest list and its session list. Either one
+// refused as refilling answers 503 ENVOY_REFILLING with the listener's Retry-After, never a
+// subscriber list missing rows; any other refusal is still ENVOY_UNAVAILABLE.
+func TestListSubscribersReportsARefillingListenerAsRefilling(t *testing.T) {
+	database := storetest.Open(t)
+	bootstrap := newSubscribersHandler(t, database, "")
+	key := createTestIssue(t, bootstrap, "TEST", "Issue")
+	document := createProjectDocument(t, bootstrap, "TEST", "Design notes", "# Design notes\n")
+	envoyURL, listener := newFakeListener(t, map[string][]string{
+		"planner": {"notifications.dispatch.issue." + key + ".>"},
+		"writer":  {"notifications.dispatch.document." + document.Project + "." + document.Slug + ".>"},
+	}, []map[string]any{{"session_id": "planner", "title": "planner", "last_seen": 200}})
+	handler := newSubscribersHandler(t, database, envoyURL)
+	refuse := func(path string, answer func(http.ResponseWriter)) {
+		listener.mu.Lock()
+		defer listener.mu.Unlock()
+		listener.refuseList = func(w http.ResponseWriter, read string) bool {
+			if read != path {
+				return false
+			}
+			answer(w)
+			return true
+		}
+	}
+	refilling := func(w http.ResponseWriter) { answerListRefilling(w, "7") }
+	plain := func(w http.ResponseWriter) { http.Error(w, "listener restarting", http.StatusServiceUnavailable) }
+
+	for _, route := range []string{"/api/v1/issues/" + key + "/subscribers", "/api/v1/artifacts/" + document.ID + "/subscribers"} {
+		for _, path := range []string{"/v1/interests/", "/v1/sessions"} {
+			refuse(path, refilling)
+			requireEnvoyRefilling(t, dispatchRequest(t, handler, http.MethodGet, route, nil, "alice"), "7")
+
+			refuse(path, plain)
+			response := dispatchRequest(t, handler, http.MethodGet, route, nil, "alice")
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
+				t.Fatalf("GET %s with %s refused plainly: status=%d body=%s, want 503 ENVOY_UNAVAILABLE", route, path, response.Code, response.Body.String())
+			}
+		}
 	}
 }
 

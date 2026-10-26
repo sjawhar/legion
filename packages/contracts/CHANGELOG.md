@@ -4,6 +4,11 @@
 
 ### Added
 
+- `IssueRouteReach.route_status_reason` (`IssueRouteStatusReason`: `"refilling" | "unreachable"`,
+  or null), on `IssueSummary` and `IssueDetails`: why a route reads `unknown`, set exactly then.
+  `refilling` is an Envoy listener that answered that its agent list is refilling, so the route
+  stays `unknown`, never `no_holder`, until the list is back; `unreachable` is a listener that is
+  not configured, did not answer, or failed otherwise (INFRA-261).
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `actorAttribution(actor)`, the part of an actor's label after its name: ` (for <owner>)` for a

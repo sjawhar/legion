@@ -284,7 +284,7 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	const sessionID = "ses_revision"
 	raw := reg.watcher.KV()
 	useKV(t, reg, &interleavingSessionPutKeyValue{
-		KeyValue: raw,
+		KeyValue: raw.Legacy(),
 		afterFirstPut: func() {
 			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote", Driving: true}
 			buf, err := json.Marshal(remote)
@@ -335,27 +335,27 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 		t.Fatalf("Get seeded entry: %v", err)
 	}
 	useKV(t, reg, &historyFailSessionKeyValue{
-		KeyValue: reg.watcher.KV(),
+		KeyValue: reg.watcher.KV().Legacy(),
 		err:      errors.New("injected history failure"),
 	})
 	if err := reg.Delete(sessionID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	reg.mu.Lock()
-	reg.cacheSessionLocked(sessionID, item, time.Time{}, entry.Revision())
-	reg.mu.Unlock()
+	sessionCache{reg}.Apply(kvwatch.LegacyEntry(entry), kvwatch.Read{})
 	if _, err := reg.Get(sessionID); err == nil {
 		t.Fatal("Get returned a session restored by a stale watcher update")
 	}
 }
 
-// useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle, so the registry writes
-// through kv from here on. The replaced watcher is stopped first.
+// useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle that watches
+// through the handle's own jetstream one, so the registry writes through kv from here on. The
+// replaced watcher is stopped first.
 func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
 	t.Helper()
+	base := r.watcher.KV()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("session registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("session registry", bus.NewKeyValue(kv, base.WatchHandle(), base.Streams()), sessionCache{r})
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -99,6 +99,80 @@ validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/envoy-and-contracts.yaml` on every change to
 `packages/envoy`, `packages/envoy-client` or `packages/contracts`.
 
+## e2e-refill.sh
+
+Proves on the real listener and a NATS server of its own (`internal/testnats/cmd/natsd`, its file
+store under the output directory) that the listener keeps its copy of a bucket while it reads the
+bucket again, and that its two list routes refuse, with no active-sessions sample, while it cannot
+stand behind that copy (INFRA-261). `internal/testnats/cmd/refillrig` does the work a shell cannot
+do quickly: it seeds the session and interest buckets, through the listener's
+`POST /v1/interests/subscribe` and straight into the buckets, deletes and recreates a bucket,
+polls `GET /v1/sessions`, `GET /v1/interests/` and `/metrics` as fast as they answer, and judges
+each scenario from those polls beside the listener's own log lines.
+
+```bash
+packages/envoy/scripts/e2e-refill.sh [--scenario reread|interrupt|refuse|recreate-live|all]
+```
+
+The listener's watcher reads its bucket's stream every 2 s, so it finds a recreated bucket itself
+and starts the read of the new bucket at once. The `reread` and `interrupt` scenarios observe that
+read of a whole bucket, so the rig stops the listener (`SIGSTOP`) while it deletes, creates and
+fills the bucket, and continues it once the bucket is full, just after a tick of the listener's
+30 s self-health monitor, so no tick falls while the listener is stopped.
+
+- `reread`: registers 3,000 `old` and 3,000 `both` sessions, then recreates the session bucket
+  holding `both` with changed titles and 3,000 `new`, the interest bucket the same way with changed
+  topics, and the session bucket again with the very records it holds (only its creation time
+  changes). Each new bucket carries 100,000 delete markers among its records, so the read outlasts
+  many list answers. Every `old` and `both` row must be listed until the read's completed
+  `cache warm-up` line, a delivered row never goes back, and the list is exactly the bucket after
+  it.
+- `interrupt`: on a 41,000-record session bucket, stops NATS the moment the read of the new bucket
+  begins (its `bucket was recreated; its cache is re-read` line), either with `SIGSTOP` until the
+  scan times out (or the watcher ends) and then `SIGCONT`, or with `SIGKILL` and a restart
+  (`--interrupt-by stop|restart`, both by default). Nothing may be removed until a later read,
+  which the listener starts itself, completes and sweeps; the verdict names which incomplete
+  outcome the log shows.
+- `recreate-live`: recreates the session bucket under a running listener, 26 to 28 s before a
+  self-health tick, so the tick cannot be what reads it, in two shapes: an old stream shorter than
+  the new one, and one longer (the old bucket's records written three times). The old bucket has a
+  60 s `MaxAge` (the listener adopts a bucket's), 1,000 `same` and 1,000 `chg` sessions, and `hb`,
+  whose old record expires 3.5 s after the recreate; the new one holds `same` unchanged, `chg` with
+  changed titles, 1,000 `new` and `hb` renewed. The recreate lands between two of the watcher's
+  stream probes, and NATS is stopped for 4 s from the watcher's `bucket was recreated under its
+  watcher` line, so `hb`'s old record expires after the copy stopped following and before the read
+  delivers its renewal. Each shape passes when the watcher logs that finding and completes the read
+  of the new bucket before the tick, with no self-health failure or rebuild; every `GET
+  /v1/sessions` answer lists every record of the old copy, `hb` included, until the read completes;
+  none answered before a line says the copy stopped following lists records only the new bucket has
+  while lacking others it held (a consumer nats.go moved onto the new stream resumes past the
+  sequences the old one covered); and once the read and the fill are done the list is exactly the
+  new bucket. A listener that finds a recreate only by the self-health tick's `Check` fails both
+  shapes: the longer one shows nothing of the new bucket before the tick, the shorter one part of
+  it. `refillrig recreate -fill-log` records when each record of the fill was acknowledged, so a
+  read that begins before the fill is done is judged against what the bucket held.
+- `refuse`: a start on 40,000-record buckets, where every list answer is the refilling `503` with
+  `Retry-After: 5` or the whole bucket and no gauge has a sample while its list refuses; NATS down
+  past the 2-minute stale bound, where both lists answer the refilling `503` and `/metrics` has
+  neither gauge's sample, then a complete `200` within 30 s of NATS's return with both gauges equal
+  to the lists; and empty buckets, which answer `200 []` and `0` samples. The outage waits out the
+  real bound, which the listener has no setting for, so the scenario takes about four minutes.
+  `--during-refuse <command>` runs while both lists refuse and `--after-refuse <command>` once they
+  are whole again, each with `bash -c`, `ENVOY_URL` and `REFILL_RIG_ROLE`, `REFILL_RIG_HOLDER` (a
+  registered session whose topics make it that role's holder), `REFILL_RIG_SESSIONS` and
+  `REFILL_RIG_DIR` exported, so another client (an MCP host, Dispatch) is checked in the same
+  window; their output is in `refuse/during-refuse.log` and `refuse/after-refuse.log`.
+
+Each scenario prints `verdict <scenario> PASS <what it saw>`, `FAIL <reason>`, or
+`INVALID <reason>` when the run missed the window it was there to observe (no poll inside the read,
+a scan that finished before the interruption, a read that began before the bucket was filled, a
+self-health tick inside the read of `recreate-live`), which is never a pass. It exits 0 when every
+verdict passes, 1 on a `FAIL`, and 4 on an `INVALID` with no `FAIL`. `--listener-bin` and
+`--natsd-bin` run other builds, such as the merge base's for a negative control. The evidence (each
+scenario's listener and NATS logs and every poll, one JSON line each) goes to `--out` (default
+`$TMPDIR/envoy-e2e-refill`). `E2E_REFILL_NATS_PORT` (14232) and `E2E_REFILL_PORT` (19030) move the
+ports. A full run takes about ten minutes, so it is a manual proof, not a CI job.
+
 ## listener-deploy-probe.sh
 
 Watches an Envoy listener from a client's seat while its deployment rolls, and
@@ -174,6 +248,17 @@ A listener from before LEGION-456 keeps `/v1` closed until its durable binds,
 so during a rolling deploy the replacement answers `/healthz` 200 `starting`
 and `/v1` 503 `service starting` for most of a minute and the run exits 1. A
 listener that opens `/v1` once its caches are warm passes.
+
+The refilling answer is another cause. A listener answers `GET /v1/sessions`
+`503` with `Retry-After: 5` and code `refilling` (`503:envoy: the agent list is
+refilling; try again in a moment` in the summary) while it cannot stand behind
+its copy of the session or interest bucket: before its first complete read of
+the bucket (its closed `/v1` start gate gives this route the same answer, and a
+cache warm-up that timed out opens `/v1` on a copy still being read), or once a
+re-read has not completed for longer than its bound (2 minutes, or half the
+bucket's `MaxAge` when that is shorter). Its `/healthz` answers 200 all the
+while, so the target fails: a client that reached it then was refused the list
+(INFRA-261).
 
 `listener-deploy-probe.test.sh` proves the verdict over two fake tasks, Python
 `http.server`s on `127.0.0.1` and `127.0.0.2` behind a fake `getent`; CI runs it

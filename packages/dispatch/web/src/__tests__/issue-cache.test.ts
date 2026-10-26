@@ -8,8 +8,13 @@ import { issue as fixture } from "../features/margin/margin-fixture";
 function cachedAfterPatch(before: IssueDetails, patch: Partial<IssueDetails>): IssueDetails {
   const queryClient = new QueryClient();
   queryClient.setQueryData(["issue", before.key], before);
-  // A PATCH answers the `Issue` fields alone; route_status is never among them.
-  const { route_status: _status, route_holder: _holder, ...response } = { ...before, ...patch };
+  // A PATCH answers the `Issue` fields alone; the route's reach is never among them.
+  const {
+    route_status: _status,
+    route_holder: _holder,
+    route_status_reason: _reason,
+    ...response
+  } = { ...before, ...patch };
   mergeIssue(queryClient, response);
   const cached = queryClient.getQueryData<IssueDetails>(["issue", before.key]);
   if (cached === undefined) throw new Error("the merge dropped the cached issue");
@@ -29,4 +34,23 @@ test("a PATCH that leaves the route alone keeps its status until the next read",
   const cached = cachedAfterPatch(unheld, { title: "Renamed" });
   expect(cached.title).toBe("Renamed");
   expect(cached.route_status).toBe("no_holder");
+});
+
+const refilling: IssueDetails = {
+  ...fixture,
+  route: "role:sre",
+  route_status: "unknown",
+  route_status_reason: "refilling",
+};
+
+test("a PATCH that moves the route drops why the old route was unknown", () => {
+  const cached = cachedAfterPatch(refilling, { route: "role:platform-po" });
+  expect(cached.route_status).toBeNull();
+  expect(cached.route_status_reason).toBeNull();
+});
+
+test("a PATCH that leaves the route alone keeps why it is unknown", () => {
+  const cached = cachedAfterPatch(refilling, { title: "Renamed" });
+  expect(cached.route_status).toBe("unknown");
+  expect(cached.route_status_reason).toBe("refilling");
 });
