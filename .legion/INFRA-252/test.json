@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T10:05:00Z",
-  "round": 5,
-  "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
+  "completed": "2026-10-26T12:15:00Z",
+  "round": 6,
+  "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at the branch head 55c575a0c798 (PASS in 39s) and on its merge with main 7f6ef46fd42f, tree 4ccee51b75ba exported with `git archive` (PASS in 60s, all eleven steps); transcripts https://github.com/sjawhar/legion/pull/2226#issuecomment-6413066649."
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at 3b91e647b693: `child adoption e2e: PASS in 41s`, all eleven steps (transcript https://github.com/sjawhar/legion/pull/2226#issuecomment-6415362280)."
   },
   "failures": [],
   "failed": 0,
@@ -15,35 +15,35 @@
     {
       "criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree",
       "round": 1,
-      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree passes at 55c575a0c798"
+      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree passes at 3b91e647b693"
     }
   ],
   "proof": [
     {
-      "criterion": "Review round 3 (critical): the merged tree's migrations load and the daemon boots and migrates; the ancestry migration no longer shares version 51 with main's 0051_issue_suspend_release",
-      "surface": "whole daemon (the function `legion start` calls) over a fresh PostgreSQL and its own nats-server, run from the merged tree `git merge-tree --write-tree 7f6ef46fd42f 55c575a0c798` = 4ccee51b75ba (migrations 0050, 0051_issue_suspend_release, 0052_issue_ancestry)",
-      "command": "cd <merged tree> && LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh",
-      "observed": "store migrated, daemon booted, `child adoption e2e: PASS in 60s`, all eleven steps ok",
-      "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
-      "negativeControl": "same command on the pre-fix merge e34ce555d437 (main + 5f1f78dc08ae): `migrate the store: migrations 0051_issue_ancestry.up.sql and 0051_issue_suspend_release.up.sql share version 51`, FAIL before any step"
+      "criterion": "The refactor preserves the boot path: across a daemon restart the boot listing and the retained envelopes free, adopt and hold as live events do",
+      "surface": "whole daemon stopped and started again (rebindHeldPorts, a fresh fake runtime) over the same PostgreSQL and nats-server, against a Dispatch stand-in whose GET /api/v1/issues lists the board (throwaway -tags e2e driver)",
+      "command": "before: H held under unrecorded P under T, C waiting; daemon stopped; while down: P moved to no parent, C re-parented under T, N labelled todo under unreleased P2 of T; daemon started; run twice, with P's move as an envelope and with P's move on the board only",
+      "observed": "both runs: H in admission.waiting with ancestry [P]; C planning in T at generation 2 with no slot or architect; N recorded as its own root, held with ancestry [P2, T], no slot",
+      "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
+      "negativeControl": "before the restart H was held (ancestry [P, T]) and C waiting; the second run gives the boot listing's own walk as the only way to see P's move"
     },
     {
-      "criterion": "AC1-AC4 and D2 at the branch head",
+      "criterion": "AC1-AC4 and D2 at the refactor head",
       "surface": "whole daemon (scripts/e2e/child-adoption.sh) and round 1's red test",
       "command": "LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh; go test -run TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree ./internal/daemon/",
-      "observed": "PASS in 39s, all eleven steps; red test PASS",
-      "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
+      "observed": "PASS in 41s, all eleven steps; red test PASS",
+      "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
       "negativeControl": "release-refuses: 409 CHILD_IN_OTHER_TREE, record unchanged, no Dispatch write; red test failed at fac524684344 before the fix"
     },
     {
-      "criterion": "The tester's round 1-4 scenarios on the merged tree",
-      "surface": "whole daemon on the merged tree (throwaway -tags e2e driver)",
+      "criterion": "The tester's round 1-4 scenarios at the refactor head",
+      "surface": "whole daemon (throwaway -tags e2e driver)",
       "command": "stale-ancestor, parent-release-adopts-held, two-level-move, reverse-move-holds, hold-follows-ancestor-adoption, concurrent-release, wave-atomic, not-adoptable, held-child-follows-freed-root, unreadable-chain-skips-one, stale-unrecorded-ancestor-event, parked-root-on-chain",
       "observed": "all twelve ok",
-      "headSha": "55c575a0c79891a7f43ac1bb3f2d3ae64a30d6f2",
+      "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
       "negativeControl": "wave-atomic and not-adoptable drive the refusals (409 CHILD_IN_OTHER_TREE, 409 CHILD_NOT_ADOPTABLE) with nothing written"
     }
   ],
-  "ci": "At 55c575a0c798, read 2026-10-26T10:00Z: Tests 40301762532 queued; Legion Envoy and Contracts 40301762543 queued; Docs 40301762595 queued; Worker Image 40301762544 pending; PR Title 40301810089 pending (40301762637 cancelled).",
+  "ci": "At 3b91e647b693, read 2026-10-26T12:10Z: Tests 40317495101 queued; Legion Envoy and Contracts 40317494961 queued; Docs 40317495032 queued; Worker Image 40317495011 queued; PR Title 40317609872 queued (40317494960 cancelled). GitHub reports MERGEABLE; main 8298fc710323 still carries only 0051_issue_suspend_release, so 0052_issue_ancestry does not collide.",
   "verdictProvider": "provider not verified (no review subagents ran)"
 }
