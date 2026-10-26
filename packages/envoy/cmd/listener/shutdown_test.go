@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -134,6 +136,54 @@ func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T
 	}
 	if !holder.IsValid() {
 		t.Fatal("the old task's subscription to the durable is gone after the replacement's shutdown")
+	}
+}
+
+// With the live topics lane on, a SIGTERM is an ordered shutdown inside the 30 s every runtime
+// gives even while a live delivery is blocked on a serving port that never answers: the live
+// lane's drain gives that delivery its 3 s and no more, as core NATS retries nothing, and the main
+// client drains after it. Nothing on the path is an error.
+func TestASIGTERMWithALiveDeliveryBlockedIsAnOrderedShutdown(t *testing.T) {
+	uri := testnats.URL(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "sigterm-live", liveLaneEnv...)
+	listener.waitHealthy(t)
+
+	arrived := make(chan struct{}, 1)
+	release := make(chan struct{})
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		<-release
+	}))
+	// Cleanups run last first: the handler returns before the server's Close waits for it.
+	t.Cleanup(blocked.Close)
+	t.Cleanup(func() { close(release) })
+	topic := "notifications.team." + id.New()
+	sessionID := "ses_blocked_" + id.New()
+	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":["`+topic+`"],"port":`+strconv.Itoa(endpointPort(t, blocked.URL))+`,"host":"127.0.0.1"}`)
+	publish(t, connectPublisher(t, uri), newEnvelope("agent", topic, "a message the session never answers"))
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the live delivery never reached the session's port:\n%s", listener.Output.String())
+	}
+
+	signalled := listener.Terminate(t)
+	listener.WaitExit(t, "SIGTERM")
+	output := listener.Output.String()
+	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (-1 is a death by the signal, with no ordered shutdown):\n%s", code, output)
+	}
+	t.Logf("the listener exited %s after the SIGTERM", time.Since(signalled).Round(time.Millisecond))
+	if !strings.Contains(output, "envoy-listener shutdown complete") {
+		t.Fatalf("the listener did not finish its ordered shutdown:\n%s", output)
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		if errorLine.MatchString(line) {
+			t.Fatalf("a SIGTERM with a live delivery blocked logged an error: %s", line)
+		}
 	}
 }
 

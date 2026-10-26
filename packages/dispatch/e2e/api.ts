@@ -817,16 +817,23 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
   );
 }
 
-/** Points `project` at `repo`'s `.dispatch/architecture` on `branch` (the fake GitHub serves it). */
+/** The route of `project`'s source `repo` (`owner/name`): a source is addressed by its repository. */
+function architectureSourcePath(project: string, repo: string): string {
+  const [owner = "", name = ""] = repo.split("/");
+  return `/api/v1/projects/${encodeURIComponent(project)}/architecture-sources/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+/** Adds `repo`'s `.dispatch/architecture` on `branch` as one of `project`'s sources, or moves that
+ *  source to `branch` (the fake GitHub serves it). */
 export function putArchitectureSource(
   project: string,
   input: { branch: string; repo: string },
   options: ApiOptions = {}
 ): Promise<ArchitectureSource> {
   return request<ArchitectureSource>(
-    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source`,
+    architectureSourcePath(project, input.repo),
     "PUT",
-    input,
+    { branch: input.branch },
     options
   );
 }
@@ -857,13 +864,15 @@ export function listProjectDefaultAssignees(
   );
 }
 
-/** Imports the model now; a rejected model answers 200 with the reason in `last_error`. */
+/** Imports `project`'s source `repo` now; a rejected model answers 200 with the reason in
+ *  `last_error`. */
 export function syncArchitectureSource(
   project: string,
+  repo: string,
   options: ApiOptions = {}
 ): Promise<ArchitectureSource> {
   return request<ArchitectureSource>(
-    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source/sync`,
+    `${architectureSourcePath(project, repo)}/sync`,
     "POST",
     undefined,
     options

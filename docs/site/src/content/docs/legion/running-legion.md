@@ -89,10 +89,10 @@ an installation that Dispatch searches.
 
 `--webhook-url` becomes the Envoy App's webhook. That App's webhook secret is the listener's
 `ENVOY_GITHUB_WEBHOOK_SECRET`, its client id is Dispatch's `DISPATCH_APP_CLIENT_ID`, and its
-private key, base64-encoded, is `DISPATCH_APP_PEM_B64`. The review App's id is the listener's
-`ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and Dispatch read them,
-delete the files, then install every App from `https://github.com/apps/<slug>/installations/new`
-on the same repositories.
+private key, as the PEM GitHub gives or its base64, is `DISPATCH_APP_PEM_B64`. The review App's id
+is the listener's `ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and
+Dispatch read them, delete the files, then install every App from
+`https://github.com/apps/<slug>/installations/new` on the same repositories.
 
 ## The cluster
 
@@ -185,8 +185,9 @@ on the same repositories.
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
 (`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
-Node, uv, the AWS CLI, kubectl) and the client tools a role's own work needs (`psql`, `redis-cli`,
-`sqlite3`, `nc`, `dig`): `apt` cannot write a system prefix in an unprivileged container, unpacking
+Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl) and the client tools a
+role's own work needs (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`): `apt` cannot write a system
+prefix in an unprivileged container, unpacking
 one by hand works for some tools and not others, and what rules out a client a role unpacks onto
 its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
