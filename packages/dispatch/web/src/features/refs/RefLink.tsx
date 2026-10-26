@@ -9,6 +9,7 @@ import {
   type DispatchReferenceRoute,
   nodeRouteFromHref,
   parseDispatchReference,
+  referenceRouteFromHref,
   shortForm,
 } from "./routes";
 
@@ -130,14 +131,32 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
 }
 
 /**
+ * Whether an anchor is a URL its author left as text: what GFM autolinks, a bare `https://…`
+ * (a bare `www.…`, whose href gains `http://`) or one in angle brackets, and the anchor
+ * `linkifyDispatchRefs` wraps around a bare `dispatch://…`, all show their href as their words.
+ * A Markdown link whose words are its own target reads the same, and is the same text to the
+ * server. Proof's sanitized `dispatch://` link (`data-dispatch-href`) is never one.
+ */
+function isTextUrl(anchor: HTMLAnchorElement, text: string): boolean {
+  const href = anchor.getAttribute("href");
+  return (
+    !anchor.hasAttribute("data-dispatch-href") &&
+    href !== null &&
+    (href === text || href === `http://${text}`)
+  );
+}
+
+/**
  * Finds every already-rendered `<a>` in root whose href is a dispatch:// reference or a
  * same-origin dashboard path — a link `linkifyDispatchRefs` just inserted, an ordinary Markdown
  * link a user wrote by hand, or a bare `http(s)://` URL remark-gfm autolinked — rewrites its href
  * to the SPA route via `buildReferencePath`, and clears its text so the caller can
- * portal a `RefLink` in to render the resolved title. Each link already names its target, and
+ * portal a `RefLink` in to render the resolved title. A URL its author left as text
+ * (`isTextUrl`) is read as the server's `text.Extract` reads text (`referenceRouteFromHref`), so
+ * one past the bounds the index keys stays the link it is, and one whose block is past them names
+ * its document, as the server cites it. A link its author wrote names its target explicitly, and
  * drawing or opening it is a read, so its href is read as the server reads a request
- * (`nodeRouteFromHref`), whatever the length of its names; which bare `dispatch://` text becomes
- * a link at all is `linkifyDispatchRefs`'s bounded reading. An external link, or an href that
+ * (`nodeRouteFromHref`), whatever the length of its names. An external link, or an href that
  * fails to parse as a reference, is left untouched, and so is a picture's link
  * (`data-dispatch-picture`, the engine's `pictureSerializer`), whose content is a
  * `DispatchPicture` rather than a title.
@@ -160,14 +179,16 @@ export function collectReferenceAnchors(
     if (href === null) {
       continue;
     }
-    const route = nodeRouteFromHref(href, appOrigin);
+    const text = anchor.textContent ?? "";
+    const route = isTextUrl(anchor, text)
+      ? referenceRouteFromHref(href, appOrigin)
+      : nodeRouteFromHref(href, appOrigin);
     if (route === undefined) {
       continue;
     }
     anchor.setAttribute("href", buildReferencePath(route));
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
-    const text = anchor.textContent ?? "";
     anchor.replaceChildren();
     targets.push({ anchor, key: `${reference}:${index}`, route, text });
     index += 1;

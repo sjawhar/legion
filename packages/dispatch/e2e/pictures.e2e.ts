@@ -360,8 +360,9 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
 // A picture's source and a link's target are nodes their author named, so each is drawn and
 // opened whatever the length of its name: a reference key past the 2048 bytes text cites
 // (MAX_REFERENCE_TARGET_BYTES), yet within the 2692 a new upload's key holds, still loads from its
-// version's bytes and opens its document's dashboard page.
-test("a long-named picture in a comment draws, and its link to a long-named document opens it", async ({
+// version's bytes and opens its document's dashboard page. The same page's URL left as text is
+// text, which the server keeps a URL past those bytes, so it stays the plain link it is.
+test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -395,8 +396,10 @@ test("a long-named picture in a comment draws, and its link to a long-named docu
       expect(keyBytes).toBeLessThanOrEqual(2692);
     }
     const designTarget = `dispatch://${issue.key}/artifact/${designSlug}`;
+    const path = `/issues/${issue.key}/artifacts/${designSlug}`;
+    const bareUrl = `${dashboardOrigin}${path}`;
     const comment = await createComment(issue.key, {
-      body: `![shot](dispatch://${issue.key}/artifact/${pictureSlug}@v1)\n\nSee [design](${designTarget}).`,
+      body: `![shot](dispatch://${issue.key}/artifact/${pictureSlug}@v1)\n\nSee [design](${designTarget}).\n\nBare: ${bareUrl}`,
     });
 
     await page.goto(`/issues/${issue.key}/conversation`);
@@ -413,9 +416,14 @@ test("a long-named picture in a comment draws, and its link to a long-named docu
     await expectDrawn(shot, src);
 
     // The link is found by the target its author wrote, which it keeps whatever it shows.
-    const path = `/issues/${issue.key}/artifacts/${designSlug}`;
     const link = thread.locator(`a[data-dispatch-href="${designTarget}"]`);
     await expect(link).toHaveAttribute("href", path);
+    // Asserted once the author's link is drawn, in the same pass: the bare URL's words are the URL
+    // and it keeps its href, never the document's name and route a reference link would show.
+    const bare = thread.locator("p", { hasText: "Bare:" }).getByRole("link");
+    await expect(bare).toHaveAttribute("href", bareUrl);
+    await expect(bare).toHaveText(bareUrl);
+    await expect(bare).not.toHaveAttribute("data-dispatch-ref");
     // The link reads as the document's name, so it wraps past the window's height; the click lands
     // on its last line, clear of the composer pinned above the conversation.
     const lastLine = await link.evaluate((anchor) => {

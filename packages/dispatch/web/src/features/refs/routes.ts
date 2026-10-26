@@ -251,8 +251,9 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
 /** A `dispatch://` reference's route as text cites it, which the server's `text.Extract` indexes:
  * one holding a control character names nothing, and so does one past the bounds the graph keys
  * (`routeInBound`); a fragment names a block (`parseBlockReference`, `withBlock`) or nothing. Only
- * where plain text becomes a reference - linkifying a bare `dispatch://` string, shortening one,
- * reading a composer's text - since that must match what the server indexes. */
+ * where plain text becomes a reference - linkifying or shortening a bare `dispatch://` string,
+ * titling a URL an author left as text in a rendered body (`referenceRouteFromHref`), reading a
+ * composer's text - since that must match what the server indexes. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
   const route = parseNodeReference(value);
   return route !== undefined && routeInBound(route) ? route : undefined;
@@ -415,10 +416,11 @@ export function routeProjectOf(pathname: string): string | undefined {
 }
 
 /** The reference a `dispatch://` URL or a same-origin dashboard path names as text cites it, as
- * the server's `text.Extract` reads it; undefined for an external link or a dashboard path that is
- * not an issue/document reference (`pageRoutes`). A `#b-<block id>` fragment names the page's
- * block while text cites it (`pageInBound`), else the page; a reference past the bounds names
- * nothing (`parseDispatchReference`). */
+ * the server's `text.Extract` reads it: a composer's text, and a URL an author left as text in a
+ * rendered body (`collectReferenceAnchors`); undefined for an external link or a dashboard path
+ * that is not an issue/document reference (`pageRoutes`). A `#b-<block id>` fragment names the
+ * page's block while text cites it (`pageInBound`), else the page; a reference past the bounds
+ * names nothing (`parseDispatchReference`). */
 export function referenceRouteFromHref(
   href: string,
   appOrigin: string = window.location.origin
@@ -430,9 +432,9 @@ export function referenceRouteFromHref(
   return routes === undefined ? undefined : pageInBound(routes.page, routes.block);
 }
 
-/** The reference a link names as the server reads a request - a search hit's `href`, an explicit
- * link's target, a `dispatch://` node reference - whatever the length of its names: the bounds
- * text is held to decide only what text cites (`referenceRouteFromHref`). */
+/** The reference a link names as the server reads a request - a search hit's `href`, the target of
+ * a link an author wrote, a `dispatch://` node reference - whatever the length of its names: the
+ * bounds text is held to decide only what text cites (`referenceRouteFromHref`). */
 export function nodeRouteFromHref(
   href: string,
   appOrigin: string = window.location.origin

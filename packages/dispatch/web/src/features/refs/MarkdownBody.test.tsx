@@ -269,6 +269,58 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // A URL left as text is text to the server's `text.Extract`, which cites a dashboard page only
+  // within the bounds the graph keys: a document past them stays the URL it is, and a block past
+  // them (257 bytes) is its document. A link its author wrote names its target, so it opens the
+  // same long-named document.
+  test("a bare dashboard URL past the bounds stays a plain link; an author's link to it still opens the document", async () => {
+    const slug = "a".repeat(2683);
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const page = `https://dispatch.test/issues/CORE-1/artifacts/${slug}`;
+    const plan = "https://dispatch.test/issues/CORE-1/artifacts/plan-md";
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Bare: ${page}\n\nSee [design](${page}) and [design](dispatch://CORE-1/artifact/${slug}).\n\nPlan: ${plan} and ${plan}#b-${"b".repeat(257)}`}
+        />
+      )
+    );
+
+    try {
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(2);
+      for (const link of designs) {
+        expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+        expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+      }
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan-md");
+        expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/plan-md");
+      }
+      const bare = within(view.container).getByRole("link", { name: page });
+      expect(bare.getAttribute("href")).toBe(page);
+      expect(bare.getAttribute("data-dispatch-ref")).toBeNull();
+    } finally {
+      getArtifactText.mockRestore();
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a picture on another website renders as it always has", async () => {
     const view = render(
       withQueries(<MarkdownBody markdown="![chart](https://example.com/a.png)" />)
