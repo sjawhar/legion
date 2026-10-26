@@ -2,8 +2,7 @@ package daemon
 
 import (
 	"context"
-	"maps"
-	"slices"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -20,14 +19,14 @@ import (
 )
 
 // awaitingDispatch is the Dispatch a boot catch-up reads: the issue, the design document's
-// approval, and the root's asks. ask is the one ask a test has the root carry, and asks every ask
-// it has it carry by id; the ask list is both, the named ones first.
+// approval, and the root's event log, which it serves past the sequence asked for, as Dispatch's
+// events route does, recording each sequence it was asked to read after.
 type awaitingDispatch struct {
 	outboxDispatch
 	issue    dispatch.Issue
 	approval dispatch.Approval
-	ask      dispatch.Ask
-	asks     map[string]dispatch.Ask
+	events   []json.RawMessage
+	afters   []int64
 }
 
 func (d *awaitingDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
@@ -36,15 +35,45 @@ func (d *awaitingDispatch) GetIssue(context.Context, string) (dispatch.Issue, er
 func (d *awaitingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return d.approval, nil
 }
-func (d *awaitingDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) {
-	var asks []dispatch.Ask
-	for _, id := range slices.Sorted(maps.Keys(d.asks)) {
-		asks = append(asks, d.asks[id])
+func (d *awaitingDispatch) EventsAfter(_ context.Context, _ string, after int64) ([]json.RawMessage, error) {
+	d.afters = append(d.afters, after)
+	var events []json.RawMessage
+	for _, raw := range d.events {
+		var event struct {
+			Seq int64 `json:"seq"`
+		}
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return nil, err
+		}
+		if event.Seq > after {
+			events = append(events, raw)
+		}
 	}
-	if d.ask.ID != "" {
-		asks = append(asks, d.ask)
+	return events, nil
+}
+
+// askEvent is one event of CAPTURE-ROOT's Dispatch event log, as Dispatch's events route serves
+// it: type at seq by actor, carrying payload.
+func askEvent(seq int64, eventType string, actor dispatch.Actor, payload map[string]any) json.RawMessage {
+	raw, err := json.Marshal(map[string]any{
+		"id": 1000 + seq, "issue_key": "CAPTURE-100", "seq": seq, "type": eventType, "notify": true,
+		"actor": map[string]any{"kind": actor.Kind, "id": actor.ID}, "created_at": time.Date(2026, 10, 23, 17, 0, int(seq), 0, time.UTC),
+		"payload": payload,
+	})
+	if err != nil {
+		panic(err)
 	}
-	return asks, nil
+	return raw
+}
+
+// askClosed is an answer or resolution (state) of ask at seq, by actor.
+func askClosed(seq int64, state, ask, kind string, actor dispatch.Actor) json.RawMessage {
+	return askEvent(seq, "ask."+state, actor, map[string]any{"id": ask, "kind": kind})
+}
+
+// askReplied is a reply at seq in ask's thread by actor, leaving the turn waitingOn.
+func askReplied(seq int64, ask, waitingOn string, actor dispatch.Actor) json.RawMessage {
+	return askEvent(seq, "comment.created", actor, map[string]any{"ask_id": ask, "ask_waiting_on": waitingOn})
 }
 
 var (
@@ -59,7 +88,7 @@ func catchUpRoot(t *testing.T, waiting record.Awaiting, gate *record.DesignGate,
 	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
+	root := record.Issue{Key: "CAPTURE-100", Tree: "CAPTURE-100", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &waiting}
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		if err := records.PutIssue(context.Background(), tx, root); err != nil {
@@ -120,15 +149,15 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("and name who runs the restore")}}},
 		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
-				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyBy: alice}}}},
+				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", alice)}}},
 		{name: "a person's answer", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "answered", ClosedBy: alice}}},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "answered", "ask-root", "question", alice)}}},
 		{name: "a person's resolution", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: alice}}},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", alice)}}},
 		{name: "a person's reply handing the open ask to the agent", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "agent", LastReplyBy: alice}}},
+			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "agent", alice)}}},
 		{name: "a person's reply under an ask a session resolved", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: architectSession, LastReplyBy: alice}}},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession), askReplied(10, "ask-root", "", alice)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			waitGate := tc.gate
@@ -159,16 +188,21 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 		client   awaitingDispatch
 	}{
 		{name: "an ask still waiting on the person", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "human", LastReplyBy: architectSession}}},
+			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "human", architectSession)}}},
 		{name: "a session's resolution", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: architectSession}}},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", architectSession)}}},
 		{name: "settlement's retraction", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: settler}}},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "resolved", "ask-root", "question", settler)}}},
 		{name: "a session's progress note", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "agent", LastReplyBy: architectSession}}},
+			client: awaitingDispatch{events: []json.RawMessage{askReplied(9, "ask-root", "agent", architectSession)}}},
 		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
-				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyBy: architectSession}}}},
+				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", architectSession)}}},
+		{name: "a person's answer Dispatch recorded before the wait began", awaiting: record.Awaiting{Ask: "ask-root", Since: record.EventMark{Seq: 10}},
+			client: awaitingDispatch{events: []json.RawMessage{askClosed(9, "answered", "ask-root", "question", alice)}}},
+		{name: "a person's reply Dispatch recorded before a registration's read began", awaiting: record.Awaiting{GateVersion: 3, Since: record.EventMark{Seq: 10}},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "human"},
+				events: []json.RawMessage{askReplied(9, "ask-approval", "agent", alice), askReplied(10, "ask-approval", "human", architectSession)}}},
 		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3},
 			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
 				ToldChangesMark: record.EventMark{Seq: 5, At: reviewed}},
@@ -185,13 +219,16 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 			if got == nil || !got.AwaitingPerson() || got.Answered() {
 				t.Fatalf("root after the catch-up = %#v, want it still waiting on the person", got)
 			}
+			if len(tc.client.afters) != 1 || tc.client.afters[0] != tc.awaiting.Since.Seq {
+				t.Fatalf("event log read after %v, want one read after the wait's start %d", tc.client.afters, tc.awaiting.Since.Seq)
+			}
 		})
 	}
 }
 
-type unreachableAsks struct{ awaitingDispatch }
+type unreachableEvents struct{ awaitingDispatch }
 
-func (*unreachableAsks) Asks(context.Context, string) ([]dispatch.Ask, error) {
+func (*unreachableEvents) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, &dispatch.TransientError{Err: context.DeadlineExceeded}
 }
 
@@ -217,8 +254,13 @@ func TestCatchUpAwaitingSkipsARootItCannotReadAndStillFailsWhenDispatchIsDown(t 
 	}
 	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 10, 23, 18, 0, 0, 0, time.UTC) }}, quietLogger())
 	admission := admit.New(records, engine, 0, "CAPTURE", quietLogger())
-	client := &awaitingDispatch{issue: dispatch.Issue{Key: asking.Key, LastSeq: 7},
-		ask: dispatch.Ask{ID: "ask-2", IssueKey: "CAPTURE-2", Kind: "question", State: "answered", ClosedBy: alice}}
+	answered, err := json.Marshal(map[string]any{"id": 1009, "issue_key": "CAPTURE-2", "seq": 9, "type": "ask.answered", "notify": true,
+		"actor": map[string]any{"kind": alice.Kind, "id": alice.ID}, "created_at": time.Date(2026, 10, 23, 17, 0, 9, 0, time.UTC),
+		"payload": map[string]any{"id": "ask-2", "kind": "question"}})
+	if err != nil {
+		t.Fatalf("encode the answer: %v", err)
+	}
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: asking.Key, LastSeq: 7}, events: []json.RawMessage{answered}}
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", handlers: []intake.Handler{engine, admission}, log: quietLogger()}
 
 	if err := w.catchUpAwaiting(context.Background()); err != nil {
@@ -236,7 +278,7 @@ func TestCatchUpAwaitingSkipsARootItCannotReadAndStillFailsWhenDispatchIsDown(t 
 		t.Fatalf("root after the broken one = %#v, want its answer caught up", got)
 	}
 
-	w.dispatch = &unreachableAsks{awaitingDispatch{issue: dispatch.Issue{Key: asking.Key, LastSeq: 7}}}
+	w.dispatch = &unreachableEvents{awaitingDispatch{issue: dispatch.Issue{Key: asking.Key, LastSeq: 7}}}
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		asking.Awaiting = &record.Awaiting{Ask: "ask-2"}
 		return records.PutIssue(context.Background(), tx, asking)
@@ -273,7 +315,7 @@ func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
 				seq++
 				return record.EventMark{Seq: seq, At: start.Add(time.Duration(seq) * time.Minute)}
 			}
-			root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
+			root := record.Issue{Key: "CAPTURE-100", Tree: "CAPTURE-100", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
 				Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 				Awaiting: &record.Awaiting{GateVersion: 4, Since: next()}}
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -351,14 +393,11 @@ func TestCatchUpAnswersWithAPersonsActOnAnyAskOfTheRoot(t *testing.T) {
 	}{
 		{name: "a person resolved the approval request", client: awaitingDispatch{
 			approval: dispatch.Approval{State: "draft", LatestVersion: 3},
-			ask:      dispatch.Ask{ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "resolved", ClosedBy: alice},
+			events:   []json.RawMessage{askClosed(9, "resolved", "ask-approval", "approval", alice)},
 		}},
 		{name: "a person answered another ask of the root", client: awaitingDispatch{
 			approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "human"},
-			asks: map[string]dispatch.Ask{
-				"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "human"},
-				"ask-question": {ID: "ask-question", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "answered", ClosedBy: alice},
-			},
+			events:   []json.RawMessage{askClosed(9, "answered", "ask-question", "question", alice)},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,7 +417,7 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
+	root := record.Issue{Key: "CAPTURE-100", Tree: "CAPTURE-100", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 		Awaiting: &record.Awaiting{GateVersion: 3}}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -447,7 +486,7 @@ func TestADelayedRegistrationDoesNotStrandARootAcrossASeedAndABoot(t *testing.T)
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.Admitted,
+	root := record.Issue{Key: "CAPTURE-100", Tree: "CAPTURE-100", Project: "CAPTURE", Title: "root", Phase: phase.Admitted,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.PutIssue(ctx, tx, root); err != nil {

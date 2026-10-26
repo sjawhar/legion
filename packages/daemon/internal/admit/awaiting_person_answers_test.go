@@ -555,8 +555,9 @@ var (
 // A changes request Dispatch recorded before the root's wait began answers nothing: the person gave
 // it before the request was handed back to them. One recorded after it answers the wait, also when
 // its transaction began before the hand-back's and committed after it, so that its time is the
-// earlier one: the issue's event sequence, not Dispatch's time, orders the two. Where the review
-// carries no sequence (a review Dispatch recorded before it kept one), its time places it.
+// earlier one: the issue's event sequence, not Dispatch's time, orders the two. A review carrying
+// no sequence was recorded before Dispatch kept one (its migration 0117), so before every wait,
+// whatever its time says.
 func TestAChangesRequestGivenBeforeTheWaitBeganAnswersNothingOnTheLivePath(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -568,7 +569,7 @@ func TestAChangesRequestGivenBeforeTheWaitBeganAnswersNothingOnTheLivePath(t *te
 		{name: "a review whose transaction began before the hand-back's and committed after it",
 			mark: record.EventMark{Seq: 11, At: handedBackAt.Add(-time.Millisecond)}, answered: true},
 		{name: "a review with no sequence, given before the hand-back", mark: record.EventMark{At: handedBackAt.Add(-time.Minute)}},
-		{name: "a review with no sequence, given after the hand-back", mark: record.EventMark{At: handedBackAt.Add(time.Minute)}, answered: true},
+		{name: "a review with no sequence, whatever its time", mark: record.EventMark{At: handedBackAt.Add(time.Minute)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)

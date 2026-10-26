@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -98,8 +99,8 @@ func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue
 	return issue, nil
 }
 
-func (*statusRecorder) Asks(context.Context, string) ([]dispatch.Ask, error) {
-	return nil, errors.New("architect status recorder reads no asks")
+func (*statusRecorder) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, errors.New("architect status recorder reads no events")
 }
 
 func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) error {
@@ -876,8 +877,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 // architect's approval request and its registration keeps the root in its slot with the architect
 // told; and it carries an open request Dispatch shows waiting on the agent, which starts no wait. A
 // changes request a newer version superseded carries nothing. Each registration reads the issue's
-// event sequence before the approval, and a wait it starts begins there, with the time of the
-// latest review that read showed.
+// event sequence before the approval, and a wait it starts begins at that sequence alone: the
+// latest review's time is that review's, never the read's.
 func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	const changed, moved, superseded = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", "7c1e3a5b-9d2f-4b6a-8e0c-1d3f5a7b9c2e"
@@ -898,7 +899,7 @@ func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) 
 			t.Fatalf("gate register %s = %d: %s", artifact, recorder.Code, recorder.Body)
 		}
 	}
-	since := record.EventMark{Seq: 7, At: reviewed}
+	since := record.EventMark{Seq: 7}
 	want := []intake.Fact{
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason,
 			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, DispatchVersion: 4, Since: since},

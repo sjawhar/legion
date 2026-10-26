@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,15 +84,9 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	}
 }
 
-// The list and the detail carry the issue's claim, which the record keeps as `<kind>:<id>`; the
-// issue's ask list carries whose turn an open ask waits on, who closed a closed one and when, and
-// the newest reply in each thread with its author and time, which the boot catch-up reads for a
-// person's act it may have missed.
-func TestReadsCarryTheClaimHolderAndEachAsksTurnCloserAndNewestReply(t *testing.T) {
+// The list and the detail carry the issue's claim, which the record keeps as `<kind>:<id>`.
+func TestReadsCarryTheClaimHolder(t *testing.T) {
 	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
-	replied := time.Date(2026, 10, 23, 17, 30, 0, 0, time.UTC)
-	answered := time.Date(2026, 10, 23, 17, 45, 0, 0, time.UTC)
-	resolved := time.Date(2026, 10, 23, 17, 50, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/issues":
@@ -100,25 +96,6 @@ func TestReadsCarryTheClaimHolderAndEachAsksTurnCloserAndNewestReply(t *testing.
 			})
 		case "/api/v1/issues/LEGION-1":
 			writeJSON(t, w, map[string]any{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed})
-		case "/api/v1/issues/LEGION-1/asks":
-			if got := r.URL.Query().Get("state"); got != "all" {
-				t.Fatalf("ask list state = %q, want all", got)
-			}
-			writeJSON(t, w, []map[string]any{
-				{
-					"id": "6c83cb7f-8f4e-4820-9e05-7c94fa725007", "issue_key": "LEGION-1", "kind": "question", "state": "open", "waiting_on": "agent",
-					"last_reply": map[string]any{"author": map[string]any{"kind": "user", "id": "alice"}, "created_at": replied},
-				},
-				{
-					"id": "answered", "issue_key": "LEGION-1", "kind": "approval", "state": "answered",
-					"answer": map[string]any{"user": "alice", "selected": []string{"Approve"}, "at": answered},
-				},
-				{
-					"id": "resolved", "issue_key": "LEGION-1", "kind": "question", "state": "resolved",
-					"resolution": map[string]any{"kind": "retracted", "reason": "moot", "at": resolved,
-						"actor": map[string]any{"kind": "system", "id": "document-settlement"}},
-				},
-			})
 		default:
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
@@ -140,20 +117,51 @@ func TestReadsCarryTheClaimHolderAndEachAsksTurnCloserAndNewestReply(t *testing.
 	if got := detail.Claim.Holder(); got != "user:alice" {
 		t.Fatalf("detail claim = %q, want user:alice", got)
 	}
-	asks, err := client.Asks(context.Background(), "LEGION-1")
+}
+
+// The boot catch-up reads an issue's event log after a sequence, oldest first, page after page
+// until a short page, each event as Dispatch served it; a page that does not ascend past the last
+// sequence read is refused rather than read again.
+func TestEventsAfterPagesTheIssuesEventLogInOrder(t *testing.T) {
+	var afters []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/issues/LEGION-1/events" || r.URL.Query().Get("limit") != "200" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+		afters = append(afters, r.URL.Query().Get("after"))
+		count := 200
+		if after >= 200 {
+			count = 3
+		}
+		page := make([]map[string]any, 0, count)
+		for seq := after + 1; seq <= after+int64(count); seq++ {
+			page = append(page, map[string]any{"seq": seq, "type": "comment.created", "issue_key": "LEGION-1"})
+		}
+		writeJSON(t, w, page)
+	}))
+	defer server.Close()
+
+	events, err := New(server.URL, dispatchToken).EventsAfter(context.Background(), "LEGION-1", 7)
 	if err != nil {
-		t.Fatalf("read the issue's asks: %v", err)
+		t.Fatalf("read events: %v", err)
 	}
-	want := []Ask{
-		{ID: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", IssueKey: "LEGION-1", Kind: "question", State: "open", WaitingOn: "agent",
-			LastReplyBy: Actor{Kind: "user", ID: "alice"}, LastReplyAt: replied},
-		{ID: "answered", IssueKey: "LEGION-1", Kind: "approval", State: "answered",
-			ClosedBy: Actor{Kind: "user", ID: "alice"}, ClosedAt: answered},
-		{ID: "resolved", IssueKey: "LEGION-1", Kind: "question", State: "resolved",
-			ClosedBy: Actor{Kind: "system", ID: "document-settlement"}, ClosedAt: resolved},
+	if !reflect.DeepEqual(afters, []string{"7", "207"}) || len(events) != 203 {
+		t.Fatalf("pages after %v gave %d events, want pages after 7 and 207 giving 203", afters, len(events))
 	}
-	if !reflect.DeepEqual(asks, want) {
-		t.Fatalf("asks = %#v, want %#v", asks, want)
+	var last struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := json.Unmarshal(events[len(events)-1], &last); err != nil || last.Seq != 210 {
+		t.Fatalf("last event = %s (%v), want seq 210", events[len(events)-1], err)
+	}
+
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, []map[string]any{{"seq": 7, "type": "comment.created"}})
+	}))
+	defer stuck.Close()
+	if _, err := New(stuck.URL, dispatchToken).EventsAfter(context.Background(), "LEGION-1", 7); err == nil || !strings.Contains(err.Error(), "non-ascending") {
+		t.Fatalf("a page at the sequence already read = %v, want refused", err)
 	}
 }
 

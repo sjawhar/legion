@@ -102,32 +102,6 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 	}, nil
 }
 
-// Asks reads GET /api/v1/issues/{key}/asks?state=all: every ask of the issue, open or closed, with
-// who closed a closed one and when, and the newest reply in its thread with its author and time
-// (Dispatch's row carries the thread's newest reply beside the ask). The boot catch-up applies
-// each act a person took on one of them as the live event would have.
-func (c *HTTPClient) Asks(ctx context.Context, key string) ([]Ask, error) {
-	var rows []askListRow
-	if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/asks?state=all", nil, &rows); err != nil {
-		return nil, err
-	}
-	asks := make([]Ask, 0, len(rows))
-	for _, row := range rows {
-		ask := Ask{ID: row.ID, IssueKey: deref(row.IssueKey), Kind: row.Kind, State: row.State, WaitingOn: row.WaitingOn}
-		switch {
-		case row.State == "answered" && row.Answer != nil:
-			ask.ClosedBy, ask.ClosedAt = Actor{Kind: "user", ID: row.Answer.User}, row.Answer.At.UTC()
-		case row.State == "resolved" && row.Resolution != nil:
-			ask.ClosedBy, ask.ClosedAt = Actor(row.Resolution.Actor), row.Resolution.At.UTC()
-		}
-		if row.LastReply != nil {
-			ask.LastReplyBy, ask.LastReplyAt = Actor(row.LastReply.Author), row.LastReply.CreatedAt.UTC()
-		}
-		asks = append(asks, ask)
-	}
-	return asks, nil
-}
-
 // ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
 // which the caller filters to its own project.
 func (c *HTTPClient) ListRepoProjects(ctx context.Context) ([]RepoProject, error) {
@@ -228,6 +202,39 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 			return nil, fmt.Errorf("page issue events for %s: non-descending sequence %d", key, next)
 		}
 		before = next
+	}
+}
+
+// EventsAfter reads the issue's Dispatch event log after sequence after, oldest first, through GET
+// /api/v1/issues/{key}/events?after=…, every page of it: each event as Dispatch serves it, which is
+// the shape its durable stream carries, so the boot catch-up applies each through the live
+// decoder, with its own sequence.
+func (c *HTTPClient) EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error) {
+	events := []json.RawMessage{}
+	for {
+		query := url.Values{}
+		query.Set("after", fmt.Sprint(after))
+		query.Set("limit", fmt.Sprint(eventPageLimit))
+		var page []json.RawMessage
+		if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/events?"+query.Encode(), nil, &page); err != nil {
+			return nil, err
+		}
+		for _, raw := range page {
+			var event struct {
+				Seq int64 `json:"seq"`
+			}
+			if err := json.Unmarshal(raw, &event); err != nil {
+				return nil, fmt.Errorf("page issue events for %s: %w", key, err)
+			}
+			if event.Seq <= after {
+				return nil, fmt.Errorf("page issue events for %s: non-ascending sequence %d after %d", key, event.Seq, after)
+			}
+			after = event.Seq
+			events = append(events, raw)
+		}
+		if len(page) < eventPageLimit {
+			return events, nil
+		}
 	}
 }
 
@@ -405,30 +412,6 @@ type issueResponse struct {
 
 type claimResponse struct {
 	Actor actor `json:"actor"`
-}
-
-// askListRow is one row of Dispatch's issue ask list: the ask, with the newest reply in its
-// thread beside it.
-type askListRow struct {
-	ID        string  `json:"id"`
-	IssueKey  *string `json:"issue_key"`
-	Kind      string  `json:"kind"`
-	State     string  `json:"state"`
-	WaitingOn string  `json:"waiting_on"`
-	// Answer is a person's answer: Dispatch takes one from a person alone (its answer route's
-	// requireHuman, and a review or carried approval in the reviewer's own name).
-	Answer *struct {
-		User string    `json:"user"`
-		At   time.Time `json:"at"`
-	} `json:"answer"`
-	Resolution *struct {
-		Actor actor     `json:"actor"`
-		At    time.Time `json:"at"`
-	} `json:"resolution"`
-	LastReply *struct {
-		Author    actor     `json:"author"`
-		CreatedAt time.Time `json:"created_at"`
-	} `json:"last_reply"`
 }
 
 type repoProjectResponse struct {

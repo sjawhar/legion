@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -95,7 +96,9 @@ func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, erro
 	return d.issue, d.getErr
 }
 
-func (*outboxDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) { return nil, nil }
+func (*outboxDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
 	d.statuses = append(d.statuses, status)
 	return d.statusErr

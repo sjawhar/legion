@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -211,9 +212,11 @@ func (d *pilotDispatch) GetIssue(context.Context, string) (dispatch.Issue, error
 	return dispatch.Issue{}, nil
 }
 
-func (*pilotDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) { return nil, nil }
-func (d *pilotDispatch) SetStatus(context.Context, string, string) error    { return nil }
-func (d *pilotDispatch) PostMessage(context.Context, string, string) error  { return nil }
+func (*pilotDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
+func (d *pilotDispatch) SetStatus(context.Context, string, string) error   { return nil }
+func (d *pilotDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *pilotDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return nil
 }
@@ -255,7 +258,7 @@ func (d *filteringDispatch) GetIssue(context.Context, string) (dispatch.Issue, e
 	return dispatch.Issue{}, nil
 }
 
-func (*filteringDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) {
+func (*filteringDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *filteringDispatch) SetStatus(context.Context, string, string) error   { return nil }

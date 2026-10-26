@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -272,7 +273,7 @@ func (d *blockingDispatch) GetIssue(context.Context, string) (dispatch.Issue, er
 	return d.issue, nil
 }
 
-func (*blockingDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) {
+func (*blockingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
@@ -436,7 +437,7 @@ func (d *refusingDispatch) GetIssue(_ context.Context, key string) (dispatch.Iss
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
 
-func (*refusingDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) {
+func (*refusingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string) error {
@@ -474,7 +475,9 @@ func (d *boardDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue,
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
 
-func (*boardDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) { return nil, nil }
+func (*boardDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) error {
 	if d.failures > 0 {
 		d.failures--

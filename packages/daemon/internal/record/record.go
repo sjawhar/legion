@@ -192,14 +192,20 @@ type EventMark struct {
 }
 
 // After says whether m comes after start: by sequence when both carry one, otherwise by time when
-// both carry one, strictly, so an event at start's own time is not after it. That fallback is
-// blind to two events whose transactions began at one instant, and to an event whose transaction
-// began before start's and committed after it. When neither is known on both sides, which comes
-// first cannot be told, and m counts as after start, as it did before marks were recorded.
+// both carry one, strictly, so an event at start's own time is not after it. A start with a
+// sequence is never followed by an m without one: Dispatch has given every review and every event
+// a sequence since its migration 0117 (a review written by any release, through the trigger that
+// migration adds), and every wait this daemon records starts at a sequenced event or read, so an
+// act Dispatch shows with no sequence was recorded before it. The time fallback is otherwise blind
+// to two events whose transactions began at one instant, and to an event whose transaction began
+// before start's and committed after it. When neither is known on both sides, which comes first
+// cannot be told, and m counts as after start, as it did before marks were recorded.
 func (m EventMark) After(start EventMark) bool {
 	switch {
 	case m.Seq > 0 && start.Seq > 0:
 		return m.Seq > start.Seq
+	case start.Seq > 0:
+		return false
 	case !m.At.IsZero() && !start.At.IsZero():
 		return m.At.After(start.At)
 	}

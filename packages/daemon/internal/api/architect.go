@@ -240,13 +240,13 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	// A re-admitted root's architect registers its spec again, often at the same version: each
 	// generation's registration is its own fact. What this read found of the person's review travels
 	// with it, so a spec a person approved or asked changes of before the architect registered is
-	// never waited on: the root keeps its admission slot, planning or revising. The wait's start
-	// also carries the time of the latest review the read showed, which places a review Dispatch
-	// gives no sequence for: every review it did not show is later.
+	// never waited on: the root keeps its admission slot, planning or revising. The wait's start is
+	// the read's sequence alone: no time this read shows is the read's own (the latest review's time
+	// is that review's), and every act Dispatch records after the read carries a later sequence.
 	changes, reason := approval.ChangesRequestedLatest()
 	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
 		ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent",
-		DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since, At: approval.At}}
+		DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since}}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	if changes != 0 {
 		fact.ChangesRequestedMark = review

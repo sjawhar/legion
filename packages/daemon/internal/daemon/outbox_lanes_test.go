@@ -153,7 +153,7 @@ func (d *postingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issu
 	return dispatch.Issue{Key: key}, nil
 }
 
-func (*postingDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) {
+func (*postingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *postingDispatch) SetStatus(context.Context, string, string) error {
@@ -208,7 +208,9 @@ func (d *laneBoard) GetIssue(_ context.Context, key string) (dispatch.Issue, err
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
 
-func (*laneBoard) Asks(context.Context, string) ([]dispatch.Ask, error) { return nil, nil }
+func (*laneBoard) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

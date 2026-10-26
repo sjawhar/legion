@@ -7,10 +7,10 @@
 -- person answered it, which puts it at the front of the waiting line. awaiting_since_seq and
 -- awaiting_since are where the wait began on Dispatch: the issue's event sequence and Dispatch's
 -- time of the event that started it (a hand-back, a question opened), or, for a registration, the
--- sequence its read began at and the time of the newest review that read showed. A review whose
--- event sequence (or, when Dispatch gave none, whose time) is not past that start never answers
--- the wait. The five are set only in that phase, and exactly one of the ask and the gate version
--- is; either start may be unknown (null).
+-- sequence its read began at, with no time. A person's act whose event sequence is not past that
+-- start never answers the wait, and neither does one Dispatch shows with no sequence (recorded
+-- before Dispatch kept one). The five are set only in that phase, and exactly one of the ask and
+-- the gate version is; either start may be unknown (null).
 --
 -- wait_fence_seq is the highest Dispatch event sequence of the issue that a wait has started from,
 -- kept in every phase and across a resume and a re-admission: a hand-back (ask.handed_back, or a

@@ -381,6 +381,14 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 	}
 }
 
+// DecodeDispatchEvent decodes one event of key's Dispatch event log as Dispatch's API serves it
+// (GET /api/v1/issues/{key}/events), which is the shape its durable stream carries: the boot
+// catch-up applies an act the daemon missed exactly as its live event would have been applied,
+// with its own sequence.
+func DecodeDispatchEvent(project, key string, event json.RawMessage) (Fact, error) {
+	return decodeDispatchFact("notifications.dispatch.issue."+key, project, string(event))
+}
+
 func dispatchSubjectKey(subject string) (string, bool) {
 	const prefix = "notifications.dispatch.issue."
 	remaining := strings.TrimPrefix(subject, prefix)

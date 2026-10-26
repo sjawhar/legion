@@ -472,8 +472,8 @@ type awaitingRoot struct {
 
 // catchUpAwaiting reads the person-owned state a root may have missed while this daemon was down.
 // It runs after Reconcile committed its durable-consumer holds, so a synthetic answer observes the
-// same admission fences as a live event. Each fact's id names what it read (a review's place in
-// the issue's Dispatch event log, a reply's id), so a second catch-up of the same state is dropped
+// same admission fences as a live event. Each fact's id names what it read (a review's or an ask
+// event's place in the issue's Dispatch event log), so a second catch-up of the same state is dropped
 // as processed; what keeps one act from answering twice, beside a later JetStream redelivery of the
 // original event whose id differs, is the record: a root already answered is skipped, a changes
 // request the gate records as told answers nothing, and one Dispatch recorded before the wait began
@@ -583,38 +583,36 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	return nil
 }
 
-// catchUpAwaitingAsks applies every act a person took on an ask of the root while the daemon was
-// down, as the live event would have carried it: the answer or resolution of an ask a person
-// closed, and the newest reply in a thread when a person wrote it and the ask is closed or waiting
-// on the agent (an open ask a session's reply moved carries that session as its author, and a
-// person's reply hands an open ask to the agent). What each act answers is the workflow's, as on
-// the live path: a root waiting on one of its asks is answered by an act on that ask, and one
-// waiting on its design gate by a person's act on any ask of the root, the approval request
-// included — the architect is the tree's only agent while it waits. Each act carries Dispatch's
-// time of it, so one recorded before the wait began answers nothing, and each fact's id names that
-// time, so a second catch-up of the same act is dropped as processed.
+// catchUpAwaitingAsks applies every act on an ask of the root that Dispatch recorded after the
+// root's wait began, while the daemon was down: it reads the root's Dispatch event log past the
+// wait's start (Awaiting.Since) and applies each ask event through the live decoder and the live
+// handlers, with its own sequence. What each act answers is the workflow's, as on the live path:
+// a root waiting on one of its asks is answered by a person's act on that ask, and one waiting on
+// its design gate by a person's act on any ask of the root, the approval request included — the
+// architect is the tree's only agent while it waits; a session's or Dispatch's own act answers
+// nothing. Each fact's id names the event's sequence and the root's generation, so a second
+// catch-up of the same event is dropped as processed.
 func (w *workflowRuntime) catchUpAwaitingAsks(ctx context.Context, root awaitingRoot) error {
-	asks, err := w.dispatch.Asks(ctx, root.issue.Key)
+	events, err := w.dispatch.EventsAfter(ctx, root.issue.Key, root.issue.Awaiting.Since.Seq)
 	if err != nil {
-		return fmt.Errorf("read the asks of %s: %w", root.issue.Key, err)
+		return fmt.Errorf("read the events of %s after %d: %w", root.issue.Key, root.issue.Awaiting.Since.Seq, err)
 	}
-	for _, ask := range asks {
-		if ask.ID == "" {
-			return fmt.Errorf("read the asks of %s: Dispatch returned an ask with no id", root.issue.Key)
+	for _, event := range events {
+		fact, err := intake.DecodeDispatchEvent(w.dispatchProject, root.issue.Key, event)
+		if err != nil {
+			return fmt.Errorf("read the events of %s: %w", root.issue.Key, err)
 		}
-		if (ask.State == "answered" || ask.State == "resolved") && ask.ClosedBy.Person() {
-			closed := record.EventMark{At: ask.ClosedAt}
-			if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-closed:%s:%d:%s:%s:%d", root.issue.Key, root.issue.Generation, ask.ID, ask.State, closed.ID()),
-				intake.DispatchAskClosed{Key: root.issue.Key, Ask: ask.ID, Kind: ask.Kind, State: ask.State, Actor: ask.ClosedBy, Mark: closed}); err != nil {
-				return err
-			}
+		var mark record.EventMark
+		switch fact := fact.(type) {
+		case intake.DispatchAskClosed:
+			mark = fact.Mark
+		case intake.DispatchAskReply:
+			mark = fact.Mark
+		default:
+			continue
 		}
-		if ask.LastReplyBy.Person() && (ask.State != "open" || ask.WaitingOn == "agent") {
-			replied := record.EventMark{At: ask.LastReplyAt}
-			if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-reply:%s:%d:%s:%d", root.issue.Key, root.issue.Generation, ask.ID, replied.ID()),
-				intake.DispatchAskReply{Key: root.issue.Key, Ask: ask.ID, WaitingOn: ask.WaitingOn, Actor: ask.LastReplyBy, Mark: replied}); err != nil {
-				return err
-			}
+		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("event:%s:%d:%d", root.issue.Key, root.issue.Generation, mark.Seq), fact); err != nil {
+			return err
 		}
 	}
 	return nil

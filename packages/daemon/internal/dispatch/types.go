@@ -3,6 +3,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -28,7 +29,7 @@ func MessageBodyLength(body string) int {
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
-	Asks(ctx context.Context, key string) ([]Ask, error)
+	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
 	SetStatus(ctx context.Context, key, status string) error
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
@@ -130,26 +131,6 @@ type Actor struct {
 
 // Person says whether the actor is a person: only a person's act answers a root waiting on one.
 func (a Actor) Person() bool { return a.Kind == "user" }
-
-// Ask is the bounded portion of a Dispatch ask the daemon needs to catch a suspended architect up
-// after boot. WaitingOn is whose reply an open ask needs next, `human` or `agent`; Dispatch leaves
-// it empty on an answered or resolved ask. ClosedBy is who closed a closed ask: the person whose
-// answer it carries (Dispatch takes an answer from a person alone), or the actor its resolution
-// names; zero on an open ask, with ClosedAt Dispatch's time of that answer or resolution.
-// LastReplyBy and LastReplyAt are the author of the newest reply in its thread and Dispatch's time
-// of it, both zero when it has none. The two times place each act against the start of a root's
-// wait, as the latest review's does (Approval.At): an ask read gives no event sequence.
-type Ask struct {
-	ID          string
-	IssueKey    string
-	Kind        string
-	State       string
-	WaitingOn   string
-	ClosedBy    Actor
-	ClosedAt    time.Time
-	LastReplyBy Actor
-	LastReplyAt time.Time
-}
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
 // the document (empty for a project document). While an approval request is open (State
