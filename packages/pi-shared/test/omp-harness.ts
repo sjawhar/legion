@@ -245,8 +245,11 @@ export function spawnRpc(
   };
 }
 
-/** The Anthropic Messages stream for one scripted reply. */
-export function messageStream(blocks: readonly Block[], id: string): string {
+/**
+ * The Anthropic Messages stream for one scripted reply. `inputTokens` is the input usage its
+ * `message_start` reports, which a caller raises to push the session past a compaction threshold.
+ */
+export function messageStream(blocks: readonly Block[], id: string, inputTokens = 5): string {
   const events: [string, unknown][] = [
     [
       "message_start",
@@ -260,7 +263,7 @@ export function messageStream(blocks: readonly Block[], id: string): string {
           content: [],
           stop_reason: null,
           stop_sequence: null,
-          usage: { input_tokens: 5, output_tokens: 1 },
+          usage: { input_tokens: inputTokens, output_tokens: 1 },
         },
       },
     ],
