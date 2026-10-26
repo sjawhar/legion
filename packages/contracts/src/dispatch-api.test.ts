@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   type Actor,
   type Agent,
@@ -13,6 +13,7 @@ import {
   AskEventPayloadSchema,
   type AskRead,
   type AskThread,
+  answerNotKept,
   type BlockTypeSchema,
   type Comment,
   CommentEventPayloadSchema,
@@ -27,8 +28,13 @@ import {
   DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
+  IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
+  IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_KEY_MAX,
   IDEMPOTENCY_KEY_PATTERN,
+  IDEMPOTENCY_KEY_REUSED,
+  type IdempotencyLandedCode,
   IssueDeployedEventPayloadSchema,
   IssueEventPayloadSchema,
   MessageDeliveryEventPayloadSchema,
@@ -36,6 +42,7 @@ import {
   MessageEventPayloadSchema,
   type MyAnswersResponse,
   type MyRepliesResponse,
+  retriesUnderKey,
   serviceSubjectLabel,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
@@ -63,6 +70,53 @@ test("an idempotency key is letters, digits, '.', '_', ':' and '-', at most 128 
   for (const key of ["", "k".repeat(IDEMPOTENCY_KEY_MAX + 1), "with space", "slash/key", "é"]) {
     expect(IDEMPOTENCY_KEY_PATTERN.test(key)).toBe(false);
   }
+});
+
+// The page and the `dispatch` command retry by this one rule, so a gateway's 408 is asked again
+// under the key by both (the server stores no 408) and a 422 or a KEY_COMMITTED by neither.
+describe("retriesUnderKey", () => {
+  test("asks again after every answer Dispatch does not store, and after a key still in flight", () => {
+    for (const status of [500, 502, 503, 504, 599, 408, 429]) {
+      expect(retriesUnderKey(status, undefined)).toBe(true);
+    }
+    expect(retriesUnderKey(409, IDEMPOTENCY_KEY_IN_FLIGHT)).toBe(true);
+  });
+
+  test("takes every other answer as Dispatch's verdict", () => {
+    for (const status of [200, 201, 204, 400, 401, 403, 404, 410, 413]) {
+      expect(retriesUnderKey(status, undefined)).toBe(false);
+    }
+    expect(retriesUnderKey(409, IDEMPOTENCY_KEY_COMMITTED)).toBe(false);
+    expect(retriesUnderKey(409, undefined)).toBe(false);
+    expect(retriesUnderKey(422, IDEMPOTENCY_KEY_REUSED)).toBe(false);
+  });
+});
+
+describe("answerNotKept", () => {
+  const notKept = { code: IDEMPOTENCY_ANSWER_NOT_KEPT, error: "answer too large to keep" };
+
+  test("is a replayed 2xx whose body names ANSWER_NOT_KEPT, with or without its reason", () => {
+    expect(answerNotKept(201, true, notKept)).toBe(true);
+    expect(answerNotKept(200, true, { code: IDEMPOTENCY_ANSWER_NOT_KEPT })).toBe(true);
+  });
+
+  test("is never an answer that was not replayed, a non-2xx, or another body", () => {
+    // An answer run afresh is the resource itself, whatever its fields say.
+    expect(answerNotKept(201, false, notKept)).toBe(false);
+    expect(answerNotKept(409, true, notKept)).toBe(false);
+    expect(answerNotKept(201, true, { code: "SOMETHING_ELSE" })).toBe(false);
+    for (const body of [undefined, null, "ANSWER_NOT_KEPT", [IDEMPOTENCY_ANSWER_NOT_KEPT]]) {
+      expect(answerNotKept(201, true, body)).toBe(false);
+    }
+  });
+
+  test("names the two landed codes in one type", () => {
+    const landed: readonly IdempotencyLandedCode[] = [
+      IDEMPOTENCY_KEY_COMMITTED,
+      IDEMPOTENCY_ANSWER_NOT_KEPT,
+    ];
+    expect(landed).toEqual(["KEY_COMMITTED", "ANSWER_NOT_KEPT"]);
+  });
 });
 
 test("models Agent activity and open-ask aggregates", () => {

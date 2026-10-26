@@ -1200,7 +1200,9 @@ export const MAX_BROADCAST_RECIPIENTS = 100;
  * `422 IDEMPOTENCY_KEY_REUSED`; the same key while the first is still running (within
  * `IDEMPOTENCY_LEASE_MS`) is `409 IDEMPOTENCY_KEY_IN_FLIGHT` with `Retry-After: 1`, which a client
  * asks again after. A 5xx, 401, 408 or 429 is not stored, so the next attempt runs the request
- * again. Keys belong to the signed-in login that sent them and are kept `IDEMPOTENCY_KEY_TTL_MS`.
+ * again - unless the first attempt's write committed before its answer was lost, which a repeat
+ * is answered `409 IDEMPOTENCY_KEY_COMMITTED` for. Keys belong to the signed-in login that sent
+ * them and are kept `IDEMPOTENCY_KEY_TTL_MS`.
  * Five routes answer a repeat from the record they made rather than the stored body: `POST
  * /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`, `POST
  * /api/v1/issues/{key}/messages`, `POST /api/v1/issues/{key}/comments` and `POST
@@ -1222,7 +1224,7 @@ export const IDEMPOTENCY_KEY_MAX = 128;
 
 /** A whole `IDEMPOTENCY_KEY_HEADER` value: letters, digits, `.`, `_`, `:` and `-`, from one to
  *  `IDEMPOTENCY_KEY_MAX` characters. Any other is `400 IDEMPOTENCY_KEY_INVALID`. */
-export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+export const IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
 
 /** The code of the `422` for a key already used for a different request (another method,
  *  route, path value or body); that request was not run. */
@@ -1245,6 +1247,47 @@ export const IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID";
  *  the replay has the first answer's status and this body instead of the first's. A 2xx with it
  *  means the write ran; the client reads the resource again rather than this body. */
 export const IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+
+/** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
+ *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */
+export type IdempotencyLandedCode =
+  | typeof IDEMPOTENCY_KEY_COMMITTED
+  | typeof IDEMPOTENCY_ANSWER_NOT_KEPT;
+
+/**
+ * Whether an attempt Dispatch answered with `status` (and `code`, its error body's) ended without
+ * Dispatch's verdict on the key, so a client asks again under the same key: a 5xx, a 408 or a 429
+ * (none of which Dispatch stores, `IDEMPOTENCY_KEY_HEADER`), or `409 IDEMPOTENCY_KEY_IN_FLIGHT`
+ * (the first request under the key is still running). Any other answer is Dispatch's verdict, and
+ * the same key would be answered with it again. The page and the `dispatch` command both retry by
+ * this one rule.
+ */
+export function retriesUnderKey(status: number, code: string | undefined): boolean {
+  return (
+    status >= 500 ||
+    status === 408 ||
+    status === 429 ||
+    (status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT)
+  );
+}
+
+/**
+ * Whether an answer of `status`, `replayed` (it carried `IDEMPOTENCY_REPLAYED_HEADER`) and parsed
+ * `body` is a replay whose first answer Dispatch did not keep: a replayed 2xx whose body is
+ * `{ code: IDEMPOTENCY_ANSWER_NOT_KEPT }`. The write ran; the client reads the resource again
+ * rather than taking this body for it. An answer that is not a replay is the resource itself,
+ * whatever it holds.
+ */
+export function answerNotKept(status: number, replayed: boolean, body: unknown): boolean {
+  return (
+    replayed &&
+    status >= 200 &&
+    status < 300 &&
+    typeof body === "object" &&
+    body !== null &&
+    Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT
+  );
+}
 
 /** How long Dispatch keeps a key's answer: 24 hours. */
 export const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
