@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // Source is the stored text of one reference source as its live write indexes it, read again so
@@ -65,18 +66,20 @@ func LoadSource(ctx context.Context, q Queryer, kind, id string) (Source, error)
 }
 
 // Reindex reconciles source's edges with its stored text in tx, as its live write would by the
-// current rules (replace): an edge it adds takes the source's own write time as created_at and
-// carries no source_seq, since no event introduced it, and no event is appended. A source that no
-// longer exists loses its edges. It leaves refs_owed to its caller, which claims the source's row
-// before reading it (ClaimOwed, RebuildAll).
-func Reindex(ctx context.Context, tx pgx.Tx, source Source, serverURL string) error {
+// current rules (replace), resolving a bare key and a `#id` through resolver: the source's
+// NewResolver, or, for a source of a scope the drain reads once, its NewScopedResolver. An edge it
+// adds takes the source's own write time as created_at and carries no source_seq, since no event
+// introduced it, and no event is appended. A source that no longer exists loses its edges. It
+// leaves refs_owed to its caller, which claims the source's row before reading it (ClaimOwed,
+// RebuildAll).
+func Reindex(ctx context.Context, tx pgx.Tx, source Source, serverURL string, resolver text.Resolver) error {
 	if !source.Exists {
 		if _, err := tx.Exec(ctx, `delete from refs where from_kind = $1 and from_id = $2`, source.Kind, source.ID); err != nil {
 			return fmt.Errorf("clear the references of %s %s: %w", source.Kind, source.ID, err)
 		}
 		return nil
 	}
-	if _, err := replaceAt(ctx, tx, source.Kind, source.ID, source.Body, serverURL, &source.WrittenAt); err != nil {
+	if _, err := replaceAt(ctx, tx, source.Kind, source.ID, source.Body, serverURL, resolver, &source.WrittenAt); err != nil {
 		return fmt.Errorf("re-index %s %s: %w", source.Kind, source.ID, err)
 	}
 	return nil
@@ -152,29 +155,65 @@ func SettleScope(ctx context.Context, q Execer, owed Owed) (bool, error) {
 	return settled.RowsAffected() == 1, nil
 }
 
-// questionCandidate matches every text text.Mentions may read a `#id` in, and fewer others: a `#`
-// and a block-id character, after the start of the text or any character text.Mentions lets a
-// mention follow. It refuses only what Mentions never reads - a `#` after a letter, a digit, a `/`
-// (`owner/repo#1`, `https://x/#q1`) or `{` (`:::ask{#q1}`, the declaration itself) - so a
-// document whose only `#` declares its question blocks is not re-indexed for its own scope.
-var questionCandidate = regexp.MustCompile(`(?:^|[^{/0-9A-Za-z])#[0-9A-Za-z_-]`)
+// questionCandidate is the Postgres regular expression matching every text text.Mentions may read
+// a `#id` in, and fewer others: a `#` and a block-id character, after the start of the text or any
+// character text.Mentions lets a mention follow. It refuses only what Mentions never reads - a `#`
+// after a letter, a digit, a `/` (`owner/repo#1`, `https://x/#q1`) or `{` (`:::ask{#q1}`, the
+// declaration itself) - so a document whose only `#` declares its question blocks is not
+// re-indexed for its own scope. Postgres reads `^` as the start of the text alone and lets `[^…]`
+// match a newline, as Go's regexp does.
+const questionCandidate = `(?:^|[^{/0-9A-Za-z])#[0-9A-Za-z_-]`
+
+// citationQueries reads, kind by kind in ScopeSources' order, which of the sources $1 hold text that
+// may cite a question (questionCandidate, $2), in id order: the text sourceQueries reads of each
+// kind, so a source no write indexes (a document with no markdown version, an issue-less message)
+// is never one.
+var citationQueries = []struct{ kind, query string }{
+	{"artifact", `
+		select d.id::text from unnest($1::uuid[]) as d(id)
+		cross join lateral (
+			select markdown from artifact_versions
+			where artifact_id = d.id and markdown is not null
+			order by number desc limit 1
+		) latest
+		where latest.markdown ~ $2
+		order by d.id`},
+	{"ask", `select id::text from asks where id = any($1::uuid[]) and question ~ $2 order by id`},
+	{"comment", `select id::text from comments where id = any($1::uuid[]) and body ~ $2 order by id`},
+	{"message", `
+		select id::text from messages
+		where id = any($1::uuid[]) and issue_key is not null and body ~ $2
+		order by id`},
+}
 
 // ScopeCitations is every source in the scope of the document doc (ScopeSources) whose stored text
-// may cite a question by `#id` (questionCandidate): the sources whose references change when the
-// document's question map does.
+// may cite a question by `#id` (questionCandidate), in ScopeSources' order: the sources whose
+// references change when the document's question map does. The text is matched where it is
+// stored, one query per kind, so a scope of thousands of comments sends none of their bodies.
 func ScopeCitations(ctx context.Context, q Queryer, doc string) ([]Target, error) {
 	sources, err := ScopeSources(ctx, q, doc)
 	if err != nil {
 		return nil, err
 	}
+	ids := map[string][]string{}
+	for _, source := range sources {
+		ids[source.Kind] = append(ids[source.Kind], source.ID)
+	}
 	citing := []Target{}
-	for _, target := range sources {
-		source, err := LoadSource(ctx, q, target.Kind, target.ID)
-		if err != nil {
-			return nil, err
+	for _, kind := range citationQueries {
+		if len(ids[kind.kind]) == 0 {
+			continue
 		}
-		if source.Exists && questionCandidate.MatchString(source.Body) {
-			citing = append(citing, target)
+		rows, err := q.Query(ctx, kind.query, ids[kind.kind], questionCandidate)
+		if err != nil {
+			return nil, fmt.Errorf("read the %ss in the scope of document %s that may cite a question: %w", kind.kind, doc, err)
+		}
+		found, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, fmt.Errorf("read the %ss in the scope of document %s that may cite a question: %w", kind.kind, doc, err)
+		}
+		for _, id := range found {
+			citing = append(citing, Target{Kind: kind.kind, ID: id})
 		}
 	}
 	return citing, nil

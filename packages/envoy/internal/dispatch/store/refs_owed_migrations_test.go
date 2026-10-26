@@ -118,9 +118,9 @@ func TestRefsOwedSeedOwesEveryStoredSource(t *testing.T) {
 }
 
 // What a server of the release before the queue writes reaches the database as the row alone, and
-// each such write is owed: a comment, an ask, an issue message and a document version, which also
-// owes its document as a scope, as does a question block's ask. An edit of what the index reads is
-// owed again, and re-dates a row already owed; an update the index does not read - a resolution, an
+// each such write is owed: a comment, an ask, an issue message and a document version, and a
+// question block's ask also owes its document as a scope. An edit of what the index reads is owed
+// again, and re-dates a row already owed; an update the index does not read - a resolution, an
 // answer, an anchor refreshed within its document - owes nothing, and neither does a file version or
 // a direct message.
 func TestRefsOwedTriggersOweWhatAnEarlierReleaseWrites(t *testing.T) {
@@ -178,5 +178,62 @@ func TestRefsOwedTriggersOweWhatAnEarlierReleaseWrites(t *testing.T) {
 	}
 	if !redated.After(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("a second edit left the owed comment enqueued at %v; want it re-dated", redated)
+	}
+}
+
+// A document version owes its document as a scope only when the lines its question map is read
+// from change: a question block added, renamed or dropped, or settlement writing copied_from into
+// one, each owes it, while an edit of the prose around blocks that stand as they were, or one
+// that only moves them, owes the version alone. A document's first version owes the scope when it
+// declares a block, and not when it declares none.
+func TestRefsOwedVersionOwesItsScopeOnlyWhenItsQuestionBlocksChange(t *testing.T) {
+	store := openEmptyTestStore(t)
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	execAll(t, store, `
+		insert into projects (key, name) values ('ACME', 'Acme')`, `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('ACME-1', 'ACME', 1, 'One', '{"kind":"user","id":"alice"}', 'U')`)
+	newDocument := func(slug string) string {
+		return insertReturningID(t, store, `
+			insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+			values ('ACME-1', 'ACME', $1, $1, 'doc', '{"kind":"user","id":"alice"}')
+			returning id::text`, slug)
+	}
+	plain := newDocument("plain")
+	declared := newDocument("declared")
+
+	const copiedFrom = "6f1c1f39-3d43-4b8e-9d0a-2f0d6c5b7a10"
+	versions := map[string]int{}
+	for _, step := range []struct {
+		name, doc, markdown string
+		scope               bool
+	}{
+		{"a first version declaring no block", plain, "Blocked on ACME-1, see #q1.\n", false},
+		{"a first version declaring a block", declared, "Intro.\n\n:::ask{#q1}\nWhich?\n:::\n", true},
+		{"an edit of the prose alone", declared, "Intro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", false},
+		{"a block added", declared, "Intro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n\n:::ask{#q2}\nWhen?\n:::\n", true},
+		{"the blocks moved", declared, ":::ask{#q2}\nWhen?\n:::\n\nIntro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", false},
+		{"a block renamed", declared, ":::ask{#q3}\nWhen?\n:::\n\nIntro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", true},
+		{"copied_from written into a block", declared, `:::ask{#q3 copied_from="` + copiedFrom + `"}` + "\nWhen?\n:::\n\nIntro, reworded.\n\n:::ask{#q1}\nWhich one?\n:::\n", true},
+		{"a block dropped", declared, `:::ask{#q3 copied_from="` + copiedFrom + `"}` + "\nWhen?\n:::\n\nIntro, reworded.\n", true},
+		{"a later version declaring no block, after none did", plain, "Blocked on ACME-1 still.\n", false},
+	} {
+		execAll(t, store, `delete from refs_owed`)
+		versions[step.doc]++
+		if _, err := store.Pool.Exec(ctx, `
+			insert into artifact_versions (artifact_id, number, markdown) values ($1, $2, $3)
+		`, step.doc, versions[step.doc], step.markdown); err != nil {
+			t.Fatalf("%s: insert version %d: %v", step.name, versions[step.doc], err)
+		}
+		want := []string{"artifact " + step.doc}
+		if step.scope {
+			want = sortedOwed("artifact "+step.doc, "scope "+step.doc)
+		}
+		if got := readOwed(t, store); !reflect.DeepEqual(got, want) {
+			t.Errorf("owed after %s = %v; want %v", step.name, got, want)
+		}
 	}
 }

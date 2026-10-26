@@ -114,7 +114,7 @@ func rebuildSource(ctx context.Context, pool Pool, kind, id, serverURL string) (
 	if err != nil {
 		return false, err
 	}
-	if err := Reindex(ctx, tx, source, serverURL); err != nil {
+	if err := Reindex(ctx, tx, source, serverURL, NewResolver(ctx, tx, kind, id)); err != nil {
 		return false, err
 	}
 	return source.Exists, tx.Commit(ctx)

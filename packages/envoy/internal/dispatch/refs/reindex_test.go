@@ -1,8 +1,11 @@
 package refs
 
 import (
+	"cmp"
 	"context"
 	"reflect"
+	"regexp"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -61,6 +64,7 @@ func sortedStrings(values []string) []string {
 
 // rebuildFixture writes, by raw SQL as an earlier release does, a comment edited after it was
 // written and a document version, each naming ACME-2 bare, and returns their ids and write times.
+// The version declares a question block, so it owes its document as a scope too.
 func rebuildFixture(t *testing.T, database *store.Store) (comment, document string, commentAt, versionAt time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -86,8 +90,8 @@ func rebuildFixture(t *testing.T, database *store.Store) (comment, document stri
 	`, commentAt)
 	document = insertScopeDocument(t, tx, "ACME-1", "plan", false)
 	if _, err := tx.Exec(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, created_at) values ($1, 1, 'After ACME-2.', $2)
-	`, document, versionAt); err != nil {
+		insert into artifact_versions (artifact_id, number, markdown, created_at) values ($1, 1, $2, $3)
+	`, document, "After ACME-2.\n\n:::ask{#q1}\nWhich?\n:::\n", versionAt); err != nil {
 		t.Fatalf("insert the version: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -151,7 +155,7 @@ func TestReindexDropsTheEdgesOfASourceThatIsGone(t *testing.T) {
 		if loaded.Exists {
 			t.Fatalf("%s %s loaded as %#v; want it absent", source.kind, source.id, loaded)
 		}
-		if err := Reindex(ctx, tx, loaded, "https://dispatch.example"); err != nil {
+		if err := Reindex(ctx, tx, loaded, "https://dispatch.example", NewResolver(ctx, tx, source.kind, source.id)); err != nil {
 			t.Fatalf("re-index %s: %v", source.kind, err)
 		}
 		var edges int
@@ -161,5 +165,85 @@ func TestReindexDropsTheEdgesOfASourceThatIsGone(t *testing.T) {
 		if edges != 0 {
 			t.Errorf("%s %s keeps %d edges; want none", source.kind, source.id, edges)
 		}
+	}
+}
+
+// ScopeCitations matches in Postgres what text.Mentions may read a `#id` in, exactly as the Go
+// pattern it replaced did ((?:^|[^{/0-9A-Za-z])#[0-9A-Za-z_-], start of text only, a newline
+// matching the negated class): a `#` after `{`, `/`, a letter or a digit, or with no id character
+// after it, is no candidate. It reads each kind's text as its live write indexes it - a document's
+// latest version, an ask's question, a comment's and an issue message's body - and answers in
+// ScopeSources' order.
+func TestScopeCitationsSelectsTheTextThatMayCiteAQuestion(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "ACME")
+	createReferenceIssue(t, tx, "ACME-1", "ACME")
+	spec := insertScopeDocument(t, tx, "ACME-1", "spec", true)
+	insertScopeVersion(t, tx, spec, 1, ":::ask{#q1}\nWhich?\n:::\n")
+	insertScopeVersion(t, tx, spec, 2, "See #q1.\n\n:::ask{#q1}\nWhich?\n:::\n")
+
+	oldCandidate := regexp.MustCompile(`(?:^|[^{/0-9A-Za-z])#[0-9A-Za-z_-]`)
+	want := []Target{{"artifact", spec}}
+	for _, body := range []struct {
+		text   string
+		citing bool
+	}{
+		{"{#q1}", false},
+		{"/#q1", false},
+		{"a#q1", false},
+		{"1#q1", false},
+		{":::ask{#q1}", false},
+		{"owner/repo#1", false},
+		{"https://x/#q1", false},
+		{" #q1", true},
+		{"(#q1", true},
+		{"_#q1_", true},
+		{"#q1 at the start of the text", true},
+		{"#", false},
+		{"# heading", false},
+		{"a line\n#q1 at the start of the next", true},
+		{"a line\n{#q1}", false},
+	} {
+		if oldCandidate.MatchString(body.text) != body.citing {
+			t.Fatalf("the Go pattern reads %q as citing %v; the table says %v", body.text, !body.citing, body.citing)
+		}
+		comment := insertScopeRow(t, tx, "comment", `
+			insert into comments (issue_key, author, body) values ('ACME-1', '{"kind":"user","id":"alice"}', $1)
+			returning id::text
+		`, body.text)
+		if body.citing {
+			want = append(want, Target{"comment", comment})
+		}
+	}
+	citingAsk := insertScopeRow(t, tx, "citing ask", `
+		insert into asks (issue_key, author, question) values ('ACME-1', '{"kind":"user","id":"alice"}', 'After #q1?')
+		returning id::text
+	`)
+	insertScopeAsk(t, tx, "ACME-1", "", nil)
+	citingMessage := insertScopeRow(t, tx, "citing message", `
+		insert into messages (issue_key, author, body) values ('ACME-1', '{"kind":"user","id":"alice"}', 'See #q1.')
+		returning id::text
+	`)
+	insertScopeRow(t, tx, "message", `
+		insert into messages (issue_key, author, body) values ('ACME-1', '{"kind":"user","id":"alice"}', 'See ACME-1.')
+		returning id::text
+	`)
+	want = append(want, Target{"ask", citingAsk}, Target{"message", citingMessage})
+	slices.SortFunc(want, func(left, right Target) int {
+		return cmp.Or(cmp.Compare(left.Kind, right.Kind), cmp.Compare(left.ID, right.ID))
+	})
+
+	got, err := ScopeCitations(ctx, tx, spec)
+	if err != nil {
+		t.Fatalf("scope citations: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("scope citations = %v; want %v", got, want)
 	}
 }

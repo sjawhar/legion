@@ -1460,16 +1460,21 @@ selects and a scan of directive lines, never `loadAskBlocks`, which locks rows).
 `GET /api/v1/references/questions?kind=&id=` serves both to the dashboard so it resolves `#id` by
 the same rule. Text the rule has not read is owed in `refs_owed` (migrations 0118-0123): triggers
 on `comments`, `asks`, `messages` and `artifact_versions` enqueue a source when what the index
-reads of it changes, and a document as a `scope` when its question map may have changed; 0123
-seeds every stored source. `refs.ReplaceCounted` deletes its own source's row in the write's
-transaction, so only a write an earlier release made stays owed. `docs.Service.RunReferenceReindex`
-drains the queue under the `reference-reindex` lease (`duty.Exclusive`): batches of 200, 2 s apart
-while a batch is full and every 30 s otherwise; each source in its own transaction that claims its
-row (`refs.ClaimOwed`, `for update skip locked`), reads it (`refs.LoadSource`) and reconciles it
-(`refs.Reindex`, edges dated at the source's own write time, no `source_seq`, no event), a
-document storing its excerpts in that transaction; a `scope` row owes every source of that scope
-whose text may cite a `#id` (`refs.ScopeCitations`). `packages/envoy/cmd/dispatch/README.md`
-(Reference graph) has the grammar and how a rolling update converges.
+reads of it changes, and a document as a `scope` when its question map may have changed (a
+question block's ask made or moved; a version whose sorted `:::ask{` lines differ from the
+previous markdown version's, never a prose-only edit); 0123 seeds every stored source.
+`refs.ReplaceCounted` deletes its own source's row in the write's transaction, so only a write an
+earlier release made stays owed. `docs.Service.RunReferenceReindex` drains the queue under the
+`reference-reindex` lease (`duty.Exclusive`): batches of 200, 2 s apart while a batch is full and
+every 30 s otherwise; each source in its own transaction that claims its row (`refs.ClaimOwed`,
+`for update skip locked`), reads it (`refs.LoadSource`) and reconciles it (`refs.Reindex`, edges
+dated at the source's own write time, no `source_seq`, no event), a document storing its excerpts
+in that transaction; a `scope` row owes every source of that scope whose text may cite a `#id`
+(`refs.ScopeCitations`, one SQL regex query per source kind) and re-indexes each against the
+document's question map read once for the row (`refs.NewScopedResolver`), unless the source's
+scope, read again in its own transaction, has moved, when its own scope's map is read.
+`packages/envoy/cmd/dispatch/README.md` (Reference graph) has the grammar and how a rolling update
+converges.
 
 The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
 That editor builds each node it loads with its schema, so an attribute the live document lacks

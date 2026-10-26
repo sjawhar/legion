@@ -969,18 +969,26 @@ owe a comment when its body or what decides its scope changes (`reply_to`, its a
 document, `artifact_id`, `ask_id`, `issue_key`); an ask when its question or what decides its
 scope changes, and, when it is made or its `block_id` or block document changes, its block's
 document as a `scope`; an issue message when it is written or its body changes; and, for each
-version holding markdown, its document as an `artifact` and as a `scope`. `refs.ReplaceCounted`,
-which every indexing write goes through, deletes its own source's row at the end of the write's
-transaction, so a write this release indexes is not owed again; an earlier release never deletes
-one, so its writes stay owed. `docs.Service.RunReferenceReindex` drains the queue under the
-`reference-reindex` lease (`duty.Exclusive`): one batch of 200 rows per tick, oldest first, 2 s
-apart while a batch comes back full and every 30 s otherwise. Each source is re-indexed in a
-transaction of its own that claims its row (`for update skip locked`; a row a landing write holds
-waits for the next tick), reads the stored text and reconciles the source's edges; a source that
-is gone loses its edges, and a document also stores its mentions' excerpts in that transaction. A
-`scope` row owes, in its place, every source in that document's scope whose text may cite a
-`#id`, which is how a `#q2` written before settlement made q2's ask (another question of the same
-edit saying "see #q2") is stored once the ask exists. An edge the drain adds is dated at the
+version holding markdown, its document as an `artifact`, and as a `scope` only when the version's
+question directives differ from the previous markdown version's: every line holding a `:::ask{`
+opener, sorted, so adding, dropping or renaming a block, or settlement writing `copied_from` into
+one, owes the scope, and an edit of the prose around unchanged blocks does not (a first version
+owes it when it has any such line). `refs.ReplaceCounted`, which every indexing write goes
+through, deletes its own source's row at the end of the write's transaction, so a write this
+release indexes is not owed again; an earlier release never deletes one, so its writes stay owed.
+`docs.Service.RunReferenceReindex` drains the queue under the `reference-reindex` lease
+(`duty.Exclusive`): one batch of 200 rows per tick, oldest first, 2 s apart while a batch comes
+back full and every 30 s otherwise. Each source is re-indexed in a transaction of its own that
+claims its row (`for update skip locked`; a row a landing write holds waits for the next tick),
+reads the stored text and reconciles the source's edges; a source that is gone loses its edges,
+and a document also stores its mentions' excerpts in that transaction. A `scope` row owes, in its
+place, every source in that document's scope whose text may cite a `#id` (`refs.ScopeCitations`,
+matched in Postgres with one query per source kind), which is how a `#q2` written before
+settlement made q2's ask (another question of the same edit saying "see #q2") is stored once the
+ask exists. The document's question map is read once for the row, before the row is settled, and
+each of those sources resolves its `#id`s against it (`refs.NewScopedResolver`); a source whose
+scope has moved since it was listed (a comment anchored elsewhere), checked in its own
+transaction, resolves against its new scope's map instead. An edge the drain adds is dated at the
 source's own write time (an ask's or comment's latest edit, else its creation; a message's or a
 version's creation), so old text does not sort as new under "Referenced by", and like a
 `rebuild-refs` edge it carries no `source_seq` and appends no event. A source it cannot re-index

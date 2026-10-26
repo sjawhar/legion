@@ -88,14 +88,15 @@ func ReplaceCounted(
 // inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
 // batched backlink count.
 func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
-	return replaceAt(ctx, tx, fromKind, fromID, body, serverURL, nil)
+	return replaceAt(ctx, tx, fromKind, fromID, body, serverURL, NewResolver(ctx, tx, fromKind, fromID), nil)
 }
 
-// replaceAt is replace with the created_at of the edges it inserts: writtenAt, the source's own
-// write time, for a re-index of stored text (Reindex), so old text does not sort as new under
-// "Referenced by"; the transaction's time when nil, for the write that stores the text.
-func replaceAt(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string, writtenAt *time.Time) ([]Target, error) {
-	kinds, ids, err := targets(ctx, tx, fromKind, fromID, body, serverURL)
+// replaceAt is replace with the resolver a bare key and a `#id` are read through (Reindex's) and
+// the created_at of the edges it inserts: writtenAt, the source's own write time, for a re-index of
+// stored text (Reindex), so old text does not sort as new under "Referenced by"; the transaction's
+// time when nil, for the write that stores the text.
+func replaceAt(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string, resolver text.Resolver, writtenAt *time.Time) ([]Target, error) {
+	kinds, ids, err := targets(body, serverURL, resolver)
 	if err != nil {
 		return nil, fmt.Errorf("read references: %w", err)
 	}
@@ -144,10 +145,10 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 }
 
 // targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays: the
-// references text.Mentions reads in it, a bare key and a `#id` resolved for the source (fromKind,
-// fromID) through q (NewResolver).
-func targets(ctx context.Context, q Queryer, fromKind, fromID, body, serverURL string) ([]string, []string, error) {
-	mentions, err := text.Mentions(body, serverURL, NewResolver(ctx, q, fromKind, fromID))
+// references text.Mentions reads in it, a bare key and a `#id` resolved for its source through
+// resolver.
+func targets(body, serverURL string, resolver text.Resolver) ([]string, []string, error) {
+	mentions, err := text.Mentions(body, serverURL, resolver)
 	if err != nil {
 		return nil, nil, err
 	}

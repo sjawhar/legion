@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // referenceReindexBatch is how many owed rows one re-index tick reads; referenceReindexStep is the
@@ -91,7 +92,7 @@ func (s *Service) ReindexReferences(ctx context.Context) (reindexed int, full bo
 			done, err = s.reindexScope(ctx, item)
 		} else {
 			var claimed bool
-			if claimed, err = s.reindexOwed(ctx, item.Kind, item.ID); claimed {
+			if claimed, err = s.reindexOwed(ctx, item.Kind, item.ID, nil); claimed {
 				done = 1
 			}
 		}
@@ -107,14 +108,31 @@ func (s *Service) ReindexReferences(ctx context.Context) (reindexed int, full bo
 	return reindexed, len(owed) == referenceReindexBatch, nil
 }
 
+// scopeQuestions is the question map of the document a scope row names (refs.QuestionMap), read
+// once for every source of that scope reindexScope re-indexes.
+type scopeQuestions struct {
+	doc       string
+	questions map[string]text.Ref
+}
+
 // reindexScope owes every source in the scope of the document item names that may cite a question
 // by `#id`, settles the scope row once each is owed (refs.SettleScope keeps a row the question map
-// re-dated meanwhile), and re-indexes those sources. Each statement runs on its own, holding no
-// transaction: a write landing in that scope may hold one of the rows it waits on.
+// re-dated meanwhile), and re-indexes those sources, each resolving `#id` against the document's
+// question map read once here (refs.NewScopedResolver) rather than once per source. The map is read
+// before the row is settled, so a change to it after the read - a version changing its question
+// blocks, an ask made for one - re-dates or remakes the row, which stays owed and is read again at
+// a later tick. Each statement runs on its own, holding no transaction: a write landing in that
+// scope may hold one of the rows it waits on.
 func (s *Service) reindexScope(ctx context.Context, item refs.Owed) (int, error) {
 	citing, err := refs.ScopeCitations(ctx, s.store.Pool, item.ID)
 	if err != nil {
 		return 0, err
+	}
+	scope := &scopeQuestions{doc: item.ID}
+	if len(citing) > 0 {
+		if scope.questions, err = refs.QuestionMap(ctx, s.store.Pool, item.ID); err != nil {
+			return 0, err
+		}
 	}
 	for _, source := range citing {
 		if err := refs.OweSource(ctx, s.store.Pool, source.Kind, source.ID); err != nil {
@@ -126,7 +144,7 @@ func (s *Service) reindexScope(ctx context.Context, item refs.Owed) (int, error)
 	}
 	reindexed := 0
 	for _, source := range citing {
-		claimed, err := s.reindexOwed(ctx, source.Kind, source.ID)
+		claimed, err := s.reindexOwed(ctx, source.Kind, source.ID, scope)
 		switch {
 		case ctx.Err() != nil:
 			return reindexed, ctx.Err()
@@ -152,13 +170,15 @@ type excerptRead struct {
 
 // reindexOwed re-indexes the source (kind, id) in one transaction and reports whether it claimed
 // its row: the claim (refs.ClaimOwed) comes first, then the stored text (refs.LoadSource) and the
-// index (refs.Reindex); a source that is gone loses its edges. A document also stores its mentions'
+// index (refs.Reindex); a source that is gone loses its edges. A source of a scope reindexScope
+// drains resolves `#id` against scope's question map while it is still in that scope; any other
+// (scope nil) as its live write does (refs.NewResolver). A document also stores its mentions'
 // excerpts in that transaction, so it leaves none owed for an earlier release's reconciliation,
 // which reads mentions by the grammar before bare keys and `#id`s, to fill: cut from the rendering
 // read beforehand when it is the version's markdown, as IndexDocumentReferences cuts them only
 // from the render its version came from; else marked owed (refs.ClearExcerpts) for this release's
 // reconciliation, which reads the document itself. A row another transaction holds is left owed.
-func (s *Service) reindexOwed(ctx context.Context, kind, id string) (bool, error) {
+func (s *Service) reindexOwed(ctx context.Context, kind, id string, scope *scopeQuestions) (bool, error) {
 	var read excerptRead
 	if kind == "artifact" {
 		markdown, blocks, err := s.TextWithBlocks(ctx, id)
@@ -186,11 +206,15 @@ func (s *Service) reindexOwed(ctx context.Context, kind, id string) (bool, error
 	if err != nil {
 		return false, err
 	}
-	if err := refs.Reindex(ctx, tx, source, s.serverURL); err != nil {
+	resolver := refs.NewResolver(ctx, tx, kind, id)
+	if scope != nil {
+		resolver = refs.NewScopedResolver(ctx, tx, kind, id, scope.doc, scope.questions)
+	}
+	if err := refs.Reindex(ctx, tx, source, s.serverURL, resolver); err != nil {
 		return false, err
 	}
 	if kind == "artifact" && source.Exists {
-		if err := s.recordReindexedExcerpts(ctx, tx, source, read); err != nil {
+		if err := s.recordReindexedExcerpts(ctx, tx, source, read, resolver); err != nil {
 			return false, err
 		}
 	}
@@ -198,16 +222,17 @@ func (s *Service) reindexOwed(ctx context.Context, kind, id string) (bool, error
 }
 
 // recordReindexedExcerpts stores the excerpts of the mentions the document source writes, at its
-// version: none for a document it could not read (as ReconcileReferenceExcerpts records one), cut
-// from read when read renders as the version's markdown, else owed to the reconciliation.
-func (s *Service) recordReindexedExcerpts(ctx context.Context, tx pgx.Tx, source refs.Source, read excerptRead) error {
+// version, each resolved through resolver as its index was: none for a document it could not read
+// (as ReconcileReferenceExcerpts records one), cut from read when read renders as the version's
+// markdown, else owed to the reconciliation.
+func (s *Service) recordReindexedExcerpts(ctx context.Context, tx pgx.Tx, source refs.Source, read excerptRead, resolver text.Resolver) error {
 	switch {
 	case read.unreadable:
 		return refs.RecordExcerpts(ctx, tx, source.ID, source.Version, nil)
 	case read.markdown != source.Body:
 		return refs.ClearExcerpts(ctx, tx, source.ID)
 	}
-	excerpts, err := refs.MentionExcerpts(read.markdown, read.blocks, s.serverURL, refs.NewResolver(ctx, tx, "artifact", source.ID))
+	excerpts, err := refs.MentionExcerpts(read.markdown, read.blocks, s.serverURL, resolver)
 	if err != nil {
 		return err
 	}

@@ -382,17 +382,31 @@ func isUUID(id string) bool {
 // resolver is text.Resolver for the text of one reference source, read through q, the write's
 // transaction: a bare key names an issue that exists there, and a `#id` the question of that id
 // in the source's scope (ScopeOf, QuestionMap), which is read only when the text holds a `#id`.
+// A resolver made with the question map of a document (NewScopedResolver) answers that map, unread
+// again, while the source's scope is still that document.
 type resolver struct {
-	ctx      context.Context
-	q        Queryer
-	fromKind string
-	fromID   string
+	ctx       context.Context
+	q         Queryer
+	fromKind  string
+	fromID    string
+	scope     string
+	questions map[string]text.Ref
 }
 
 // NewResolver is the text.Resolver for the text the source (fromKind, fromID) writes, read through
 // q: the transaction that writes it, or the pool for a reader outside one.
 func NewResolver(ctx context.Context, q Queryer, fromKind, fromID string) text.Resolver {
 	return resolver{ctx: ctx, q: q, fromKind: fromKind, fromID: fromID}
+}
+
+// NewScopedResolver is NewResolver for a source of the scope of the document doc whose question map,
+// questions, its caller read once for every source of that scope it re-indexes (docs.Service's
+// drain of a scope row), so a scope of many citing sources reads the map once and not once each.
+// The source's scope is still read through q, in the source's own transaction: a source moved out
+// of doc's scope since its caller listed it (a comment anchored elsewhere) resolves against its
+// own scope's map, as NewResolver's does, and never against doc's.
+func NewScopedResolver(ctx context.Context, q Queryer, fromKind, fromID, doc string, questions map[string]text.Ref) text.Resolver {
+	return resolver{ctx: ctx, q: q, fromKind: fromKind, fromID: fromID, scope: doc, questions: questions}
 }
 
 func (r resolver) Issues(keys []string) (map[string]bool, error) {
@@ -403,6 +417,9 @@ func (r resolver) Questions() (map[string]text.Ref, error) {
 	doc, err := ScopeOf(r.ctx, r.q, r.fromKind, r.fromID)
 	if err != nil || doc == "" {
 		return nil, err
+	}
+	if doc == r.scope {
+		return r.questions, nil
 	}
 	return QuestionMap(r.ctx, r.q, doc)
 }
