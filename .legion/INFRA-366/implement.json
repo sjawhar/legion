@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T14:30:00Z",
+  "completed": "2026-10-26T15:45:00Z",
   "proof": [
+    {
+      "criterion": "Review round 4: a dashboard URL that GFM autolinked from plain text is read as text cites it (bounded), so one past the index's bounds stays a raw link where the server records no reference; a link its author wrote to the same long-named document still opens it",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server, plus MarkdownBody's component test",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r10?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/pictures.e2e.ts e2e/block-references.e2e.ts e2e/references.e2e.ts; bun test web/src/features/refs/MarkdownBody.test.tsx -t 'bare dashboard URL past the bounds'",
+      "observed": "40 passed, including 'a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link' on both projects: the bare URL (reference key 2613 bytes) keeps href and text equal to the URL with no data-dispatch-ref, while the author's [design](dispatch://…) link has href /issues/CORE-1/artifacts/<slug> and opens it. The unit test passes: a bare 2683-character-slug URL stays a plain link, two author links open the document, and a bare page URL with a 257-byte #b- fragment names its document.",
+      "headSha": "ea0496c2f4928f8656406069ee8a91fb0ed0cf9f",
+      "negativeControl": "With RefLink.tsx from 811b7261 the unit test finds 3 design.md links instead of 2; the browser test on a git archive of 811b7261 (test file copied) fails 2/2: the bare link's href is /issues/CORE-1/artifacts/<slug>, not the URL"
+    },
     {
       "criterion": "Review round 3, finding 1: `dispatch read` of the href `dispatch search` prints for an ask hit never fails where main printed the document; the hit links its typed block only while the block is a graph node, otherwise `?ask=<id>`",
       "surface": "Real Go server builds on fresh local Postgres databases (head, previous head e26a6648, main 8298fc71) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r9-search.sh",
@@ -131,7 +139,8 @@
     "Round 8: dashboard target-id.ts and reference-spans.ts out of routes.ts (922 lines), parseNodeReference/nodeRouteFromHref for server data, versioned spec page, BlockTarget.block = {id, pin?}, contracts utf8Bytes and encodeBlockId per code point, shared href rows (aee29df2)",
     "Round 8: MentionExcerpts comment, indexRenderedVersion/indexUnrenderedVersion, acceptance lib.sh (4fb3569c); docs (c00e53a6)",
     "Round 8: forward merge of main 8298fc71, migrations renumbered 0118-0125 after main's 0117, envoy-client dispatch-command.ts args['issue'] for claude-envoy's typecheck (e26a6648)",
-    "Round 9: api/search.go askBlockNodeSQL and search_ask_block_href_test.go (394e2fb9); dashboard routes.ts, DispatchPicture.tsx, RefLink.tsx, RefPreview.tsx, ProofDocument.tsx and their tests (573dd319); e2e/pictures.e2e.ts, e2e/sends.ts (2ece5e05); forward merges of main a5aeddf1 and 3f34ba12 (6fdbd78e, 811b7261)"
+    "Round 9: api/search.go askBlockNodeSQL and search_ask_block_href_test.go (394e2fb9); dashboard routes.ts, DispatchPicture.tsx, RefLink.tsx, RefPreview.tsx, ProofDocument.tsx and their tests (573dd319); e2e/pictures.e2e.ts, e2e/sends.ts (2ece5e05); forward merges of main a5aeddf1 and 3f34ba12 (6fdbd78e, 811b7261)",
+    "Round 10: RefLink.tsx isTextUrl and bounded read of text URLs, routes.ts comments, MarkdownBody.test.tsx, e2e/pictures.e2e.ts, packages/dispatch/AGENTS.md (ea0496c2)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
