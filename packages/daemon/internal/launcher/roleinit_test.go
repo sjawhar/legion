@@ -148,7 +148,10 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		{"agent2 home-carryover", "present", "the relaunched role keeps its own home layer across generations"},
 		{"agent2 tmp-mount", "mounted-a", "the relaunch keeps the mount /tmp carries"},
 		{"agent2 home-mount", "mounted-a", "the relaunch binds the home's volumes back again"},
-		{"agent2 home-mount-deep", "mounted-a", "the relaunch finds the deep volume's place already made in its layer"},
+		{"agent2 home-mount-deep", "mounted-a", "the relaunch makes the deep volume's place in its own layer again, over the link its first generation left there"},
+		{"stage2 sibling-config", "absent", "a link the role left in its home layer is not followed: no directory appears at the sibling's own config home"},
+		{"agent2 home-mount-other", "mounted-a", "the relaunch makes the other deep volume's place in its own layer again, over the link its first generation left there"},
+		{"stage2 sibling-state", "absent", "a link the role left in its home layer is not followed: nothing appears in the sibling's state directory"},
 		{"agent2 home-mounts-view", "0", "the relaunch covers the container's view of the home's volumes too"},
 		{"stage2 status", "0", "the relaunch reports its own shim's wait status"},
 		{"stage2 detached", "gone", "the relaunch leaves nothing behind either"},
@@ -159,7 +162,8 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		{"agent2 config-planted", "present", "the relaunched role keeps what it wrote in its own config home"},
 		{"agent2 config-legion", "legion-jj", "the relaunched role still reads workspace-init's jj configuration"},
 		{"agent-sibling own-gh", "gh-b", "the sibling role reads its own gh bundle"},
-		{"agent-sibling config-legion", "legion-jj", "the sibling's config home holds workspace-init's jj configuration too"},
+		{"agent-sibling config-legion", "legion-jj", "the sibling's config home holds workspace-init's jj configuration too, made again over a directory with no marker of a finished copy"},
+		{"agent-sibling config-stale", "absent", "what stood at the sibling's own config home without the marker is gone"},
 		{"agent-sibling config-planted", "absent", "what one role wrote in its config home never reaches a sibling's"},
 		{"agent-sibling config-nested", "nested-a", "the sibling sees the mount under the shared config home too"},
 		{"stage-sibling status", "0", "the sibling's role-init reports its shim's wait status"},
@@ -175,6 +179,10 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		if got, ok := report[want.key]; !ok || got != want.value {
 			t.Errorf("%s = %q, want %q: %s\n%s", want.key, got, want.value, want.why, output)
 		}
+	}
+	// The relaunch's role-init says which link it replaced rather than followed.
+	if want := "/deep was a link, which role-init does not follow on the way to a mount point"; !strings.Contains(string(output), want) {
+		t.Errorf("the relaunch's role-init logged no %q\n%s", want, output)
 	}
 	// POSIX message queues, where the machine has a /dev/mqueue: the role's shows its own IPC
 	// namespace's queues, none of the container's, and the container never sees one it makes.
@@ -343,6 +351,7 @@ func runStage(plan stagePlan) error {
 	for _, bind := range [][2]string{
 		{carried, filepath.Join(homeMounts, "mounted")},
 		{nested, filepath.Join(homeMounts, "mounted", "nested")},
+		{carried, filepath.Join(homeMounts, "other", "cache")},
 		{carried, filepath.Join(homeMounts, "deep", "sessions")},
 		{carried, "/tmp/mounted"},
 		{shared, filepath.Join(homeMounts, ConfigHomeDir)},
@@ -402,17 +411,42 @@ func runStage(plan stagePlan) error {
 
 	// The role's relaunch: a second generation over the same role-homes volume, with the
 	// agent-secrets directory gone, as a pod that is not enrolled with the secrets broker has it.
+	// Its first generation left, in its own home layer, a link where each deep volume's place
+	// goes: one naming the sibling's own config home under the roles directory, which the sibling
+	// has not made yet, and one naming the sibling's state directory, which exists. role-init must
+	// make each volume's place in the role's layer without following either link.
 	if err := os.RemoveAll(filepath.Join(rolesDir, plan.Role, RoleAgentSecretsDir)); err != nil {
 		return err
 	}
+	siblingConfig := filepath.Join(rolesDir, RoleHomesDir, plan.Sibling, RoleConfigHomeDir)
+	siblingState := filepath.Join(rolesDir, plan.Sibling, RoleStateDir)
+	for link, target := range map[string]string{"deep": siblingConfig, "other": siblingState} {
+		if err := os.RemoveAll(filepath.Join(homes, "upper", link)); err != nil {
+			return err
+		}
+		if err := os.Symlink(target, filepath.Join(homes, "upper", link)); err != nil {
+			return err
+		}
+	}
 	layout.Detached = plan.Detached + "2"
-	if err := runGeneration(plan, layout, 2, "agent2"); err != nil {
-		return err
+	// What the links named is reported even when the generation failed, so a role-init that
+	// followed one shows where it wrote.
+	relaunched := runGeneration(plan, layout, 2, "agent2")
+	fmt.Printf("stage2 sibling-config=%s\n", presence(siblingConfig))
+	fmt.Printf("stage2 sibling-state=%s\n", presence(filepath.Join(siblingState, "cache")))
+	if relaunched != nil {
+		return relaunched
 	}
 	fmt.Printf("stage2 detached=%s\n", detachedProcess(layout.Detached))
 
 	// The sibling role's first generation, after the role's two have written their own config
-	// home: what the role wrote there never reaches the sibling, nor the pod's shared one.
+	// home: what the role wrote there never reaches the sibling, nor the pod's shared one. A
+	// directory already stands at the sibling's own config home, as one a generation stopped
+	// midway, or anything else, would leave: it holds no marker of a finished copy, so the
+	// sibling's role-init makes the copy again.
+	if err := os.MkdirAll(filepath.Join(siblingConfig, "stale"), 0o755); err != nil {
+		return err
+	}
 	siblingPlan := plan
 	siblingPlan.Role, siblingPlan.Sibling = plan.Sibling, plan.Role
 	siblingLayout := layout
@@ -548,6 +582,7 @@ func TestRoleInitAgentHelper(t *testing.T) {
 	say("home-mount", content(filepath.Join(plan.Home, "mounted", "marker")))
 	say("home-mount-nested", content(filepath.Join(plan.Home, "mounted", "nested", "marker")))
 	say("home-mount-deep", content(filepath.Join(plan.Home, "deep", "sessions", "marker")))
+	say("home-mount-other", content(filepath.Join(plan.Home, "other", "cache", "marker")))
 	if err := os.WriteFile(filepath.Join(plan.Home, "mounted", "written-"+plan.Label), []byte("volume"), 0o600); err != nil {
 		say("home-mount-writes", err.Error())
 	} else {
@@ -570,6 +605,7 @@ func TestRoleInitAgentHelper(t *testing.T) {
 	say("config-legion", content(filepath.Join(configHome, "jj", "repos", "id", "config.toml")))
 	say("config-nested", content(filepath.Join(configHome, "nested", "marker")))
 	say("config-planted", presence(filepath.Join(configHome, "git", "config")))
+	say("config-stale", presence(filepath.Join(configHome, "stale")))
 	if err := os.MkdirAll(filepath.Join(configHome, "git"), 0o755); err != nil {
 		say("config-write", err.Error())
 	} else if err := os.WriteFile(filepath.Join(configHome, "git", "config"), []byte("[core]\n\tfsmonitor = /planted-by-"+plan.Label+"\n"), 0o600); err != nil {
@@ -836,5 +872,120 @@ func TestTheRoleNamespaceCheckRunsARoleGeneration(t *testing.T) {
 	}
 	if got := report["failing"]; !strings.Contains(got, "did not run its shim to a clean exit") || !strings.Contains(got, "Code:1") {
 		t.Errorf("the check over a shim that exits 1 = %q, want a refusal naming exit 1\n%s", got, output)
+	}
+}
+
+// role-init makes a mount point's place in a role's own layer without following a link the role
+// left there: a link where a directory of the path goes, naming another role's directory under the
+// roles directory (one that exists, and the sibling's own config home before the sibling made it),
+// is replaced by a directory in the role's layer and reported, and nothing appears where it
+// pointed; a link where the mount point itself goes is replaced too, for a directory's bind and for
+// a file's. A file already at a file's mount point is left as it is. An entry in the way that is
+// neither a directory nor a link is refused, and so is a target outside the root.
+func TestAMountPointsPlaceFollowsNoLinkARoleLeft(t *testing.T) {
+	dir := t.TempDir()
+	root, elsewhere := filepath.Join(dir, "home"), filepath.Join(dir, "roles", RoleHomesDir, "b")
+	for _, path := range []string{root, elsewhere} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, target := range map[string]string{
+		"into": elsewhere, "deep": filepath.Join(elsewhere, RoleConfigHomeDir),
+		"final-dir": filepath.Join(elsewhere, "dir"), "final-file": filepath.Join(elsewhere, "file"),
+	} {
+		if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{"plain": "plain", "existing": "keep"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var replaced []string
+	record := func(link string) { replaced = append(replaced, link) }
+	for _, place := range []struct {
+		target string
+		dir    bool
+	}{{"into/sessions", true}, {"deep/sessions", true}, {"final-dir", true}, {"final-file", false}, {"existing", false}} {
+		if err := mountPointBeneath(root, filepath.Join(root, place.target), place.dir, record); err != nil {
+			t.Errorf("the place of %s: %v", place.target, err)
+		}
+	}
+	if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 0 {
+		t.Errorf("the sibling's directory holds %v (%v), want nothing: a link was followed", entries, err)
+	}
+	for path, want := range map[string]fs.FileMode{
+		"into": fs.ModeDir, "into/sessions": fs.ModeDir, "deep": fs.ModeDir, "deep/sessions": fs.ModeDir, "final-dir": fs.ModeDir, "final-file": 0,
+	} {
+		if info, err := os.Lstat(filepath.Join(root, path)); err != nil || info.Mode().Type() != want {
+			t.Errorf("%s is %v (%v), want type %v in the role's own layer", path, info, err, want)
+		}
+	}
+	if want := []string{filepath.Join(root, "into"), filepath.Join(root, "deep"), filepath.Join(root, "final-dir"), filepath.Join(root, "final-file")}; strings.Join(replaced, " ") != strings.Join(want, " ") {
+		t.Errorf("replaced links %q, want %q", replaced, want)
+	}
+	if got := content(filepath.Join(root, "existing")); got != "keep" {
+		t.Errorf("the file already at a file's mount point reads %q, want it left as it was", got)
+	}
+	if err := mountPointBeneath(root, filepath.Join(root, "plain", "x"), true, record); err == nil || !strings.Contains(err.Error(), "neither a directory nor a link") {
+		t.Errorf("a place through a regular file = %v, want a refusal", err)
+	}
+	if err := mountPointBeneath(root, filepath.Join(dir, "outside"), true, record); err == nil || !strings.Contains(err.Error(), "is not under") {
+		t.Errorf("a place outside the root = %v, want a refusal", err)
+	}
+}
+
+// A role's own config home is a finished copy only once it holds ownConfigHome's marker: a
+// directory at its path without the marker — a copy a generation stopped midway, or an empty
+// directory something else made there before the role's first start — is removed and copied
+// again from the pod's shared one, and so is a link at its path, which is removed without touching
+// what it named. A finished copy is the role's own from then on: what the role wrote there stays.
+func TestAnOwnConfigHomeWithoutItsMarkerIsMadeAgain(t *testing.T) {
+	dir := t.TempDir()
+	shared, own, elsewhere := filepath.Join(dir, "shared"), filepath.Join(dir, "own"), filepath.Join(dir, "elsewhere")
+	for path, body := range map[string]string{
+		filepath.Join(shared, "jj", "repos", "id", "config.toml"): "legion-jj",
+		filepath.Join(own, "sessions", "stale"):                   "stale",
+		filepath.Join(elsewhere, configHomeMarker):                "",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := ownConfigHome(shared, own, nil); err != nil || got != own {
+		t.Fatalf("ownConfigHome over an unfinished copy = %q, %v", got, err)
+	}
+	if got := content(filepath.Join(own, "jj", "repos", "id", "config.toml")); got != "legion-jj" {
+		t.Errorf("the role's config home reads %q at workspace-init's jj configuration, want legion-jj: an unfinished copy was kept", got)
+	}
+	if got := presence(filepath.Join(own, "sessions")); got != "absent" {
+		t.Errorf("what stood at the role's config home without the marker is %s, want absent", got)
+	}
+	if err := os.WriteFile(filepath.Join(own, "role-wrote"), []byte("role"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownConfigHome(shared, own, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := content(filepath.Join(own, "role-wrote")); got != "role" {
+		t.Errorf("what the role wrote in its finished config home reads %q, want it kept", got)
+	}
+	linked := filepath.Join(dir, "linked")
+	if err := os.Symlink(elsewhere, linked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownConfigHome(shared, linked, nil); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(linked); err != nil || !info.IsDir() {
+		t.Errorf("the config home made over a link is %v (%v), want a directory of its own", info, err)
+	}
+	if got := presence(filepath.Join(elsewhere, configHomeMarker)); got != "present" {
+		t.Errorf("what the link named lost its file (%s): the link was followed", got)
 	}
 }

@@ -161,6 +161,12 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 					i, mount.MountPath, covered, spelled)
 			}
 		}
+		for _, device := range roleDevicePaths {
+			if spelled, ok := throughImageLinks(mount.MountPath, device, overlaps); ok {
+				return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s%s, which every role's namespace in an issue pod replaces with a filesystem of its own and carries no mount back onto: a mount may be neither at, under, nor above %s",
+					i, mount.MountPath, device, spelled, device)
+			}
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(providerKeys)) {
 		if name == ompsessions.DSNFileName {

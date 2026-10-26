@@ -1059,21 +1059,23 @@ func (r *liveRig) kubectl(args ...string) (string, error) {
 
 // roleEnter is the shell that runs a command inside one running role of an issue pod's one
 // container (`legion launcher role-init`), from `kubectl exec -c roles`: $1 the role, the rest the
-// command. It finds the role's role-init by its argv (`… launcher role-init … --role <role> … --
-// <shim argv>`), refusing, exit 125, a role that runs none or two; enters that role-init's user,
-// mount, PID and IPC namespaces (uid 0 there, the container's runtime user outside, with
-// --preserve-credentials, since gVisor refuses the setgroups a plain nsenter makes), where /proc is
-// the role's own and role-init is its PID 1; and from there enters the user namespace of the role's
-// worker-shim (role-init's child, PPid 1), so the command runs as the role's own user with the
-// role's own mounts: its gh, private, state and agent-secrets directories at their fixed paths, its
-// home layer, its /tmp, and an empty roles directory. Pids it reads are the role's own, and so are
-// those it signals. With "pid" for the command it prints the role-init's pid in the container's PID
-// namespace instead, and runs nothing.
+// command. It finds the role's role-init by its argv (argv[1] `launcher`, argv[2] `role-init`, then
+// `--role <role>` before the shim's `--`), refusing, exit 125, a role that runs none or two; enters
+// that role-init's user, mount, PID and IPC namespaces (uid 0 there, the container's runtime user
+// outside, with --preserve-credentials, since gVisor refuses the setgroups a plain nsenter makes),
+// where /proc is the role's own and role-init is its PID 1; and from there enters the user
+// namespace of the role's worker-shim (role-init's child, PPid 1, whose argv[1] is `worker-shim`:
+// role-init reaps every orphan of its namespace, so a process the agent detached is its child too,
+// and the word anywhere else in an argv is no shim), so the command runs as the role's own user
+// with the role's own mounts: its gh, private, state and agent-secrets directories at their fixed
+// paths, its home layer, its /tmp, and an empty roles directory. Pids it reads are the role's own,
+// and so are those it signals. With "pid" for the command it prints the role-init's pid in the
+// container's PID namespace instead, and runs nothing.
 const roleEnter = `role=$1; shift
 found=
 for d in /proc/[0-9]*; do
   args=$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null) || continue
-  printf '%s\n' "$args" | sed '/^--$/q' | grep -qx role-init || continue
+  [ "$(printf '%s\n' "$args" | sed -n 2,3p | tr '\n' ' ')" = "launcher role-init " ] || continue
   [ "$(printf '%s\n' "$args" | sed -n '/^--$/q; /^--role$/{n;p;q;}')" = "$role" ] || continue
   [ -z "$found" ] || { echo "role $role runs two role-inits, pids $found and ${d#/proc/}" >&2; exit 125; }
   found=${d#/proc/}
@@ -1084,7 +1086,7 @@ exec nsenter -t "$found" -U -m -p -i --preserve-credentials -- sh -c '
 shim=
 for d in /proc/[0-9]*; do
   [ "$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)" = 1 ] || continue
-  tr "\0" "\n" <"$d/cmdline" 2>/dev/null | grep -qx worker-shim || continue
+  [ "$(tr "\0" "\n" <"$d/cmdline" 2>/dev/null | sed -n 2p)" = worker-shim ] || continue
   [ -z "$shim" ] || { echo "the role runs two worker-shims under its role-init" >&2; exit 125; }
   shim=${d#/proc/}
 done

@@ -318,7 +318,8 @@ package api
 // `{issue, controller}`, the two pods' reservations, rather than one entry per role; the
 // resource-limits capability row names those pods. (This branch took 36; main then landed
 // INFRA-229 at 36, so this branch takes the number above it, as the collision note says. Main
-// holds store migration 0050, so this takes 0051. sjawhar/legion#2131 also declares 37 and migration
-// 0051 on its branch: whichever of the two merges second takes the next contract number and
-// renumbers its store migration past the other's, as the collision note says.)
+// holds store migration 0050, so this takes 0051. Other open branches may declare 37 or a
+// migration 0051 too: whichever merges after another takes the next free contract number and
+// renumbers its store migration past main's, every site that names either included, among them
+// the rollback's `delete from schema_version where version = 51` in docs/kubernetes.md.)
 const DaemonAPIVersion = 37

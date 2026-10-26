@@ -245,7 +245,7 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runt
 			name, pod.UID, container, ended.Reason, ended.ExitCode, role, r.roleLog(ctx, name, container, role))
 	}
 	if !connected {
-		return observe(runtime.Uncertain, "pod %s (uid %s) role %s's launcher is disconnected", name, pod.UID, role)
+		return observe(runtime.Uncertain, "pod %s (uid %s) role %s's launcher is disconnected%s", name, pod.UID, role, containerRestarts(status))
 	}
 	switch {
 	case state.Child != nil:
@@ -263,6 +263,30 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runt
 	default:
 		return observe(runtime.Gone, "pod %s (uid %s) role %s's launcher reports no child", name, pod.UID, role)
 	}
+}
+
+// containerRestarts is what the kubelet says of the pod's one container while no launcher of it
+// is connected: the reason it waits, and, once it has ended at least once, its restart count and
+// how its last instance ended. That container runs every role's launcher, so a container that
+// crash-loops reads as every role's launcher disconnected, and this is the why each of them
+// carries. It is "" for a container that is running and never ended.
+func containerRestarts(status *corev1.ContainerStatus) string {
+	var detail strings.Builder
+	if waiting := status.State.Waiting; waiting != nil {
+		fmt.Fprintf(&detail, "; container %s waiting (%s", status.Name, waiting.Reason)
+		if waiting.Message != "" {
+			fmt.Fprintf(&detail, ": %s", waiting.Message)
+		}
+		detail.WriteString(")")
+	}
+	if last := status.LastTerminationState.Terminated; last != nil {
+		fmt.Fprintf(&detail, "; container %s restarted %d times, its last instance terminated (%s, exit code %d", status.Name, status.RestartCount, last.Reason, last.ExitCode)
+		if !last.FinishedAt.IsZero() {
+			fmt.Fprintf(&detail, " at %s", last.FinishedAt.UTC().Format(time.RFC3339))
+		}
+		detail.WriteString(")")
+	}
+	return detail.String()
 }
 
 // podAbsent describes the Sandbox mode, its current Suspended condition, and any same-named

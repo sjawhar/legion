@@ -44,9 +44,9 @@ func providersItems(pod corev1.PodSpec) []corev1.KeyToPath {
 // the providers directory and, seeing the pointer, never exports the URL into Oh My Pi's
 // environment; the image probe mounts the key too, so a Secret that lacks it refuses boot. Under
 // cloudsql-iam no pod and no probe mounts a session key at all: the file is the generation's own,
-// written beside the socket each role container's launcher proxies to the instance, and that
-// launcher is told the instance, the database and the login. Under the volume store no pod carries
-// either variable, the projection, or the launcher's flags.
+// written beside the socket the pod's one launcher proxies to the instance for that generation of
+// that role, and the launcher is told the instance, the database and the login. Under the volume
+// store no pod carries either variable, the projection, or the launcher's flags.
 func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 	projection := corev1.KeyToPath{Key: "SESSION_DSN", Path: "OMP_SESSION_SQL_DSN"}
 	proxyFlags := []string{

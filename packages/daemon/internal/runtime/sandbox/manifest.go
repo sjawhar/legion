@@ -177,6 +177,13 @@ func legionMountPaths() []string {
 // those links.
 var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/tmp", "/var/tmp"}
 
+// roleDevicePaths are the device filesystems each role's namespace replaces with its own
+// (role-init's privateDevices): a new devpts instance at /dev/pts and its own IPC namespace's
+// mqueue at /dev/mqueue. role-init carries no mount back onto either, so an operator's mount at,
+// under or above one would vanish from every role; CheckPod refuses all three, where it refuses
+// only a mount at or above a roleNamespacePaths entry.
+var roleDevicePaths = []string{"/dev/mqueue", "/dev/pts"}
+
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
 	spec runtime.SpawnSpec
@@ -936,8 +943,9 @@ func (r *Runtime) LaunchBound() time.Duration {
 // API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the
 // issue's volume leads PATH. The GIT_CONFIG pairs are the GitHub credential of every git the role
-// runs, in the issue's clone or outside it, and the two settings that would run another role's
-// program in it (gitConfigEnv).
+// runs, in the issue's clone or outside it, and two settings that would run a program another role
+// planted in the clone, the fsmonitor and the hooks, turned off (gitConfigEnv); other settings of
+// the shared clone can still run one.
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -1001,6 +1009,9 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 // the fsmonitor program or a hook any configuration file names. The issue's roles share the
 // clone, and each can write its `.git/config` and hooks, so without these a `git status` or `git
 // commit` of one role would run a program another planted, with the first role's credentials.
+// These are two of the settings that can do so, not all: a diff driver, a filter driver or a
+// signing program a role plants in the shared clone still runs in a sibling's git, and the roles
+// are no boundary against each other's code (docs/kubernetes.md).
 var gitConfigPairs = [][2]string{
 	{"credential.https://github.com.helper", ""},
 	{"credential.https://github.com.helper", workspace.GitHubCredentialHelper},

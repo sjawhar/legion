@@ -142,7 +142,7 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 		{filepath.Join(homes, "tmp"), "/tmp"},
 		{filepath.Join(homes, "var-tmp"), "/var/tmp"},
 	} {
-		if err := carryOver(bind[1], stage, func() error { return bindMount(bind[0], bind[1]) }); err != nil {
+		if err := carryOver(cfg, bind[1], stage, func() error { return bindMount(bind[0], bind[1]) }); err != nil {
 			return fmt.Errorf("give the role its own %s: %w", bind[1], err)
 		}
 	}
@@ -163,7 +163,7 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 			continue
 		}
 		covered[resolved] = true
-		if err := carryOver(resolved, stage, func() error { return mountTmpfs(resolved, "size=64m") }); err != nil {
+		if err := carryOver(cfg, resolved, stage, func() error { return mountTmpfs(resolved, "size=64m") }); err != nil {
 			return fmt.Errorf("give the role its own %s: %w", path, err)
 		}
 	}
@@ -237,9 +237,10 @@ func privateDevices() error {
 // (clone_private_mount), and every mount the container carries is locked in the role's namespaces.
 // A home that carries a mount anyway is refused, naming it, rather than overlaid on one kernel and
 // hidden on another. What the role writes anywhere else under its home is its own: no sibling role
-// and nothing in the container sees it. The pod's shared config home is the one volume not bound
-// back: the role's own config home goes at its path instead (ownConfigHome), and a mount under the
-// shared one is bound back on top of the role's.
+// and nothing in the container sees it. Each volume's place is made in the role's own layer
+// without following a link the role left there (makeLike). The pod's shared config home is the
+// one volume not bound back: the role's own config home goes at its path instead (ownConfigHome),
+// and a mount under the shared one is bound back on top of the role's.
 func privateHome(cfg RoleInitConfig, homes, work string) error {
 	if _, carried, err := mountsUnder(cfg.Home); err != nil {
 		return err
@@ -276,7 +277,7 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 				return fmt.Errorf("give the role its own config home: %w", err)
 			}
 		}
-		if err := makeLike(source, target); err != nil {
+		if err := makeLike(cfg, source, cfg.Home, target); err != nil {
 			return fmt.Errorf("make %s's place in the role's home: %w", target, err)
 		}
 		if err := bindMount(source, target); err != nil {
@@ -296,12 +297,20 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 // across its generations. A git `core.fsmonitor` or a jj alias one role sets in its config home
 // would otherwise run in every sibling's git or jj, with the sibling's credentials. The copy
 // leaves out every mount under the shared config home (among mounts, mountinfo's list), which
-// privateHome binds back over the role's copy, and is made under a name of its own and renamed
-// into place, so a generation that stopped midway leaves no half copy for the next to keep.
+// privateHome binds back over the role's copy, and is made under a name of its own, finished with
+// the marker file configHomeMarker, and renamed into place. An own that is not a directory
+// holding that marker is no finished copy of role-init's — a generation that stopped midway, or a
+// directory something else made at that path — and is removed and made again, so a role never
+// starts without workspace-init's jj configuration. The marker is in the role's own config home,
+// so a role that removes it has its config home copied afresh at its next generation.
 func ownConfigHome(shared, own string, mounts []string) (string, error) {
-	if _, err := os.Lstat(own); err == nil {
+	switch complete, err := configHomeComplete(own); {
+	case err != nil:
+		return "", err
+	case complete:
 		return own, nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	}
+	if err := os.RemoveAll(own); err != nil {
 		return "", err
 	}
 	partial := own + ".partial"
@@ -345,10 +354,39 @@ func ownConfigHome(shared, own string, mounts []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := os.WriteFile(filepath.Join(partial, configHomeMarker), nil, 0o600); err != nil {
+		return "", err
+	}
 	if err := os.Rename(partial, own); err != nil {
 		return "", err
 	}
 	return own, nil
+}
+
+// configHomeMarker is the file ownConfigHome writes into a role's own config home last, before it
+// renames the copy into place.
+const configHomeMarker = ".legion-config-home-complete"
+
+// configHomeComplete reports whether own is a finished copy of ownConfigHome's: a directory, not a
+// link, holding the regular file configHomeMarker.
+func configHomeComplete(own string) (bool, error) {
+	info, err := os.Lstat(own)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	case !info.IsDir():
+		return false, nil
+	}
+	marker, err := os.Lstat(filepath.Join(own, configHomeMarker))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return marker.Mode().IsRegular(), nil
 }
 
 // copyRegular copies the regular file source to target, which it creates with perm.
@@ -376,8 +414,8 @@ func copyRegular(source, target string, perm fs.FileMode) error {
 // writes anywhere else under dir is its own: no sibling role and nothing in the container sees it.
 // The home is not carried this way (privateHome): an overlay's lower layer may have no mount under
 // it at all.
-func carryOver(dir, stage string, place func() error) error {
-	_, carried, err := mountsUnder(dir)
+func carryOver(cfg RoleInitConfig, dir, stage string, place func() error) error {
+	root, carried, err := mountsUnder(dir)
 	if err != nil {
 		return err
 	}
@@ -390,7 +428,7 @@ func carryOver(dir, stage string, place func() error) error {
 	}
 	for index, mount := range carried {
 		aside := filepath.Join(held, strconv.Itoa(index))
-		if err := makeLike(mount, aside); err != nil {
+		if err := makeLike(cfg, mount, held, aside); err != nil {
 			return fmt.Errorf("hold %s aside: %w", mount, err)
 		}
 		if err := bindMount(mount, aside); err != nil {
@@ -402,7 +440,7 @@ func carryOver(dir, stage string, place func() error) error {
 	}
 	for index, mount := range carried {
 		aside := filepath.Join(held, strconv.Itoa(index))
-		if err := makeLike(aside, mount); err != nil {
+		if err := makeLike(cfg, aside, root, mount); err != nil {
 			return fmt.Errorf("put %s back: %w", mount, err)
 		}
 		if err := bindMount(aside, mount); err != nil {
@@ -538,28 +576,87 @@ func unescapeMount(field string) string {
 	return out.String()
 }
 
-// makeLike makes target a mount point of source's kind — a directory for a directory, an empty
-// file for anything else — so a bind of source has somewhere to land. A file already there is
-// the mount point itself, and is left as it is: it is never opened for writing.
-func makeLike(source, target string) error {
+// makeLike makes target, a path under root, a mount point of source's kind — a directory for a
+// directory, an empty file for anything else — so a bind of source has somewhere to land, and
+// follows no link below root on the way (mountPointBeneath). A file already there is the mount
+// point itself, and is left as it is: it is never opened for writing.
+func makeLike(cfg RoleInitConfig, source, root, target string) error {
 	info, err := os.Stat(source)
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
-		return os.MkdirAll(target, 0o755)
+	return mountPointBeneath(root, target, info.IsDir(), func(link string) {
+		roleLogf(cfg, "role-init: %s was a link, which role-init does not follow on the way to a mount point: replaced it with the mount point's place", link)
+	})
+}
+
+// mountPointBeneath makes target, a path under root, a mount point — a directory when dir is
+// set, an empty file otherwise — following no link at or below root's entries. root is a directory
+// role-init named itself (the home, a temporary directory, the stage); what lies below it is one
+// of the role's own layers, which an earlier generation of the role wrote, so a link there could
+// name any path the container shows, another role's directory under the roles directory among
+// them, before the covers go on, and a walk that followed it would make directories there: an
+// empty config home a sibling would then keep as its own. A link in the way is the role's own
+// entry, and is removed and replaced by the directory or file the mount needs, with replaced told
+// its path; any other entry in the way that is not a directory is refused. Nothing of the role
+// runs while role-init does, and no other role reaches the role's layers, so the path the walk
+// made is the path the bind that follows lands on.
+func mountPointBeneath(root, target string, dir bool, replaced func(link string)) error {
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("%s is not under %s", target, root)
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, fs.ErrExist) {
+	if rel == "." {
+		if !dir {
+			return fmt.Errorf("%s is a directory, where a file's mount point goes", target)
+		}
 		return nil
 	}
+	parent, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return err
+		return fmt.Errorf("open %s: %w", root, err)
 	}
-	return file.Close()
+	defer func() { _ = unix.Close(parent) }()
+	names := strings.Split(rel, string(filepath.Separator))
+	path := root
+	for index, name := range names {
+		path = filepath.Join(path, name)
+		file := !dir && index == len(names)-1
+		var stat unix.Stat_t
+		err := unix.Fstatat(parent, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+		if err == nil && stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+			if err := unix.Unlinkat(parent, name, 0); err != nil {
+				return fmt.Errorf("remove the link %s: %w", path, err)
+			}
+			replaced(path)
+			err = unix.ENOENT
+		}
+		switch {
+		case errors.Is(err, unix.ENOENT) && file:
+			fd, err := unix.Openat(parent, name, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+			if err != nil {
+				return fmt.Errorf("make %s: %w", path, err)
+			}
+			return unix.Close(fd)
+		case errors.Is(err, unix.ENOENT):
+			if err := unix.Mkdirat(parent, name, 0o755); err != nil {
+				return fmt.Errorf("make %s: %w", path, err)
+			}
+		case err != nil:
+			return fmt.Errorf("read %s: %w", path, err)
+		case file:
+			return nil
+		case stat.Mode&unix.S_IFMT != unix.S_IFDIR:
+			return fmt.Errorf("%s is neither a directory nor a link, where a mount point's directory goes", path)
+		}
+		next, err := unix.Openat(parent, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", path, err)
+		}
+		_ = unix.Close(parent)
+		parent = next
+	}
+	return nil
 }
 
 // privateMounts holds every mount this namespace makes or drops to itself, so nothing it does

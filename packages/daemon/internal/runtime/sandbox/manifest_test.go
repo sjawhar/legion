@@ -580,7 +580,7 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4); each role's role-init seeds the role's own config
-// home from it (TestEveryRoleIsToldTheConfigHomeItsRoleInitMakesItsOwn). It is in memory, so every
+// home from it (launcher's TestARoleRunsInNamespacesOfItsOwn). It is in memory, so every
 // pod's starts empty and nothing an agent wrote reaches workspace-init's jj. The config home is
 // the one home the two agree on: a role's cache and data homes are the issue's scratch's on the
 // issue's volume and its state home its own directory there
@@ -638,29 +638,14 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
-// Every role is told the config home at the image's home where its role-init binds the role's own
-// (launcher.ConfigHomeDir), never a path of the issue's volume or scratch, which every role of the
-// pod writes: a git `core.fsmonitor` one role set in a config home the roles shared ran in every
-// sibling's `git status`, with the sibling's credentials.
-func TestEveryRoleIsToldTheConfigHomeItsRoleInitMakesItsOwn(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, role := range launcherRoles {
-		if got, want := envOf(workerOf(t, r, roleSpec(t, role)))["XDG_CONFIG_HOME"], launcher.Home+"/"+launcher.ConfigHomeDir; got != want {
-			t.Errorf("%s's agent is told XDG_CONFIG_HOME=%q, want %q, where its role-init binds its own", role, got, want)
-		}
-	}
-}
-
 // The issue's roles share one clone, and any of them can write its `.git/config` and hooks, or a
 // git configuration in any config home it reaches. So every role's git is told, at command scope,
 // which git reads after every configuration file, to start no fsmonitor program and no hook: a
 // real git run with exactly the role's GIT_CONFIG pairs, in a clone whose `.git/config` and global
 // configuration name a recording fsmonitor and a recording hooks directory, runs neither through
 // `git status` and `git commit`. The same git without the pairs runs both, so the plant is live.
-func TestEveryRolesGitRunsNoProgramAnotherRolePlanted(t *testing.T) {
+// These are the two settings the pairs turn off; others a role can plant still run.
+func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatalf("this test runs the real git: %v", err)

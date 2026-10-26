@@ -299,6 +299,24 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			row:     "8 the role's launcher is not connected",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, running),
 			want:    runtime.Uncertain, detail: []string{"role tester's launcher is disconnected"},
+			absent: []string{"restarted", "waiting"},
+		},
+		{
+			// The one container runs every role's launcher, so its crash loop reads as each role's
+			// launcher disconnected; the detail says why, from the kubelet's own status.
+			row: "8 the pod's one container crash-loops with no launcher connected",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: workerContainer, RestartCount: 5,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 2m40s restarting failed container"}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 2, Reason: "Error", FinishedAt: metav1.NewTime(time.Date(2026, 10, 26, 9, 30, 0, 0, time.UTC)),
+				}},
+			}}}),
+			want: runtime.Uncertain,
+			detail: []string{
+				"role tester's launcher is disconnected; container roles waiting (CrashLoopBackOff: back-off 2m40s restarting failed container); " +
+					"container roles restarted 5 times, its last instance terminated (Error, exit code 2 at 2026-10-26T09:30:00Z)",
+			},
 		},
 		{
 			row:      "8 the launcher runs a later generation",

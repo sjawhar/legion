@@ -648,3 +648,28 @@ func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 		}
 	}
 }
+
+// A role's namespace mounts a new devpts instance at /dev/pts and its own IPC namespace's mqueue at
+// /dev/mqueue, and carries no mount back onto either: an operator's mount at or under one would
+// vanish from every role without a word, so it is refused like a mount at /dev/shm, and refused
+// under it too, naming the device filesystem it overlaps. A mount beside them in /dev's other
+// directories is not one role-init replaces.
+func TestCheckPodRefusesAMountAtOrUnderARolesOwnDevices(t *testing.T) {
+	mountAt := func(path string) Pod {
+		return Pod{
+			Volumes:      []corev1.Volume{{Name: "share", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+			VolumeMounts: []corev1.VolumeMount{{Name: "share", MountPath: path}},
+		}
+	}
+	for path, device := range map[string]string{
+		"/dev/pts": "/dev/pts", "/dev/pts/operator": "/dev/pts", "/dev/mqueue": "/dev/mqueue", "/dev/mqueue/x": "/dev/mqueue",
+	} {
+		err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ompsessions.Store{})
+		if err == nil || !strings.Contains(err.Error(), "overlaps "+device+", which every role's namespace in an issue pod replaces with a filesystem of its own") {
+			t.Errorf("a mount at %s = %v, want it refused naming %s", path, err, device)
+		}
+	}
+	if err := CheckPod(mountAt("/dev/operator"), nil, testOptions().Tools, nil, nil, ompsessions.Store{}); err != nil {
+		t.Errorf("a mount at /dev/operator was refused: %v; role-init replaces nothing there", err)
+	}
+}

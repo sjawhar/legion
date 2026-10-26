@@ -112,10 +112,16 @@ func RoleInit(stop context.Context, cfg RoleInitConfig) error {
 // layout of its own under dir, with shim as the shim's argv, and refuses unless the shim ran and
 // exited 0. `legion probe-image --role-namespaces` runs it in the daemon's probe pod, placed and
 // secured as every issue pod is, with dir on a disk volume as the role homes volume is and its
-// own `legion version` as the shim, so a runtime or node that refuses a role's namespaces, a mount
-// role-init makes, or the overlay over its home fails the daemon's boot rather than every role's
-// start. The layout is the roles directory, fixed root, home and home mounts directory role-init's
-// flags name, with the one role's gh, private and state directories and nothing else.
+// own `legion version` as the shim, so a runtime or node that refuses a role's namespaces or one
+// of the mounts role-init makes in them fails the daemon's boot rather than every role's start.
+// The layout is the roles directory, fixed root, home and home mounts directory role-init's flags
+// name, with the one role's gh, private and state directories and nothing else: the home is an
+// empty directory on dir's volume and the home mounts directory carries no mount. So the check
+// makes an overlay over a home on that volume, the role's binds, its own /tmp and /var/tmp, its
+// memory filesystems, devpts and mqueue, the covers and its /proc; it does not make the overlay
+// over the image's own home, whose lower layer is on the container's root filesystem, bind a
+// home's volume back, or copy a config home (ownConfigHome). Those first run at a role's start in
+// an issue pod.
 func CheckRoleNamespaces(dir string, shim ...string) error {
 	if len(shim) == 0 {
 		return errors.New("role namespaces: no shim argv")
