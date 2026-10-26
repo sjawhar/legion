@@ -706,6 +706,57 @@ not work over the new schema, and nothing at boot stops it from serving:
   `.dispatch/architecture/`) commits the delete, and every source's components are gone.
 - Its delete removes every source of the project and every component of the project.
 
+Migration `0118_artifact_reviews_event_seq` adds `artifact_reviews.event_seq`, the sequence of the
+`artifact.*` event each review appended on its document's owner, which `docs.WriteReview` writes in
+the transaction that appends the event and the approval read returns as `seq`
+(`packages/envoy/AGENTS.md`). It is nullable, so a review recorded before it reads with no `seq`,
+and the release before it, which names no `event_seq` in its insert, rolls beside it. Adding a
+nullable column with no default writes the catalog alone, under `artifact_reviews`'
+`ACCESS EXCLUSIVE` lock for milliseconds; it refuses and rewrites no row, and its census answers `0`.
+Its `event_seq > 0` check is a second statement, added `not valid` as the rule above requires: an
+inline check would read every row of the table while it held that lock, and `not valid` still
+refuses every row written or updated after it. Nothing validates it later — every row below the
+migration carries no sequence at all — so the constraint stays `not valid` for good.
+
+`0118` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls
+last, created_at desc, id desc)`, `docs.ReviewOrder` per document, so the newest-review reads
+(`docs.LatestApprovedReview`, `latestReviewBy`) take one index entry rather than sort every review
+of the document. It is a plain `create index`, not `concurrently`: the runner applies a migration
+inside one transaction (`internal/dispatch/store/store.go`, `pgmigrate.Exec`), where `concurrently`
+cannot run, and no migration of the set uses it. The build takes no lock the migration does not
+already hold — its `alter table` statements hold `artifact_reviews`' `ACCESS EXCLUSIVE` — and holds
+it while it reads the table's rows, which the census bounds by its 1 GiB limit; the census still
+answers `0`, since the build refuses and rewrites no row. `artifact_reviews_by_artifact` (`0014`,
+`created_at desc, id desc`) stays, because the release before `0118` orders by it while it serves.
+
+The release before `0118` keeps serving beside it while the app Deployment rolls (below), and again
+for as long as a rollback lasts, and it inserts every review naming no `event_seq`. Left null, such
+a review — newer than every sequenced one — would rank below them all in `docs.ReviewOrder`
+(`event_seq desc nulls last`): a person's approval an old pod wrote would read back as the changes
+requested before it, and a changes request an old pod wrote would be overridden by the approval
+before it. So `0118` also adds a trigger, which the rule below allows a migration to add:
+`artifact_reviews_event_seq`, a constraint trigger on `artifact_reviews` deferred to the commit, gives
+every review inserted without a sequence, by either release, the sequence of the `artifact.*` event
+its own transaction appended for it (its type, document and version, among the events on the
+owner that its transaction wrote, which the owner's row lock keeps the newest there until the
+commit). An event is the transaction's own when it carries the transaction's `now()` and its row's
+`xmin` is the transaction or one of its subtransactions (`artifact_reviews_own_row`, which reads it
+through `pg_xact_status`, so a savepoint's event counts and another transaction's does not, even
+one that started in the same microsecond and so shares `now()`). It is deferred because every
+release inserts a review before it appends the event.
+Every row that carries no sequence was therefore committed before `0118`, whose `ACCESS EXCLUSIVE`
+lock waits out every transaction that has inserted a review, and every sequenced row is newer.
+The trigger is on `artifact_reviews`, the table `0118` already locks, so the migration holds no
+second lock: a trigger on `events` would need that table's `SHARE ROW EXCLUSIVE` while holding
+`artifact_reviews`, against a transaction that appended an event and then waits to insert a
+review (a carried approval), and the census holds every table a migration names to its 1 GiB limit.
+
+`0118` is additive — a nullable column, a `not valid` check, an index and a trigger — so rolling Dispatch
+back past it is an image rollback alone, with no schema to restore and no backup to take for it:
+the release before it runs over the new schema unchanged, and the trigger gives every review that
+release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
+schema has moved it refuses to start the previous tag, and recovery there is forward.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

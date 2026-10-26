@@ -580,7 +580,11 @@ export interface ArtifactApproval {
   readonly latest_version: number;
   readonly version?: number;
   readonly by?: Actor;
+  /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
+  /** The latest review's event sequence on the document's owner, which orders the review among
+   *  the owner's events as they commit; absent for a review recorded before Dispatch kept it. */
+  readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
@@ -1018,8 +1022,10 @@ export interface ReferenceChangesPayload {
 export type IssueEventPayload = Issue & ReferenceChangesPayload;
 
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
- *  graph. */
-export type AskEventPayload = Ask & ReferenceChangesPayload;
+ *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
+ *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
+ *  anything new. */
+export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: true };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -2545,6 +2551,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  restored: z.boolean().optional(),
   anchor: z
     .object({
       quote: z.string().optional(),

@@ -4,6 +4,12 @@
 
 ### Added
 
+- `AskEventPayload.restored`: `true` on the `ask.opened` or `ask.answered` Dispatch's settlement
+  appends when an edit restores a decision block it retracted, which records no new answer.
+- `ArtifactApproval.seq`, the latest review's event sequence on the document's owner, beside its
+  `at`: the owner's row lock orders its events as they commit, so `seq` places the review among them
+  where `at`, its transaction's start, cannot. Absent for a review recorded before Dispatch kept
+  it.
 - The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
   and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
   frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
