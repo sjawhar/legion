@@ -3,7 +3,7 @@ title: "Envoy: how events reach Dispatch, Legion and the agents"
 description: The Envoy listener and NATS under it, how GitHub webhooks, Slack mentions and Dispatch events reach subscribers, replying in Slack, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
 sidebar:
   label: Envoy
-  order: 9
+  order: 10
 ---
 
 Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions. It has two parts:

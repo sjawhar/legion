@@ -86,7 +86,9 @@ generators, and `bun run generate` (part of `dev` and `build`) runs them under t
   `envoy-dispatch`, `envoy-broker`, `agent-secrets` and `agent-secrets-helper`.
 - **Output.** It writes its pages, with frontmatter like any other page, under
   `<content dir>/<section>/reference/`. That directory is emptied before the generators run and is
-  ignored by git. The sidebar shows it as the section's **Reference** group.
+  ignored by git. The sidebar shows it as the section's **Reference** group. A generator may also
+  write files for people to download under `docs/site/public/downloads/`, published at
+  `/legion/downloads/`, which is emptied and ignored the same way.
 - **Failure.** A generator that exits non-zero, or exits zero without writing a page, fails the
   build.
 

@@ -2,7 +2,7 @@
 title: Running Dispatch
 description: What the Dispatch server needs, how to run it, its health check, running more than one copy, and its migrations.
 sidebar:
-  order: 8
+  order: 9
 ---
 
 Dispatch is one Go program. It serves the web app, the HTTP API, live documents, and Google

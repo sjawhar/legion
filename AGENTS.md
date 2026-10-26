@@ -132,6 +132,7 @@ repository both GitHub Apps are installed on, and leaves out, and reports in `le
 | Secrets broker | `packages/envoy/cmd/broker`, `packages/envoy/internal/broker` | See `packages/envoy/AGENTS.md` |
 | Envoy Pulumi components | `packages/envoy/infra/` | The `envoy-infra` Pulumi plugin and the `envoy-infra` command (`seed`, `render`), a Go module outside the root `go.work`. Operators: `packages/envoy/infra/README.md`; changing it: `packages/envoy/infra/AGENTS.md` |
 | Documentation site | `docs/site/` | Astro Starlight, published to GitHub Pages by `.github/workflows/docs.yaml`. See `docs/site/README.md`; generated reference pages come from `docs/site/generators/` |
+| Dispatch skill for people (claude.ai, Claude in Chrome) | `docs/site/claude-skills/dispatch-web/SKILL.md` | Not an agent skill: `docs/site/generators/dispatch-web-skill.ts` zips it with the Dispatch guide's pages at every docs build, and the build fails when it cites a heading the pages lack, or names a control or key no page shows in bold or as code |
 
 ## Conventions
 

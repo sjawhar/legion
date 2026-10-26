@@ -4,3 +4,5 @@
 .bin/
 # Generated reference pages: scripts/generate.ts rebuilds them on every build, so they never drift.
 src/content/docs/*/reference/
+# Generated downloads, rebuilt the same way, such as the dispatch-web skill's zip.
+public/downloads/

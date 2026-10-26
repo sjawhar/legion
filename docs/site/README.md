@@ -38,10 +38,12 @@ refuses relative links (`errorOnRelativeLinks`, its default) or, with that off, 
 | `src/content/docs/` | The pages. Each section (`legion/`, `dispatch/`, `broker/`) builds its sidebar from its directory. |
 | `src/content/docs/<section>/reference/` | Generated reference pages, rebuilt on every build and ignored by git. |
 | `generators/` | The reference generators: `<section>-<name>.ts` or `.sh`, run by `scripts/generate.ts`. |
+| `claude-skills/` | Skills for Claude on claude.ai, such as `dispatch-web`, which `generators/dispatch-web-skill.ts` zips with this site's pages. |
 | `scripts/generate.ts` | Runs every generator before the build, under the contract it documents. |
 | `scripts/build-binaries.sh` | Builds the Go binaries the generators run. The one place module paths are named. |
 | `media/` | The scripts that make screenshots and narrated walkthroughs, and the walkthroughs' sources, with a README saying how to run and extend them. A section with a rig of its own keeps its scripts and sources in `media/<section>/` with a README of its own (`media/broker/`). Nothing here is published. |
 | `public/media/` | Where those scripts' output goes, served at `/legion/media/`: the screenshots, which CI takes before every build (the broker's are committed), and the finished videos. |
+| `public/downloads/` | Files the generators write for people to download, served at `/legion/downloads/` and ignored by git: the `dispatch-web` skill's zip. |
 | `astro.config.mjs` | Site URL and base, sidebar, and plugins (Mermaid, the link validator, sidebar labels). |
 
 How to write a page, the generator contract and where media goes are on the published site's
