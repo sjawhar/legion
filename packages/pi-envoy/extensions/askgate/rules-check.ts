@@ -140,6 +140,11 @@ export interface RulesCheck {
   outcome: RuleOutcome;
   /** How a refusal names each ask, in the order the request lists them. */
   names: readonly string[];
+  /**
+   * The asks the request numbers, in its order, so a match's `ask` names one of them; empty when no
+   * model judged the call. An upload's list leaves out the asks the version it replaces holds.
+   */
+  judged: readonly NewAsk[];
   /** The asks a rule matched, by ask number; empty for every other outcome. */
   matches: RuleMatch[];
   /** The model's own one-line reason, empty when it gave none. */
@@ -437,6 +442,7 @@ export async function runRulesCheck(
   const ended = (outcome: RuleOutcome, rest: Partial<RulesCheck> = {}): RulesCheck => ({
     outcome,
     names: [],
+    judged: [],
     matches: [],
     reason: "",
     promptBytes: 0,
@@ -479,6 +485,7 @@ export async function runRulesCheck(
             : "none";
     return ended(outcome, {
       names: described.names,
+      judged: asks,
       matches: verdict?.matches.toSorted((a, b) => a.ask - b.ask) ?? [],
       reason: verdict?.reason ?? "",
       ...(answer.kind === "error"

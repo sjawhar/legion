@@ -3309,17 +3309,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         const charterReason = verdict?.decision === "revise" ? verdict.reason : undefined;
         // The refusal is the rules check's in either mode, so it counts on the asks that check
         // refused, and a charter revise beside it adds its reason only: a rules refusal counts the
-        // same in warn and block mode. The rules check numbers the asks it judged in the order this
-        // scan of the same arguments reads them, except for an upload, whose judged list leaves out
-        // the asks the document it replaces already holds: where the two do not line up, every ask
-        // of the call counts as refused, which keeps the pass the breaker may later give inside the
-        // call that earned it.
-        const asks = callAsks();
+        // same in warn and block mode. A match numbers an ask of the list the check judged, never of
+        // this call's scan: an upload's judged list leaves out the asks its stored version holds,
+        // which no check read and so none refused.
         const tripsNext = breaker.revised(
           key,
-          asks.length === ruled.names.length
-            ? matches.map((match) => askIdentity(asks[match.ask - 1]))
-            : breakerThings(asks),
+          matches.map((match) => askIdentity(ruled.judged[match.ask - 1])),
           charterReason
         );
         const delivered = [

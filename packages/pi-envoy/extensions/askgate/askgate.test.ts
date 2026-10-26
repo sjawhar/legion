@@ -5890,6 +5890,56 @@ describe("rules check", () => {
     for (const field of ["rule", "ruleModel", "ruleError", "ruleTextMissing"] as const)
       expect(g.entries[0]?.[field]).toBeUndefined();
   });
+  test("an upload's rules refusals count only the asks the check judged, never a block its stored version holds, so a third upload with a new ask is reviewed", async () => {
+    // Each upload carries the stored `#window` and one ask of its own; the rules check judges that
+    // ask alone and refuses it. `#window`, which no check read, is refused by none of them, so the
+    // breaker has no pass to give the third upload on it: its new ask is judged like the others.
+    const served = dispatchServing([
+      { id: "doc-brief", name: "brief.md", slug: "brief", markdown: BRIEF },
+    ]);
+    let content = "";
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      complete: bySystem(ALLOW, NO_CHANGE),
+      dispatch: served.session,
+      dryRun: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ issue: "X-1", name: "brief.md", content }),
+        stderr: "",
+        timedOut: false,
+      }),
+      // A directory that exists: the gate reads the stored version through its Dispatch.
+      cwd: SUITE_TMP,
+    });
+    const upload = (id: string, opening: string) => {
+      content = `${BRIEF}\n:::ask{#${id}}\n${opening} Should I change the cache path? Recommendation: keep it as it is.\n:::\n`;
+      return g.bash(
+        id,
+        `dispatch artifact --issue X-1 --name brief.md --content-file - <<'EOF'\n${content}EOF`
+      );
+    };
+    const first = await upload("alpha", "Alpha.");
+    expect(first?.block).toBe(true);
+    expect(first?.reason).toContain('matches the rule "no change"');
+    const second = await upload("beta", "Beta.");
+    expect(second?.block).toBe(true);
+    // Beta's first refusal, and `#window` never refused: no warning that a resend goes out unasked.
+    expect(second?.reason).not.toContain(SECOND);
+    const third = await upload("gamma", "Gamma.");
+    expect(third?.additionalContext ?? "").not.toContain('outcome="breaker"');
+    expect(third?.block).toBe(true);
+    expect(third?.reason).toContain('matches the rule "no change"');
+    // Every upload had its rules call, each judging its own new ask and never the stored one.
+    const rules = g.calls.filter(isRules);
+    expect(rules).toHaveLength(3);
+    for (const [index, id] of ["alpha", "beta", "gamma"].entries()) {
+      expect(rules[index]?.user).toContain(`id="${id}"`);
+      expect(rules[index]?.user).not.toContain('id="window"');
+    }
+    expect(g.entries.map((e) => [e.tool, e.outcome, e.decision, e.rule])).toEqual(
+      Array(3).fill(["dispatch_artifact", "verdict", "revise", "no_change"])
+    );
+  });
   test("a doc-edit whose document read fails still judges every ask it inserts", async () => {
     const check = await checkRules(
       {
