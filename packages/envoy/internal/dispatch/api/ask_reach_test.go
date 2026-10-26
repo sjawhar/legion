@@ -21,8 +21,7 @@ func describeOptionalString(value *string) string {
 }
 
 func (reach askReachRead) matches(claimant, route *string) bool {
-	return describeOptionalString(reach.Claimant) == describeOptionalString(claimant) &&
-		describeOptionalString(reach.Route) == describeOptionalString(route)
+	return stringPointersEqual(reach.Claimant, claimant) && stringPointersEqual(reach.Route, route)
 }
 
 // A person's answer and replies on an issue's ask reach the session holding the issue's claim and
@@ -33,7 +32,6 @@ func (reach askReachRead) matches(claimant, route *string) bool {
 func TestAskReadsCarryTheIssueClaimantAndRoute(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
-	text := func(value string) *string { return &value }
 
 	sessionClaimed := createInteractionIssue(t, handler, "TEST", "Transport rollout", "A spec").Key
 	personClaimed := createAnswerListIssue(t, handler, "Billing export").Key
@@ -48,15 +46,15 @@ func TestAskReadsCarryTheIssueClaimantAndRoute(t *testing.T) {
 		{
 			name:         "session claim, session route",
 			key:          sessionClaimed,
-			claimedBy:    text(`{"kind":"session","id":"session-claimant"}`),
-			route:        text("session:session-routed"),
-			wantClaimant: text("session-claimant"),
+			claimedBy:    new(`{"kind":"session","id":"session-claimant"}`),
+			route:        new("session:session-routed"),
+			wantClaimant: new("session-claimant"),
 		},
 		{
 			name:      "person claim, role route",
 			key:       personClaimed,
-			claimedBy: text(`{"kind":"user","id":"alice"}`),
-			route:     text("role:reviewer"),
+			claimedBy: new(`{"kind":"user","id":"alice"}`),
+			route:     new("role:reviewer"),
 		},
 		{name: "no claim, no route", key: unclaimed},
 	}

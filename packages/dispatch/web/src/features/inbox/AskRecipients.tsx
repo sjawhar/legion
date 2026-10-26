@@ -142,25 +142,23 @@ export function AskRecipients({
     listed.add(subscriber.session_id);
   }
   const issueRows: IssueReachRow[] = [];
-  if (claimant !== null && !listed.has(claimant)) {
-    listed.add(claimant);
+  const addIssueRow = (sessionId: string, via: IssueReachRow["via"]): void => {
+    if (listed.has(sessionId)) {
+      return;
+    }
+    listed.add(sessionId);
     issueRows.push({
-      id: claimant,
-      label: followerLabel(claimant),
-      live: agents.some((agent) => agent.session_id === claimant),
-      via: "claim",
+      id: sessionId,
+      label: followerLabel(sessionId),
+      live: agents.some((agent) => agent.session_id === sessionId),
+      via,
     });
+  };
+  if (claimant !== null) {
+    addIssueRow(claimant, "claim");
   }
   if (routeSession !== undefined) {
-    if (!listed.has(routeSession)) {
-      listed.add(routeSession);
-      issueRows.push({
-        id: routeSession,
-        label: followerLabel(routeSession),
-        live: agents.some((agent) => agent.session_id === routeSession),
-        via: "route",
-      });
-    }
+    addIssueRow(routeSession, "route");
   } else if (route?.startsWith("role:")) {
     // A role route reaches whichever session holds the role, so the row names the route itself.
     const role = route.slice("role:".length);

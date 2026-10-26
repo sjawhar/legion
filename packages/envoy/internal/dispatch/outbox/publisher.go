@@ -996,8 +996,7 @@ func payloadMentionedSessions(payload any) map[string]struct{} {
 	mentions, _ := values["mentions"].([]any)
 	result := map[string]struct{}{}
 	for _, entry := range mentions {
-		mention, _ := entry.(map[string]any)
-		if sessionID, _ := mention["session_id"].(string); sessionID != "" {
+		if sessionID := payloadString(entry, "session_id"); sessionID != "" {
 			result[sessionID] = struct{}{}
 		}
 	}

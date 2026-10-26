@@ -7,8 +7,13 @@ import {
   projectsQuery,
   userStateQuery,
 } from "../api/queries";
-import { coalescePrefixKeys } from "../api/query-refresh";
-import { eventQueryKeys, mergeEventPages, prependEventToLog } from "../api/sse";
+import { coalescePrefixKeys, refreshQueries } from "../api/query-refresh";
+import {
+  eventQueryKeys,
+  expandAskThreadsOnIssue,
+  mergeEventPages,
+  prependEventToLog,
+} from "../api/sse";
 import type { Event, EventType } from "../api/types";
 
 /**
@@ -662,13 +667,14 @@ function answersPageAdditions(incoming: Event): unknown[][] {
 
 /** Every open ask card lists the issue's claimant and route among the sessions it reaches, read
  *  from its thread. A claim or a release moves the claimant and an issue update can move the
- *  route; the thread key holds only the ask id, so every open thread refetches. */
+ *  route; the thread key holds only the ask id, so the event names its issue's threads by a
+ *  marker the flush expands (`expandAskThreadsOnIssue`). */
 function askRecipientsAdditions(incoming: Event): unknown[][] {
   return incoming.issue_key !== null &&
     (incoming.type === "issue.claimed" ||
       incoming.type === "issue.released" ||
       incoming.type === "issue.updated")
-    ? [["ask-thread"]]
+    ? [["ask-thread", { issue_key: incoming.issue_key }]]
     : [];
 }
 
@@ -886,6 +892,63 @@ test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker r
   const keys = invalidatedKeys(event("comment.created", { id: "comment-1", ask_id: "ask-1" }));
   expect(keys).toContainEqual(["ask-thread", "ask-1"]);
   expect(keys).toContainEqual(["inbox"]);
+});
+
+// A thread read as `GET /asks/{id}` answers it, cut to the one field the flush reads.
+function cacheThread(client: QueryClient, id: string, issueKey: string | null): void {
+  client.setQueryData(["ask-thread", id], { ask: { id, issue_key: issueKey } });
+}
+
+test("a claim, a release or an update refreshes the ask threads on its issue and no other", () => {
+  const client = new QueryClient();
+  cacheThread(client, "ask-1", "CORE-1");
+  cacheThread(client, "ask-2", "CORE-2");
+  cacheThread(client, "ask-doc", null);
+  const onIssue = [
+    event("issue.claimed", { key: "CORE-1", claim: null }),
+    event("issue.released", { key: "CORE-1", claim: null }),
+    event("issue.updated", issuePayload("todo", null)),
+  ];
+  for (const incoming of onIssue) {
+    const threads = expandAskThreadsOnIssue(client, invalidatedKeys(incoming)).filter(
+      (key) => key[0] === "ask-thread"
+    );
+    expect(threads).toEqual([["ask-thread", "ask-1"]]);
+  }
+
+  // Through the refresh the flush runs: the thread on another issue is never invalidated.
+  for (const incoming of onIssue) {
+    refreshQueries(
+      client,
+      coalescePrefixKeys(expandAskThreadsOnIssue(client, invalidatedKeys(incoming)))
+    );
+  }
+  expect(client.getQueryState(["ask-thread", "ask-1"])?.isInvalidated).toBe(true);
+  expect(client.getQueryState(["ask-thread", "ask-2"])?.isInvalidated).toBe(false);
+  expect(client.getQueryState(["ask-thread", "ask-doc"])?.isInvalidated).toBe(false);
+});
+
+test("an issue's thread marker reaches a thread on its first load, once, and alone matches nothing", async () => {
+  const client = new QueryClient();
+  cacheThread(client, "ask-1", "CORE-1");
+  cacheThread(client, "ask-2", "CORE-2");
+  // Its ask is not read yet, so the cache cannot tell its issue.
+  const firstLoad = Promise.withResolvers<never>();
+  void client.prefetchQuery({
+    queryFn: () => firstLoad.promise,
+    queryKey: ["ask-thread", "ask-3"],
+  });
+  const marker = ["ask-thread", { issue_key: "CORE-1" }];
+  expect(
+    expandAskThreadsOnIssue(client, [marker, ["ask-thread", "ask-1"], ["issue", "CORE-1"]])
+  ).toEqual([
+    ["ask-thread", "ask-1"],
+    ["ask-thread", "ask-3"],
+    ["issue", "CORE-1"],
+  ]);
+  // A marker that ever reached `invalidateQueries` unexpanded would invalidate nothing.
+  await client.invalidateQueries({ queryKey: marker, refetchType: "none" });
+  expect(client.getQueryState(["ask-thread", "ask-1"])?.isInvalidated).toBe(false);
 });
 
 /** The payload of an `issue.*` event as `issue_patch.go` sends it: `model.NewIssueEventPayload`

@@ -752,9 +752,7 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "ask") {
 		return
 	}
-	var reach askReach
-	ask, err := s.loadAskRow(r.Context(), s.deps.Store.Pool, askReadWithReachQuery, r.PathValue("id"),
-		&reach.Claimant, &reach.Route)
+	ask, err := s.loadAsk(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -790,6 +788,11 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	reaches, err := loadAskReaches(r.Context(), s.deps.Store.Pool, []string{ask.ID})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	WriteJSON(w, http.StatusOK, struct {
 		Ask       model.Ask           `json:"ask"`
 		Replies   []model.Comment     `json:"replies"`
@@ -797,7 +800,7 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		Answers   []model.AskAnswer   `json:"answers"`
 		Followers []model.AskFollower `json:"followers"`
 		askReach
-	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reach})
+	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID]})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,
@@ -911,24 +914,14 @@ func (s *server) loadAskAnswers(ctx context.Context, q queryer, askID string) ([
 	return answers[askID], nil
 }
 
-// askReadQuery reads one ask by id; askReadWithReachQuery adds its askReach, which only the
-// single-ask read serialises.
-const (
-	askReadQuery          = `select ` + askReadColumns + ` ` + askReadFrom + ` where a.id = $1`
-	askReadWithReachQuery = `select ` + askReadColumns + `, ` + askReachColumns + `
-		` + askReadFrom + askReachJoin + ` where a.id = $1`
-)
-
 // loadAsk reads one ask for a response: unlike lockAskForTransition, which feeds the
 // ask.* event payloads, it carries WaitingOn for an open ask.
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
-	return s.loadAskRow(ctx, q, askReadQuery, id)
-}
-
-// loadAskRow reads the ask id through query, which selects askReadColumns and then the columns
-// extra receives.
-func (s *server) loadAskRow(ctx context.Context, q queryer, query, id string, extra ...any) (model.Ask, error) {
-	ask, _, err := scanAskRead(q.QueryRow(ctx, query, id), extra...)
+	ask, _, err := scanAskRead(q.QueryRow(ctx, `
+		select `+askReadColumns+`
+		`+askReadFrom+`
+		where a.id = $1
+	`, id))
 	if err != nil {
 		return model.Ask{}, err
 	}

@@ -22,7 +22,7 @@ import {
   userStateQuery,
 } from "./queries";
 import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
-import type { ChangedReference, Event, EventType } from "./types";
+import type { AskRead, ChangedReference, Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
   "project.created": true,
@@ -143,6 +143,51 @@ function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
   if (id !== undefined) {
     keys.push(["ask", id], ["ask-thread", id]);
   }
+}
+
+/**
+ * Every cached ask thread on one issue. A claim, a release or an update moves the claimant or the
+ * route an ask card lists among the sessions it reaches, but the thread key holds only the ask id,
+ * so no key names an issue's threads: the flush expands this marker into the exact key of each one
+ * (`expandAskThreadsOnIssue`). Left unexpanded it matches no query, since TanStack never matches
+ * the object it carries against an ask id.
+ */
+function askThreadsOnIssueKey(issueKey: string): readonly unknown[] {
+  return ["ask-thread", { issue_key: issueKey }];
+}
+
+function markedIssue([family, scope]: readonly unknown[]): string | undefined {
+  if (family !== "ask-thread" || typeof scope !== "object" || scope === null) {
+    return undefined;
+  }
+  return "issue_key" in scope && typeof scope.issue_key === "string" ? scope.issue_key : undefined;
+}
+
+/**
+ * Replaces each `askThreadsOnIssueKey` marker with the `["ask-thread", id]` key of every cached
+ * thread whose ask is on that issue, and of every thread still on its first load, whose issue the
+ * cache cannot tell yet. A thread on another issue is left alone. The result holds each key once,
+ * as the pending set it is read from does.
+ */
+export function expandAskThreadsOnIssue(
+  queryClient: QueryClient,
+  keys: readonly (readonly unknown[])[]
+): (readonly unknown[])[] {
+  const expanded = new Map<string, readonly unknown[]>();
+  for (const key of keys) {
+    const issueKey = markedIssue(key);
+    const matches =
+      issueKey === undefined
+        ? [key]
+        : queryClient
+            .getQueriesData<AskRead>({ queryKey: ["ask-thread"] })
+            .filter(([, thread]) => thread === undefined || thread.ask.issue_key === issueKey)
+            .map(([queryKey]) => queryKey);
+    for (const match of matches) {
+      expanded.set(JSON.stringify(match), match);
+    }
+  }
+  return [...expanded.values()];
 }
 
 /** The signed-in person's answers page lists every answer and every reply on an ask, so the
@@ -541,11 +586,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // chain, so an issue's own event alters ancestors and descendants that get no event of
     // their own: refetch every open issue. The sidebar's per-project open-ask badge moves
     // with a close, a reopen and an assignment, so it refetches here too. An update can change
-    // the issue's route, which every open ask card on it lists among the sessions it reaches;
-    // the thread key holds only the ask id, so every open thread refetches.
+    // the issue's route, which every open ask card on it lists among the sessions it reaches.
     keys.push(["issue"], projectsQuery().queryKey);
     if (event.type === "issue.updated") {
-      keys.push(["ask-thread"]);
+      keys.push(askThreadsOnIssueKey(event.issue_key));
     }
     return keys;
   }
@@ -555,12 +599,12 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "issue.deployed"
   ) {
     // A claim changes only who holds the issue: its detail, its log, the lists that render
-    // the claim — `["issues"]` above covers every project list by prefix — and every open ask
-    // card's recipients, which list the claimant (the thread key holds only the ask id, so every
-    // open thread refetches). No rollup, ask count or component attachment moves with it. A
-    // deploy is a line in the issue's log and nothing the lists or rollups read.
+    // the claim — `["issues"]` above covers every project list by prefix — and the recipients of
+    // every open ask card on it, which list the claimant. No rollup, ask count or component
+    // attachment moves with it. A deploy is a line in the issue's log and nothing the lists or
+    // rollups read.
     if (event.type !== "issue.deployed") {
-      keys.push(["ask-thread"]);
+      keys.push(askThreadsOnIssueKey(event.issue_key));
     }
     return keys;
   }
@@ -795,7 +839,9 @@ export function useEventStream({
       }
       flush = window.setTimeout(() => {
         flush = undefined;
-        const keys = pendingAll ? undefined : coalescePrefixKeys([...pending.values()]);
+        const keys = pendingAll
+          ? undefined
+          : coalescePrefixKeys(expandAskThreadsOnIssue(queryClient, [...pending.values()]));
         pendingAll = false;
         pending.clear();
         refreshQueries(queryClient, keys);

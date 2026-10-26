@@ -633,6 +633,12 @@ export function claimIssue(issue: string, options: ApiOptions = {}): Promise<Iss
   );
 }
 
+/** `DELETE /api/v1/issues/{key}/claim`: the holder, `options.actor` with the agent bearer, gives
+ *  the issue up. */
+export function releaseClaim(issue: string, options: ApiOptions = {}): Promise<Issue> {
+  return request<Issue>(`/api/v1/issues/${encodeURIComponent(issue)}/claim`, "DELETE", {}, options);
+}
+
 export function createMessage(
   issue: string,
   input: CreateMessageInput,

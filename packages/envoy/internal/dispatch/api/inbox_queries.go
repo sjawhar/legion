@@ -130,24 +130,19 @@ func (s *server) loadAskThreads(ctx context.Context, q queryer, askIDs []string)
 	return threads, nil
 }
 
-// askReachColumns select an askReach for the ask aliased a from the issue askReachJoin attaches
-// as ri: the claimant only while a session holds the claim (the same rule the outbox's
-// loadSessionClaimant reads), and the route; an empty id or route is none. A project document's
-// ask joins no issue, so both are null.
-const askReachColumns = `case when ri.claimed_by->>'kind' = 'session'
-		then nullif(ri.claimed_by->>'id', '') end,
-	nullif(ri.route, '')`
-
-const askReachJoin = `
-		left join issues ri on ri.key = a.issue_key`
-
-// loadAskReaches reads every listed ask's askReach in one query, keyed by ask id; an ask the
-// query does not find keeps the zero askReach, both null.
+// loadAskReaches reads every listed ask's askReach in one query, keyed by ask id: the claimant
+// only while a session holds the claim on the ask's issue (the same rule the outbox's
+// loadSessionClaimant reads), and the issue's route; an empty id or route is none. A project
+// document's ask joins no issue, and an ask the query does not find keeps the zero askReach, so
+// both are null.
 func loadAskReaches(ctx context.Context, q queryer, askIDs []string) (map[string]askReach, error) {
 	reaches := make(map[string]askReach, len(askIDs))
 	rows, err := q.Query(ctx, `
-		select a.id::text, `+askReachColumns+`
-		from asks a`+askReachJoin+`
+		select a.id::text,
+			case when i.claimed_by->>'kind' = 'session' then nullif(i.claimed_by->>'id', '') end,
+			nullif(i.route, '')
+		from asks a
+		left join issues i on i.key = a.issue_key
 		where a.id = any($1::uuid[])
 	`, askIDs)
 	if err != nil {

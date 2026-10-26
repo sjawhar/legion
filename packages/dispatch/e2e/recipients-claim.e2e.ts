@@ -1,16 +1,14 @@
 import { expect, test } from "@playwright/test";
 
-import type { Actor } from "../web/src/api/types";
 import { setLiveSessions } from "./agents";
 import {
-  baseUrl,
   claimIssue,
   createAsk,
   createIssue,
   createProject,
-  e2eAgentToken,
   getAsk,
   patchIssue,
+  releaseClaim,
 } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -21,19 +19,6 @@ import { asUser } from "./users";
 const asker = { kind: "session" as const, id: "e2e-reach-asker" };
 const claimant = { kind: "session" as const, id: "e2e-reach-claimant" };
 const routed = "e2e-reach-routed";
-
-/** `DELETE /api/v1/issues/{key}/claim` with the agent bearer: the holder gives the issue up. */
-async function releaseClaim(issue: string, actor: Actor): Promise<void> {
-  const path = `/api/v1/issues/${encodeURIComponent(issue)}/claim`;
-  const response = await fetch(new URL(path, baseUrl), {
-    body: JSON.stringify({ actor }),
-    headers: { Authorization: `Bearer ${e2eAgentToken}`, "Content-Type": "application/json" },
-    method: "DELETE",
-  });
-  if (!response.ok) {
-    throw new Error(`DELETE ${path} failed: ${response.status} ${await response.text()}`);
-  }
-}
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -100,7 +85,7 @@ test("the ask card lists the issue's claimant and route, and drops the claimant 
     await expect(dialog).toHaveCount(0);
 
     // The claimant gives the issue up over the agent API; the open card drops it over SSE.
-    await releaseClaim(issue.key, claimant);
+    await releaseClaim(issue.key, { actor: claimant, as: "agent" });
     await expect(recipients).toContainText("Reaches 2");
     await expect(recipients.locator(`[title='${claimant.id}']`)).toHaveCount(0);
     await expect(routeRow).toContainText("via route");

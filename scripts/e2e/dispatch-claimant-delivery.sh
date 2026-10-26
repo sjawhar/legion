@@ -30,6 +30,12 @@ begin() { check=$1; echo "== $check"; }
 note() { echo "   $*"; }
 pass() { echo "ok $check"; }
 fail() { echo "FAIL $check: $*" >&2; exit 1; }
+# What lib/rig.sh reads of its caller: start_process and await_start log under $evidence/logs, the
+# work directory's once the build makes it.
+evidence=''
+timeout_hook=''
+# shellcheck source-path=SCRIPTDIR source=lib/rig.sh
+. "$root/scripts/e2e/lib/rig.sh"
 
 # DISPATCH_BIN is this script's input, read before the sweep below drops every DISPATCH_* variable.
 dispatch_bin=${DISPATCH_BIN:-}
@@ -51,16 +57,8 @@ done
 # The work directory is made once the prerequisites hold, so a refused run leaves nothing behind.
 work=''
 nats_pid=''
-envoy_pid=''
-server_pid=''
-
-stop() {
-  local pid=$1
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  fi
-}
+fake_envoy_pid=''
+dispatch_pid=''
 
 # cleanup stops what the run started and exits with rc: the script's own status for EXIT, 128 plus
 # the signal's number for INT and TERM, so an interrupted run never reports success.
@@ -68,9 +66,9 @@ cleanup() {
   local rc=$1
   trap - EXIT INT TERM
   set +e
-  stop "$server_pid"
-  stop "$envoy_pid"
-  stop "$nats_pid"
+  stop_pid "$dispatch_pid"
+  stop_pid "$fake_envoy_pid"
+  stop_pid "$nats_pid"
   if [ -z "$work" ]; then
     echo "dispatch claimant delivery e2e: FAIL at $check after $((SECONDS - started))s" >&2
   elif [ "$rc" -eq 0 ]; then
@@ -89,18 +87,6 @@ trap 'cleanup 143' TERM
 # port_answers PORT succeeds when something accepts a connection on 127.0.0.1:PORT.
 port_answers() {
   (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
-}
-
-# wait_http NAME PID URL waits up to 60s for URL to answer 2xx from the process PID started, and
-# fails the check the moment that process is gone.
-wait_http() {
-  local name=$1 pid=$2 url=$3
-  for _ in $(seq 1 240); do
-    kill -0 "$pid" 2>/dev/null || fail "$name exited at startup; see $work/$name.log"
-    curl -fsS --max-time 2 "$url" >/dev/null 2>&1 && return 0
-    sleep 0.25
-  done
-  fail "$name did not answer $url within 60s; see $work/$name.log"
 }
 
 begin prerequisites
@@ -146,8 +132,9 @@ pass
 
 begin build
 work=$(mktemp -d "${TMPDIR:-/tmp}/dispatch-claimant-delivery.XXXXXXXX")
+evidence=$work
 note "work directory $work"
-mkdir -p "$work/bin" "$work/web-dist"
+mkdir -p "$work/bin" "$work/web-dist" "$work/logs"
 if [ -z "$dispatch_bin" ]; then
   dispatch_bin=$work/bin/envoy-dispatch
   go -C "$root/packages/envoy" build -o "$dispatch_bin" ./cmd/dispatch || fail "./cmd/dispatch did not build"
@@ -169,26 +156,20 @@ pass
 
 begin nats
 # The port is the kernel's pick (`-p -1`), read back from the line the server logs once it listens.
-# The log exists before the server does, so the wait below never reads a file not yet there.
-: >"$work/nats.log"
-"$work/bin/natsd" -p -1 -store_dir "$work/nats-store" >>"$work/nats.log" 2>&1 &
-nats_pid=$!
-for _ in $(seq 1 120); do
-  grep -q 'Server is ready' "$work/nats.log" && break
-  kill -0 "$nats_pid" 2>/dev/null || fail "natsd exited at startup; see $work/nats.log"
-  sleep 0.5
-done
-grep -q 'Server is ready' "$work/nats.log" || fail "natsd was not ready within 60s; see $work/nats.log"
-nats_port=$(sed -n 's/.*Listening for client connections on .*:\([0-9][0-9]*\)$/\1/p' "$work/nats.log" | sed -n 1p)
-[ -n "$nats_port" ] || fail "natsd logged no client port; see $work/nats.log"
+start_process nats "$work/bin/natsd" -p -1 -store_dir "$work/nats-store"
+await_start nats "$nats_pid" 0 60 "natsd to be ready" grep -q 'Server is ready' "$work/logs/nats.log" ||
+  fail "natsd could not bind its port; see $work/logs/nats.log"
+nats_port=$(sed -n 's/.*Listening for client connections on .*:\([0-9][0-9]*\)$/\1/p' "$work/logs/nats.log" | sed -n 1p)
+[ -n "$nats_port" ] || fail "natsd logged no client port; see $work/logs/nats.log"
 nats_url=nats://127.0.0.1:$nats_port
 note "JetStream on $nats_url"
 pass
 
 begin fake-envoy
-FAKE_ENVOY_PORT=$envoy_port bun "$root/packages/dispatch/e2e/fake-envoy.ts" >"$work/fake-envoy.log" 2>&1 &
-envoy_pid=$!
-wait_http fake-envoy "$envoy_pid" "http://127.0.0.1:$envoy_port/healthz"
+FAKE_ENVOY_PORT=$envoy_port start_process fake_envoy bun "$root/packages/dispatch/e2e/fake-envoy.ts"
+await_start fake_envoy "$fake_envoy_pid" 0 60 "the fake Envoy listener to answer /healthz" \
+  curl -fsS --max-time 2 "http://127.0.0.1:$envoy_port/healthz" ||
+  fail "another process bound 127.0.0.1:$envoy_port first; see $work/logs/fake_envoy.log"
 note "fake Envoy listener on http://127.0.0.1:$envoy_port"
 pass
 
@@ -199,7 +180,7 @@ begin dispatch
 # caller's is read. Sessions authenticate with a token minted for this run.
 agent_token=$(openssl rand -hex 24)
 dispatch_url=http://127.0.0.1:$dispatch_port
-env -i \
+start_process dispatch env -i \
   PATH="$PATH" \
   TMPDIR="$work" \
   HOME=/nonexistent \
@@ -217,9 +198,10 @@ env -i \
   DISPATCH_WEB_DIST="$work/web-dist" \
   ENVOY_URL="http://127.0.0.1:$envoy_port" \
   NATS_URLS="$nats_url" \
-  "$dispatch_bin" >"$work/dispatch.log" 2>&1 &
-server_pid=$!
-wait_http dispatch "$server_pid" "$dispatch_url/healthz"
+  "$dispatch_bin"
+await_start dispatch "$dispatch_pid" 0 60 "envoy-dispatch to answer /healthz" \
+  curl -fsS --max-time 2 "$dispatch_url/healthz" ||
+  fail "another process bound 127.0.0.1:$dispatch_port first; see $work/logs/dispatch.log"
 note "envoy-dispatch on $dispatch_url, NATS on, outbox publishing to $nats_url"
 pass
 
@@ -228,7 +210,7 @@ status=0
 CLAIMANT_E2E_AGENT_TOKEN=$agent_token \
   bun "$root/scripts/e2e/dispatch-claimant-delivery.ts" "$dispatch_url" "$nats_url" "http://127.0.0.1:$envoy_port" ||
   status=$?
-kill -0 "$server_pid" 2>/dev/null || fail "envoy-dispatch exited during the run; see $work/dispatch.log"
+kill -0 "$dispatch_pid" 2>/dev/null || fail "envoy-dispatch exited during the run; see $work/logs/dispatch.log"
 case "$status" in
   0) ;;
   1) fail "a case failed (above)" ;;
