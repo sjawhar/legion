@@ -44,9 +44,9 @@ fixes a live row's session.
 `blocked`, when present, is `[{issue, blockedBy}, …]`: every root and child Legion is waiting to
 start behind an unfinished Dispatch issue, each with the issues it waits on. `read_state` shows the
 same list under `admission.blocked`, and `legion state` prints it as `blocked on Dispatch links:`.
-The wait ends when each blocker reaches `done` (a person's close, or a child's own merge) or its link
-is taken off (by a person or the tree's architect): name the waits in the day's report and take
-nothing for them.
+The wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
+link is taken off (by a person or the tree's architect): name the waits in the day's report and
+take nothing for them.
 
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
 

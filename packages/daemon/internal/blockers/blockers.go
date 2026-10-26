@@ -89,10 +89,11 @@ func UnfinishedOf(rows map[string]Row, blockedBy []string) []string {
 //
 // It is the two decisions themselves, read rather than made: a root of waiting — the line
 // admission promotes from, which the caller passes as it computes it — that promotion skips
-// (WaitsOn), and a recorded child the workflow holds at `admitted` (Holds, the hold
-// workflow.Engine.StartUnblockedChildren starts it from). A candidate the rule exempts is
-// never judged, as the decider that would admit it does not judge it either (Exempt): what
-// promotion starts whatever its links say is never reported as waiting on them.
+// (WaitsOn), and a recorded child the workflow holds at `admitted` (Holds;
+// workflow.Engine.StartUnblockedChildren starts it once Holdable meets nothing Unfinished). A
+// candidate the rule exempts is never judged, as the decider that would admit it does not judge
+// it either (Exempt): what promotion starts whatever its links say is never reported as waiting
+// on them.
 func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.BlockedIssue {
 	blocked := make([]record.BlockedIssue, 0, len(waiting))
 	for _, issue := range waiting {

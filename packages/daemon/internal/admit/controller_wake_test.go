@@ -177,9 +177,9 @@ func TestTheTickAloneCarriesTheOpenCapabilities(t *testing.T) {
 
 // The tick is the turn that posts the day's report, so it alone tells the controller what Legion
 // is waiting to start behind a Dispatch issue nobody has finished: the roots promotion skips and
-// the children the workflow holds at `admitted`, by issue key, with what each waits on. Only a
-// person finishes a blocker, so the wait is the controller's to name and nobody else's: a todo
-// wake and a slot-free wake carry none, and a tick with nothing blocked carries none either.
+// the children the workflow holds at `admitted`, by issue key, with what each waits on. The wait
+// is the controller's to name in the report and nobody else's: a todo wake and a slot-free wake
+// carry none, and a tick with nothing blocked carries none either.
 func TestTheTickAloneCarriesWhatLegionWaitsOn(t *testing.T) {
 	t.Run("a tick names them, a todo wake does not", func(t *testing.T) {
 		pool := migratedPool(t)
