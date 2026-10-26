@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -73,7 +74,15 @@ type statusRecorder struct {
 	writes []statusWrite
 	// documents maps each Dispatch document id this fake knows to the issue carrying it.
 	documents map[string]string
+	// approved maps a document id to the version Dispatch shows approved, its latest; absent means
+	// no approval.
+	approved map[string]int
+	// approvals maps a document id to the whole approval Dispatch shows for it, read ahead of
+	// approved.
+	approvals map[string]dispatch.Approval
 	issues    map[string]dispatch.Issue
+	// reads is every issue and document read, in order: `issue:<key>` and `approval:<id>`.
+	reads []string
 }
 
 func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -81,6 +90,7 @@ func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispat
 }
 
 func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
+	r.reads = append(r.reads, "issue:"+key)
 	issue, ok := r.issues[key]
 	if !ok {
 		return dispatch.Issue{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "issue not found"}
@@ -106,9 +116,17 @@ func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) 
 }
 
 func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatch.Approval, error) {
+	r.reads = append(r.reads, "approval:"+artifactID)
 	issue, ok := r.documents[artifactID]
 	if !ok {
 		return dispatch.Approval{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "artifact not found"}
+	}
+	if approval, shown := r.approvals[artifactID]; shown {
+		approval.IssueKey = issue
+		return approval, nil
+	}
+	if version, approved := r.approved[artifactID]; approved {
+		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version}, nil
 	}
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
 }
@@ -127,7 +145,9 @@ func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intak
 	if grants == nil {
 		grants = credential.New(nil)
 	}
-	facts, statuses := &factRecorder{refusal: refusal}, &statusRecorder{}
+	// Dispatch shows the tree root LEGION-208 at event sequence 7, which register_gate reads before
+	// the approval; a test that reads other issues replaces the map.
+	facts, statuses := &factRecorder{refusal: refusal}, &statusRecorder{issues: map[string]dispatch.Issue{"LEGION-208": {Key: "LEGION-208", LastSeq: 7}}}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor:    h.supervisor,
 		BootTokens:    h.tokens,
@@ -285,6 +305,7 @@ func assertProcessedEvent(t *testing.T, h *harness, eventID string) {
 func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	statuses.documents = map[string]string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": "LEGION-208"}
+	statuses.approvals = map[string]dispatch.Approval{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": {State: "none", LatestVersion: 7}}
 	seedTree(t, h, "LEGION-208", "LEGION-209")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 
@@ -296,7 +317,8 @@ func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	if gate.Code != http.StatusOK {
 		t.Fatalf("gate register = %d: %s", gate.Code, gate.Body)
 	}
-	assertProcessedEvent(t, h, "gate:LEGION-208:0:d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093:7")
+	// The id names the read as well as the version: Dispatch shows LEGION-208 at sequence 7.
+	assertProcessedEvent(t, h, "gate:LEGION-208:0:d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093:7:7")
 
 	retryGrant := architect.grant(t)
 	retry := h.request(http.MethodPost, "/legion/v1/phase/retry", map[string]any{
@@ -813,6 +835,136 @@ func TestGateRegistrationIsItsOwnFactInEachGeneration(t *testing.T) {
 	register()
 	if got := facts.recorded(); len(got) != 2 {
 		t.Fatalf("gate facts = %#v, want one registration per generation", got)
+	}
+}
+
+// A person who approved the spec from the document header before its architect registered it:
+// register_gate's own read of the document sees the approval, and carries it into the fact, so the
+// workflow opens the gate at registration.
+func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	statuses.documents = map[string]string{
+		"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": "LEGION-208",
+		"4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d": "LEGION-208",
+	}
+	statuses.approved = map[string]int{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": 3}
+	statuses.approvals = map[string]dispatch.Approval{"4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d": {State: "none", LatestVersion: 3}}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, artifact := range []string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d"} {
+		if recorder := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 3,
+		}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gate register %s = %d: %s", artifact, recorder.Code, recorder.Body)
+		}
+	}
+	want := []intake.Fact{
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
+	}
+	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gate facts = %#v, want the approved document to carry its approval and the other none", got)
+	}
+}
+
+// register_gate carries a changes request Dispatch shows on the document's latest version, with its
+// reason and the review's place in the issue's event log, so a request given between the
+// architect's approval request and its registration closes the gate with the architect told. An
+// open request carries no review, and a changes request a newer version superseded carries nothing.
+// Each registration reads the issue's event sequence before the approval, and the read begins at
+// that sequence alone: the latest review's time is that review's, never the read's.
+func TestGateRegistrationCarriesAChangesRequestDispatchAlreadyShows(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	const changed, open, superseded = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", "7c1e3a5b-9d2f-4b6a-8e0c-1d3f5a7b9c2e"
+	statuses.documents = map[string]string{changed: "LEGION-208", open: "LEGION-208", superseded: "LEGION-208"}
+	reason := "name the rollback path"
+	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 123456000, time.UTC)
+	statuses.approvals = map[string]dispatch.Approval{
+		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, At: reviewed, Seq: 6},
+		open:       {State: "awaiting", LatestVersion: 4, Version: new(3), At: reviewed},
+		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason, At: reviewed, Seq: 5},
+	}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, artifact := range []string{changed, open, superseded} {
+		if recorder := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 4,
+		}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gate register %s = %d: %s", artifact, recorder.Code, recorder.Body)
+		}
+	}
+	since := record.EventMark{Seq: 7}
+	want := []intake.Fact{
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason,
+			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, DispatchVersion: 4, Since: since},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: open, Version: 4, DispatchVersion: 4, Since: since},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5, Since: since},
+	}
+	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gate facts = %#v, want %#v", got, want)
+	}
+	wantReads := []string{"issue:LEGION-208", "approval:" + changed, "issue:LEGION-208", "approval:" + open, "issue:LEGION-208", "approval:" + superseded}
+	if !reflect.DeepEqual(statuses.reads, wantReads) {
+		t.Fatalf("Dispatch reads = %q, want the issue's sequence read before each approval: %q", statuses.reads, wantReads)
+	}
+}
+
+// register_gate refuses a version Dispatch does not show for the document: the caller names the
+// version, and a gate recorded past the document's own latest version is one no person's review
+// can open.
+func TestGateRegistrationRefusesAVersionDispatchDoesNotShow(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	const artifact = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093"
+	statuses.documents = map[string]string{artifact: "LEGION-208"}
+	statuses.approvals = map[string]dispatch.Approval{artifact: {State: "awaiting", LatestVersion: 4}}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 5,
+	}, nil), http.StatusConflict, "VERSION_NOT_IN_DISPATCH")
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("gate facts = %#v, want none for a refused registration", got)
+	}
+}
+
+// Two registrations of one version are two facts when their reads of Dispatch differ: the second
+// carries a review the first could not see, and the fact's id names the read it began at, so the
+// handlers see it. A retry of one read stays one fact.
+func TestASecondRegistrationAtOneVersionCarriesWhatItsOwnReadFound(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	const artifact = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093"
+	statuses.documents = map[string]string{artifact: "LEGION-208"}
+	statuses.approvals = map[string]dispatch.Approval{artifact: {State: "awaiting", LatestVersion: 4}}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	register := func() {
+		t.Helper()
+		response := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 4,
+		}, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("register gate = %d: %s", response.Code, response.Body)
+		}
+	}
+
+	register()
+	register()
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("facts after two registrations of one read = %#v, want the retry deduplicated", got)
+	}
+
+	// The person requests changes, which moves the issue's sequence, and the architect registers
+	// the same version again.
+	statuses.issues["LEGION-208"] = dispatch.Issue{Key: "LEGION-208", LastSeq: 11}
+	statuses.approvals[artifact] = dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: new("name the rollback path"), Seq: 11}
+	register()
+	got := facts.recorded()
+	if len(got) != 2 {
+		t.Fatalf("facts after a registration carrying a new review = %#v, want two", got)
+	}
+	registered, ok := got[1].(intake.GateRegistered)
+	if !ok || registered.ChangesRequestedVersion != 4 || registered.ChangesRequestedMark.Seq != 11 || registered.Since.Seq != 11 {
+		t.Fatalf("second registration fact = %#v, want the changes request at sequence 11 and a read beginning there", got[1])
 	}
 }
 

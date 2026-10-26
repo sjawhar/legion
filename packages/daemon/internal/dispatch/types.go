@@ -107,13 +107,42 @@ type Issue struct {
 }
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
-// the document (empty for a project document).
+// the document (empty for a project document). At and Seq identify the document's latest review,
+// whatever State shows: At is Dispatch's time of it (its `created_at`, which its artifact.* event
+// shares, since one transaction writes both), and Seq that event's sequence on the issue. Each is
+// zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
+// recorded before it kept the sequence, and from a Dispatch that predates it.
 type Approval struct {
 	IssueKey      string
 	State         string
 	LatestVersion int
 	Version       *int
 	Reason        *string
+	At            time.Time
+	Seq           int64
+}
+
+// ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
+// version, and 0 otherwise.
+func (a Approval) ApprovedLatest() int {
+	if a.State == "approved" && a.Version != nil && *a.Version == a.LatestVersion {
+		return *a.Version
+	}
+	return 0
+}
+
+// ChangesRequestedLatest is the version of the changes request Dispatch shows on its latest version
+// and the request's reason, or 0 when the latest version has none: a newer version superseded it,
+// the latest review approves, or an approval request is open again.
+func (a Approval) ChangesRequestedLatest() (int, string) {
+	if a.State != "changes_requested" || a.Version == nil || *a.Version != a.LatestVersion {
+		return 0, ""
+	}
+	reason := "Dispatch reports changes requested"
+	if a.Reason != nil && *a.Reason != "" {
+		reason = *a.Reason
+	}
+	return *a.Version, reason
 }
 
 // Error is a non-success response from Dispatch. Code is empty only when the response did not

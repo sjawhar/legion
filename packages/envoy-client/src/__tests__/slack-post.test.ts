@@ -23,6 +23,11 @@ case "$FAKE_BROKER" in
 esac
 while [ "$1" != "--" ]; do shift; done
 shift
+echo "agent-secrets: LEGION_SLACK_BOT_TOKEN from the broker at broker.example (GCP Secret Manager project 000000000000)" >&2
+if [ "$FAKE_BROKER" = crash-after-inject ]; then
+  echo "the poster's private stderr" >&2
+  exit 1
+fi
 LEGION_SLACK_BOT_TOKEN=xoxb-granted exec "$@"
 `;
 
@@ -170,6 +175,21 @@ describe("postSlackReply", () => {
     await expect(postSlackReply(reply, { env })).rejects.toThrow(
       "the secrets broker denied LEGION_SLACK_BOT_TOKEN (agent-secrets: request req-1 was denied); nothing was posted"
     );
+    expect(slack.calls).toEqual([]);
+  });
+
+  test("a poster that dies after the injection line may have posted, without quoting its stderr", async () => {
+    const slack = fakeSlack({ ok: true, ts: "1.2" });
+    const { env } = brokerEnvironment("crash-after-inject", slack.url);
+
+    const said = await outcome(env);
+
+    expect(said).toContain(
+      "slack_post's poster exited 1 without an answer: the reply may have been posted"
+    );
+    expect(said).not.toContain("nothing was posted");
+    expect(said).not.toContain("agent-secrets: LEGION_SLACK_BOT_TOKEN");
+    expect(said).not.toContain("the poster's private stderr");
     expect(slack.calls).toEqual([]);
   });
 

@@ -44,6 +44,8 @@ type DispatchSettings struct {
 	AppID              string
 	AppKeySecretName   string
 	AppKeySecretKey    string
+	AppCPU             string
+	AppMemory          string
 }
 
 // ResolveDispatch resolves Dispatch's plain inputs for the external refusal and default tests.
@@ -65,6 +67,8 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		AppID:              s.appID,
 		AppKeySecretName:   s.appKeySecretName,
 		AppKeySecretKey:    s.appKeySecretKey,
+		AppCPU:             s.appCPU,
+		AppMemory:          s.appMemory,
 	}
 	if rolling := s.strategy.rollingUpdate; rolling != nil {
 		settings.RollingUpdate = &DispatchRollingUpdate{MaxUnavailable: rolling.maxUnavailable, MaxSurge: rolling.maxSurge}

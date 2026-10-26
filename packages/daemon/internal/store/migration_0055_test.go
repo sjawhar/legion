@@ -2,78 +2,63 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
-// A root an older daemon already made of a member of another tree stays its own tree after the
-// upgrade, as one this daemon makes does: the older daemon adopted nothing, and the first admission
-// sweep after 0055 would otherwise take it back into the tree it left once that tree is live. 0055
-// marks the rows that still show the tree they left: an outbox hand-over the daemon processed, or a
-// phase worker's claim still naming another tree. A root that only waited, a root that re-admitted
-// itself after a trip to backlog (INFRA-214's case), and a member still in its tree keep the
-// default, so each stays adoptable or unaffected as before.
-func TestTheTreeARootLeftIsBackfilledBy0055(t *testing.T) {
+// 0055 records where Dispatch put the approval a gate holds and the changes request its architect
+// was told of. A gate the older daemon left migrates with neither recorded; afterwards each column
+// refuses a version or a sequence of zero, and no check ties a mark to its version, so the older
+// daemon, which writes approved_version alone, can still clear an approval on a gate that has a
+// mark: the daemon keeps that shape itself (record.Postgres.PutGate).
+func TestTheGatesReviewMarksArriveWith0055(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 54)
-	claim := func(token, tree, issue string) string {
-		return `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
-			launch_failures, prompt_failures, prompt_retires, uncertain_streak)
-			values ('` + token + `', 'LEGION', '` + tree + `', '` + issue + `', 'planner', 1, '', '', 'retired', 0, 0, 0, 0)`
+	if _, err := store.Pool().Exec(ctx, `insert into issues
+		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 1)`); err != nil {
+		t.Fatal(err)
 	}
-	for _, seed := range []string{
-		// The old tree a child was handed over from.
-		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-920', 'LEGION-920', 'LEGION', 'a finished tree', 'done', 1, 'done', 'A', 1, true)`,
-		// A child the outbox handed over without its run, never started: no claim, no mark of a run.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-921', 'LEGION-921', 'LEGION', 'an uncarried hand-over', 'LEGION-920', 'admitted', 2, 'todo', 'B', 2, true)`,
-		`insert into processed_events (source, event_id) values ('outbox', 'handover:LEGION-921:77')`,
-		// Another outbox row's event whose key only starts like the first: not a hand-over of LEGION-92.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-92', 'LEGION-92', 'LEGION', 'a root whose key prefixes another', 'LEGION-920', 'admitted', 1, 'todo', 'C', 3, true)`,
-		// A child that ran a worker under the old tree, admitted as an orphan by a person, since gone
-		// to backlog: its planner's claim still names the old tree.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-922', 'LEGION-922', 'LEGION', 'an orphan that ran', 'LEGION-920', 'done', 2, 'backlog', 'D', 4, true)`,
-		claim("legion-LEGION-922-planner", "LEGION-920", "LEGION-922"),
-		// A root that re-admitted itself after a trip to backlog, its own worker's claim on its own tree.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-923', 'LEGION-923', 'LEGION', 'a root back from backlog', 'LEGION-930', 'admitted', 3, 'todo', 'E', 5, true)`,
-		claim("legion-LEGION-923-planner", "LEGION-923", "LEGION-923"),
-		// A member still in its tree, with a hand-over event the reopened root fenced off.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-924', 'LEGION-920', 'LEGION', 'a member still in its tree', 'LEGION-920', 'planning', 1, 'in_progress', 'F', 6, false)`,
-		`insert into processed_events (source, event_id) values ('outbox', 'handover:LEGION-924:78')`,
-		// A hand-over event recorded by another source does not count.
-		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-925', 'LEGION-925', 'LEGION', 'a root that only waited', 'admitted', 1, 'todo', 'G', 7, true)`,
-		`insert into processed_events (source, event_id) values ('api', 'handover:LEGION-925:79')`,
-	} {
-		if _, err := store.Pool().Exec(ctx, seed); err != nil {
-			t.Fatalf("record before 0055: %v", err)
-		}
+	if _, err := store.Pool().Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version)
+		values ('LEGION-208', '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26', 4, 4)`); err != nil {
+		t.Fatal(err)
 	}
-
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-
-	for key, want := range map[string]string{
-		"LEGION-920": "",
-		"LEGION-921": "LEGION-920",
-		"LEGION-92":  "",
-		"LEGION-922": "LEGION-920",
-		"LEGION-923": "",
-		"LEGION-924": "",
-		"LEGION-925": "",
+	var approvedSeq, toldSeq *int64
+	var approvedAt, toldAt *string
+	var toldVersion *int
+	var reason string
+	if err := store.Pool().QueryRow(ctx, `select approved_seq, approved_at::text, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at::text
+		from design_gates where issue = 'LEGION-208'`).Scan(&approvedSeq, &approvedAt, &toldVersion, &reason, &toldSeq, &toldAt); err != nil {
+		t.Fatalf("read the migrated gate: %v", err)
+	}
+	if approvedSeq != nil || approvedAt != nil || toldVersion != nil || reason != "" || toldSeq != nil || toldAt != nil {
+		t.Fatalf("gate after 0055 = approved %v/%v told %v %q %v/%v, want the approval it held placed nowhere and nothing told",
+			approvedSeq, approvedAt, toldVersion, reason, toldSeq, toldAt)
+	}
+	for _, accepted := range []string{
+		`update design_gates set approved_seq = 12, approved_at = now() where issue = 'LEGION-208'`,
+		// The older daemon's write of a changes request: approved_version alone.
+		`update design_gates set approved_version = null where issue = 'LEGION-208'`,
+		`update design_gates set told_changes_version = 4, told_changes_reason = 'name the rollback path', told_changes_seq = 13, told_changes_at = now() where issue = 'LEGION-208'`,
+		// The older daemon's write of an approval, which knows nothing of the told record.
+		`update design_gates set approved_version = 4 where issue = 'LEGION-208'`,
 	} {
-		var got string
-		if err := store.Pool().QueryRow(ctx, `select handed_over_from from issues where key = $1`, key).Scan(&got); err != nil {
-			t.Fatalf("read %s: %v", key, err)
+		if _, err := store.Pool().Exec(ctx, accepted); err != nil {
+			t.Fatalf("%s: %v, want it accepted", accepted, err)
 		}
-		if got != want {
-			t.Errorf("%s handed_over_from = %q, want %q", key, got, want)
+	}
+	for _, refused := range []struct{ why, statement string }{
+		{"an approval sequence of zero", `update design_gates set approved_seq = 0 where issue = 'LEGION-208'`},
+		{"a told version of zero", `update design_gates set told_changes_version = 0 where issue = 'LEGION-208'`},
+		{"a told sequence of zero", `update design_gates set told_changes_seq = 0 where issue = 'LEGION-208'`},
+	} {
+		_, err := store.Pool().Exec(ctx, refused.statement)
+		if err == nil || !strings.Contains(err.Error(), "check constraint") {
+			t.Fatalf("%s = %v, want a check constraint to refuse it", refused.why, err)
 		}
 	}
 }

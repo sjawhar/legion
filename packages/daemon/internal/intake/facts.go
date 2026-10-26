@@ -153,16 +153,36 @@ const (
 	DispatchArtifactVersion          DispatchArtifactKind = "version"
 )
 
-// DispatchArtifact records one review or version event for a registered design document.
+// DispatchArtifact records one review or version event for a registered design document, from a
+// live event or from the daemon's own read of Dispatch's approval (the gate seed). Every source
+// applies alike: a key per review, not the source, keeps the architect from hearing one changes
+// request twice (the workflow's tellChanges). Mark places the event in the issue's Dispatch event log: the event's
+// sequence and Dispatch's time of it, from the event itself, or, for a review, from the read's
+// latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A version the
+// gate seed read from Dispatch carries none.
 type DispatchArtifact struct {
 	Key        string
 	ArtifactID string
 	Kind       DispatchArtifactKind
 	Version    int
 	Reason     string
+	Mark       record.EventMark
 }
 
 func (DispatchArtifact) isFact() {}
+
+// GateAboveDispatch is the gate seed of a generation (Generation) finding the document at a version
+// below the one the seed was queued at (Above): Read is what the seed read of Dispatch, as the fact
+// it would otherwise apply, at Dispatch's latest version. Dispatch's versions only rise and the
+// seed reads after the daemon applied whatever moved the gate, so the gate stands above any version
+// Dispatch wrote, and is reset to Dispatch's.
+type GateAboveDispatch struct {
+	Generation uint64
+	Above      int
+	Read       DispatchArtifact
+}
+
+func (GateAboveDispatch) isFact() {}
 
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
@@ -516,11 +536,29 @@ type SignOff struct{ Issue string }
 
 func (SignOff) isFact() {}
 
-// GateRegistered records a design document and its current version.
+// GateRegistered records a design document and its current version, with what register_gate read
+// of Dispatch's approval of it, so a person's review given before the architect registered is
+// applied at registration. ApprovedVersion is the version Dispatch showed approved, set only when
+// that approval is of Dispatch's latest version, and 0 otherwise: the gate opens at registration,
+// keeping that approval's place in the issue's Dispatch event log (ApprovedMark).
+// ChangesRequestedVersion is the version of a changes request Dispatch showed on its latest
+// version, with its reason and the review's place in the issue's Dispatch event log
+// (ChangesRequestedMark), and 0 otherwise: the gate closes with the architect told.
+// DispatchVersion is the document's latest version as that read found it: Version is the caller's,
+// and the gate is registered at the newer of the two. Since is the issue's event sequence read
+// before the approval, with no time, so every review the read did not show comes after it
+// (record.EventMark.After): a review the gate already applied after Since is newer than the read.
 type GateRegistered struct {
-	Issue      string
-	ArtifactID string
-	Version    int
+	Issue                   string
+	ArtifactID              string
+	Version                 int
+	ApprovedVersion         int
+	ApprovedMark            record.EventMark
+	ChangesRequestedVersion int
+	ChangesReason           string
+	ChangesRequestedMark    record.EventMark
+	DispatchVersion         int
+	Since                   record.EventMark
 }
 
 func (GateRegistered) isFact() {}

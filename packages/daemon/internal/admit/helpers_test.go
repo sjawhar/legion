@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -81,7 +82,15 @@ func (r servedRepositories) ResolveRepository(resolved string) (workflow.Resolut
 
 func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
 	t.Helper()
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, log)
+	return newAdmissionWithGate(t, cap, "", log)
+}
+
+// newAdmissionWithGate is newAdmission under a design-gate policy of its own: the default leaves
+// workflow.Config's zero value, which is the armed gate.
+func newAdmissionWithGate(t *testing.T, cap int, gate config.DesignGate, log *slog.Logger) *Admission {
+	t.Helper()
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: gate,
+		Clock: func() time.Time { return fixedNow }}, log)
 	admission := New(record.NewStore(), engine, cap, testProject, log)
 	admission.now = func() time.Time { return fixedNow }
 	return admission

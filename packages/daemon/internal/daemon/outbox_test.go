@@ -760,6 +760,92 @@ func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
 	}
 }
 
+// The seed applies a changes request Dispatch shows on the version registered (or a later one),
+// with its reason and the review's place in the issue's event log, so a request whose own event
+// was lost still reaches the gate and its architect. The review's place names the fact, so a
+// second seed of one version that reads a newer review is a fact of its own, and a seed that reads
+// the same review again is not.
+func TestOutboxGateSeedAppliesAChangesRequestWithItsMark(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	handler := &outboxFactHandler{}
+	reason := "name the rollback path"
+	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
+	client := &outboxDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: &reason, At: reviewed, Seq: 9}}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: client, handlers: []intake.Handler{handler}}
+	seed := func() {
+		t.Helper()
+		if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 3}, time.Now())); err != nil {
+			t.Fatalf("execute gate seed: %v", err)
+		}
+	}
+	seed()
+	seed()
+	first := intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: reason,
+		Mark: record.EventMark{Seq: 9, At: reviewed}}
+	if got := handler.facts(); len(got) != 1 || got[0] != first {
+		t.Fatalf("gate facts after two seeds of one review = %#v, want the changes request once: %#v", got, first)
+	}
+	client.approval.Seq, client.approval.At = 12, reviewed.Add(time.Minute)
+	seed()
+	if got := handler.facts(); len(got) != 2 || got[1].(intake.DispatchArtifact).Mark.Seq != 12 {
+		t.Fatalf("gate facts after a seed that read a newer review = %#v, want that review as a second fact", got)
+	}
+}
+
+// A gate recorded above every version Dispatch holds for its document (a daemon that registered
+// the caller's version unchecked could record one) is reset by the next gate seed that reads
+// Dispatch below it, the seed a registration of the real version queues at the gate's version, and
+// the review the seed read there applies: approved, the gate opens at Dispatch's version; changes
+// requested, it stays closed there with the request told. Left above, every review of the real
+// latest version would be dropped as a review of an older one.
+func TestTheGateSeedResetsAGateAboveTheVersionDispatchHolds(t *testing.T) {
+	reason := "name the rollback path"
+	for _, tc := range []struct {
+		name     string
+		approval dispatch.Approval
+		open     bool
+		told     int
+	}{
+		{name: "approved at Dispatch's version", approval: dispatch.Approval{State: "approved", LatestVersion: 4, Version: new(4), Seq: 9}, open: true},
+		{name: "changes requested at Dispatch's version", approval: dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, Seq: 9}, told: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1,
+				Status: "in_progress", Rank: "U", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"})
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				return records.PutGate(ctx, tx, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 7})
+			}); err != nil {
+				t.Fatalf("seed the gate above Dispatch's version: %v", err)
+			}
+			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, dispatch: &outboxDispatch{approval: tc.approval},
+				handlers: []intake.Handler{engine}, now: time.Now}
+			if err := runner.execute(ctx, mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 7, Generation: 1}, time.Now())); err != nil {
+				t.Fatalf("execute gate seed: %v", err)
+			}
+			var gate *record.DesignGate
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				var err error
+				gate, err = records.Gate(ctx, tx, "LEGION-208")
+				return err
+			}); err != nil || gate == nil {
+				t.Fatalf("read the gate: %#v, %v", gate, err)
+			}
+			open := gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion
+			if gate.LatestVersion != 4 || open != tc.open {
+				t.Fatalf("gate after the seed = %#v, want it at Dispatch's version 4 with open=%t", gate, tc.open)
+			}
+			var told int
+			if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'notice' and issue = 'LEGION-208' and payload->>'kind' = 'design-changes-requested'`).Scan(&told); err != nil || told != tc.told {
+				t.Fatalf("design-changes-requested notices = %d, %v; want %d", told, err, tc.told)
+			}
+		})
+	}
+}
+
 func TestOutboxLingerAppliesExpirationAndReturnsHandlerFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	handler := &outboxFactHandler{}

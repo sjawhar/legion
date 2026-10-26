@@ -3,6 +3,7 @@ package gcp
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -36,6 +37,33 @@ const (
 	// between them.
 	dispatchStrategyRecreate      = "Recreate"
 	dispatchStrategyRollingUpdate = "RollingUpdate"
+
+	// defaultAzureFederationAudience is the audience of the keyless form's projected token when
+	// azureFederationAudience is unset: the one Entra's federated credentials expect by default.
+	defaultAzureFederationAudience = "api://AzureADTokenExchange"
+
+	// defaultDispatchAppCPU and defaultDispatchAppMemory size the app's envoy-dispatch container
+	// when appCpu and appMemory are unset.
+	defaultDispatchAppCPU    = "1"
+	defaultDispatchAppMemory = "4Gi"
+
+	// dispatchProxyCPU and dispatchProxyMemory size the app pod's cloud-sql-proxy sidecar, which
+	// Autopilot counts in the pod's request beside envoy-dispatch.
+	dispatchProxyCPU    = "200m"
+	dispatchProxyMemory = "256Mi"
+)
+
+// Autopilot's bounds for the app pod's total request, the general-purpose compute class's under the
+// safe-to-evict annotation (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests):
+// below the floor or outside the memory-per-CPU ratio Autopilot raises the pod's request, so the
+// container would not run at the size the component renders; above the ceiling it rejects the pod.
+var (
+	autopilotPodMinCPU    = big.NewRat(1, 2)
+	autopilotPodMaxCPU    = big.NewRat(30, 1)
+	autopilotPodMinMemory = new(big.Rat).SetInt64(512 << 20)
+	autopilotPodMaxMemory = new(big.Rat).SetInt64(110 << 30)
+	autopilotMinGiBPerCPU = big.NewRat(1, 1)
+	autopilotMaxGiBPerCPU = big.NewRat(13, 2)
 )
 
 var (
@@ -43,6 +71,9 @@ var (
 	signInDomainRule   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 	namespaceRule      = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	secretKeyRule      = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+	// quantityRule is a Kubernetes resource quantity (k8s.io/apimachinery's resource.Quantity):
+	// a signed decimal, then a binary suffix, a decimal suffix or a decimal exponent.
+	quantityRule = regexp.MustCompile(`^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$`)
 )
 
 // DispatchArgs are the inputs of an envoy-infra:gcp:Dispatch. Every field of a plain Go type is a
@@ -99,11 +130,41 @@ type DispatchArgs struct {
 	// its pods instead of being recreated.
 	Replicas *int `pulumi:"replicas,optional"`
 
+	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
+	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
+	// cloud-sql-proxy sidecar keeps its own 200m and 256Mi, and the front door and the listener
+	// are unchanged.
+	AppCpu    *string `pulumi:"appCpu,optional"`
+	AppMemory *string `pulumi:"appMemory,optional"`
+
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the app's NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster
 	// namespace: only the component's own tailnet front door, which Tailscale Serve on 443 proxies
 	// through, reaches the app.
 	AllowedNamespaces []string `pulumi:"allowedNamespaces,optional"`
+
+	// AzureEmbedEndpoint turns on meaning search through Azure AI Foundry: DISPATCH_EMBEDDER=azure
+	// and DISPATCH_AZURE_EMBED_ENDPOINT, the base URL the embeddings route is appended to (such as
+	// https://<resource>.services.ai.azure.com/models), which may be an Azure resource's output.
+	// AzureEmbedTokensPerMinute, the deployment's quota, comes with it, and AzureEmbedDeployment
+	// (DISPATCH_AZURE_EMBED_DEPLOYMENT, Dispatch's default when unset) may. Every other Azure input
+	// needs the endpoint.
+	AzureEmbedEndpoint        pulumi.StringInput `pulumi:"azureEmbedEndpoint,optional"`
+	AzureEmbedDeployment      pulumi.StringInput `pulumi:"azureEmbedDeployment,optional"`
+	AzureEmbedTokensPerMinute *int               `pulumi:"azureEmbedTokensPerMinute,optional"`
+
+	// The endpoint takes exactly one credential. AzureEmbedKeySecret is the key form: the Secret
+	// Manager secret's resource path (projects/<project>/secrets/<id>) holding the deployment's API
+	// key, mounted through the Secret Manager CSI driver as the file DISPATCH_AZURE_EMBED_KEY_FILE
+	// names, so the key never enters the component or its state. AzureTenantId and AzureClientId
+	// are the keyless form, set together (a managed identity's outputs): the pod's projected
+	// service-account token, for audience AzureFederationAudience (api://AzureADTokenExchange when
+	// unset), is the assertion Dispatch exchanges with Entra, through the federated credential the
+	// identity holds for this component's serviceAccountIssuer and serviceAccountSubject.
+	AzureEmbedKeySecret     pulumi.StringInput `pulumi:"azureEmbedKeySecret,optional"`
+	AzureTenantId           pulumi.StringInput `pulumi:"azureTenantId,optional"`
+	AzureClientId           pulumi.StringInput `pulumi:"azureClientId,optional"`
+	AzureFederationAudience *string            `pulumi:"azureFederationAudience,optional"`
 }
 
 // dispatchSeededInput names the first plain string input that holds an nkey seed. No component
@@ -145,6 +206,12 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.DatabaseTier != nil && bus.HoldsSeed(*args.DatabaseTier) {
 		return "databaseTier", true
 	}
+	if args.AppCpu != nil && bus.HoldsSeed(*args.AppCpu) {
+		return "appCpu", true
+	}
+	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
+		return "appMemory", true
+	}
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
 	}
@@ -152,6 +219,9 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 		if bus.HoldsSeed(namespace) {
 			return fmt.Sprintf("allowedNamespaces[%d]", i), true
 		}
+	}
+	if args.AzureFederationAudience != nil && bus.HoldsSeed(*args.AzureFederationAudience) {
+		return "azureFederationAudience", true
 	}
 	return "", false
 }
@@ -165,6 +235,12 @@ type Dispatch struct {
 	Kubeconfig       pulumi.StringOutput `pulumi:"kubeconfig"`
 	Principal        pulumi.StringOutput `pulumi:"principal"`
 	AgentToken       pulumi.StringOutput `pulumi:"agentToken" provider:"secret"`
+	// ServiceAccountIssuer and ServiceAccountSubject are the issuer and subject of the Dispatch
+	// pods' service-account tokens: the cluster's OIDC issuer, and the pods' Kubernetes service
+	// account. A federated credential trusting the pair (an Azure identity's, for the keyless
+	// form) admits exactly those pods.
+	ServiceAccountIssuer  pulumi.StringOutput `pulumi:"serviceAccountIssuer"`
+	ServiceAccountSubject pulumi.StringOutput `pulumi:"serviceAccountSubject"`
 }
 
 // dispatchSettings are the plain inputs, validated, with the defaults applied, and the texts built
@@ -181,8 +257,80 @@ type dispatchSettings struct {
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
+	appCPU, appMemory                           string
 	strategy                                    dispatchStrategy
 	serveConfig                                 string
+	azure                                       dispatchAzure
+}
+
+// dispatchAzure is the Azure embedder's plain configuration, the zero value when
+// azureEmbedEndpoint is unset. When enabled, exactly one of key (azureEmbedKeySecret) and keyless
+// (azureTenantId with azureClientId) is set, and audience is the keyless form's token audience.
+type dispatchAzure struct {
+	key, keyless    bool
+	tokensPerMinute int
+	audience        string
+}
+
+// enabled reports whether azureEmbedEndpoint turned the Azure embedder on: one credential form is
+// then set.
+func (a dispatchAzure) enabled() bool { return a.key || a.keyless }
+
+// newDispatchAzure validates the Azure embedder's inputs: the endpoint turns it on and needs the
+// quota and exactly one credential form; no other Azure input is taken without the endpoint. The
+// Inputs are judged by being set alone, so a value unknown at preview passes as it will at update.
+func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
+	keyless := args.AzureTenantId != nil || args.AzureClientId != nil
+	if args.AzureEmbedEndpoint == nil {
+		for _, in := range []struct {
+			input string
+			set   bool
+		}{
+			{"azureEmbedDeployment", args.AzureEmbedDeployment != nil},
+			{"azureEmbedTokensPerMinute", args.AzureEmbedTokensPerMinute != nil},
+			{"azureEmbedKeySecret", args.AzureEmbedKeySecret != nil},
+			{"azureTenantId", args.AzureTenantId != nil},
+			{"azureClientId", args.AzureClientId != nil},
+			{"azureFederationAudience", args.AzureFederationAudience != nil},
+		} {
+			if in.set {
+				return dispatchAzure{}, fmt.Errorf("azureEmbedEndpoint is required when %s is set: every Azure input configures the Azure embedder, which the endpoint turns on", in.input)
+			}
+		}
+		return dispatchAzure{}, nil
+	}
+	if args.AzureEmbedTokensPerMinute == nil {
+		return dispatchAzure{}, errors.New("azureEmbedTokensPerMinute is required when azureEmbedEndpoint is set: the deployment's tokens-per-minute quota, which Dispatch paces its embedding by")
+	}
+	if *args.AzureEmbedTokensPerMinute <= 0 {
+		return dispatchAzure{}, fmt.Errorf("azureEmbedTokensPerMinute %d must be a positive integer", *args.AzureEmbedTokensPerMinute)
+	}
+	if args.AzureEmbedKeySecret != nil && keyless {
+		return dispatchAzure{}, errors.New("azureEmbedKeySecret is set with azureTenantId or azureClientId: the key and keyless credential forms are exclusive, so set exactly one")
+	}
+	if args.AzureTenantId != nil && args.AzureClientId == nil {
+		return dispatchAzure{}, errors.New("azureClientId is required when azureTenantId is set: the keyless form takes both")
+	}
+	if args.AzureClientId != nil && args.AzureTenantId == nil {
+		return dispatchAzure{}, errors.New("azureTenantId is required when azureClientId is set: the keyless form takes both")
+	}
+	if args.AzureFederationAudience != nil && !keyless {
+		return dispatchAzure{}, errors.New("azureFederationAudience is set without azureTenantId and azureClientId: it is the keyless form's token audience")
+	}
+	if args.AzureEmbedKeySecret == nil && !keyless {
+		return dispatchAzure{}, errors.New("azureEmbedEndpoint needs one credential: azureEmbedKeySecret, or azureTenantId with azureClientId")
+	}
+	azure := dispatchAzure{key: !keyless, keyless: keyless, tokensPerMinute: *args.AzureEmbedTokensPerMinute}
+	if keyless {
+		azure.audience = defaultAzureFederationAudience
+		if args.AzureFederationAudience != nil {
+			if *args.AzureFederationAudience == "" {
+				return dispatchAzure{}, errors.New("azureFederationAudience is empty; leave it unset for " + defaultAzureFederationAudience)
+			}
+			azure.audience = *args.AzureFederationAudience
+		}
+	}
+	return azure, nil
 }
 
 // dispatchRollingUpdate bounds a rolling update: how many of the wanted pods may be missing at
@@ -312,6 +460,10 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("appPrivateKeySecretKey %q must match %s", args.AppPrivateKeySecretKey, secretKeyRule)
 		}
 	}
+	azure, err := newDispatchAzure(args)
+	if err != nil {
+		return dispatchSettings{}, err
+	}
 
 	s := dispatchSettings{
 		hostname:           args.Hostname,
@@ -335,6 +487,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.appID = args.AppId
 	s.appKeySecretName = args.AppPrivateKeySecretName
 	s.appKeySecretKey = args.AppPrivateKeySecretKey
+	s.azure = azure
 	if args.DatabaseVersion != nil {
 		if *args.DatabaseVersion == "" {
 			return dispatchSettings{}, errors.New("databaseVersion is empty; leave it unset for " + defaultDispatchDatabaseVersion)
@@ -357,6 +510,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		s.replicas = *args.Replicas
 	}
 	s.strategy = dispatchStrategyFor(s.replicas)
+	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
+		return dispatchSettings{}, err
+	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
 		if !dnsLabel(*args.Namespace) {
@@ -393,6 +549,141 @@ func dnsSubdomain(value string) bool {
 		}
 	}
 	return true
+}
+
+// newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request
+// and limit, and refuses a size at which Autopilot would not run the app pod as rendered: the
+// pod's total, with the cloud-sql-proxy sidecar's, below autopilotPodMinCPU or
+// autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot raises it), or above
+// autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it).
+func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error) {
+	cpu, memory = defaultDispatchAppCPU, defaultDispatchAppMemory
+	if args.AppCpu != nil {
+		if *args.AppCpu == "" {
+			return "", "", errors.New("appCpu is empty; leave it unset for " + defaultDispatchAppCPU)
+		}
+		cpu = *args.AppCpu
+	}
+	if args.AppMemory != nil {
+		if *args.AppMemory == "" {
+			return "", "", errors.New("appMemory is empty; leave it unset for " + defaultDispatchAppMemory)
+		}
+		memory = *args.AppMemory
+	}
+	appCPU, err := appQuantity("appCpu", cpu, "1, 1500m or 2")
+	if err != nil {
+		return "", "", err
+	}
+	appMemory, err := appQuantity("appMemory", memory, "4Gi or 6144Mi")
+	if err != nil {
+		return "", "", err
+	}
+	proxyCPU, _ := quantityValue(dispatchProxyCPU)
+	proxyMemory, _ := quantityValue(dispatchProxyMemory)
+	podCPU := new(big.Rat).Add(appCPU, proxyCPU)
+	podMemory := new(big.Rat).Add(appMemory, proxyMemory)
+	if podCPU.Cmp(autopilotPodMinCPU) < 0 {
+		return "", "", fmt.Errorf("appCpu %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
+			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, proxyCPU)), dispatchProxyCPU, milliCPU(autopilotPodMinCPU))
+	}
+	if podCPU.Cmp(autopilotPodMaxCPU) > 0 {
+		return "", "", fmt.Errorf("appCpu %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above %s CPU, and Autopilot rejects such a pod",
+			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, proxyCPU)), dispatchProxyCPU, autopilotPodMaxCPU.RatString())
+	}
+	if podMemory.Cmp(autopilotPodMinMemory) < 0 {
+		return "", "", fmt.Errorf("appMemory %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
+			memory, mebibytes(new(big.Rat).Sub(autopilotPodMinMemory, proxyMemory)), dispatchProxyMemory, mebibytes(autopilotPodMinMemory))
+	}
+	if podMemory.Cmp(autopilotPodMaxMemory) > 0 {
+		return "", "", fmt.Errorf("appMemory %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above 110Gi, and Autopilot rejects such a pod",
+			memory, mebibytes(new(big.Rat).Sub(autopilotPodMaxMemory, proxyMemory)), dispatchProxyMemory)
+	}
+	gibPerCPU := new(big.Rat).Quo(podMemory, podCPU)
+	gibPerCPU.Quo(gibPerCPU, new(big.Rat).SetInt64(1<<30))
+	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) < 0 || gibPerCPU.Cmp(autopilotMaxGiBPerCPU) > 0 {
+		return "", "", fmt.Errorf("appCpu %q and appMemory %q: with cloud-sql-proxy's %s and %s the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
+			cpu, memory, dispatchProxyCPU, dispatchProxyMemory)
+	}
+	return cpu, memory, nil
+}
+
+// appQuantity is the exact value of input's quantity, or a refusal naming input.
+func appQuantity(input, value, examples string) (*big.Rat, error) {
+	quantity, err := quantityValue(value)
+	switch {
+	case errors.Is(err, errQuantityExponent):
+		return nil, fmt.Errorf("%s %q has a decimal exponent outside e%d to e%d, the range of the suffixes n to E; write it with a suffix, such as %s", input, value, minQuantityExponent, maxQuantityExponent, examples)
+	case err != nil:
+		return nil, fmt.Errorf("%s %q is not a Kubernetes quantity, such as %s", input, value, examples)
+	}
+	return quantity, nil
+}
+
+var (
+	quantityBinarySuffixes  = map[string]uint{"Ki": 10, "Mi": 20, "Gi": 30, "Ti": 40, "Pi": 50, "Ei": 60}
+	quantityDecimalSuffixes = map[string]int{"n": -9, "u": -6, "m": -3, "": 0, "k": 3, "M": 6, "G": 9, "T": 12, "P": 15, "E": 18}
+
+	errNotQuantity      = errors.New("not a Kubernetes quantity")
+	errQuantityExponent = errors.New("decimal exponent out of range")
+)
+
+// minQuantityExponent and maxQuantityExponent bound a quantity's decimal exponent (the e<n> form)
+// to the range its suffixes cover, n to E. Every value inside it is computed exactly, whatever
+// its mantissa; one outside it is refused rather than computed, since 10^n costs time without
+// bound, and no size this component takes needs one.
+const (
+	minQuantityExponent = -9
+	maxQuantityExponent = 18
+)
+
+// quantityValue is the exact value of a Kubernetes quantity (CPU in cores, memory in bytes):
+// errNotQuantity when value is not one, errQuantityExponent when its decimal exponent is outside
+// minQuantityExponent to maxQuantityExponent.
+func quantityValue(value string) (*big.Rat, error) {
+	match := quantityRule.FindStringSubmatch(value)
+	if match == nil {
+		return nil, errNotQuantity
+	}
+	number, ok := new(big.Rat).SetString(match[1])
+	if !ok {
+		return nil, errNotQuantity
+	}
+	suffix := match[2]
+	if shift, ok := quantityBinarySuffixes[suffix]; ok {
+		return number.Mul(number, new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), shift))), nil
+	}
+	exponent, ok := quantityDecimalSuffixes[suffix]
+	if !ok {
+		// A decimal exponent, whose digits quantityRule guarantees; Atoi fails only past int's
+		// range, which is outside the bounds too.
+		var err error
+		exponent, err = strconv.Atoi(suffix[1:])
+		if err != nil || exponent < minQuantityExponent || exponent > maxQuantityExponent {
+			return nil, errQuantityExponent
+		}
+	}
+	power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(abs(exponent))), nil)
+	if exponent < 0 {
+		return number.Quo(number, new(big.Rat).SetInt(power)), nil
+	}
+	return number.Mul(number, new(big.Rat).SetInt(power)), nil
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// milliCPU writes a whole number of millicores as a quantity, such as 300m.
+func milliCPU(cores *big.Rat) string {
+	return new(big.Rat).Mul(cores, big.NewRat(1000, 1)).FloatString(0) + "m"
+}
+
+// mebibytes writes a whole number of mebibytes as a quantity, such as 256Mi.
+func mebibytes(bytes *big.Rat) string {
+	return new(big.Rat).Quo(bytes, new(big.Rat).SetInt64(1<<20)).FloatString(0) + "Mi"
 }
 
 // NewDispatch registers a Dispatch component after resolving all plain inputs and requiring the
@@ -432,5 +723,9 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	comp.Principal = cloud.principal
 	comp.AgentToken = cloud.agentToken.Result
 	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
+	comp.ServiceAccountIssuer = cloud.issuer
+	// Every Dispatch pod runs as ServiceAccount <hostname> in the component's namespace, the
+	// account newDispatchKubernetes registers, and Kubernetes names a token's subject after it.
+	comp.ServiceAccountSubject = pulumi.String("system:serviceaccount:" + s.namespace + ":" + s.hostname).ToStringOutput()
 	return comp, nil
 }

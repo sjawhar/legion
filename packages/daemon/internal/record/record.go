@@ -156,6 +156,78 @@ type HoldReason string
 // HoldEscalated is a hold its architect sent to the controller.
 const HoldEscalated HoldReason = "escalated"
 
+// EventMark places a Dispatch event in its issue's event log: its sequence on the issue (Seq) and
+// Dispatch's time of it (At), each zero when unknown. Dispatch appends an issue's events under the
+// issue's row lock, so their sequence is the order they commit in. The time is the start of the
+// transaction that wrote the event, so an event can carry a time before that of an event that
+// committed ahead of it: only the sequence orders two events for certain.
+type EventMark struct {
+	Seq int64
+	At  time.Time
+}
+
+// After says whether m comes after start: by sequence when both carry one, otherwise by time when
+// both carry one, strictly, so an event at start's own time is not after it. An m with no sequence
+// against a start with one is ordered by their times when both carry a time: such an m comes from a
+// read of a Dispatch that does not give the sequence (one older than its migration 0118, which a
+// daemon deployed first, a rolling update or a Dispatch rollback can meet), even for a review whose
+// row has one, so the times are what orders the two, as before Dispatch kept the sequence. That
+// fallback is as blind as it was then: to two transactions that began at one instant, and to one
+// that began before the other and committed after it. A start with a sequence and no time is a
+// registration's read (its Since), which has no time of its own to compare with, so an m without a
+// sequence is never after it. When neither is known on both sides, which comes first cannot be
+// told, and m counts as after start, as it did before marks were recorded.
+func (m EventMark) After(start EventMark) bool {
+	switch {
+	case m.Seq > 0 && start.Seq > 0:
+		return m.Seq > start.Seq
+	case !m.At.IsZero() && !start.At.IsZero():
+		return m.At.After(start.At)
+	case start.Seq > 0:
+		return false
+	}
+	return true
+}
+
+// Same says whether m and other can mark the same event: equal sequences when both carry one,
+// otherwise equal times when both carry one, otherwise true. A review that a read of Dispatch shows
+// with no sequence (one Dispatch recorded before it kept the sequence, or a Dispatch that predates
+// it) is still recognised by its time as the one its live event carried.
+func (m EventMark) Same(other EventMark) bool {
+	switch {
+	case m.Seq > 0 && other.Seq > 0:
+		return m.Seq == other.Seq
+	case !m.At.IsZero() && !other.At.IsZero():
+		return m.At.Equal(other.At)
+	}
+	return true
+}
+
+// Merged is m with each part it lacks taken from other. Two reads of one review (Same), one of
+// which gave less of its mark, are kept as the fuller one, so a sequence the daemon once knew of a
+// review is never lost to a read that did not give it.
+func (m EventMark) Merged(other EventMark) EventMark {
+	if m.Seq == 0 {
+		m.Seq = other.Seq
+	}
+	if m.At.IsZero() {
+		m.At = other.At
+	}
+	return m
+}
+
+// ID is the mark as one number for a fact's event id: the sequence, else the time in Unix
+// nanoseconds, else 0.
+func (m EventMark) ID() int64 {
+	switch {
+	case m.Seq > 0:
+		return m.Seq
+	case !m.At.IsZero():
+		return m.At.UnixNano()
+	}
+	return 0
+}
+
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {
 	Issue         string
@@ -435,12 +507,24 @@ const (
 	CheckNotRun CheckOutcome = "not_run"
 )
 
-// DesignGate records the current document version and the version a human approved, if any.
+// DesignGate records the current document version, the version a human approved, if any, with
+// where Dispatch recorded that approval (ApprovedMark, zero when the read that carried it gave
+// none), and the changes request the architect has been told of, if any: its document version, the
+// reviewer's reason and the review's place in the issue's Dispatch event log (ToldChangesMark,
+// zero the same way). A re-read of that same changes request, by a later registration or the gate
+// seed, tells the architect nothing new; another review does, even at that version with that
+// reason. An approval clears the told record and a changes request clears the approval, so the two
+// marks never stand together: the one that is set is the gate's newest applied review
+// (classify.LatestReview).
 type DesignGate struct {
-	Issue           string
-	ArtifactID      string
-	LatestVersion   int
-	ApprovedVersion *int
+	Issue              string
+	ArtifactID         string
+	LatestVersion      int
+	ApprovedVersion    *int
+	ApprovedMark       EventMark
+	ToldChangesVersion *int
+	ToldChangesReason  string
+	ToldChangesMark    EventMark
 }
 
 // Slot is an active admission slot.

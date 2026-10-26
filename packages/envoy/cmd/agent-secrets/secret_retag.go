@@ -106,7 +106,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	defer s.Close()
 	held, err := s.backend.currentTags(s.ctx, slug)
 	if err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
 	// after is the secret's tags once this retag lands: the tags held, less those it removes, with
 	// those it sets.
@@ -120,7 +120,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	maps.Copy(after, set)
 	if *newOwner != "" {
 		if after[policy.TagOwner], err = ownerTag(*newOwner, email); err != nil {
-			return secretFail(stderr, form, err)
+			return secretFailIn(stderr, form, s, err)
 		}
 	}
 	if *newTier != "" {
@@ -128,24 +128,24 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	named := *newGitHubOwners != "" && *newGitHubOwners != tagNone
 	if err := checkGitHubOwnersFor(after[policy.TagKind], after[policy.TagGitHubOwners], named); err != nil {
-		return secretFail(stderr, form, err)
+		return secretFailIn(stderr, form, s, err)
 	}
 	if len(remove) > 0 {
 		if err := s.backend.removeTags(s.ctx, slug, held, remove); err != nil {
-			fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
+			fmt.Fprintf(stderr, "agent-secrets %s: %v; looked in %s\n", form, err, s.storeName())
 			rereadIfRestored(s, stdout, stderr, form, name, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
+		fmt.Fprintf(stdout, "retagged %s in %s (removed %s)\n", name, s.storeName(), strings.Join(remove, ", "))
 		return rereadRetag(s, stdout, stderr, form, name, after[policy.TagKind])
 	}
 	owner, tier := after[policy.TagOwner], after[policy.TagTier]
 	if owner == "" || tier == "" {
-		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
+		return secretFailIn(stderr, form, s, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
 	}
 	set[policy.TagOwner], set[policy.TagTier] = owner, tier
 	if err := s.backend.setTags(s.ctx, slug, held, set); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
+		fmt.Fprintf(stderr, "agent-secrets %s: %v; looked in %s\n", form, err, s.storeName())
 		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
 		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
 		// so a deployment instead grants that permission at all only to administrators for the
@@ -156,7 +156,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		rereadIfRestored(s, stdout, stderr, form, name, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
+	fmt.Fprintf(stdout, "retagged %s in %s (owner=%s, tier=%s)\n", name, s.storeName(), owner, tier)
 	return rereadRetag(s, stdout, stderr, form, name, after[policy.TagKind])
 }
 
@@ -181,7 +181,7 @@ func rereadRetag(s *secretSession, stdout, stderr io.Writer, form, name, kind st
 		return 1
 	}
 	if r.Kind != kind {
-		fmt.Fprintf(stderr, "agent-secrets %s: the retag stands, but the broker serves %s as %s, not %s: it still sees the old tags. Run this retag again to ask it to reread them, and store no value in %s until a retag exits 0\n", form, name, kindName(r.Kind), kindName(kind), name)
+		fmt.Fprintf(stderr, "agent-secrets %s: the retag in %s stands, but %s serves %s as %s, not %s: it still sees the old tags. Run this retag again to ask it to reread them, and store no value in %s until a retag exits 0\n", form, s.storeName(), s.src.brokerAt(), name, kindName(r.Kind), kindName(kind), name)
 		return 1
 	}
 	return 0

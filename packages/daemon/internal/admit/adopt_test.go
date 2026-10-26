@@ -38,15 +38,6 @@ func queuedRoot(key, parent, rank string, seq int64) record.Issue {
 		Parent: record.ParentOf(parent), Phase: phase.Admitted, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: rank, HandedOver: true, LastDispatchSeq: seq}
 }
 
-// applyFact applies a fact that is not a Dispatch issue event through admission's own engine and
-// admission, as intake does.
-func applyFact(t *testing.T, pool *pgxpool.Pool, admission *Admission, id string, fact intake.Fact) {
-	t.Helper()
-	if _, err := intake.ApplyFact(context.Background(), pool, "test", id, fact, admission.engine, admission); err != nil {
-		t.Fatalf("ApplyFact %s: %v", id, err)
-	}
-}
-
 // joinedNotices is the reason of every child-status notice queued on child.
 func joinedNotices(t *testing.T, pool *pgxpool.Pool, child string) []string {
 	t.Helper()
