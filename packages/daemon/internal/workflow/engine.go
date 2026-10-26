@@ -38,7 +38,11 @@ type Config struct {
 	// build): a build the daemon boots on, or Dispatch starts on, is compared only against the
 	// open production checks of that repository, since no other repository's merge can be in it.
 	// Empty, no build is compared.
-	BuiltFrom      string
+	BuiltFrom string
+	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
+	// a completed run of one on the default branch of its repository is read from GitHub for each
+	// open production check of that repository (deployRunCompleted). Empty, no run wakes a check.
+	Deploys        []config.Deploy
 	MergeQueueRole string
 	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
@@ -146,6 +150,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.issueDeployed(ctx, tx, fact)
 	case intake.ServerStarted:
 		return e.serverStarted(ctx, tx, fact)
+	case intake.WorkflowRunCompleted:
+		return e.deployRunCompleted(ctx, tx, fact)
 	case intake.CheckWake:
 		return e.checkWake(ctx, tx, fact)
 	case intake.CheckLookEnded:
@@ -726,6 +732,13 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	if issue.Phase != phase.Accepting {
 		return refused("SIGNOFF_OUTSIDE_ACCEPTING", fmt.Sprintf("%s is in phase %s, not accepting; this sign-off changed nothing", issue.Key, issue.Phase)), nil
 	}
+	running, err := e.openBeneath(ctx, tx, *issue)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if len(running) > 0 {
+		return refused("SIGNOFF_CHILD_IN_WORKFLOW", fmt.Sprintf("%s still has %s beneath it in the workflow; this sign-off changed nothing. Accept %s once the last of them closes, or take one out of the workflow with park_child", issue.Key, strings.Join(running, ", "), issue.Key)), nil
+	}
 	review, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
 		return intake.Result{}, err
@@ -806,9 +819,14 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if row.To == phase.AwaitingMerge {
 		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:
-		// the merge closes the issue at once, and no READY asks a human to merge it.
+		// the merge closes the issue at once, and no READY asks a human to merge it. The close is
+		// closeMergedTelling's rather than a second transition's because a root's close waits for the
+		// rest of its tree, and an issue that arrives here and waits must be told why: the notice its
+		// architect got at the merge could not say it, since the issue was elsewhere then. Nothing
+		// else of the two paths differs, since they part only inside a lingering tree, which no issue
+		// reaches awaiting_merge in.
 		if pr != nil && pr.State == record.PullRequestMerged {
-			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+			return e.closeMergedTelling(ctx, tx, issue, pr)
 		}
 		return e.ready(ctx, tx, issue, handoff, pr)
 	}
@@ -986,6 +1004,52 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		}
 	}
 	return members, nil
+}
+
+// openBeneath is the sorted keys of the issues under issue — its children, their children, and so
+// on — that are still in the workflow (InWorkflow). It reads the tree's members once and walks
+// down the recorded parent column from issue, which is the right candidate set because every issue
+// of a tree keeps the root's key in its tree field and its own parent's key in parent. The walk
+// must be downward and never over the flat tree: every member names the root in its tree field, so
+// an issue held for any member of its tree would wait for the root, which is waiting for it. Its
+// three termination rules are the ones the daemon's upward walk already carries (api/architect.go,
+// owns): a visited set, since parent is plain nullable text with no foreign key, rewritten from
+// every Dispatch observation, so a cycle is possible and would otherwise spin inside the fact's
+// transaction; only issues the tree lists are followed, so a parent recorded in another tree is
+// never reached; and an issue whose parent is empty, or names a key the tree does not hold, is
+// beneath nothing.
+func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue) ([]string, error) {
+	members, err := e.treeMembers(ctx, tx, issue)
+	if err != nil {
+		return nil, err
+	}
+	// The index holds each child's place in members rather than its record: an Issue is a wide
+	// struct, and the walk reads only its key and whether it is in the workflow.
+	children := map[string][]int{}
+	for index, member := range members {
+		if member.Parent != nil && *member.Parent != "" {
+			children[*member.Parent] = append(children[*member.Parent], index)
+		}
+	}
+	running := []string{}
+	seen := map[string]bool{issue.Key: true}
+	for frontier := []string{issue.Key}; len(frontier) > 0; {
+		current := frontier[len(frontier)-1]
+		frontier = frontier[:len(frontier)-1]
+		for _, index := range children[current] {
+			child := members[index]
+			if seen[child.Key] {
+				continue
+			}
+			seen[child.Key] = true
+			frontier = append(frontier, child.Key)
+			if InWorkflow(child) {
+				running = append(running, child.Key)
+			}
+		}
+	}
+	slices.Sort(running)
+	return running, nil
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

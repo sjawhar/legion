@@ -33,7 +33,7 @@ import (
 // draft; Google AIP-155): the dashboard mints one per press and the agents' client one per command,
 // and both retry a failed fetch, a timeout, a 5xx, a 429 and a 409 KEY_IN_FLIGHT under it, none of
 // which says whether the first attempt ran. keyedWrites, which register wraps around every POST and
-// PATCH route, makes that retry safe with one request_keys row per key (migration 0116):
+// PATCH route, makes that retry safe with one request_keys row per key (migration 0118):
 //
 //   - The row is inserted in flight, in a statement of its own, before the handler runs. A repeat
 //     that finds it answers from it instead: a different request under the key is 422 KEY_REUSED,

@@ -13,6 +13,7 @@ const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "
 // the form - creates nothing, where the old draft would have tried the same project again.
 test("a create answered KEY_COMMITTED clears the form, says the project was made, and a second press sends nothing", async () => {
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
     new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
   );
@@ -47,6 +48,7 @@ test("a create answered KEY_COMMITTED clears the form, says the project was made
     cleanup();
     queryClient.clear();
     listProjects.mockRestore();
+    listDefaults.mockRestore();
     createProject.mockRestore();
   }
 });

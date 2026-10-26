@@ -3298,7 +3298,7 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     await tick(1_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
 
-    // Another session's live view holds nothing of Planner's, and its Send is free.
+    // Another session's live view holds nothing of Planner's: only its own empty box refuses Send.
     await act(async () => backToAgents());
     await act(async () => openLiveView("Reviewer"));
     expect(screen.getByPlaceholderText(/^Message Reviewer/)).toBeTruthy();
@@ -3306,8 +3306,8 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     expect(
       within(screen.getByTestId("agent-composer"))
         .getByRole("button", { name: "Send" })
-        .getAttribute("aria-disabled")
-    ).toBeNull();
+        .getAttribute("title")
+    ).toBe("Type a message first.");
     await tick(2_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(3);
 

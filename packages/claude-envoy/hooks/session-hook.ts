@@ -30,6 +30,11 @@
 // session that started with the skill keeps one copy, and one that started without it (opened
 // before this plugin version, or before Dispatch was configured) gets it. A plugin installed
 // without the skill file exits non-zero naming it, which Claude Code shows the user.
+//
+// The name a person gave the session is recorded by a bundle of its own,
+// `hooks/session-title-hook.ts`: it runs before every user prompt, with the prompt blocked on it,
+// so it must not pay for this bundle's zod and Dispatch client. `open-asks` records it too, from
+// the same `session_title` field, so a session starts under its name before its first prompt.
 
 import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -44,9 +49,14 @@ import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
+import { recordChosenTitle } from "../src/session-state"
 
 const OPEN_ASKS_TIMEOUT_MS = 3_000
-const OpenAsksInput = z.object({ session_id: z.string().min(1), cwd: z.string().optional() })
+const OpenAsksInput = z.object({
+  session_id: z.string().min(1),
+  cwd: z.string().optional(),
+  session_title: z.string().optional(),
+})
 const DispatchFirstInput = z.object({
   hook_event_name: z.enum(["SessionStart", "SubagentStart"]),
   cwd: z.string().optional(),
@@ -86,6 +96,11 @@ async function openAsks(raw: unknown): Promise<void> {
     } catch (error) {
       process.stderr.write(`envoy: could not record the session id — ${messageFor(error)}\n`)
     }
+  }
+  try {
+    await recordChosenTitle(input.session_id, input.session_title)
+  } catch (error) {
+    process.stderr.write(`envoy: could not record the session title — ${messageFor(error)}\n`)
   }
 
   const directory = claudeProjectDirectory(

@@ -8,11 +8,16 @@
 // The baseline variables: the two that decide where a pod's Oh My Pi keeps its sessions
 // (baseline), set on the agent where the pod leaves them unset — when Oh My Pi would otherwise fill
 // them from the working directory's .env — and never on the shim; the Sandbox runtime refuses them,
-// and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod): a pod keeps its sessions
-// as files on the issue's volume, where a resume reads them, unless the runtime keeps them in a
-// database (runtime.kubernetes.session_store postgres), where it starts every generation with
+// and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod). Every session of a
+// workflow role is a row in the database the deployment must name (runtime.kubernetes.session_store
+// postgres or cloudsql-iam): the runtime starts every such generation with
 // OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The
-// state-home directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
+// baseline's `file` is left for the one
+// container the runtime tells neither, the image probe's, whose session nothing resumes — neither
+// the probe's pod nor an issue's mounts a disk that outlives it, an issue pod's being the pod's
+// own ephemeral volume (the project controller's pod does mount one its Sandbox owns, and it is
+// told the database like every other role). The state-home
+// directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
 // (EnsureStateHome), made before Oh My Pi starts, since Oh My Pi reads the variable only where
 // that directory exists. And the scratch directories: each directory the runtime tells a role to
 // write what it writes without being told where — the temporary directory, the cache and data
@@ -57,8 +62,8 @@ const TurnScopeFile = "podsafety-turnscope-overlay.yml"
 const settingsOverlays = "PI_CONFIG_FILES"
 
 // placesSessions is why an operator's pod may not set a variable that decides where Oh My Pi keeps
-// a session: Legion places a pod's sessions where a resume reads them, as files on the issue's
-// volume or in the runtime's session database.
+// a session: Legion places a pod's sessions where a resume reads them, which under the Kubernetes
+// runtime is the session database and nothing else, a pod's disk dying with the pod (INFRA-80).
 const placesSessions = "it decides where Oh My Pi keeps the session a resume reads"
 
 // baseline are the variables Apply sets where the pod's environment leaves them unset or empty,

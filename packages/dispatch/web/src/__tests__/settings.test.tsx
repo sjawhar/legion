@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../api/client";
-import type { ArchitectureSource, Project, RepoProject } from "../api/types";
+import type { Project, ProjectDefaultAssignee, RepoProject } from "../api/types";
 import { App } from "../app";
 import { keyedAttempt } from "./keyed-attempt";
 
@@ -83,6 +83,7 @@ test("human users manage repository project mappings from the settings route", a
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -172,6 +173,7 @@ test("human users manage repository project mappings from the settings route", a
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
@@ -205,6 +207,7 @@ test("a delayed mapping response does not undo a newer default the page has read
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -253,6 +256,7 @@ test("a delayed mapping response does not undo a newer default the page has read
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
@@ -275,6 +279,7 @@ test("repository settings retries a failed mapping query", async () => {
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -306,6 +311,7 @@ test("repository settings retries a failed mapping query", async () => {
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
   }
@@ -326,6 +332,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects")
     .mockResolvedValueOnce([core])
@@ -370,6 +377,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
@@ -390,6 +398,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
@@ -425,153 +434,390 @@ test("creating a project with a taken key shows the server's error inline", asyn
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
   }
 });
 
-const architectureSource: ArchitectureSource = {
-  branch: "main",
-  created_at: "2026-09-10T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
-  enabled: true,
-  last_commit: null,
-  last_error: null,
-  last_sync_at: null,
-  project: "CORE",
-  repo: "legion/arch",
-};
+/** The default-assignee routes' server state as the Settings page reaches it: a read answers
+ *  what the writes have left, and `sent` records each write's assignee as it arrives. While
+ *  `hold()`'s release has not been called, a write that arrives waits before it lands. */
+function defaultAssigneeServer(initial: ProjectDefaultAssignee[]) {
+  let rows = initial.map((row) => ({ ...row }));
+  const sent: (string | null)[] = [];
+  let gate: Promise<void> | undefined;
+  return {
+    hold: (): (() => void) => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      gate = promise;
+      return () => {
+        gate = undefined;
+        resolve();
+      };
+    },
+    list: async (): Promise<ProjectDefaultAssignee[]> => rows.map((row) => ({ ...row })),
+    put: async (
+      project: string,
+      { assignee }: { assignee: string | null }
+    ): Promise<ProjectDefaultAssignee> => {
+      sent.push(assignee);
+      await gate;
+      rows = rows.filter((row) => row.project !== project);
+      if (assignee !== null) {
+        rows.push({ assignee, project });
+      }
+      return { assignee, project };
+    },
+    rows: () => rows,
+    sent,
+  };
+}
 
-test("a human adds an architecture source and the verified row appears", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
-    event_head: "0",
-    kind: "user",
-    login: "alice",
-  });
-  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
-  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
-  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
-  const listArchitectureSources = spyOn(api, "listArchitectureSources")
-    .mockResolvedValueOnce([])
-    .mockResolvedValue([architectureSource]);
-  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
-  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
-  ]);
-  const putArchitectureSource = spyOn(api, "putArchitectureSource").mockResolvedValue(
-    architectureSource
-  );
+/** Renders the Settings route with every read but the default assignees and the people list
+ *  stubbed, listing `projects`. `leave` unmounts the page and `reopen` renders it again on the
+ *  same QueryClient, as leaving Settings and coming back does; `done` unmounts it and restores
+ *  the stubs. */
+function renderSettings(projects: string[]): {
+  done: () => void;
+  leave: () => void;
+  reopen: () => void;
+} {
+  const stubs = [
+    spyOn(api, "whoAmI").mockResolvedValue({ event_head: "0", kind: "user", login: "alice" }),
+    spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "getMyState").mockResolvedValue({}),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+    spyOn(api, "listRepoProjects").mockResolvedValue([]),
+    spyOn(api, "listAgentTokens").mockResolvedValue([]),
+    spyOn(api, "getCredentialPending").mockResolvedValue(null),
+    spyOn(api, "listArchitectureSources").mockResolvedValue([]),
+    spyOn(api, "getDeliverySettings").mockResolvedValue(null),
+    spyOn(api, "listProjects").mockResolvedValue(
+      projects.map((key) => ({ created_at: "2026-09-01T00:00:00Z", key, name: key }))
+    ),
+  ];
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const page = (
+    <MemoryRouter initialEntries={["/settings"]}>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  render(page);
+  return {
+    done: () => {
+      cleanup();
+      queryClient.clear();
+      for (const stub of stubs) {
+        stub.mockRestore();
+      }
+    },
+    leave: cleanup,
+    reopen: () => {
+      render(page);
+    },
+  };
+}
+
+const defaultAssigneeControl = async (project: string): Promise<HTMLSelectElement> =>
+  (await screen.findByRole("combobox", {
+    name: `Default assignee of ${project}`,
+  })) as HTMLSelectElement;
+
+test("default assignee picks made while one is saving show, and only the newest follows the held save", async () => {
+  const server = defaultAssigneeServer([{ assignee: "alice@example.com", project: "CORE" }]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockImplementation(server.list);
+  const putDefault = spyOn(api, "putProjectDefaultAssignee").mockImplementation(server.put);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([
+    { login: "alice@example.com" },
+    { login: "bob@example.com" },
+    { login: "carol@example.com" },
+  ]);
+  const { done } = renderSettings(["CORE"]);
 
   try {
-    render(
-      <MemoryRouter initialEntries={["/settings"]}>
-        <QueryClientProvider client={queryClient}>
-          <App />
-        </QueryClientProvider>
-      </MemoryRouter>
-    );
+    const section = within(await screen.findByRole("region", { name: "Projects" }));
+    // A default set on the project an unmapped repository falls back to is what a reader has to
+    // weigh while setting one, so the consequence sits beside the control.
+    expect(section.getByText(/no project mapping/).textContent).toContain("default project");
 
-    const section = within(await screen.findByRole("region", { name: "Architecture sources" }));
-    expect(section.getByText("No architecture sources yet.")).toBeDefined();
+    const control = await defaultAssigneeControl("CORE");
+    await waitFor(() => expect(control.value).toBe("alice@example.com"));
+    expect(control.disabled).toBe(false);
+    // Nobody is listed until a reader reaches for the picker.
+    expect(listUsers).not.toHaveBeenCalled();
 
-    fireEvent.change(section.getByLabelText("Source project"), { target: { value: "CORE" } });
-    fireEvent.change(section.getByLabelText("Source repository"), {
-      target: { value: "legion/arch" },
-    });
-    fireEvent.click(section.getByRole("button", { name: "Add source" }));
+    fireEvent.focus(control);
     await waitFor(() =>
-      expect(putArchitectureSource).toHaveBeenLastCalledWith(
-        "CORE",
-        {
-          branch: "main",
-          repo: "legion/arch",
-        },
-        keyedAttempt
-      )
+      expect(within(control).getByRole("option", { name: "carol@example.com" })).toBeDefined()
     );
-    await waitFor(() => expect(section.getByRole("cell", { name: "legion/arch" })).toBeDefined());
-    expect(section.getByRole("cell", { name: "Access verified" })).toBeDefined();
+    expect(
+      within(control)
+        .getAllByRole("option")
+        .map((option) => option.textContent)
+    ).toEqual(["Unassigned", "alice@example.com", "bob@example.com", "carol@example.com"]);
+
+    const release = server.hold();
+    fireEvent.change(control, { target: { value: "bob@example.com" } });
+    await waitFor(() => expect(control.value).toBe("bob@example.com"));
+    await waitFor(() => expect(server.sent).toEqual(["bob@example.com"]));
+
+    // Two more picks while bob's save is held: each shows, neither is sent yet.
+    fireEvent.change(control, { target: { value: "" } });
+    await waitFor(() => expect(control.value).toBe(""));
+    fireEvent.change(control, { target: { value: "carol@example.com" } });
+    await waitFor(() => expect(control.value).toBe("carol@example.com"));
+    await act(async () => {});
+    expect(putDefault).toHaveBeenCalledTimes(1);
+
+    await act(async () => release());
+    // Only the newest pick follows the held save: Unassigned was superseded before it was sent.
+    await waitFor(() => expect(server.sent).toEqual(["bob@example.com", "carol@example.com"]));
+    await waitFor(() =>
+      expect(server.rows()).toEqual([{ assignee: "carol@example.com", project: "CORE" }])
+    );
+    expect(putDefault).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(control.value).toBe("carol@example.com"));
+
+    // Clearing it leaves the project with no default, and the control at Unassigned.
+    fireEvent.change(control, { target: { value: "" } });
+    await waitFor(() => expect(server.rows()).toEqual([]));
+    await waitFor(() =>
+      expect(putDefault).toHaveBeenLastCalledWith("CORE", { assignee: null }, keyedAttempt)
+    );
+    expect(control.value).toBe("");
   } finally {
-    cleanup();
-    queryClient.clear();
-    whoAmI.mockRestore();
-    listIssues.mockRestore();
-    getMyState.mockRestore();
-    getInbox.mockRestore();
-    listRepoProjects.mockRestore();
-    listAgentTokens.mockRestore();
-    getCredentialPending.mockRestore();
-    listArchitectureSources.mockRestore();
-    getDeliverySettings.mockRestore();
-    listProjects.mockRestore();
-    putArchitectureSource.mockRestore();
+    done();
+    listDefaults.mockRestore();
+    putDefault.mockRestore();
+    listUsers.mockRestore();
   }
 });
 
-test("a failed architecture source access check shows the server's reason inline", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
-    event_head: "0",
-    kind: "user",
-    login: "alice",
-  });
-  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
-  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
-  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
-  const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
-  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
-  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
+// The saves still out when Settings unmounts belong to the QueryClient, not to the row: a pick on
+// the remounted row waits behind the held save and supersedes the pick queued before leaving, so
+// only the newest pick follows the held save.
+test("a default assignee picked after Settings is remounted supersedes the pick queued before, and follows the held save", async () => {
+  const server = defaultAssigneeServer([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockImplementation(server.list);
+  const putDefault = spyOn(api, "putProjectDefaultAssignee").mockImplementation(server.put);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([
+    { login: "bob@example.com" },
+    { login: "carol@example.com" },
+    { login: "dave@example.com" },
   ]);
-  const putArchitectureSource = spyOn(api, "putArchitectureSource").mockRejectedValue(
-    new ApiError(409, {
-      code: "SOURCE_ACCESS",
-      error: "the GitHub App is not installed on legion/arch",
-    })
-  );
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { done, leave, reopen } = renderSettings(["CORE"]);
 
   try {
-    render(
-      <MemoryRouter initialEntries={["/settings"]}>
-        <QueryClientProvider client={queryClient}>
-          <App />
-        </QueryClientProvider>
-      </MemoryRouter>
+    let control = await defaultAssigneeControl("CORE");
+    await waitFor(() => expect(control.disabled).toBe(false));
+    fireEvent.focus(control);
+    await waitFor(() =>
+      expect(within(control).getByRole("option", { name: "dave@example.com" })).toBeDefined()
     );
 
-    const section = within(await screen.findByRole("region", { name: "Architecture sources" }));
-    fireEvent.change(section.getByLabelText("Source project"), { target: { value: "CORE" } });
-    fireEvent.change(section.getByLabelText("Source repository"), {
-      target: { value: "legion/arch" },
-    });
-    fireEvent.click(section.getByRole("button", { name: "Add source" }));
+    const release = server.hold();
+    fireEvent.change(control, { target: { value: "bob@example.com" } });
+    await waitFor(() => expect(server.sent).toEqual(["bob@example.com"]));
+    fireEvent.change(control, { target: { value: "carol@example.com" } });
+    await waitFor(() => expect(control.value).toBe("carol@example.com"));
 
+    leave();
+    reopen();
+    control = await defaultAssigneeControl("CORE");
+    // The pick still waiting behind bob's held save is what the returning row shows.
+    await waitFor(() => expect(control.value).toBe("carol@example.com"));
+    fireEvent.focus(control);
     await waitFor(() =>
-      expect(section.getByRole("alert").textContent).toContain(
-        "the GitHub App is not installed on legion/arch"
+      expect(within(control).getByRole("option", { name: "dave@example.com" })).toBeDefined()
+    );
+
+    fireEvent.change(control, { target: { value: "dave@example.com" } });
+    await waitFor(() => expect(control.value).toBe("dave@example.com"));
+    await act(async () => {});
+    // Still one at a time: nothing follows bob's save onto the wire while it is held.
+    expect(server.sent).toEqual(["bob@example.com"]);
+
+    await act(async () => release());
+    await waitFor(() => expect(server.sent).toEqual(["bob@example.com", "dave@example.com"]));
+    await waitFor(() =>
+      expect(server.rows()).toEqual([{ assignee: "dave@example.com", project: "CORE" }])
+    );
+    expect(putDefault).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(control.value).toBe("dave@example.com"));
+  } finally {
+    done();
+    listDefaults.mockRestore();
+    putDefault.mockRestore();
+    listUsers.mockRestore();
+  }
+});
+
+// A save refused while Settings is unmounted is still the reader's to hear about: the reopened
+// row says so, beside the stored value it fell back to, and Retry resends it.
+test("a default assignee save refused while Settings is unmounted shows its reason when Settings is reopened", async () => {
+  const server = defaultAssigneeServer([{ assignee: "alice@example.com", project: "CORE" }]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockImplementation(server.list);
+  const refusal = Promise.withResolvers<ProjectDefaultAssignee>();
+  const putDefault = spyOn(api, "putProjectDefaultAssignee")
+    .mockReturnValueOnce(refusal.promise)
+    .mockImplementation(server.put);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([
+    { login: "alice@example.com" },
+    { login: "bob@example.com" },
+  ]);
+  const { done, leave, reopen } = renderSettings(["CORE"]);
+
+  try {
+    let core = await defaultAssigneeControl("CORE");
+    await waitFor(() => expect(core.value).toBe("alice@example.com"));
+    fireEvent.focus(core);
+    await waitFor(() =>
+      expect(within(core).getByRole("option", { name: "bob@example.com" })).toBeDefined()
+    );
+    fireEvent.change(core, { target: { value: "bob@example.com" } });
+    await waitFor(() => expect(putDefault).toHaveBeenCalledTimes(1));
+
+    leave();
+    // Dispatch's verdict, a 4xx: a 5xx is tried again under the write's key, not refused.
+    await act(async () =>
+      refusal.reject(
+        new ApiError(400, {
+          code: "ASSIGNEE_NOT_ALLOWED",
+          error: "the default assignee save was refused",
+        })
       )
     );
+    reopen();
+
+    core = await defaultAssigneeControl("CORE");
+    const coreCell = within(core.closest("td") as HTMLElement);
+    await waitFor(() =>
+      expect(coreCell.getByRole("alert").textContent).toContain(
+        "the default assignee save was refused"
+      )
+    );
+    expect(core.value).toBe("alice@example.com");
+
+    fireEvent.click(coreCell.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(coreCell.queryByRole("alert")).toBeNull());
+    await waitFor(() =>
+      expect(server.rows()).toEqual([{ assignee: "bob@example.com", project: "CORE" }])
+    );
+    expect(putDefault.mock.calls).toEqual([
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
+    ]);
+    await waitFor(() => expect(core.value).toBe("bob@example.com"));
   } finally {
-    cleanup();
-    queryClient.clear();
-    whoAmI.mockRestore();
-    listIssues.mockRestore();
-    getMyState.mockRestore();
-    getInbox.mockRestore();
-    listRepoProjects.mockRestore();
-    listAgentTokens.mockRestore();
-    getCredentialPending.mockRestore();
-    listArchitectureSources.mockRestore();
-    getDeliverySettings.mockRestore();
-    listProjects.mockRestore();
-    putArchitectureSource.mockRestore();
+    done();
+    listDefaults.mockRestore();
+    putDefault.mockRestore();
+    listUsers.mockRestore();
+  }
+});
+
+test("a refused default assignee puts the row back, shows the server's reason in that row, and Retry resends it", async () => {
+  const server = defaultAssigneeServer([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockImplementation(server.list);
+  const putDefault = spyOn(api, "putProjectDefaultAssignee")
+    .mockRejectedValueOnce(
+      new ApiError(400, {
+        code: "ASSIGNEE_NOT_ALLOWED",
+        error: "bob@example.com has never signed in",
+      })
+    )
+    .mockImplementation(server.put);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([{ login: "bob@example.com" }]);
+  const { done } = renderSettings(["CORE", "OPS"]);
+
+  try {
+    const core = await defaultAssigneeControl("CORE");
+    const ops = await defaultAssigneeControl("OPS");
+    const coreCell = within(core.closest("td") as HTMLElement);
+    const opsCell = within(ops.closest("td") as HTMLElement);
+    await waitFor(() => expect(core.disabled).toBe(false));
+    fireEvent.focus(core);
+    await waitFor(() =>
+      expect(within(core).getByRole("option", { name: "bob@example.com" })).toBeDefined()
+    );
+
+    fireEvent.change(core, { target: { value: "bob@example.com" } });
+    await waitFor(() =>
+      expect(coreCell.getByRole("alert").textContent).toContain(
+        "bob@example.com has never signed in"
+      )
+    );
+    // The refused pick is not left on screen: the row reads what the server holds.
+    expect(core.value).toBe("");
+
+    // A save on another row neither clears nor takes over this row's error.
+    fireEvent.change(ops, { target: { value: "bob@example.com" } });
+    await waitFor(() =>
+      expect(server.rows()).toEqual([{ assignee: "bob@example.com", project: "OPS" }])
+    );
+    expect(ops.value).toBe("bob@example.com");
+    expect(opsCell.queryByRole("alert")).toBeNull();
+    expect(coreCell.getByRole("alert").textContent).toContain(
+      "bob@example.com has never signed in"
+    );
+
+    fireEvent.click(coreCell.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(coreCell.queryByRole("alert")).toBeNull());
+    expect(putDefault.mock.calls).toEqual([
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
+      ["OPS", { assignee: "bob@example.com" }, keyedAttempt],
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
+    ]);
+    await waitFor(() => expect(core.value).toBe("bob@example.com"));
+    expect(server.rows()).toContainEqual({ assignee: "bob@example.com", project: "CORE" });
+  } finally {
+    done();
+    listDefaults.mockRestore();
+    putDefault.mockRestore();
+    listUsers.mockRestore();
+  }
+});
+
+test("a default assignee the page has not read is disabled and never reads Unassigned", async () => {
+  const read = Promise.withResolvers<ProjectDefaultAssignee[]>();
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockReturnValueOnce(read.promise);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([{ login: "alice@example.com" }]);
+  const { done } = renderSettings(["CORE"]);
+  const optionNames = (control: HTMLSelectElement) =>
+    within(control)
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+
+  try {
+    const section = within(await screen.findByRole("region", { name: "Projects" }));
+    const control = await defaultAssigneeControl("CORE");
+    // Still reading: nobody knows yet whether CORE names a default.
+    expect(control.disabled).toBe(true);
+    expect(control.value).not.toBe("");
+    expect(optionNames(control)).toEqual(["Loading…"]);
+
+    await act(async () => read.reject(new ApiError(500, { code: "INTERNAL", error: "boom" })));
+    await waitFor(() =>
+      expect(section.getByRole("alert").textContent).toContain(
+        "Couldn't load the default assignees."
+      )
+    );
+    expect(control.disabled).toBe(true);
+    expect(control.value).not.toBe("");
+    expect(optionNames(control)).toEqual(["Unavailable"]);
+
+    listDefaults.mockResolvedValue([{ assignee: "alice@example.com", project: "CORE" }]);
+    fireEvent.click(section.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(control.disabled).toBe(false));
+    expect(control.value).toBe("alice@example.com");
+    expect(section.queryByRole("alert")).toBeNull();
+  } finally {
+    done();
+    listDefaults.mockRestore();
+    listUsers.mockRestore();
   }
 });

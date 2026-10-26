@@ -18,6 +18,44 @@
   answered (INFRA-292). It is required: a page of this release subscribes the event feed on
   `GET /ws/live`, which only a server that answers the head serves, and the feed starts its first
   subscription there, so every read the page makes after the sign-in check is covered by a resume.
+- The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
+  and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
+  frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
+  (`provider/id`, absent with no model selected), `models` (every model the session lists as
+  available, never cut or truncated) and `thinking` (`level`, what `/effort` reports, `null` for the
+  model's default, and `levels`, what `/effort` offers; `thinking` is `null` when the model has no
+  adjustable thinking). `AgentStreamSettingsUnreported` (`reported: false`) is a session whose
+  plugin cannot read them from its host. A viewer older than the frame ignores it (INFRA-195).
+- `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
+  one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
+  parameters whose absence makes the server answer every match
+  (`api/issue_page.go`'s `parseIssuePage`). It is for a caller that must not miss or repeat a row
+  while other writers change the list, and above all for one whose own writes move issues out of
+  what it filtered on: offset paging shifts such a row across a page boundary, so it comes back
+  twice or never. `--all` beside `--limit` or `--offset` is refused with a usage error naming
+  both ways. The default call is unchanged, still a page of `DEFAULT_ISSUE_PAGE_LIMIT` rows at
+  offset 0.
+- `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
+  (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
+  read lists the last 10 without either.
+- `DEFAULT_ISSUE_READ_EVENTS` (10), how many of an issue's newest events `dispatch_read` lists
+  without `events` or `all_events`: the number its description names and `DispatchClient.read`'s
+  default.
+- The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
+  `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
+  still names a person who has signed in, and `dispatch_whoami` says a session under the shared
+  token creates issues that fall to the parent's assignee and then to that default.
+- Two optional arguments on `dispatch_issue_update`, `before` and `after`, which move an issue on
+  its project's board: `before` puts it above that issue, `after` below, and both together land it
+  between them. Either one is a field, so the rule that requires at least one field besides `issue`
+  now counts them beside `repo`, and a closed issue takes the move. The tool's description teaches
+  the move where it used to say the board's order is not settable there, and names the agent whose
+  order it is: in a Legion deployment, the controller. The tool stays `strict` and takes the two as
+  flat keys, never a nested `rank` object; an empty value is a field like any other, so the server
+  refuses it, as it refuses a key that does not exist, one in another project, the issue itself, and
+  a pair the board does not hold in that order. The spec's `example` is now the move riding along
+  with another change, `{ issue: "DSP-1", priority: 1, before: "DSP-2" }`, so the one call
+  `dispatch issue-update --help` and every refusal print shows the board move (INFRA-188).
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`
@@ -131,6 +169,24 @@
   `EventsLiveView` with an `EventsLiveResume`, and an `AgentLiveView` with none, which are the
   only pairings Dispatch accepts. `LiveServerFrame` adds the events and agent views' frames. The
   frame fixtures move with them: `fixtures/delivery-live/` is now `fixtures/live/`.
+- **Breaking:** a project's architecture model comes from any number of sources, one per
+  repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order
+  the project added them, replaces `source`; `ArchitectureTreeComponent.source` names the
+  repository whose files define the component; `ArchitectureSource.components` counts the
+  components that source projects now; and `ArchitectureSyncedEventPayload` and
+  `ArchitectureSyncFailedEventPayload` gain optional `repo` and `branch`, optional because events
+  retained from before projects had several sources lack them. `dispatch_architecture_sync` takes
+  an optional `repo` (`owner/name`; any other shape, a name of `.` or `..` included, is refused
+  before a request) to sync that one source, and without it syncs every source; its description
+  says a project may have several sources, that one source's failure leaves every other source
+  untouched, and that sources are saved in Settings or with
+  `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}`. Its `example` is now
+  `{ project: "CORE", repo: "acme/infra" }`.
+- `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
+  head's checks, so a base branch that requires none produces no note at all. What is left is the
+  already-merged sentence, for a pull request a person merged before READY, and the by-hand
+  `MANUAL_MERGE_REQUIRED:` note. The wire shape is unchanged — one optional `note` string — so no
+  daemon API contract bump (sjawhar/legion#2121).
 - `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
   broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
   `POST /api/v1/.../comments` and `POST /api/v1/broadcasts` accept, generated into Go as

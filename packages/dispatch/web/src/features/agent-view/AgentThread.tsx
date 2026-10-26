@@ -12,7 +12,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import type { AgentStreamCommand } from "@legion/contracts";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { RefusableButton } from "../../components/RefusableButton";
@@ -26,8 +26,6 @@ import {
   disclosureButtonText,
   inputClasses,
   primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   primaryButtonHoverBg,
   selectedCardBg,
   selectedCardBorder,
@@ -351,11 +349,13 @@ export function AgentThread({
   commands,
   contentIds,
   empty,
+  held,
   ownSendCount,
   placeholder,
   replayCount,
   resetKey,
   sendRefusal,
+  sending,
   sessionId,
 }: {
   /** The slash commands the composer completes; none is offered while this is undefined or
@@ -365,15 +365,19 @@ export function AgentThread({
    *  `data-message-id`: what the follow hook counts as new and finds the reader's place in. */
   contentIds: readonly string[];
   empty: string;
+  /** Whether a model or thinking switch is pending on this session: Send is disabled, still
+   *  reading "Send", until it ends, and `placeholder` is what says why. */
+  held: boolean;
   /** Bumped once per message this viewer sent that the session accepted. */
   ownSendCount: number;
   placeholder: string;
   /** Bumped once per rebuild of the whole transcript from the session's replay. */
   replayCount: number;
   resetKey: string;
-  /** Why Send cannot be pressed now - the viewer's last message is still out, or waits on Retry
-   *  or Discard - or null while it can. */
+  /** Why Send cannot be pressed while the session holds a keyed message. */
   sendRefusal: string | null;
+  /** Whether this session's own keyed send is in flight. */
+  sending: boolean;
   /** The session being read: moving to another one lands at its live end. */
   sessionId: string;
 }): ReactNode {
@@ -382,6 +386,13 @@ export function AgentThread({
   // listener and its observers to whichever node it is given.
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const follow = useLiveFollow({ contentIds, ownSendCount, replayCount, sessionId, viewport });
+  // An empty box is the one thing that refuses Send, and only while nothing holds it: a send in
+  // flight or a pending switch already disables Send and names why, so the line below says that
+  // instead. A turn still streaming does not refuse: the session decides what a message does
+  // mid-turn by its delivery mode, as at its terminal.
+  const boxEmpty = useAuiState((state) => state.composer.isEmpty);
+  const refusal = boxEmpty && !sending && !held ? "Type a message first." : null;
+  const hintId = useId();
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
       <ErrorBoundary region="this conversation" resetKey={resetKey}>
@@ -442,34 +453,50 @@ export function AgentThread({
         </div>
       </ErrorBoundary>
       {/* The trigger root always wraps the composer, so commands arriving or going never
-          remounts the input under the person's caret. */}
+          remounts the input under the person's caret. The form stays the composer's one box,
+          `relative`, so the command list is anchored to it and the whole composer, hint line
+          included, is what a layout measures. */}
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <ComposerPrimitive.Root
-          className={`relative mt-3 flex items-end gap-2 border-t pt-3 ${borderDefault}`}
+          className={`relative mt-3 flex flex-col gap-1 border-t pt-3 ${borderDefault}`}
           data-testid="agent-composer"
         >
           {commands === undefined || commands.length === 0 ? null : (
             <SlashCommands commands={commands} />
           )}
-          {/* While a message is held, Enter writes a new line and Send says why it waits, so the
-              next message can be drafted and nothing sends a second one beside the first. */}
-          <ComposerPrimitive.Input
-            className={`min-h-11 flex-1 rounded-lg px-3 py-2 text-sm ${inputClasses(false)}`}
-            placeholder={placeholder}
-            rows={1}
-            submitMode={sendRefusal === null ? "enter" : "none"}
-          />
-          {sendRefusal === null ? (
-            <ComposerPrimitive.Send
-              className={`min-h-11 rounded-lg px-4 text-sm font-medium ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+          {/* A refused or late keyed message owns Send until the reader retries, discards or
+              stops it. Enter writes a new line then, so the next message can be drafted without
+              sending beside the held one. */}
+          <div className="flex items-end gap-2">
+            <ComposerPrimitive.Input
+              className={`min-h-11 flex-1 rounded-lg px-3 py-2 text-sm ${inputClasses(false)}`}
+              placeholder={placeholder}
+              rows={1}
+              submitMode={sendRefusal === null ? "enter" : "none"}
+            />
+            {/* A submit button, so a click and Enter both reach the form's submit, which the
+                composer root turns into assistant-ui's own send: one way out for a message. */}
+            <RefusableButton
+              busy={sending ? "Sending…" : held ? "Send" : undefined}
+              className="min-h-11"
+              describedBy={sending || held ? hintId : undefined}
+              refusal={sendRefusal ?? refusal}
+              refusalShownBy={hintId}
+              type="submit"
             >
               Send
-            </ComposerPrimitive.Send>
-          ) : (
-            <RefusableButton className="min-h-11" refusal={sendRefusal}>
-              Send
             </RefusableButton>
-          )}
+          </div>
+          {/* While a send is out, this line says Enter waits for it; while a switch is pending it
+              says what the box's placeholder says, which the text typed may hide; while a held
+              message refuses Send it says why; otherwise it says how to send. */}
+          <p className={`text-xs ${textMutedOnCanvas}`} id={hintId}>
+            {sending
+              ? "Sending… Enter sends again once Dispatch answers."
+              : held
+                ? placeholder
+                : (sendRefusal ?? refusal ?? "Enter to send · Shift+Enter for a new line")}
+          </p>
         </ComposerPrimitive.Root>
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </ThreadPrimitive.Root>

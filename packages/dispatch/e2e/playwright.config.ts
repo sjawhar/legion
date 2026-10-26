@@ -122,39 +122,40 @@ export default defineConfig({
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
     // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
-    // rule rests on each engine dispatching a closed select's `change` in the key's own task, deep
-    // links meet each engine's chunk cancellation and the margin hold's frame and scroll order,
-    // and IndexedDB-backed document recovery must run in the engines people use. So those specs
-    // also run in WebKit. So does the one-socket invariant (`live-socket`): a tab holds one live
-    // socket in every engine, and WebKit is the one iOS Safari uses for every subscription its
-    // row opens.
+    // rule and the header session pickers' (the live view's model and thinking pickers) rest on
+    // each engine dispatching a closed select's `change` in the key's own task, deep links meet
+    // each engine's chunk cancellation and the margin hold's frame and scroll order, and
+    // IndexedDB-backed document recovery must run in the engines people use. So those specs also
+    // run in WebKit. So does the one-socket invariant (`live-socket`): a tab holds one live socket
+    // in every engine, and WebKit is the one iOS Safari uses for every subscription its row opens.
     {
       name: "webkit",
       testMatch:
-        /(collab-cursor|deep-links|keyboard-agents-picker|live-socket|offline-edits)\.e2e\.ts/,
+        /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|live-socket|offline-edits)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
-    // pill's ellipsis (the two engines lay out a flex child's min-width differently), what the
-    // Conversation's floating pills cover on a phone, and the one-socket invariant also run in
-    // WebKit, the engine iOS Safari uses; only those rows, since the rest of each spec is
-    // engine-agnostic.
+    // pill's ellipsis (the two engines lay out a flex child's min-width differently), the
+    // header's model and thinking pickers on a phone, what the Conversation's floating pills
+    // cover on a phone, and the one-socket invariant also run in WebKit, the engine iOS Safari
+    // uses; only those rows, since the rest of each spec is engine-agnostic.
     {
       name: "webkit-iphone",
-      testMatch: /(agent-view|phone-conversation|delivery-live|live-socket)\.e2e\.ts/,
-      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|a tab holds one live socket for every live view/,
+      testMatch:
+        /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket)\.e2e\.ts/,
+      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view/,
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
-    // the issue picker's keyboard-step rule rests on the engine's select dispatch, offline
-    // document recovery owns browser storage, and a click on a link inside the editor meets the
-    // engine's focus rule (Firefox focuses the editing host, not the link). Those specs, the whole
-    // deep-links spec, and the one-socket invariant (`live-socket`, which holds in every engine)
-    // run in Firefox too.
+    // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
+    // select dispatch, offline document recovery owns browser storage, and a click on a link
+    // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
+    // link). Those specs, the whole deep-links spec, and the one-socket invariant (`live-socket`,
+    // which holds in every engine) run in Firefox too.
     {
       name: "firefox",
       testMatch:
-        /(code-line-replace|deep-links|keyboard-agents-picker|live-socket|offline-edits|picture-link-click)\.e2e\.ts/,
+        /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|live-socket|offline-edits|picture-link-click)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
 

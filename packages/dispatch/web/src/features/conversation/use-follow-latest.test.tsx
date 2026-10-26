@@ -48,13 +48,17 @@ function installScrollLayoutMocks(): { restore: () => void } {
 }
 
 function Harness({
+  enabled = true,
   itemSeqs,
+  onFirstPlacement,
   ownSendCount,
 }: {
+  enabled?: boolean;
   itemSeqs: number[];
+  onFirstPlacement?: () => void;
   ownSendCount: number;
 }): ReactNode {
-  useFollowLatest({ enabled: true, latestItemSeq: itemSeqs.at(0), ownSendCount });
+  useFollowLatest({ enabled, latestItemSeq: itemSeqs.at(0), onFirstPlacement, ownSendCount });
   return (
     <div>
       <form aria-label="Comment composer" />
@@ -247,6 +251,68 @@ test("does not follow another turn after a small reader scroll", () => {
     });
 
     expect(window.scrollY).toBe(readerPosition);
+  } finally {
+    unmount?.();
+    layout.restore();
+    if (scrollY === undefined) {
+      Reflect.deleteProperty(window, "scrollY");
+    } else {
+      Object.defineProperty(window, "scrollY", scrollY);
+    }
+  }
+});
+
+// `IssuePage` forgets a tab-switch scroll recorded while the list was loading when this fires,
+// so it must fire exactly once, with the reader already placed, and never again for a return.
+test("tells the caller once, after the first placement, and not on later follows", () => {
+  const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
+  const layout = installScrollLayoutMocks();
+  let unmount: (() => void) | undefined;
+  const placedAt: number[] = [];
+  const onFirstPlacement = () => placedAt.push(window.scrollY);
+
+  try {
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 0, writable: true });
+    const view = render(
+      <Harness itemSeqs={[]} onFirstPlacement={onFirstPlacement} ownSendCount={0} />
+    );
+    unmount = view.unmount;
+    expect(placedAt).toEqual([]);
+
+    act(() => {
+      view.rerender(
+        <Harness itemSeqs={[1]} onFirstPlacement={onFirstPlacement} ownSendCount={0} />
+      );
+    });
+    expect(placedAt).toEqual([RESTING_SCROLL_Y]);
+
+    act(() => {
+      view.rerender(
+        <Harness itemSeqs={[2, 1]} onFirstPlacement={onFirstPlacement} ownSendCount={0} />
+      );
+    });
+    act(() => {
+      view.rerender(
+        <Harness itemSeqs={[2, 1]} onFirstPlacement={onFirstPlacement} ownSendCount={1} />
+      );
+    });
+    act(() => {
+      view.rerender(
+        <Harness
+          enabled={false}
+          itemSeqs={[2, 1]}
+          onFirstPlacement={onFirstPlacement}
+          ownSendCount={1}
+        />
+      );
+    });
+    act(() => {
+      view.rerender(
+        <Harness itemSeqs={[3, 2, 1]} onFirstPlacement={onFirstPlacement} ownSendCount={1} />
+      );
+    });
+
+    expect(placedAt).toEqual([RESTING_SCROLL_Y]);
   } finally {
     unmount?.();
     layout.restore();

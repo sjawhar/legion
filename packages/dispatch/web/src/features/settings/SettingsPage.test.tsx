@@ -24,6 +24,7 @@ function stubUnrelatedQueries() {
     getDeliverySettings: spyOn(api, "getDeliverySettings").mockResolvedValue(null),
     listAgentTokens: spyOn(api, "listAgentTokens").mockResolvedValue([]),
     listArchitectureSources: spyOn(api, "listArchitectureSources").mockResolvedValue([]),
+    listProjectDefaultAssignees: spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]),
     listProjects: spyOn(api, "listProjects").mockResolvedValue([]),
     listRepoProjects: spyOn(api, "listRepoProjects").mockResolvedValue([]),
   };

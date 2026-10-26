@@ -16,6 +16,7 @@ import type {
   ArchitectureTree,
   ArchitectureTreeComponent,
   ArchitectureTreeIssue,
+  ArchitectureTreeSource,
 } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { pendingWrites } from "../writes/pending-writes";
@@ -34,6 +35,7 @@ function component(
     parent: null,
     paths: [],
     prose: "",
+    source: "legion/legion",
     title: overrides.id,
     total: 0,
     ...overrides,
@@ -58,6 +60,18 @@ const webIssues = [
   issue({ key: "CORE-2", status: "in_progress", updated_at: "2026-09-12T00:00:00Z" }),
   issue({ attached: "inherited", key: "CORE-3", parent: "CORE-2", status: "todo" }),
 ];
+
+/** The fixture's one source, legion/legion on main, checked two minutes ago. */
+function legionSource(overrides: Partial<ArchitectureTreeSource> = {}): ArchitectureTreeSource {
+  return {
+    branch: "main",
+    last_commit: "3be61df5be90",
+    last_error: null,
+    last_sync_at: new Date(Date.now() - 2 * 60_000).toISOString(),
+    repo: "legion/legion",
+    ...overrides,
+  };
+}
 
 function fixture(overrides: Partial<ArchitectureTree> = {}): ArchitectureTree {
   return {
@@ -111,13 +125,7 @@ function fixture(overrides: Partial<ArchitectureTree> = {}): ArchitectureTree {
       },
     ],
     retired_links: [],
-    source: {
-      branch: "main",
-      last_commit: "3be61df5be90",
-      last_error: null,
-      last_sync_at: new Date(Date.now() - 2 * 60_000).toISOString(),
-      repo: "legion/legion",
-    },
+    sources: [legionSource()],
     totals: {
       components_without_work: 1,
       issues_done: 3,
@@ -302,6 +310,8 @@ test("the details list open work first by status then activity, fold the done is
 
     expect((await within(details).findByText("SPA")).tagName).toBe("STRONG");
     expect(within(details).getByText("packages/dispatch")).toBeTruthy();
+    // The repository whose architecture files define the component.
+    expect(within(details).getByText("legion/legion")).toBeTruthy();
     expect(
       within(details).getByRole("link", { name: "Dispatch server" }).getAttribute("href")
     ).toBe("/projects/CORE/architecture?component=server");
@@ -368,17 +378,11 @@ test("a work row's chevron expands the issue's children in place, dimming those 
   }
 });
 
-test("never synced: the source line says so and an empty model shows the Refresh call to action; Refresh POSTs the sync", async () => {
+test("never synced: the source line says so and an empty model shows the Refresh call to action; Refresh POSTs that source's sync", async () => {
   const pane = renderPane(
     fixture({
       components: [],
-      source: {
-        branch: "main",
-        last_commit: null,
-        last_error: null,
-        last_sync_at: null,
-        repo: "legion/legion",
-      },
+      sources: [legionSource({ last_commit: null, last_sync_at: null })],
       totals: {
         components_without_work: 0,
         issues_done: 0,
@@ -402,14 +406,21 @@ test("never synced: the source line says so and an empty model shows the Refresh
       settle = () => resolve(undefined as never);
       return promise;
     });
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
     await waitFor(() =>
-      expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE", keyedAttempt)
+      expect(pane.syncArchitectureSource).toHaveBeenCalledWith(
+        "CORE",
+        "legion/legion",
+        keyedAttempt
+      )
     );
-    const refreshing = await screen.findByRole("button", { name: "Refreshing…" });
+    const refreshing = await screen.findByRole("button", {
+      name: "Refreshing legion/legion…",
+    });
+    expect(refreshing.textContent).toBe("Refreshing…");
     expect(refreshing.hasAttribute("disabled")).toBe(true);
     settle?.();
-    await screen.findByRole("button", { name: "Refresh" });
+    await screen.findByRole("button", { name: "Refresh legion/legion" });
   } finally {
     pane.restore();
   }
@@ -425,14 +436,16 @@ test("a refused Refresh goes to the shell's pending writes, and the button is re
     pane.syncArchitectureSource.mockRejectedValueOnce(
       new ApiError(409, { code: "SOURCE_ACCESS", error: "GitHub is unreachable" })
     );
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
     await waitFor(() =>
       expect(pendingWrites(pane.queryClient).rows()[0]?.refusal?.message).toBe(
         "GitHub is unreachable"
       )
     );
-    expect(pendingWrites(pane.queryClient).rows()[0]?.label).toBe("Refresh of CORE's architecture");
-    await screen.findByRole("button", { name: "Refresh" });
+    expect(pendingWrites(pane.queryClient).rows()[0]?.label).toBe(
+      "Refresh of CORE's architecture source legion/legion"
+    );
+    await screen.findByRole("button", { name: "Refresh legion/legion" });
     expect(within(source).queryByRole("alert")).toBeNull();
   } finally {
     pane.restore();
@@ -456,13 +469,12 @@ test("?component= naming a component the model no longer has says so above the r
 test("a failed import shows the banner with the last model's commit and hatches every row; a stale source hatches too", async () => {
   const failed = renderPane(
     fixture({
-      source: {
-        branch: "main",
-        last_commit: "3be61df5be90",
-        last_error: "duplicate component id api",
-        last_sync_at: new Date(Date.now() - 60_000).toISOString(),
-        repo: "legion/legion",
-      },
+      sources: [
+        legionSource({
+          last_error: "duplicate component id api",
+          last_sync_at: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
     })
   );
   try {
@@ -477,13 +489,7 @@ test("a failed import shows the banner with the last model's commit and hatches 
 
   const stale = renderPane(
     fixture({
-      source: {
-        branch: "main",
-        last_commit: "3be61df5be90",
-        last_error: null,
-        last_sync_at: new Date(Date.now() - 11 * 60_000).toISOString(),
-        repo: "legion/legion",
-      },
+      sources: [legionSource({ last_sync_at: new Date(Date.now() - 11 * 60_000).toISOString() })],
     })
   );
   try {
@@ -493,6 +499,96 @@ test("a failed import shows the banner with the last model's commit and hatches 
     expect(rowFor("Legion").classList.contains("border-dashed")).toBe(true);
   } finally {
     stale.restore();
+  }
+});
+
+/** CORE with two sources: legion/legion (Legion and Docs, the fixture's) and acme/infra, which
+ *  supplies the Infra root. */
+function twoSources(infra: Partial<ArchitectureTreeSource>): ArchitectureTree {
+  const base = fixture();
+  return fixture({
+    components: [
+      ...base.components,
+      component({ id: "infra", source: "acme/infra", title: "Infra" }),
+      component({ id: "cluster", parent: "infra", source: "acme/infra", title: "Cluster" }),
+    ],
+    sources: [
+      legionSource(),
+      {
+        branch: "prod",
+        last_commit: "9f1e2d3c4b5a",
+        last_error: null,
+        last_sync_at: new Date(Date.now() - 60_000).toISOString(),
+        repo: "acme/infra",
+        ...infra,
+      },
+    ],
+  });
+}
+
+test("the header has one line per source, each with its own commit, check time and Refresh, and every source's roots sit at the top level", async () => {
+  const pane = renderPane(twoSources({}));
+  try {
+    await screen.findByRole("list", { name: "Components" });
+    const lines = screen.getAllByTestId("architecture-source");
+    expect(lines.map((line) => line.textContent)).toEqual([
+      "legion/legion/main·at 3be61df5·checked 2 minutes ago·Refresh",
+      "acme/infra/prod·at 9f1e2d3c·checked 1 minute ago·Refresh",
+    ]);
+    const rows = within(screen.getByRole("list", { name: "Components" })).getAllByRole("article");
+    expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual([
+      "Legion, 1/3 issues done",
+      "Docs, 2/2 issues done",
+      "Infra, no tracked work",
+    ]);
+
+    pane.syncArchitectureSource.mockImplementation(() => Promise.withResolvers<never>().promise);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh acme/infra" }));
+    await waitFor(() =>
+      expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE", "acme/infra", keyedAttempt)
+    );
+    expect(pane.syncArchitectureSource).toHaveBeenCalledTimes(1);
+    // Only the source being refreshed says so.
+    expect(
+      within(lines[1] as HTMLElement).getByRole("button", { name: "Refreshing acme/infra…" })
+    ).toBeTruthy();
+    expect(within(lines[0] as HTMLElement).getByRole("button").textContent).toBe("Refresh");
+  } finally {
+    pane.restore();
+  }
+});
+
+test("a failed source hatches only its own rows and names its error and commit on its line; the healthy source's rows stay plain", async () => {
+  const pane = renderPane(
+    twoSources({ last_error: 'component id "docs" is already a component of CORE' })
+  );
+  try {
+    await screen.findByRole("list", { name: "Components" });
+    const [legion, infra] = screen.getAllByTestId("architecture-source") as HTMLElement[];
+    expect(within(legion as HTMLElement).queryByRole("alert")).toBeNull();
+    expect(within(infra as HTMLElement).getByRole("alert").textContent).toBe(
+      'Last import failed: component id "docs" is already a component of CORE · showing the model from 9f1e2d3c'
+    );
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(rowFor("Infra").classList.contains("border-dashed")).toBe(true);
+    expect(rowFor("Legion").classList.contains("border-dashed")).toBe(false);
+    expect(rowFor("Docs").classList.contains("border-dashed")).toBe(false);
+  } finally {
+    pane.restore();
+  }
+});
+
+test("a source that never synced beside one with a model: the model shows, no empty state, and that source's line says never synced", async () => {
+  const pane = renderPane(twoSources({ last_commit: null, last_sync_at: null }));
+  try {
+    await screen.findByRole("list", { name: "Components" });
+    expect(screen.queryByTestId("architecture-empty")).toBeNull();
+    expect(rowFor("Legion")).toBeTruthy();
+    const lines = screen.getAllByTestId("architecture-source");
+    expect(lines[1]?.textContent).toBe("acme/infra/prod·never synced·Refresh");
+    expect(rowFor("Legion").classList.contains("border-dashed")).toBe(false);
+  } finally {
+    pane.restore();
   }
 });
 

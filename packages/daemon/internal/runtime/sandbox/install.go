@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -82,31 +83,38 @@ func servesVersion(crd *unstructured.Unstructured, version string) bool {
 // runs it before the store opens, so before any schema write, image probe or reconcile: a Sandbox
 // this runtime did not build must never be adopted, suspended or deleted as though it were one of
 // its pods, and nothing may change what an older binary needs to clean it up. Image probes are
-// explicit non-issue Sandboxes and are excluded. Its client paces itself and bounds each request as
-// the runtime's requests do (requestConfig).
-func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace, project string) error {
+// explicit non-issue Sandboxes and are excluded. log carries the one line the census writes about
+// a Sandbox it accepts rather than refuses (rejectLegacyIssueSandboxes). Its client paces itself
+// and bounds each request as the runtime's requests do (requestConfig).
+func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace, project string, log *slog.Logger) error {
 	dyn, err := dynamic.NewForConfig(requestConfig(rc))
 	if err != nil {
 		return fmt.Errorf("sandbox runtime: dynamic client: %w", err)
 	}
-	return rejectLegacyIssueSandboxes(ctx, dyn.Resource(sandboxGVR).Namespace(namespace), project)
+	return rejectLegacyIssueSandboxes(ctx, dyn.Resource(sandboxGVR).Namespace(namespace), project, log)
 }
 
 // rejectLegacyIssueSandboxes refuses the project's Sandboxes whose pod is not one this runtime
 // builds: its containers must be exactly the launcher roles of the kind its labels name
 // (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
-// controller's, and it must own a volume of its own, the one claim template every Sandbox made now
-// carries (issueVolume). So a per-claim Sandbox of the layout before issue pods (one worker
-// container), the controller Sandbox a daemon before issue pods made (role=controller, one worker
-// container), a pod missing a launcher, one with a container more, a Sandbox whose labels name no
-// kind, and a Sandbox of the tree-volume layout before per-issue volumes (treeVolumeLayout: no
-// claim template, or the tree root's `tree` template, the controller's of that layout included) are
-// each refused. A repository cache's Sandbox (labelled legion.dev/cache) is judged by its own shape
-// alone (cacheSandboxShape), never as a pod of a kind, and refused, as `cache Sandbox <name>`, when
-// it is not one this runtime builds. The refusal names every one of them, each with its reason, and
-// how many there are, so an operator removes them all before the next boot rather than one per
-// refused boot.
-func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
+// controller's, and it must own exactly the volumes that kind's Sandbox owns — none at all for an
+// issue, whose disk is its own pod's ephemeral volume, and the one `issue` claim template for the
+// controller, whose session outlives its pods (treeVolumeLayout). So a per-claim Sandbox of the
+// layout before issue pods (one worker container), the controller Sandbox a daemon before issue
+// pods made (role=controller, one worker container), a pod missing a launcher, one with a
+// container more, a Sandbox whose labels name no kind, and a Sandbox of the tree-volume layout
+// before per-issue volumes (the tree root's `tree` template, and that layout's controller, which
+// owns no volume) are each refused. An issue Sandbox still owning the one `issue` template the
+// release before the pod-owned disk gave it is not refused: volumeClaimTemplates is immutable in
+// the CRD, so the only way out of that shape is the delete-and-create of the issue's next launch,
+// and a boot refusal would stop the whole daemon until an operator deleted one Sandbox per open
+// issue by hand. It is logged by name instead, so the pending migration is visible without
+// holding anything up. A repository cache's Sandbox (labelled legion.dev/cache) is judged by its
+// own shape alone (cacheSandboxShape), never as a pod of a kind, and refused, as
+// `cache Sandbox <name>`, when it is not one this runtime builds. The refusal names every one of
+// them, each with its reason, and how many there are, so an operator removes them all before the
+// next boot rather than one per refused boot.
+func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string, log *slog.Logger) error {
 	list, err := sandboxes.List(ctx, metav1.ListOptions{LabelSelector: labelProject + "=" + project})
 	if err != nil {
 		return fmt.Errorf("sandbox runtime: census existing issue Sandboxes before layout migration: %w", err)
@@ -122,10 +130,21 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 			}
 			continue
 		}
-		if reason := legacyIssueSandbox(object); reason != "" {
+		kind, err := podKindOf(object.GetLabels())
+		if err != nil {
+			refused = append(refused, "legacy issue Sandbox "+object.GetName()+": "+err.Error())
+			continue
+		}
+		if reason := legacyIssueSandbox(object, kind); reason != "" {
 			refused = append(refused, "legacy issue Sandbox "+object.GetName()+reason)
-		} else if reason := treeVolumeLayout(object); reason != "" {
+			continue
+		}
+		switch reason, superseded := treeVolumeLayout(object, kind); {
+		case reason != "":
 			refused = append(refused, "Sandbox "+object.GetName()+reason)
+		case superseded:
+			log.Info("sandbox runtime: the issue Sandbox owns a claim template, the disk shape before the pod-owned disk; its next launch replaces it",
+				"sandbox", object.GetName(), "claim_template", issueVolume)
 		}
 	}
 	if len(refused) == 0 {
@@ -135,39 +154,54 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 		len(refused), project, strings.Join(refused, "; "))
 }
 
-// treeVolumeLayout is why object is a Sandbox of the tree-volume layout before per-issue volumes,
-// following its name in the census's refusal, or "" when it owns a volume of its own: every
-// Sandbox this runtime makes carries one claim template named issueVolume, where that layout gave
-// only the tree root's Sandbox a template, named `tree`, which every child of the tree mounted, and
-// its controller's Sandbox a `tree` template of its own. Such a Sandbox is never adopted: a child's
-// would fit no launch and be made again empty, and a root's volume holds every clone and workspace
-// of its tree, which only the drained cutover docs/kubernetes.md describes may take apart.
-func treeVolumeLayout(object unstructured.Unstructured) string {
+// treeVolumeLayout is why object does not own the volumes a Sandbox of kind owns, following its
+// name in the census's refusal, and, when it is accepted, whether it is an issue Sandbox still
+// owning the `issue` claim template of the release before the pod-owned disk, which its next
+// launch replaces. An issue pod's disk is the pod's own generic ephemeral volume
+// (issuePod.disk), so the Sandbox this runtime now makes for an issue owns no claim template
+// at all, while the controller's owns the one named issueVolume, which outlives its pods because
+// the controller's working root is on it (controllerPod.disk). The tree-volume layout
+// before per-issue volumes gave only the tree root's Sandbox a template, named
+// `tree`, which every child of the tree mounted, and its controller's Sandbox a `tree` template of
+// its own; a controller owning no volume comes from that layout too. A root's volume holds every
+// clone and workspace of its tree, which only the drained cutover docs/kubernetes.md describes may
+// take apart, so a Sandbox owning a `tree` template is never adopted.
+//
+// What the fence no longer catches is a **child** of that layout: it owned no template either, so
+// it is the new shape by this test, and it is adopted. That costs nothing — the Running patch
+// replaces the pod template wholesale, so its pod gets an ephemeral disk of its own and reads
+// nothing of the tree volume — but the refusal that forced the drained cutover now rests on the
+// root's `tree` template and the old controller alone. There is no narrower test: a child of that
+// layout and a Sandbox this runtime makes now are the same object.
+func treeVolumeLayout(object unstructured.Unstructured, kind podKind) (reason string, superseded bool) {
 	const upgrade = "; it is of the tree-volume layout before per-issue volumes, so drain and remove it as docs/kubernetes.md's \"Upgrading a deployment with running trees\" says"
+	_, issue := kind.(issuePod)
 	templates, found, err := unstructured.NestedSlice(object.Object, "spec", "volumeClaimTemplates")
-	if err != nil || !found || len(templates) == 0 {
-		return " owns no volume" + upgrade
+	if err != nil {
+		return " has an unreadable volume claim template" + upgrade, false
+	}
+	if !found || len(templates) == 0 {
+		if issue {
+			return "", false
+		}
+		return " owns no volume" + upgrade, false
 	}
 	for _, raw := range templates {
 		template, ok := raw.(map[string]any)
 		if !ok {
-			return " has an unreadable volume claim template" + upgrade
+			return " has an unreadable volume claim template" + upgrade, false
 		}
 		name, _, _ := unstructured.NestedString(template, "metadata", "name")
 		if name != issueVolume {
-			return fmt.Sprintf(" owns a volume claim template named %q, not %q", name, issueVolume) + upgrade
+			return fmt.Sprintf(" owns a volume claim template named %q, not %q", name, issueVolume) + upgrade, false
 		}
 	}
-	return ""
+	return "", issue
 }
 
-// legacyIssueSandbox is why object is not a pod this runtime builds, following its name in the
-// census's refusal, or "" when it is one.
-func legacyIssueSandbox(object unstructured.Unstructured) string {
-	kind, err := podKindOf(object.GetLabels())
-	if err != nil {
-		return ": " + err.Error()
-	}
+// legacyIssueSandbox is why object's pod is not the one this runtime builds for kind, the kind its
+// labels name (podKindOf), following its name in the census's refusal, or "" when it is one.
+func legacyIssueSandbox(object unstructured.Unstructured, kind podKind) string {
 	containers, found, err := unstructured.NestedSlice(object.Object, "spec", "podTemplate", "spec", "containers")
 	if err != nil || !found {
 		return " has no issue-pod container shape"

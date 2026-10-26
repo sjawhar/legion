@@ -380,7 +380,8 @@ ledger, the memory) could not be written, the result still prints, with one line
 `<XDG_STATE_HOME or ~/.local/state>/dispatch/sessions/<id>`): `state.json` carries what a
 long-lived host remembered across calls (the triage lines and pictures already shown, the asks
 whose follow notice was printed), and `results.jsonl` gets one line per call with the tool's
-`details` or its refusal, which pi-envoy's run-end check reads; a line that is not JSON is named
+`details` or its refusal, a refusal the CLI made before the call reached Dispatch included, which
+pi-envoy's run-end check reads; a line that is not JSON is named
 (file and line number) and skipped. Directories idle for 14 days are removed, at most once a day.
 
 `bun bin/stand-in-gateway.ts --status 502 --body html` serves one non-Dispatch answer (`html`,
@@ -398,13 +399,16 @@ session actor: `status` (a Legion lifecycle status), `title`, `labels` (replacin
 `priority` (`0` for P0 down to `3` for P3, or `null` to clear it), `route`,
 and `external_links`: a non-empty list merges into the issue's existing links by URL rather than
 replacing them, and an explicit empty list (`--clear-external-links`) clears every link instead;
-`rank`, the board's own order, is not exposed. Closing an issue (`status: "done"`)
-requires `reason`, which it posts as an issue message before the PATCH, since a closed issue
-refuses messages; a failed post sends no PATCH, and a PATCH that fails after the post names the
-posted message. The result is one line —
-`KEY: status a -> b; priority -> P1; linked <url> (N links)`, with `priority cleared` on a clear
-and `reason posted as message <id> (<ref>)` ahead of a close — and a server refusal keeps its
-`code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) at the head of the thrown message.
+`before` and `after` (`--before <KEY>` / `--after <KEY>`) move the issue on its project's board —
+above that issue, below it, or between the two — and go as the server's `rank` field on the same
+PATCH only when a neighbour is named, since a `rank` with neither neighbour ranks the issue last
+in its project. Closing an issue (`status: "done"`) requires `reason`, which it posts as an issue
+message before the PATCH, since a closed issue refuses messages; a failed post sends no PATCH, and
+a PATCH that fails after the post names the posted message. The result is one line —
+`KEY: status a -> b; priority -> P1; rank -> before KEY; linked <url> (N links)`, with
+`priority cleared` on a clear and `reason posted as message <id> (<ref>)` ahead of a close — and a
+server refusal keeps its `code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) at the
+head of the thrown message.
 `dispatch request-approval` refuses, before it sends anything, while the version the request would
 name (the document's latest, `approval.latest_version`) holds a decision block open. It reads the
 live document's `ask` blocks (`GET /api/v1/artifacts/{id}/blocks`), then that version's markdown

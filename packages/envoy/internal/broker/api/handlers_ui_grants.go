@@ -1,10 +1,12 @@
 // handlers_ui_grants.go: GET /v1/grants, POST /v1/grants/{id}/revoke-by-approver — a person's own
-// live-grant list and human revocation route. Part of the UI routes (uiAuth) Dispatch's server
-// relays to on behalf of the browser.
+// live-grant list and human revocation route. Part of the routes a listed service calls with its
+// own ServiceAccount token (accountAuth), relaying a person's own page; see handlers_ui_records.go
+// for the shared trust-model note.
 package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -42,7 +44,7 @@ type approverGrantsResponse struct {
 }
 
 // listGrantsForApprover lists the live grants of the person ?approver= names (writeApproverGrants).
-func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
+func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request, _ string) {
 	approver := r.URL.Query().Get("approver")
 	if !requireApprover(w, approver) {
 		return
@@ -85,8 +87,9 @@ type revokeByApproverBody struct {
 }
 
 // revokeByApprover ends a grant on a human's Dispatch login, as the person Dispatch names
-// (revokeGrantAs).
-func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
+// (revokeGrantAs), logging the caller that relayed it beside that person: the caller is a named
+// service identity, while the person it names is still its own to state (dispatch://INFRA-314).
+func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request, callerName string) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {
 		return
@@ -98,6 +101,7 @@ func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	if !requireApprover(w, body.Approver) {
 		return
 	}
+	slog.Info("grant revocation relayed", "caller", callerName, "approver", body.Approver, "grant", id)
 	s.revokeGrantAs(w, r, id, body.Approver, record.HumanActor(body.Approver))
 }
 

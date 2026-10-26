@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -720,6 +721,42 @@ func (p *dispatchProcess) checkSettledAtShutdown(t *testing.T, database *store.S
 	}
 }
 
+// A process that lost its port to another server is not healthy because the port answers: the
+// other server answers /healthz in its place, as the other process of a pair did in the CI run
+// cmdtest.FreeTCPPort names. Nor is one that bound the port and has exited since, leaving the port
+// to another server. The wait takes the bind from the process's own output and refuses any
+// process that has exited, so it refuses both answers, and takes the same answer from a running
+// process whose output says it bound the port.
+func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) {
+	holder := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(holder.Close)
+	port := holder.Listener.Addr().(*net.TCPAddr).Port
+	address := "addr=127.0.0.1:" + strconv.Itoa(port)
+	listening := `level=INFO msg="dispatch: listening" ` + address
+	process := func(output string, exited bool) *dispatchProcess {
+		logged := &cmdtest.LockedBuffer{}
+		_, _ = logged.Write([]byte(output + "\n"))
+		done := make(chan struct{})
+		if exited {
+			close(done)
+		}
+		return &dispatchProcess{Process: &cmdtest.Process{Output: logged, Exited: done}, port: port}
+	}
+
+	lost := process(`level=ERROR msg="dispatch: listen" `+address+` error="bind: address already in use"`, true)
+	if err := lost.healthyWithin(5 * time.Second); err == nil || !strings.Contains(err.Error(), "exited before it became healthy") {
+		t.Errorf("a process that exited on its bind passed as healthy on a port another server holds: %v", err)
+	}
+	gone := process(listening+"\n"+`level=INFO msg="dispatch: shutting down"`, true)
+	if err := gone.healthyWithin(5 * time.Second); err == nil || !strings.Contains(err.Error(), "exited before it became healthy") {
+		t.Errorf("a process that logged its bind and then exited passed as healthy on a port another server holds: %v", err)
+	}
+	bound := process(listening, false)
+	if err := bound.healthyWithin(5 * time.Second); err != nil {
+		t.Errorf("a running process that logged its bind, on a port that answers, was not healthy: %v", err)
+	}
+}
+
 // dispatchTestLogin is the person the test calls the server as, through header identity.
 const dispatchTestLogin = "alice"
 
@@ -760,12 +797,13 @@ func startDispatchProcessWithSettleDelay(t *testing.T, databaseURL string, settl
 }
 
 // startDispatchProcessWith starts Dispatch under options: a free loopback port, a home of its
-// own, and nothing from the caller's environment.
+// own, and nothing from the caller's environment. The binary is built before the port is drawn, so
+// the port does not sit unbound through the build as well as through the process's boot.
 func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatchOptions) *dispatchProcess {
 	t.Helper()
 	home := t.TempDir()
-	port := cmdtest.FreeTCPPort(t)
 	cmd := exec.Command(cmdtest.Build(t, "envoy-dispatch"))
+	port := cmdtest.FreeTCPPort(t)
 	cmd.Dir = home
 	environment := map[string]string{
 		"HOME":                             home,
@@ -806,26 +844,59 @@ func (p *dispatchProcess) url(path string) string {
 	return "http://127.0.0.1:" + strconv.Itoa(p.port) + path
 }
 
-// waitHealthy waits up to 30 s for /healthz to answer 200. The port is bound after the SIGTERM
-// handler is installed, so a server that answers is one a signal stops in order.
+// waitHealthy waits up to 30 s for the process to be healthy (healthyWithin), and fails the test
+// when it is not.
 func (p *dispatchProcess) waitHealthy(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		response, err := http.Get(p.url("/healthz"))
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return
+	if err := p.healthyWithin(30 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// healthyWithin waits up to within for the process to log that it bound its own port and for
+// /healthz there to answer 200 while the process still runs, and says why it did not, with the
+// process's output. An answer on the port alone does not show the bind: a process that cannot bind
+// its port exits (main.go's listen), and whatever else holds the port answers in its place
+// (cmdtest.FreeTCPPort names the CI run where that happened). Nor does a logged bind and an answer
+// from a process that has exited since, which left the port to whatever took it next. The port is
+// bound after the SIGTERM handler is installed, so a server that answers is one a signal stops in
+// order.
+func (p *dispatchProcess) healthyWithin(within time.Duration) error {
+	listening := `msg="dispatch: listening" addr=127.0.0.1:` + strconv.Itoa(p.port)
+	exited := func() bool {
+		select {
+		case <-p.Exited:
+			return true
+		default:
+			return false
+		}
+	}
+	deadline := time.Now().Add(within)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	for time.Now().Before(deadline) && !exited() {
+		if strings.Contains(p.Output.String(), listening) {
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url("/healthz"), nil)
+			if err != nil {
+				return err
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err == nil {
+				_ = response.Body.Close()
+				if response.StatusCode == http.StatusOK && !exited() {
+					return nil
+				}
 			}
 		}
 		select {
 		case <-p.Exited:
-			t.Fatalf("Dispatch exited before it became healthy:\n%s", p.Output.String())
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	t.Fatalf("Dispatch never became healthy:\n%s", p.Output.String())
+	if exited() {
+		return fmt.Errorf("Dispatch exited before it became healthy:\n%s", p.Output.String())
+	}
+	return fmt.Errorf("Dispatch never became healthy:\n%s", p.Output.String())
 }
 
 // waitPromptExit waits for Dispatch to exit after the SIGTERM sent at signalled, and requires it to

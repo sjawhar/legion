@@ -1,13 +1,11 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
-import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { apiErrorMessage } from "../../api/client";
+import { api, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
-import { pillClassName } from "../../components/Pill";
 import { RefusableButton } from "../../components/RefusableButton";
-import { TruncatedText } from "../../components/TruncatedText";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -28,8 +26,11 @@ import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { SendStoppedError } from "../writes/keyed-write";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
-import { currentModel, sessionCommands } from "./conversation";
+import { sessionCommands, sessionSettingsView } from "./conversation";
+import { SessionSettings } from "./SessionSettings";
+import { type SwitchRequest, switchCommand, useSessionSwitch } from "./use-session-switch";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 import { useLiveSend } from "./useLiveSend";
 
@@ -80,9 +81,10 @@ export function AgentConversationPage(): ReactNode {
   useDocumentTitle(label);
 
   const { conversation, replays, responding, status } = useAgentStream(sessionId);
-  // The model the session is currently running (LEGION-548), next to its title: the most recent
-  // assistant turn's own report, nothing guessed for a client that never sends one.
-  const model = currentModel(conversation);
+  // The model and thinking level the session runs now (INFRA-195), next to its title: what its
+  // newest `settings` frame reports, or, for a session that reports none, the most recent
+  // assistant turn's own model (LEGION-548), nothing guessed for a client that never sends one.
+  const settings = sessionSettingsView(conversation, responding, replays);
   const modes = deliveryModes(agent?.capabilities ?? []);
   // The human's pick holds only while the session still offers it: the session list loads after
   // the page, and a pick the session does not advertise would be refused.
@@ -94,6 +96,7 @@ export function AgentConversationPage(): ReactNode {
   const listed = sessionCommands(conversation);
   const commands =
     mode === "btw" || listed === undefined || listed.length === 0 ? undefined : listed;
+
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
   // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
   // stream carries tagged with this message's id, and the thread shows it once; one the stream
@@ -107,38 +110,58 @@ export function AgentConversationPage(): ReactNode {
   const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
+  // The header's switch, one at a time; while one waits for the session's answer neither picker
+  // nor Send takes another, so this page's next prompt reaches the session after the switch.
+  const sessionSwitch = useSessionSwitch(sessionId, stored.data);
   // One per message of this viewer's the session accepted, which takes the thread back to its
-  // live end (`use-live-follow.ts`). Bumped after the write lands and never on a refusal: the
-  // reason renders above the transcript, where a reader who has scrolled back can read it
-  // without being taken away from what they were reading.
+  // live end (`use-live-follow.ts`). Bumped after the write lands, only if the reader is still on
+  // the session it went to, and never on a refusal: the reason renders above the transcript,
+  // where a reader who has scrolled back can read it without being taken away from what they
+  // were reading.
   const [ownSendCount, setOwnSendCount] = useState(0);
-
-  // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
-  // read-only and this adds no write path of its own. The session confirms a Send or Aside with
-  // Dispatch before it takes one as its user's own turn. A press is the session's held send, on
-  // screen here and on its Agents row until Dispatch decides it, and Send waits for it
-  // (`useLiveSend`); the store refreshes the stored messages when it lands.
-  const live = useLiveSend(sessionId, () => setOwnSendCount((previous) => previous + 1));
-  const sendNow = useRef(live.send);
-  sendNow.current = live.send;
-  const onNew = useCallback(
-    async (message: { content: readonly { type: string; text?: string }[] }) => {
-      const body = message.content
-        .filter((part) => part.type === "text")
-        .map((part) => part.text ?? "")
-        .join("\n")
-        .trim();
-      if (body !== "") sendNow.current(body, mode);
+  // A header pick is its own keyed write, not a composer send: it needs the stored message id to
+  // follow the session's answer, and its pending state holds the next message until that answer.
+  // Its refusal is shown here, on the session it went to.
+  const queryClient = useQueryClient();
+  const switchWrite = useKeyedWrite({
+    inline: true,
+    label: ({ request }: { request: SwitchRequest; session: string }) =>
+      request.kind === "model"
+        ? `Switch ${label}'s model to ${request.value}`
+        : `Switch ${label}'s thinking level to ${request.value}`,
+    onLanded: (_message, { session }) => {
+      if (session === sessionId) setOwnSendCount((previous) => previous + 1);
+      void queryClient.invalidateQueries({ queryKey: agentMessagesQuery(session).queryKey });
     },
-    [mode]
+    write: ({ request, session }, bounds) =>
+      sessionSwitch.run(request, () =>
+        api.createAgentMessage(session, { body: switchCommand(request), delivery: "steer" }, bounds)
+      ),
+  });
+  // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
+  // read-only and this adds no write path of its own. The composer uses the shared held-send path,
+  // so every attempt carries its key and a refusal remains available for retry or discard.
+  const live = useLiveSend(sessionId, () => setOwnSendCount((previous) => previous + 1));
+  const onSend = useCallback((body: string) => live.send(body, mode), [live, mode]);
+  const onPick = useCallback(
+    (request: SwitchRequest) => switchWrite.mutate({ request, session: sessionId }),
+    [sessionId, switchWrite]
   );
+  const switchRefusal =
+    switchWrite.isError && switchWrite.variables?.session === sessionId ? switchWrite.error : null;
+  // A switch holds only the session it went to, from the press until the session answers.
+  const switchPending =
+    sessionSwitch.pending ||
+    (switchWrite.isPending && switchWrite.variables?.session === sessionId);
   const held = live.held;
+  // A send still inside its deadline reads "Sending…" on Send itself; past it, or refused, the held
+  // message refuses Send and says why until Dispatch decides it or the reader acts on it.
   const sendRefusal =
-    held === undefined
-      ? null
-      : held.status === "refused"
-        ? "Retry or discard the message Dispatch did not take first."
-        : "Dispatch has not confirmed your last message yet.";
+    held?.status === "refused"
+      ? "Retry or discard the message Dispatch did not take first."
+      : held?.status === "late"
+        ? "Dispatch has not confirmed your last message yet."
+        : null;
   const presence = STATUS[status];
 
   // The shell hands this route the viewport below its header as a flex column; the page takes
@@ -151,13 +174,12 @@ export function AgentConversationPage(): ReactNode {
           ← Agents
         </Link>
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>{label}</h1>
-        {model === undefined ? null : (
-          <span className={`${pillClassName("label")} max-w-56`} data-testid="agent-session-model">
-            <TruncatedText className="min-w-0" title={model}>
-              {model}
-            </TruncatedText>
-          </span>
-        )}
+        <SessionSettings
+          onPick={onPick}
+          pending={switchPending}
+          status={sessionSwitch.status}
+          view={settings}
+        />
         <span className="flex items-center gap-1.5">
           <span
             aria-hidden="true"
@@ -244,6 +266,13 @@ export function AgentConversationPage(): ReactNode {
           </div>
         </div>
       )}
+      {switchRefusal === null ? null : (
+        <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-send-error">
+          {switchRefusal instanceof SendStoppedError
+            ? switchRefusal.message
+            : `Could not send: ${apiErrorMessage(switchRefusal, "could not reach the session")}`}
+        </p>
+      )}
       {/* Everything that reads a frame lives inside this boundary, in `AgentRuntimeThread`:
           assistant-ui converts every message while the runtime is built, so a message it
           refuses throws in the render of whichever component calls `useExternalStoreRuntime`.
@@ -256,12 +285,18 @@ export function AgentConversationPage(): ReactNode {
           commands={commands}
           conversation={conversation}
           empty={emptyText(responding)}
-          onNew={onNew}
+          onSend={onSend}
           ownSendCount={ownSendCount}
-          placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`}
+          placeholder={
+            switchPending
+              ? "Waiting for the session to answer the switch…"
+              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`
+          }
           replayCount={replays}
           resetKey={sessionId}
+          sendDisabled={switchPending}
           sendRefusal={sendRefusal}
+          sending={held?.status === "sending"}
           sessionId={sessionId}
           stored={stored.data ?? []}
           viewer={viewer?.kind === "user" ? viewer.login : undefined}

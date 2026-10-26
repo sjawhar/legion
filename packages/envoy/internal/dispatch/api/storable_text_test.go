@@ -159,7 +159,7 @@ func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
 		{"create project: name", nulRequest{method: http.MethodPost, target: "/api/v1/projects", body: map[string]any{"key": "NUL", "name": nulText}}, "name"},
 		{"mint agent token: name", nulRequest{method: http.MethodPost, target: "/api/v1/me/agent-tokens", body: map[string]any{"name": nulText}}, "name"},
 		{"map repository: owner", nulRequest{method: http.MethodPut, target: "/api/v1/settings/repo-projects/" + nulPath + "/widgets", body: map[string]any{"project": "TEST"}}, "path parameter owner"},
-		{"set architecture source: branch", nulRequest{method: http.MethodPut, target: "/api/v1/projects/TEST/architecture-source", body: map[string]any{"repo": "acme/widgets", "branch": nulText}}, "branch"},
+		{"set architecture source: branch", nulRequest{method: http.MethodPut, target: "/api/v1/projects/TEST/architecture-sources/acme/widgets", body: map[string]any{"branch": nulText}}, "branch"},
 
 		{"create issue: title", nulRequest{method: http.MethodPost, target: "/api/v1/issues", body: map[string]any{"project": "TEST", "title": nulText}}, "title"},
 		{"create issue: spec", nulRequest{method: http.MethodPost, target: "/api/v1/issues", body: map[string]any{"project": "TEST", "title": "Spec with a NUL", "spec": nulText}}, "spec"},

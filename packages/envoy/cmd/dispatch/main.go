@@ -83,11 +83,13 @@ type bootConfig struct {
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
 	OIDCAudience string
-	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's UI-bearer API; empty
-	// means the credential-request feature is off. AgentSecretsToken is the resolved UI bearer
-	// (required when AgentSecretsURL is set).
-	AgentSecretsURL   string
-	AgentSecretsToken string
+	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's API; empty means the
+	// credential-request feature is off. AgentSecretsTokenFile is
+	// DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE, the file holding Dispatch's own projected
+	// Kubernetes ServiceAccount token (required when AgentSecretsURL is set). The file is read
+	// by the broker client on each call, never here: a projected token rotates.
+	AgentSecretsURL       string
+	AgentSecretsTokenFile string
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
 	// Empty keeps them in Postgres.
 	FileStoreBucket string
@@ -654,12 +656,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
 		}
 		boot.AgentSecretsURL = agentSecretsURL
-		boot.AgentSecretsToken, err = agentSecretsToken(env)
-		if err != nil {
-			return bootConfig{}, err
-		}
-		if boot.AgentSecretsToken == "" {
-			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_TOKEN_FILE or DISPATCH_AGENT_SECRETS_TOKEN is required when DISPATCH_AGENT_SECRETS_URL is set")
+		boot.AgentSecretsTokenFile = strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"))
+		if boot.AgentSecretsTokenFile == "" {
+			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE is required when DISPATCH_AGENT_SECRETS_URL is set: Dispatch calls the broker with its own projected Kubernetes ServiceAccount token")
 		}
 	}
 
@@ -859,7 +858,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.EnvoyToken = boot.EnvoyToken
 	built.GitHubAPIBase = boot.GitHubAPIBase
 	built.AgentSecretsURL = boot.AgentSecretsURL
-	built.AgentSecretsToken = boot.AgentSecretsToken
+	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
 	built.DevSignIn = boot.DevSignIn
 	return built

@@ -12,7 +12,7 @@ status: active
 module: packages/daemon
 applies_when:
   - Running go test over many packages of packages/daemon in a worker pod and reading the result from a filtered or capped shell pipeline
-  - Packages the pod cannot run (Postgres, Docker, cgo) are in the set
+  - Packages the pod cannot run (Postgres, Docker) are in the set
 related_issues:
   - "LEGION-629"
   - "sjawhar/legion#1848"

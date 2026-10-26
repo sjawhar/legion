@@ -483,22 +483,43 @@ test("API client sends architecture source requests to their routes", async () =
   const settingsApi = createApiClient(stub.fetch);
 
   await settingsApi.listArchitectureSources();
-  await settingsApi.getArchitectureSource("CORE");
-  await settingsApi.putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
-  await settingsApi.syncArchitectureSource("CORE", keyed("write-1"));
-  await settingsApi.deleteArchitectureSource("CORE");
+  await settingsApi.listProjectArchitectureSources("CORE");
+  await settingsApi.putArchitectureSource(
+    "CORE",
+    "legion/arch",
+    { branch: "main" },
+    keyed("write-1")
+  );
+  await settingsApi.syncArchitectureSource("CORE", "legion/arch", keyed("write-2"));
+  await settingsApi.deleteArchitectureSource("CORE", "acme/infra", keyed("write-3"));
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/settings/architecture-sources"],
-    ["GET", "/api/v1/projects/CORE/architecture-source"],
-    ["PUT", "/api/v1/projects/CORE/architecture-source"],
-    ["POST", "/api/v1/projects/CORE/architecture-source/sync"],
-    ["DELETE", "/api/v1/projects/CORE/architecture-source"],
+    ["GET", "/api/v1/projects/CORE/architecture-sources"],
+    ["PUT", "/api/v1/projects/CORE/architecture-sources/legion/arch"],
+    ["POST", "/api/v1/projects/CORE/architecture-sources/legion/arch/sync"],
+    ["DELETE", "/api/v1/projects/CORE/architecture-sources/acme/infra"],
   ]);
-  expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({
-    branch: "main",
-    repo: "legion/arch",
-  });
+  // The repository is the address; the body carries only the branch.
+  expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({ branch: "main" });
+});
+
+test("API client sends project default assignee requests to their routes", async () => {
+  const stub = stubFetch(() => Response.json({ assignee: "alice@example.com", project: "CORE" }));
+  const settingsApi = createApiClient(stub.fetch);
+
+  await settingsApi.listProjectDefaultAssignees();
+  await settingsApi.putProjectDefaultAssignee("CORE", { assignee: "alice@example.com" });
+  await settingsApi.putProjectDefaultAssignee("CORE", { assignee: null });
+
+  expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
+    ["GET", "/api/v1/settings/project-default-assignees"],
+    ["PUT", "/api/v1/projects/CORE/default-assignee"],
+    ["PUT", "/api/v1/projects/CORE/default-assignee"],
+  ]);
+  expect(JSON.parse(stub.requests[1]?.body as string)).toEqual({ assignee: "alice@example.com" });
+  // Clearing a default is the same route with an explicit null, not a body that omits the field.
+  expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({ assignee: null });
 });
 
 test("API client sends inline artifacts as JSON", async () => {
@@ -943,7 +964,7 @@ test("every POST and PATCH sends its Idempotency-Key, and no PUT or DELETE does"
   const bounds = keyed("press-1");
 
   await api.createProject({ key: "CORE", name: "Core" }, bounds);
-  await api.syncArchitectureSource("CORE", bounds);
+  await api.syncArchitectureSource("CORE", "legion/arch", bounds);
   await api.createAgentToken({ name: "planner" }, bounds);
   await api.createIssue({ project: "CORE", title: "Ship it" }, bounds);
   await api.patchIssue("CORE-1", { status: "done" }, bounds);
@@ -987,8 +1008,8 @@ test("every POST and PATCH sends its Idempotency-Key, and no PUT or DELETE does"
 
   await api.putRepoProject("owner/repo", { project: "CORE" }, bounds);
   await api.deleteRepoProject("owner/repo", bounds);
-  await api.putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" }, bounds);
-  await api.deleteArchitectureSource("CORE", bounds);
+  await api.putArchitectureSource("CORE", "legion/arch", { branch: "main" }, bounds);
+  await api.deleteArchitectureSource("CORE", "legion/arch", bounds);
   await api.revokeAgentToken("token-1", bounds);
   await api.releaseIssueClaim("CORE-1", bounds);
   await api.snoozeAsk("ask-1", "2026-10-26T00:00:00Z", bounds);
@@ -1011,6 +1032,7 @@ test("every POST and PATCH sends its Idempotency-Key, and no PUT or DELETE does"
   await api.deleteDeliverySessionGroup("group-1", bounds);
   await api.putIssueState("CORE-1", { pinned: true }, bounds);
   await api.putAgentState("planner-session", { cleared_before: "2026-10-25T00:00:00Z" }, bounds);
+  await api.putProjectDefaultAssignee("CORE", { assignee: "alice@example.com" }, bounds);
 
   const keyOf = ({ init }: { init?: RequestInit }) =>
     new Headers(init?.headers).get("Idempotency-Key");

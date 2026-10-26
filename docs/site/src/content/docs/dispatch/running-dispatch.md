@@ -39,7 +39,7 @@ docker buildx imagetools inspect ghcr.io/sjawhar/legion/envoy:<that commit>   # 
 | A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. To change it without locking agents out, set the new value followed by the old one, separated by a space, until every agent has moved, then the new one alone. |
 | Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, and `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | The OpenID Connect issuer people sign in through, Dispatch's client there and that client's secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with Google itself as the issuer. Required for the default cookie sign-in. [Signing people in](#signing-people-in) covers both. |
 | The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. Dispatch's client at the issuer lists this address followed by `/auth/callback` as a callback URL. |
-| The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | Without it the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
+| The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | `DISPATCH_APP_PEM_B64` holds the App's private key as the PEM GitHub gives or the base64 of that PEM; a key that does not parse stops boot. Without the App the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
 | A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the issuer's refresh tokens Dispatch stores. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Give every server the same key when you run more than one, or a cookie one made is refused by the other and nothing tells you so ([Running more than one copy](#running-more-than-one-copy)). Changing the key signs everyone out and leaves every stored refresh token unopenable, so each person signs in again, but revokes none at the issuer: after the key leaks, sign people out at the issuer too. |
 | An Envoy listener | `ENVOY_URL` | Where the Agents page finds live agent sessions. Defaults to `http://127.0.0.1:9020`. |
 | NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
@@ -205,8 +205,14 @@ Sign in, then open **Settings**:
 - **Projects**: create your first project, with a key such as `CORE` and a name.
 - **Repositories → Projects**: choose which project issues from each GitHub repository land in.
   `DISPATCH_DEFAULT_PROJECT` catches repositories with no mapping; that project must already exist.
-- **Architecture sources**: point a project at a repository branch holding its architecture
-  model. Saving checks that the GitHub App can read it.
+- **Projects → Default assignee**: name the person each project's unowned work lands on, in the
+  projects table's own column. An issue created with no assignee, by an agent on the shared token
+  and under no parent that names one, goes to that person; a project with no default leaves such
+  an issue unassigned. Only a person sets it, here — no agent command or flag does — and the
+  picker's **Unassigned** clears it.
+- **Architecture sources**: add each repository branch holding part of a project's architecture
+  model. A project can have several, one per repository, and its model is all of their components
+  together. Saving checks that the GitHub App can read the repository.
 - **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
   workflows, the job whose success is a production deploy, and whose merged pull requests count.
   Three job names are optional and feed the [Pipeline](/legion/dispatch/delivery/#pipeline) page:
@@ -337,6 +343,20 @@ From that release on, every change a page or the `dispatch` command makes carrie
 a lost answer, a timeout or an outage is made once. A page that has not heard back keeps trying
 and says so, and a script that calls the API itself can send a key of its own
 ([For agents](/legion/dispatch/for-agents/#the-http-api)).
+The release that lets a project import its components from several repositories (migration
+`0117`) is deployed the same way: stop every server of the earlier version, or scale it to zero,
+before the new version starts, and never start a version older than it again. An older server
+cannot work with the new database: saving an architecture source fails with a server error, an
+import that changes a project's components fails, and an import of an empty architecture folder
+deletes the components of every source of the project. Its census refuses while any component
+belongs to a project with no architecture source, which only a change made directly in the
+database leaves behind; delete those rows on the version still running, then take the census
+again:
+
+```sql
+delete from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
 
 ## The HTTP API
 

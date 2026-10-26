@@ -10,8 +10,21 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
+)
+
+// The two session stores a runtime takes as a test names them: the providers Secret key the
+// postgres store's URL lives under, and the Cloud SQL instance, database and IAM login the
+// cloudsql-iam store signs in with.
+var (
+	postgresStore = ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}
+	cloudSQLStore = ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
+		Instance: "example-project:us-central1:example-instance",
+		Name:     "legion_sessions",
+		User:     "legion-sessions@example-project.iam",
+	}}
 )
 
 // providersItems are the keys pod's providers volume projects, nil when it mounts none.
@@ -24,22 +37,36 @@ func providersItems(pod corev1.PodSpec) []corev1.KeyToPath {
 	return nil
 }
 
-// Under a session database (Options.SessionDSNKey, runtime.kubernetes.session_store postgres) every
-// role's Oh My Pi keeps its session in it: each generation of a workflow role and of the controller
-// starts with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the providers Secret's
-// key, mounted read-only at a file named for that pointer, and the shim reads the providers
-// directory and, seeing the pointer, never exports the URL into Oh My Pi's environment. The image
-// probe mounts the key too, so a Secret that lacks it refuses boot, and tells its Oh My Pi nothing
-// of the store. Without a key no pod carries either variable or the projection.
+// Every role's Oh My Pi keeps its session in a database (Options.SessionStore), which configure
+// requires: each generation of a workflow role and of the controller starts with
+// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the URL file its store writes. Under
+// postgres that file is the providers Secret's key, mounted read-only at a file named for that
+// pointer, and the shim reads the providers directory and, seeing the pointer, never exports the
+// URL into Oh My Pi's environment; the image probe mounts the key too, so a Secret that lacks it
+// refuses boot. Under cloudsql-iam no pod and no probe mounts a session key at all: the file is the
+// generation's own, written beside the socket each role container's launcher proxies to the
+// instance, and that launcher is told the instance, the database and the login. The image probe
+// tells its Oh My Pi nothing of the store under either.
 func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
-	dsnFile := ProvidersDir + "/OMP_SESSION_SQL_DSN"
 	projection := corev1.KeyToPath{Key: "SESSION_DSN", Path: "OMP_SESSION_SQL_DSN"}
-	for _, store := range []string{"postgres", "pvc"} {
-		t.Run(store, func(t *testing.T) {
+	proxyFlags := []string{
+		"--session-instance", cloudSQLStore.Database.Instance,
+		"--session-database", cloudSQLStore.Database.Name,
+		"--session-user", cloudSQLStore.Database.User,
+	}
+	for _, tc := range []struct {
+		store ompsessions.Store
+		// dsnFile is the URL file every generation of this store is pointed at; projected is
+		// whether the providers volume carries the session key.
+		dsnFile   func(generation uint64) string
+		projected bool
+	}{
+		{store: postgresStore, dsnFile: func(uint64) string { return ProvidersDir + "/OMP_SESSION_SQL_DSN" }, projected: true},
+		{store: cloudSQLStore, dsnFile: func(g uint64) string { return generationDir(g) + "/OMP_SESSION_SQL_DSN" }},
+	} {
+		t.Run(string(tc.store.Kind), func(t *testing.T) {
 			opts := testOptions()
-			if store == "postgres" {
-				opts.SessionDSNKey = "SESSION_DSN"
-			}
+			opts.SessionStore = tc.store
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
@@ -48,40 +75,49 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					worker := workerOf(t, r, spec)
 					env := envOf(worker)
-					items := providersItems(podOf(t, r, spec))
-					if store == "pvc" {
-						if _, set := env["OMP_SESSION_STORAGE"]; set {
-							t.Errorf("OMP_SESSION_STORAGE = %q under pvc, want it left to the pod baseline", env["OMP_SESSION_STORAGE"])
-						}
-						if _, set := env["OMP_SESSION_SQL_DSN_FILE"]; set || slices.Contains(items, projection) {
-							t.Errorf("a pvc pod points at or mounts a session database: %v, %v", env, items)
-						}
-						return
+					pod := podOf(t, r, spec)
+					items := providersItems(pod)
+					if got := slices.Contains(items, projection); got != tc.projected {
+						t.Errorf("the providers volume projects the session key: %t (%v), want %t", got, items, tc.projected)
 					}
+					role := containerNamed(t, pod, string(spec.Role))
+					wantFlags := tc.store.Kind == ompsessions.StoreCloudSQLIAM
+					if got := containsSequence(role.Command, proxyFlags); got != wantFlags {
+						t.Errorf("the role container's launcher carries the session proxy's flags: %t (%q), want %t", got, role.Command, wantFlags)
+					}
+					dsnFile := tc.dsnFile(spec.Generation)
 					if env["OMP_SESSION_STORAGE"] != "sql" || env["OMP_SESSION_SQL_DSN_FILE"] != dsnFile {
 						t.Errorf("OMP_SESSION_STORAGE = %q, OMP_SESSION_SQL_DSN_FILE = %q; want sql and %s",
 							env["OMP_SESSION_STORAGE"], env["OMP_SESSION_SQL_DSN_FILE"], dsnFile)
 					}
-					if !slices.Contains(items, projection) {
-						t.Errorf("the providers volume projects %v, want %v among them", items, projection)
+					mount := mountHolding(worker, dsnFile)
+					switch tc.store.Kind {
+					case ompsessions.StorePostgres:
+						if mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
+							t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
+						}
+					case ompsessions.StoreCloudSQLIAM:
+						if mount == nil || mount.Name != roleVolume("private", spec.Role) || mount.ReadOnly {
+							t.Errorf("%s is held by %+v, want the role's writable private volume: its launcher writes the URL there", dsnFile, mount)
+						}
 					}
-					if mount := mountHolding(worker, dsnFile); mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
-						t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
-					}
-					if !slices.Contains(worker.Command, "--provider-env-dir") {
+					if !slices.Contains(worker.Command, "--provider-env-dir") && tc.store.Kind == ompsessions.StorePostgres {
 						t.Errorf("the shim is not told the providers directory: %q", worker.Command)
 					}
 				})
 			}
 			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
-			if got := slices.Contains(providersItems(probe), projection); got != (store == "postgres") {
-				t.Errorf("the probe pod mounts the session database's key: %t, want %t", got, store == "postgres")
+			if got := slices.Contains(providersItems(probe), projection); got != tc.projected {
+				t.Errorf("the probe pod mounts the session database's key: %t, want %t", got, tc.projected)
 			}
 			probeEnv := envOf(containerNamed(t, probe, probeContainer))
 			if probeEnv["OMP_SESSION_STORAGE"] != "" {
 				t.Errorf("the probe pod's Oh My Pi is told a session store: %v", probeEnv)
 			}
-			if store == "postgres" {
+			if _, set := probeEnv["OMP_SESSION_SQL_DSN_FILE"]; set != tc.projected {
+				t.Errorf("the probe pod is told a session pointer: %t (%v), want %t: it is the mounted key's alone", set, probeEnv, tc.projected)
+			}
+			if tc.store.Kind == ompsessions.StorePostgres {
 				// The probe's and every worker's `legion` read the mounted directory as the shim does
 				// (shim.ReadProviderEnv, through each container's own environment): the URL file is
 				// skipped because its pointer is there.
@@ -96,6 +132,16 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+// containsSequence reports whether argv carries want as a run of consecutive arguments.
+func containsSequence(argv, want []string) bool {
+	for i := range argv {
+		if i+len(want) <= len(argv) && slices.Equal(argv[i:i+len(want)], want) {
+			return true
+		}
+	}
+	return false
 }
 
 // providersExported is what shim.ReadProviderEnv exports from a providers directory holding the
@@ -116,112 +162,125 @@ func providersExported(t *testing.T, env map[string]string) []string {
 	return exported
 }
 
-// A pod whose providers volume projects another session store than a pod created now would, the
-// one created before the session database was configured above all, holds a move: its next
-// generation would name a URL file the pod does not mount, so the relaunch replaces the pod.
-func TestAPodWithoutTheSessionStoresProjectionHoldsAMove(t *testing.T) {
-	before, err := configure(testOptions())
-	if err != nil {
-		t.Fatal(err)
+// withoutSessionKey is pod with its providers volume projecting no session database URL file — the
+// shape of a pod an earlier release created under the file store, which no runtime builds any more
+// now that a store that keeps sessions in a database is required.
+func withoutSessionKey(pod *corev1.Pod) *corev1.Pod {
+	out := pod.DeepCopy()
+	for i, volume := range out.Spec.Volumes {
+		if volume.Name != providersVolume || volume.Secret == nil {
+			continue
+		}
+		out.Spec.Volumes[i].Secret.Items = slices.DeleteFunc(slices.Clone(volume.Secret.Items), func(item corev1.KeyToPath) bool {
+			return item.Path == ompsessions.DSNFileName
+		})
 	}
-	opts := testOptions()
-	opts.SessionDSNKey = "SESSION_DSN"
-	after, err := configure(opts)
-	if err != nil {
-		t.Fatal(err)
+	return out
+}
+
+// A pod carries its whole session store for its life — the providers volume's projection under
+// postgres, its launchers' proxy flags under cloudsql-iam — so a pod created under any other store
+// than a pod created now would get holds a move, and the relaunch replaces it: its next generation
+// would name a URL file the pod has no way to produce. A change of kind in either direction counts,
+// and so does a changed key, or a changed instance, database or login under the same kind. A pod
+// an earlier release created under the file store, which configure now refuses, holds one under
+// either database store.
+func TestAPodUnderAnotherSessionStoreHoldsAMove(t *testing.T) {
+	runtimeFor := func(store ompsessions.Store) *Runtime {
+		t.Helper()
+		opts := testOptions()
+		opts.SessionStore = store
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	postgres := runtimeFor(postgresStore)
+	otherKey := runtimeFor(ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "OTHER_SESSION_DSN"})
+	cloudSQL := runtimeFor(cloudSQLStore)
+	moved := func(edit func(*ompsessions.Database)) *Runtime {
+		database := cloudSQLStore.Database
+		edit(&database)
+		return runtimeFor(ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: database})
 	}
 	pod := func(r *Runtime) *corev1.Pod { return &corev1.Pod{Spec: podOf(t, r, workerSpec(t))} }
-	for _, tc := range []struct {
-		name  string
+	fileStorePod := withoutSessionKey(pod(postgres))
+	for name, tc := range map[string]struct {
 		r     *Runtime
 		pod   *corev1.Pod
 		moved bool
 	}{
-		{"a file-store pod under a session database", after, pod(before), true},
-		{"a session-database pod under the file store", before, pod(after), true},
-		{"a session-database pod under the same database", after, pod(after), false},
-		{"a file-store pod under the file store", before, pod(before), false},
+		"a file-store pod under postgres":            {postgres, fileStorePod, true},
+		"a postgres pod under another key":           {otherKey, pod(postgres), true},
+		"a file-store pod under cloudsql-iam":        {cloudSQL, fileStorePod, true},
+		"a postgres pod under cloudsql-iam":          {cloudSQL, pod(postgres), true},
+		"a cloudsql-iam pod under postgres":          {postgres, pod(cloudSQL), true},
+		"a cloudsql-iam pod under another instance":  {moved(func(d *ompsessions.Database) { d.Instance = "example-project:us-central1:other-instance" }), pod(cloudSQL), true},
+		"a cloudsql-iam pod under another database":  {moved(func(d *ompsessions.Database) { d.Name = "legion_sessions_next" }), pod(cloudSQL), true},
+		"a cloudsql-iam pod under another login":     {moved(func(d *ompsessions.Database) { d.User = "legion-sessions-next@example-project.iam" }), pod(cloudSQL), true},
+		"a postgres pod under the same key":          {postgres, pod(postgres), false},
+		"a cloudsql-iam pod under the same database": {cloudSQL, pod(cloudSQL), false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			moved := tc.r.movedInPod(tc.pod, workerSpec(t).Role)
-			if got := slices.ContainsFunc(moved, func(m movedAddress) bool { return m.where == "the session database URL key" }); got != tc.moved {
+			if got := slices.ContainsFunc(moved, func(m movedAddress) bool { return m.where == "the session store" }); got != tc.moved {
 				t.Errorf("movedInPod = %v, want the session store moved %t", moved, tc.moved)
 			}
 		})
 	}
 }
 
-// A resume under a session database holds the volume to nothing: its session is in the database,
-// so the issue pod's workspace-init does not expect the issue's volume to hold anything (a resume
-// on a new volume provisions the workspace from the issue's pushed branch and continues the
-// session), and the controller's workspace-init looks for no session file. The resume itself still
-// names the session, which the role launcher finds in the table (internal/launcher) and Oh My Pi
-// resumes. Sessions kept as files on the volume hold both as before.
-func TestAResumeUnderASessionDatabaseExpectsNothingOfTheVolume(t *testing.T) {
+// A role's shim and the image probe are told the providers directory (--provider-env-dir) exactly
+// where their pod mounts the providers Secret there, which it does when something needs it
+// (mountsProviders): a provider key, a providers secret, or the postgres store's URL key. Each
+// refuses a directory it is told and cannot read (shim.ReadProviderEnv), and the probe's refusal
+// fails the daemon's boot. Under cloudsql-iam no URL key is held, so a deployment with no provider
+// key and no providers secret mounts no providers volume, and neither is told the directory.
+func TestTheProvidersDirectoryIsToldWhereThePodMountsIt(t *testing.T) {
 	for _, tc := range []struct {
-		store  string
-		key    string
-		expect bool
+		name    string
+		store   ompsessions.Store
+		keys    map[string]string
+		mounted bool
 	}{
-		{"postgres", "SESSION_DSN", false},
-		{"pvc", "", true},
+		{"cloudsql-iam with no provider key", cloudSQLStore, nil, false},
+		{"cloudsql-iam with a provider key", cloudSQLStore, map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, true},
+		{"postgres with no provider key", postgresStore, nil, true},
 	} {
-		t.Run(tc.store, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions()
-			opts.SessionDSNKey = tc.key
+			opts.SessionStore, opts.ProviderKeys = tc.store, tc.keys
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			worker := workerSpec(t)
-			worker.Generation, worker.BootToken, worker.ResumeSessionFile = 2, "boot-g2", resumeSession
-			init := envOf(containerNamed(t, podOf(t, r, worker), initContainer))
-			if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != tc.expect {
-				t.Errorf("the issue pod's workspace-init expects the issue's volume: %t, want %t", set, tc.expect)
-			}
-			controller := controllerSpec(t)
-			controller.Generation, controller.BootToken, controller.ResumeSessionFile = 2, "boot-g2", controllerSession
-			controllerInit := envOf(containerNamed(t, podOf(t, r, controller), initContainer))
-			if _, set := controllerInit["LEGION_RESUME_SESSION_FILE"]; set != tc.expect {
-				t.Errorf("the controller's workspace-init looks for its session file: %t, want %t", set, tc.expect)
-			}
-			for _, spec := range []runtime.SpawnSpec{worker, controller} {
-				l, err := r.prepare(spec)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if start := launcherCommand(l, r); start.ResumeFile != spec.ResumeSessionFile || !slices.Contains(start.Argv, "--resume="+spec.ResumeSessionFile) {
-					t.Errorf("%s starts resuming %q with %q, want its session %s", spec.Claim, start.ResumeFile, start.Argv, spec.ResumeSessionFile)
-				}
-			}
-		})
-	}
-}
-
-// A new issue pod's workspace-init expects the issue's volume when a claim of the issue kept a
-// session there; under a session database no claim keeps one there, and the issue's sessions are
-// not even read.
-func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesSessions(t *testing.T) {
-	for _, tc := range []struct {
-		store  string
-		key    string
-		expect bool
-	}{
-		{"postgres", "SESSION_DSN", false},
-		{"pvc", "", true},
-	} {
-		t.Run(tc.store, func(t *testing.T) {
-			store := newFakeStore()
-			store.sessions[rootSpec(t).Issue] = true
-			g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionDSNKey = store, tc.key }))
-			g.spawn(rootSpec(t))
-			pod := g.pod(SandboxName(rootToken))
-			if pod == nil {
-				t.Fatal("the root's issue pod was not created")
-			}
-			init := envOf(containerNamed(t, pod.Spec, initContainer))
-			if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != tc.expect {
-				t.Errorf("the new pod's workspace-init expects the issue's volume: %t, want %t", set, tc.expect)
+			l := launchOf(t, r, workerSpec(t))
+			argv := launcherCommand(l, r).Argv
+			probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 5, RoleReferences: testRoleReferences}, time.Time{}).Spec.PodTemplate.Spec
+			for _, site := range []struct {
+				name    string
+				pod     corev1.PodSpec
+				command []string
+			}{
+				{"a role's shim", r.podTemplate(l).Spec, argv[:slices.Index(argv, "--")]},
+				{"the image probe", probe, containerNamed(t, probe, probeContainer).Command},
+			} {
+				t.Run(site.name, func(t *testing.T) {
+					if got := containsSequence(site.command, []string{"--provider-env-dir", ProvidersDir}); got != tc.mounted {
+						t.Errorf("told --provider-env-dir %s: %t (%q), want %t", ProvidersDir, got, site.command, tc.mounted)
+					}
+					volume := slices.ContainsFunc(site.pod.Volumes, func(v corev1.Volume) bool { return v.Name == providersVolume })
+					var mounting []string
+					for _, c := range slices.Concat(site.pod.InitContainers, site.pod.Containers) {
+						if slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == providersVolume || m.MountPath == ProvidersDir }) {
+							mounting = append(mounting, c.Name)
+						}
+					}
+					if volume != tc.mounted || (len(mounting) > 0) != tc.mounted {
+						t.Errorf("the pod holds the providers volume: %t, mounted by %q; want %t", volume, mounting, tc.mounted)
+					}
+				})
 			}
 		})
 	}

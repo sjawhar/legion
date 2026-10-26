@@ -1102,7 +1102,7 @@ test("the Architecture tab offers its focused component's Open row, and not its 
     },
   });
   await putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
-  expect((await syncArchitectureSource("CORE")).last_error).toBeNull();
+  expect((await syncArchitectureSource("CORE", "legion/arch")).last_error).toBeNull();
   const context = await asUser(browser, "alice");
 
   try {
@@ -1220,7 +1220,7 @@ test("a nested Architecture level offers Up one level, and not the keys that mov
     },
   });
   await putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
-  expect((await syncArchitectureSource("CORE")).last_error).toBeNull();
+  expect((await syncArchitectureSource("CORE", "legion/arch")).last_error).toBeNull();
   const context = await asUser(browser, "alice");
 
   try {

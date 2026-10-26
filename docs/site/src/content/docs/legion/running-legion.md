@@ -16,7 +16,7 @@ your cluster, from one published worker image.
 | --- | --- |
 | A Kubernetes cluster | Agent Sandbox installed, a gVisor runtime class, a node pool for Legion, a namespace and a storage class ([below](#the-cluster)). |
 | A host for the daemon | Reachable from the pods on two ports: the API (`port`, 13370 by default) and the worker stream (`worker_stream_port`, the API port plus one). |
-| Postgres | One database for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment). |
+| Postgres | Two databases: one for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment), and one for the agents' conversations, which every pod reaches directly (`runtime.kubernetes.session_store`, required, with its key: `postgres` with `session_dsn_secret`, or `cloudsql-iam` with `session_database`; an issue pod's disk is deleted with the pod, so a conversation kept on it would die with it). The second may be another database of the same server; its login needs `USAGE, CREATE ON SCHEMA public`, since Oh My Pi creates its own two tables there. |
 | [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents, and the project's repositories mapped to it in Dispatch's Settings → Repositories → Projects, one of them the project's default ([below](#the-projects-repositories)). |
 | The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
 | Three GitHub Apps | An **implement** App (the implementer's and merger's identity), a **review** App (every other role's) and an **Envoy** App (the webhook that feeds Envoy, and Dispatch's GitHub reads), each installed on the owner of every repository Legion works, with its private key ([below](#the-github-apps)). |
@@ -61,8 +61,9 @@ are exactly what Legion's agents can do on GitHub:
 The implement App cannot create a check run, and a review never comes from the App that wrote the
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
-and the checks that branch requires (its rulesets and its branch protection), the set the merger's
-`READY` checks, since only those decide whether CI is red at a head.
+and the checks that branch requires (its rulesets and its branch protection), since only those
+decide whether CI is red at a head, and so where Legion sends the issue. Whether the merge happens
+is GitHub's to decide, under those same rules.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
 `scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
@@ -88,10 +89,10 @@ an installation that Dispatch searches.
 
 `--webhook-url` becomes the Envoy App's webhook. That App's webhook secret is the listener's
 `ENVOY_GITHUB_WEBHOOK_SECRET`, its client id is Dispatch's `DISPATCH_APP_CLIENT_ID`, and its
-private key, base64-encoded, is `DISPATCH_APP_PEM_B64`. The review App's id is the listener's
-`ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and Dispatch read them,
-delete the files, then install every App from `https://github.com/apps/<slug>/installations/new`
-on the same repositories.
+private key, as the PEM GitHub gives or its base64, is `DISPATCH_APP_PEM_B64`. The review App's id
+is the listener's `ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and
+Dispatch read them, delete the files, then install every App from
+`https://github.com/apps/<slug>/installations/new` on the same repositories.
 
 ## The cluster
 
@@ -106,9 +107,9 @@ on the same repositories.
   cpu and memory limit with a request no greater than it, and bounds its ephemeral storage — the
   node's disk its root filesystem writes to: `$HOME`, with the image's own content under it, and
   whatever a recipe writes elsewhere under the home directory, the issue's temporary directory,
-  cache and data homes and bun install cache being one set its roles share on the issue's volume
+  cache and data homes and bun install cache being one set its roles share on the pod's own disk
   instead, each role's state home its own directory there, and the two Go caches one pair on that
-  volume shared by the issue's roles —
+  disk shared by the issue's roles —
   with a per-role limit over a smaller request. A role's reservation is
   `runtime.kubernetes.resources.<role>` (`cpu` and `memory` the limits, `cpu_request` and
   `memory_request` what the scheduler reserves of them, `ephemeral_storage` the disk limit,
@@ -150,7 +151,8 @@ on the same repositories.
   so a node's root volume can be oversubscribed by the pods' limits — an operator who knows the
   root volume raises `ephemeral_storage_request` toward a role's expected use so the scheduler
   reserves disk and places no pod a full node could not hold. Legion sets no affinity on a pod (GKE
-  Autopilot adds its own to an issue or controller pod): each issue pod owns its volume, so the
+  Autopilot adds its own to an issue or controller pod): an issue pod carries a disk of its own and
+  shares none, so the
   scheduler places it wherever the pool has room and Karpenter
   adds nodes under the pool's limits. Concurrent issue pods are bounded by what the pool's
   `limits.cpu` and `limits.memory` leave for pods of that sum (two per 8-vCPU floor node, about 80
@@ -158,9 +160,13 @@ on the same repositories.
   under `controller: daemon`, the controller's pod are counted; `admission_cap` bounds roots alone,
   a tree of N children runs N+1 pods, and an issue pod the pool cannot place stays `Pending` until
   the daemon reads it dead and, once its launch failures run out, fails the claim.
-- **A namespace and a storage class.** Each issue's volume (`issue_volume`, 50Gi by default, raised
-  from 20Gi with the shared scratch; the daemon-launched controller's pod owns one too) comes from
-  `storage_class`, which is required.
+- **A namespace and a storage class.** Each issue pod's disk (`issue_volume`, 50Gi by default,
+  raised from 20Gi with the shared scratch) comes from `storage_class`, which is required. That
+  disk is the pod's own: Kubernetes creates its claim with the pod, names it `<pod>-issue`, and
+  deletes it when the pod goes, so an issue's clone, workspace and caches live as long as its pod
+  and no longer. What outlives a pod is what was pushed to the issue's branch and each agent's
+  conversation, which the session database holds. The daemon-launched controller's pod has a
+  volume of its own, which its Sandbox owns and which does outlive its pods.
 - **Pod Security.** Pods run under the `restricted` profile: user 1000, no privilege escalation, all
   capabilities dropped, the `RuntimeDefault` seccomp profile, and no automounted API token.
 - **A ServiceAccount for the agents' pods**, named in `runtime.kubernetes.pod.service_account`
@@ -183,8 +189,12 @@ on the same repositories.
 ## The worker image
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
-(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI and a general toolchain (git, jj, gh,
-Node, uv, the AWS CLI, kubectl).
+(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
+Go (with gcc for cgo and the race detector), Node, uv, the AWS CLI, kubectl) and the client tools a
+role's own work needs (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`): `apt` cannot write a system
+prefix in an unprivileged container, unpacking
+one by hand works for some tools and not others, and what rules out a client a role unpacks onto
+its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
@@ -230,7 +240,26 @@ What each part is for:
   ([Envoy](/legion/dispatch/envoy/#how-slack-mentions-arrive-and-how-an-agent-replies) says how
   the mentions arrive and where the controller's reply token is stored). A channel belongs to one
   project: the loader refuses one named twice. A daemon restarted with a changed list relaunches the
-  controller, which resumes its session hearing the new list.
+  controller, which resumes its session hearing the new list. Its optional `deploys` names the
+  workflows that deploy its repositories to production, each a repository, a workflow file
+  directly under `.github/workflows/` (ending `.yml` or `.yaml`, the top-level file a run names,
+  not one it calls) and the step whose success is the deploy:
+
+  ```yaml
+  projects:
+    WIDGETS:
+      deploys: [{repo: <owner>/<name>, workflow: .github/workflows/<file>.yaml, step: Apply}]
+  ```
+
+  Each time a run of that workflow on the repository's default branch completes, the daemon reads
+  the run and its jobs from GitHub as the implement App, and wakes each open
+  [production check](/legion/legion/concepts/#the-production-check) of that repository once for
+  every job of the run whose named step succeeded after the check's pull request merged. A run a
+  pull request triggered, a step that was skipped or failed, and a step that finished before the
+  merge wake nothing. The run's `workflow_run` webhook reaches the daemon through Envoy, so the
+  Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
+  repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
+  does any key it does not know.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
@@ -247,6 +276,19 @@ What each part is for:
   secret.
 - **`provider_keys`** (optional) maps a variable Oh My Pi reads to a key of the providers Secret
   ([below](#secrets-and-files)); each pod gets those keys alone, in Oh My Pi's environment.
+- **`runtime.kubernetes.session_store`** is required, and must name a store that keeps every
+  pod's Oh My Pi conversation in a database, with that store's key. There are two:
+  `postgres`, whose `session_dsn_secret` names the key of the providers Secret
+  ([below](#secrets-and-files)) holding that database's `postgres://…` URL, which every pod, the
+  controller's and the image probe's included, mounts read-only; and `cloudsql-iam`, whose
+  `session_database` (`instance`, `name` and `user`, all three required) names a Cloud SQL
+  database each pod signs in to as itself, with no URL held anywhere. No deployment runs
+  `cloudsql-iam` yet; the repository's `docs/kubernetes.md` ("Selecting the store") says what it
+  needs. Each kind refuses the other's key. An omitted `session_store` and `pvc`, the file store
+  of earlier releases, are refused with the same line and its reason: an issue pod's disk is
+  deleted with the pod, so a conversation kept as a file on it dies with the pod and the next
+  launch's resume fails on the missing file, retiring the claim after three failures. Name the
+  store and its key, and have the database reachable from the pods, before the daemon boots.
 - **`nats_nkey_seed_file`** and **`nats_daemon_nkey_seed_file`** (optional) are the NATS nkey user
   seeds for the agents and for the daemon's own connection, each in a file only its owner can read.
 - **`runtime.kubernetes.agent_secrets`** (optional) enrolls every pod with the
@@ -294,9 +336,12 @@ The loader refuses any key it does not know, naming it, and refuses `omp_invocat
 - **The Dispatch and Envoy tokens** go in the files `dispatch_token_file` and `envoy_token_file`
   name. The daemon hands each pod its own copy; no pod reads your files.
 - **The providers Secret**, `legion-<project>-providers` in the namespace (`<project>` lowercased
-  with everything but letters and digits removed, `legion-widgets-providers` here), holds the keys
-  `provider_keys` names, and `NATS_NKEY_SEED` (the agents' seed) when you use one. You create it;
-  the daemon never does, and a key the kubelet cannot mount refuses the boot.
+  with everything but letters and digits removed, `legion-widgets-providers` here), holds, under
+  `session_store: postgres`, the key `session_dsn_secret` names, with the session database's
+  `postgres://…` URL; the keys `provider_keys` names; and `NATS_NKEY_SEED` (the agents' seed) when
+  you use one. You create it; the daemon never does, and a key the kubelet cannot mount refuses
+  the boot. Under `postgres` every pod mounts the session URL, so every agent can read it: give
+  that login no rights beyond its own database.
 
 ## The model route
 
@@ -389,7 +434,7 @@ pod the daemon launches and keeps running (`controller: daemon`).
 
 Set `controller: daemon` in `legion.yaml` (it needs `runtime: kubernetes`) and restart the daemon.
 It launches the controller at boot as an Agent Sandbox pod, `legion-<project>-controller`, with the
-same model access as the workers and a volume of its own for its session, relaunches it when it
+same model access as the workers and a volume of its own, which its Sandbox owns, relaunches it when it
 dies, and resumes the same session. You start nothing, and `legion controller start` against this
 daemon is refused: one controller runs per project. Nobody types into the pod: reach the controller
 through Dispatch (a message to its session on the Agents page, a reply to an ask it opened, a
@@ -401,7 +446,8 @@ the kubelet evicts under memory pressure.
 To hand the controller back to a person, set `controller: operator`, drop
 `runtime.kubernetes.resources.controller` (the daemon refuses that key unless `controller: daemon`)
 and restart the daemon: at boot it stops its own controller's claim and releases the pod, deleting
-the pod's volume and the session on it, and you then start the controller on your machine as below.
+the volume its Sandbox owned, and retires the claim with the session it recorded; you then start
+the controller on your machine as below.
 Switching to `controller: daemon` again starts a fresh controller, not the old session.
 
 A daemon built before LEGION-592 cannot run against a database a `controller: daemon` daemon used:
@@ -483,6 +529,17 @@ Closing the terminal leaves the project without one, and the daemon logs
    threads must be closed before a merge, make that the repository's own rule (a ruleset's
    "Require conversation resolution before merging").
 
+   **After the first upgrade to the release where an issue's disk dies with its pod,** the
+   `runtime.kubernetes` block must name a `session_store` that keeps sessions in a database, with
+   that store's key — for a deployment today `session_store: postgres` and `session_dsn_secret`,
+   with the providers Secret holding that key — before the daemon boots: the loader refuses the
+   file otherwise ([legion.yaml](#legionyaml)). An issue whose Sandbox still owns the volume of the
+   earlier shape keeps it until its next launch, which deletes that Sandbox and the volume with
+   it and starts the issue on a pod-owned disk, so stop each issue with its work pushed and start
+   it again rather than letting a relaunch choose the moment. The repository's
+   `docs/kubernetes.md` ("Cutting over to the pod-owned disk") has the procedure, the audit that
+   finds any claim left behind, and what rolling the image back needs.
+
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
    `legion stop --config legion.yaml`) and start it again. `legion restart <PROJECT>` does both in
    the shell it runs in, from the configuration the stopped daemon recorded. The new daemon probes
@@ -503,7 +560,9 @@ Closing the terminal leaves the project without one, and the daemon logs
    claim while it is still launching waits until the agent is ready, or until its registration
    deadline. Until the stop lands the hold lives only in the daemon's memory, so before restarting
    the daemon wait until `legion claims list` shows the claim `suspended`, not merely
-   `suspensionHeld`. The resumed agent continues the same conversation in a new pod.
+   `suspensionHeld`. The resumed agent continues the same conversation in a new pod — and that
+   pod brings a disk of its own, so its workspace is provisioned afresh from the issue's branch
+   and anything the old pod held unpushed is gone. Let the agent push before you suspend it.
 
    **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
    suspended claim on its own when its issue's phase moves to the claim's role (a phase start,
@@ -571,8 +630,8 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`)
-  and when, and when the check's bound comes due (`none` when no check is open).
+  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build`
+  or `bound`) and when, and when the check's bound comes due (`none` when no check is open).
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,

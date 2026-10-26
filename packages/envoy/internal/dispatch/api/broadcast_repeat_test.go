@@ -213,9 +213,9 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	var reads atomic.Int32
 	listener, sends := newBroadcastListener(t, broadcastSessions, func(_ http.ResponseWriter, r *http.Request) bool {
-		// The first create's registry read waits; each recipient's delivery reads the registry
-		// again after the 201 (envoy_resolve.go), and goes through.
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/sessions" && reads.Add(1) == 1 {
+		// The first create's first per-session registry read waits; the create's other read and
+		// each recipient's delivery read after the 201 (envoy_resolve.go) go through.
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/") && reads.Add(1) == 1 {
 			close(reading)
 			<-release
 		}

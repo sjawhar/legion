@@ -35,7 +35,6 @@ import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
 import { RefusableButton } from "../../components/RefusableButton";
-import { TruncatedText } from "../../components/TruncatedText";
 import { useSending } from "../../hooks/useSending";
 import { compareTimestamps } from "../../lib/timestamps";
 import {
@@ -78,6 +77,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { closestMatching, focusOnDocument } from "../shell/roving";
+import { MD_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -599,10 +599,19 @@ function AskCountPill({
 /** The list a row sits in: the open list, or one of the two folds below it. */
 type AgentSection = "active" | "inactive" | "quiet";
 
+/** The last segment of a session's directory, which is what a row wide enough to hover shows in
+ *  place of the whole path. A trailing slash names no segment, and a path of nothing but slashes
+ *  has none at all, so both keep the path itself rather than show an empty directory. */
+function lastPathSegment(dir: string): string {
+  const segments = dir.split("/").filter((segment) => segment !== "");
+  return segments.at(-1) ?? dir;
+}
+
 function AgentRow({
   agent,
   hidden,
   liveAgents,
+  mdViewport,
   needsYou,
   onPin,
   onSelect,
@@ -616,6 +625,13 @@ function AgentRow({
    *  or a filter loses nothing it holds. */
   hidden: boolean;
   liveAgents: readonly Agent[];
+  /** Whether the page is at Tailwind's `md` or wider - the width the row's own `md:` classes
+   *  switch at - answered once for the whole list rather than once per row: a list of two
+   *  hundred rows must not hold two hundred media-query listeners. Below it, on a phone, there
+   *  is no hover and the directory has a line of its own under the name, so it shows the whole
+   *  path; at `md` and wider the directory keeps its last segment and the path is a hover
+   *  away. */
+  mdViewport: boolean;
   /** This session's open questions that wait on the reader themselves: whose next move is a
    *  person's, on an issue assigned to them, and not snoozed. */
   needsYou: number;
@@ -630,6 +646,10 @@ function AgentRow({
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.host} · ${agent.dir}`;
+  // The name takes the row's width, so from `md` - where the span's own `md:` classes truncate
+  // it - the directory gives its own up and keeps the segment that names the session's work,
+  // with the whole path on the hover its `title` is.
+  const shownDir = `${agent.host} · ${mdViewport ? lastPathSegment(agent.dir) : agent.dir}`;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
@@ -675,7 +695,11 @@ function AgentRow({
             type="checkbox"
           />
           <FreshnessDot agent={agent} />
-          <h2 className={`max-w-56 shrink-0 text-sm font-semibold ${textPrimaryOnCanvas}`}>
+          {/* A person finds a session by its name, so the name is never cut: the heading shrinks
+              with the row instead of holding a width of its own, and its text wraps - mid-word
+              where the name has nothing else to break on - so a long name makes a taller row
+              rather than a shortened one or a page wider than the screen. */}
+          <h2 className={`min-w-0 text-sm font-semibold ${textPrimaryOnCanvas}`}>
             <button
               aria-controls={detailsId}
               aria-expanded={expanded}
@@ -685,7 +709,7 @@ function AgentRow({
               title={label}
               type="button"
             >
-              <TruncatedText className="min-w-0">{label}</TruncatedText>
+              <span className="min-w-0 break-words">{label}</span>
               <span className={disclosureButtonText}>
                 <ChevronIcon expanded={expanded} />
               </span>
@@ -706,11 +730,23 @@ function AgentRow({
               title
             </CopyButton>
           )}
+          {/* The directory is what gives the row's width to the name: above a phone it keeps its
+              last segment and the whole path is one hover away, while a phone, which has no
+              hover and already puts the directory on a line of its own under the name, shows the
+              path whole and wraps it rather than cutting it. The floor at `md` is there because
+              the name is allowed to take everything else: without it a long name squeezes this
+              span to nothing, and a directory with no box is painted nowhere and hovered
+              nowhere. It is sized for a host and a last segment at this text size - roughly
+              thirty characters - so the shortened directory stays readable, and the name takes
+              a third line instead. Nothing here ellipsises: the shortened text is meant to be
+              read whole, so a host or segment longer than the floor wraps inside it rather than
+              being cut, and the whole path is still the `title`. */}
           <span
-            className={`order-last min-w-0 basis-full truncate text-xs md:order-none md:flex-1 md:basis-0 ${textMutedOnCanvas}`}
+            className={`order-last min-w-0 basis-full text-xs break-words md:order-none md:min-w-48 md:flex-1 md:basis-0 ${textMutedOnCanvas}`}
+            data-agent-dir=""
             title={machineAndDir}
           >
-            {machineAndDir}
+            {shownDir}
           </span>
           {agent.roles.map((role) => (
             <LabelPill key={role}>{role}</LabelPill>
@@ -1153,6 +1189,8 @@ function BroadcastComposer({
 export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
   const { agents, error, isError, isPending } = useAgents(true, true);
+  // One listener for the list, not one per row: every row's directory reads the same answer.
+  const mdViewport = useMediaQuery(MD_VIEWPORT_QUERY);
   const inbox = useQuery(inboxQuery());
   // Until `/auth/whoami` answers, no question is counted as the reader's.
   const viewer = useQuery(whoAmIQuery()).data?.login;
@@ -1319,6 +1357,7 @@ export function AgentsPage(): ReactNode {
       hidden={!foldOpen || !matches(agent)}
       key={agent.session_id}
       liveAgents={agents}
+      mdViewport={mdViewport}
       needsYou={needsYouBySession.get(agent.session_id) ?? 0}
       onPin={() => togglePin(agent.session_id)}
       onSelect={(next) => select(agent.session_id, next)}

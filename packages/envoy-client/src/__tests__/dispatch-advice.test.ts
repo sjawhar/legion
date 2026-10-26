@@ -56,9 +56,9 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
         )
       );
     }
-    if (target.pathname === "/api/v1/projects/DSP/architecture-source" && method === "GET") {
-      // No source configured is the read's own answer, not a refusal.
-      return new Response("null", { headers: { "Content-Type": "application/json" } });
+    if (target.pathname === "/api/v1/projects/DSP/architecture-sources" && method === "GET") {
+      // No source configured is the list's own answer, not a refusal.
+      return new Response("[]", { headers: { "Content-Type": "application/json" } });
     }
     if (target.pathname === "/api/v1/issues/DSP-42/artifacts" && method === "POST") {
       return response(
@@ -382,6 +382,41 @@ describe("Dispatch write advice", () => {
     );
     expect(first.details.advice).toEqual(rawAdvice);
     expect(second.details.advice).toEqual(rawAdvice);
+  });
+
+  test("drops the triage pointer when Legion owns the issue's status", async () => {
+    const rawAdvice = advice({ issue_status: "triage", legion_managed_status: true });
+    const result = await executeWrite(
+      "dispatch_message",
+      { issue: "DSP-42", body: "First" },
+      rawAdvice
+    );
+
+    expect(result.text).toBe(
+      `Posted message message-1 (dispatch://DSP-42/message/message-1) ${issueSuffix}`
+    );
+    expect(result.details.advice).toEqual(rawAdvice);
+    // The memo stays unmarked, so the line is still available if the issue leaves Legion's hands.
+    const later = await executeWrite(
+      "dispatch_message",
+      { issue: "DSP-42", body: "Second" },
+      advice({ issue_status: "triage" })
+    );
+    expect(later.text).toContain("is still in triage");
+  });
+
+  // The absent case is the rest of this file's fixtures, which carry no field and print the line.
+  test("renders the triage pointer when legion_managed_status is false", async () => {
+    const rawAdvice = advice({ issue_status: "triage", legion_managed_status: false });
+    const result = await executeWrite(
+      "dispatch_message",
+      { issue: "DSP-42", body: "First" },
+      rawAdvice
+    );
+
+    expect(result.text).toEndWith(
+      'DSP-42 is still in triage — nobody can see its development status. See the `dispatch` skill, "Issue status is yours to move".'
+    );
   });
 
   test("caps open-ask pointers at two and truncates questions to 80 characters", async () => {

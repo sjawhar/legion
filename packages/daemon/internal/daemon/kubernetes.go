@@ -211,7 +211,8 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 type sandboxBoot struct {
 	// clusterCheck is the cluster's half of boot's refusals (plan.clusterCheck), each read-only:
 	// Agent Sandbox is installed, and no Sandbox of a layout before this runtime's remains in the
-	// namespace for the project.
+	// namespace for the project. The census logs what it accepts but will not keep — an issue
+	// Sandbox whose next launch replaces its disk — to the runtime's own logger.
 	clusterCheck func(context.Context) error
 	// probe is the image probe the runtime runs (sandbox.ImageProbe), over the references of the
 	// role prompts every worker pod is handed (prompts.RoleReferences).
@@ -230,7 +231,7 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
 			return err
 		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project, reads.opts.Log)
 	}
 	return sandboxBoot{clusterCheck: clusterCheck, probe: probe}, nil
 }
@@ -340,7 +341,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ProviderKeys:            providerSecretKeys(cfg.ProviderKeys),
 		LaunchSecrets:           launchSecretNames(cfg, lookup),
 		ProvidersSecrets:        providersSecrets(cfg, lookup),
-		SessionDSNKey:           k.SessionDSNSecret,
+		SessionStore:            k.SessionStore,
 		Setup:                   k.Setup,
 		BootTimeout:             cfg.WorkerBootTimeout,
 		RegistrationIntervals:   cfg.WorkerBootRegistrationDeadlineIntervals,

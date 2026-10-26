@@ -297,4 +297,35 @@ package api
 // 30; main then landed sjawhar/legion#1986 at 30, 31 and 32, LEGION-781 at 33 and INFRA-31 at 34,
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
-const DaemonAPIVersion = 35
+//
+// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
+// issue beneath it is still in the workflow and a merged root's close waits for the rest of its
+// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
+// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
+// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+//
+// 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
+// generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates
+// with the pod and deletes with it, so an issue's Sandbox owns no volume claim template and a
+// stopped issue's Sandbox is always deleted. Nothing carries a disk from one pod to the next, so
+// every provision is the first and the `workspace-init provision` container's environment loses
+// `LEGION_EXPECT_ISSUE_VOLUME`. With it go `workspace-init`'s exit code 3 for a volume holding
+// neither the clone nor a retained session, the `LEGION_WORKSPACE_RECOVERED_FROM` a relaunch after
+// that loss carried and the `.legion/<KEY>/workspace-recovered.json` marker `workspace-init` wrote
+// from it, the daemon's probe for a retained session of the issue that decided whether to expect
+// anything, and `legion sessions mark-lost`, the operator command that marked a claim whose
+// workspace was lost. The controller's pod loses its init container with them, since the sessions
+// directory it made is gone. `runtime.kubernetes.session_store` must name a store that keeps
+// sessions in a database, `postgres` or `cloudsql-iam` — an omitted key is the same refusal as an
+// explicit `pvc` — since a session kept as a file on the pod's disk would die with the pod and the
+// next launch's resume would fail on the missing file, retiring the claim after three failures. A
+// daemon before 37 sets `LEGION_EXPECT_ISSUE_VOLUME=true` on a pod whose `workspace-init` from
+// this commit knows neither that name nor exit 3, so a lost disk is
+// provisioned afresh and reported as provisioned, and that daemon resumes a role onto a session
+// file the new disk does not hold; an image built before 37 runs the whole lost-disk machinery
+// against a daemon that sets none of it. The image probe, which holds the image's pi-legion to
+// this number, refuses either pair. (This branch took 36; main then landed INFRA-229 at 36 and
+// released pi-legion declaring it, so this branch takes the number above it, as the collision
+// note says.)
+const DaemonAPIVersion = 37

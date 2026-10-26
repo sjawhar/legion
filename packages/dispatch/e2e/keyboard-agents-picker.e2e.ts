@@ -873,8 +873,9 @@ test.describe("agents page", () => {
       await expect(picker).toBeFocused();
       await opener.click();
       await expect(opener).toHaveAttribute("aria-expanded", "false");
-      // Back on the row itself - a click beside its controls - for the key.
-      await row.getByText("box-1 · /srv/planner").click();
+      // Back on the row itself - a click beside its controls, on the directory, which is not
+      // one of them - for the key.
+      await row.locator("[data-agent-dir]").click();
       await expect(row).toBeFocused();
       await page.keyboard.press("i");
 

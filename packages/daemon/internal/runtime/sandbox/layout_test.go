@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -17,14 +19,14 @@ func TestTheBootCensusRefusesLegacyIssueSandboxesOnly(t *testing.T) {
 	g := newRig(t, nil)
 	g.spawn(rootSpec(t))
 	sandboxes := g.dyn.Resource(sandboxGVR).Namespace(testNamespace)
-	if err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject); err != nil {
+	if err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject, slogTo(io.Discard)); err != nil {
 		t.Fatalf("census of a current issue pod = %v, want none", err)
 	}
 	legacy := sandboxObject(t, "legion-legion-legion-208-tester", "uid-legacy", modeRunning, claimLabels(workerSpec(t).Role))
 	if err := g.dyn.Tracker().Create(sandboxGVR, legacy, testNamespace); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject)
+	err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject, slogTo(io.Discard))
 	if err == nil || !strings.Contains(err.Error(), "legacy issue Sandbox") || !strings.Contains(err.Error(), legacy.GetName()) {
 		t.Fatalf("legacy object census = %v", err)
 	}
@@ -39,7 +41,7 @@ func TestTheBootCensusHoldsEverySandboxToTheLaunchersItsLabelsName(t *testing.T)
 	g := newRig(t, nil)
 	g.spawn(controllerSpec(t))
 	g.spawn(rootSpec(t))
-	if err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject); err != nil {
+	if err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject, slogTo(io.Discard)); err != nil {
 		t.Fatalf("census of a current controller pod and issue pod = %v, want none", err)
 	}
 
@@ -62,7 +64,7 @@ func TestTheBootCensusHoldsEverySandboxToTheLaunchersItsLabelsName(t *testing.T)
 	} {
 		t.Run(label, func(t *testing.T) {
 			sandboxes := newDynamic(t, sandboxRunning(t, tc.name, tc.labels, tc.containers...)).Resource(sandboxGVR).Namespace(testNamespace)
-			err := rejectLegacyIssueSandboxes(context.Background(), sandboxes, testProject)
+			err := rejectLegacyIssueSandboxes(context.Background(), sandboxes, testProject, slogTo(io.Discard))
 			if err == nil || !strings.Contains(err.Error(), tc.name) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("census = %v, want a refusal naming %s: %q", err, tc.name, tc.want)
 			}
@@ -93,7 +95,7 @@ func TestTheBootCensusNamesEveryRefusedSandboxAndHowMany(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject)
+	err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject, slogTo(io.Discard))
 	if err == nil {
 		t.Fatal("census = nil, want a refusal naming every legacy Sandbox")
 	}
@@ -114,41 +116,44 @@ func TestTheBootCensusNamesEveryRefusedSandboxAndHowMany(t *testing.T) {
 	}
 }
 
-// Every Sandbox this runtime builds owns a volume of its own, the `issue` claim template, and the
-// census passes a current issue Sandbox and the current controller's. It refuses, by name, every
-// Sandbox of the tree-volume layout before per-issue volumes whose containers would otherwise pass:
-// a child issue's Sandbox with no claim template (it mounted its tree root's volume), a tree root's
-// Sandbox with its `tree` template, and that layout's controller Sandbox with a `tree` template of
-// its own — each told it is of the tree-volume layout and pointed at docs/kubernetes.md's upgrade
-// section — before the daemon adopts, suspends or recreates any of them.
+// An issue Sandbox owns no claim template at all — its disk is its own pod's (INFRA-80) — and the
+// controller's owns the one `issue` template its working root is on, which outlives its pods while
+// its session is a row in the session database; the census passes both as this runtime builds
+// them. It refuses, by name, every Sandbox of the tree-volume layout before
+// per-issue volumes whose containers would otherwise pass: a tree root's Sandbox with its `tree`
+// template, that layout's controller Sandbox with a `tree` template of its own, and a controller
+// Sandbox owning no volume, which no release of this runtime built — each told it is of the
+// tree-volume layout and pointed at docs/kubernetes.md's upgrade section — before the daemon
+// adopts, suspends or recreates any of them.
 func TestTheBootCensusRefusesEverySandboxOfTheTreeVolumeLayout(t *testing.T) {
 	g := newRig(t, nil)
 	g.spawn(controllerSpec(t))
 	g.spawn(rootSpec(t))
-	if err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject); err != nil {
+	if err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject, slogTo(io.Discard)); err != nil {
 		t.Fatalf("census of a current issue pod and controller pod = %v, want none", err)
 	}
 
 	const layout = "it is of the tree-volume layout before per-issue volumes"
 	const upgrade = `docs/kubernetes.md's "Upgrading a deployment with running trees"`
+	controller := map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
 	for label, tc := range map[string]struct {
 		object *unstructured.Unstructured
 		want   string
 	}{
-		"a child issue Sandbox that mounted its tree root's volume": {
-			withoutVolume(sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...)), "owns no volume",
-		},
 		"a tree root's Sandbox with its tree template": {
 			withTreeVolume(t, sandboxRunning(t, "legion-legion-legion-300", claimLabels(claim.RoleArchitect), workflowContainers()...)), `owns a volume claim template named "tree", not "issue"`,
 		},
 		"the controller Sandbox of that layout": {
-			withTreeVolume(t, sandboxRunning(t, "legion-legion-controller", map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}, string(claim.RoleController))),
+			withTreeVolume(t, sandboxRunning(t, "legion-legion-controller", controller, string(claim.RoleController))),
 			`owns a volume claim template named "tree", not "issue"`,
+		},
+		"a controller Sandbox owning no volume": {
+			sandboxRunning(t, "legion-legion-controller", controller, string(claim.RoleController)), "owns no volume",
 		},
 	} {
 		t.Run(label, func(t *testing.T) {
 			sandboxes := newDynamic(t, tc.object).Resource(sandboxGVR).Namespace(testNamespace)
-			err := rejectLegacyIssueSandboxes(context.Background(), sandboxes, testProject)
+			err := rejectLegacyIssueSandboxes(context.Background(), sandboxes, testProject, slogTo(io.Discard))
 			if err == nil {
 				t.Fatalf("census = nil, want a refusal naming %s", tc.object.GetName())
 			}
@@ -161,29 +166,66 @@ func TestTheBootCensusRefusesEverySandboxOfTheTreeVolumeLayout(t *testing.T) {
 	}
 }
 
+// An issue's disk is its own pod's, so the Sandbox this runtime builds for an issue owns no claim
+// template and the census passes it. It passes the one `issue` template the release before the
+// pod-owned disk gave an issue too: volumeClaimTemplates is immutable in the CRD, so nothing but
+// the delete-and-create of the issue's next launch can replace that Sandbox, and a boot refusal
+// would stop the daemon until an operator deleted one Sandbox per open issue by hand. The census
+// names it in one info line instead, so the pending migration is visible, and says nothing of the
+// Sandboxes already of this runtime's shape.
+func TestTheBootCensusPassesAnIssueSandboxOfEitherDiskShape(t *testing.T) {
+	g := newRig(t, nil)
+	g.spawn(controllerSpec(t))
+	g.spawn(rootSpec(t))
+	before := withSupersededDisk(t, sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...))
+	now := sandboxRunning(t, "legion-legion-legion-210", claimLabels(claim.RoleImplementer), workflowContainers()...)
+	for _, object := range []*unstructured.Unstructured{before, now} {
+		if err := g.dyn.Tracker().Create(sandboxGVR, object, testNamespace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logs := &bytes.Buffer{}
+	if err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject, slogTo(logs)); err != nil {
+		t.Fatalf("census of an issue Sandbox of each disk shape = %v, want none", err)
+	}
+	if lines := strings.Count(logs.String(), "sandbox="+before.GetName()); lines != 1 {
+		t.Errorf("census logged %s %d times, want once: %q", before.GetName(), lines, logs)
+	}
+	if !strings.Contains(logs.String(), "next launch replaces it") {
+		t.Errorf("census logged %q, want it to say %s's next launch replaces its claim template", logs, before.GetName())
+	}
+	for _, name := range []string{now.GetName(), SandboxName(rootToken), SandboxName(controllerToken)} {
+		if strings.Contains(logs.String(), name) {
+			t.Errorf("census logged %q, which names %s, a Sandbox already of this runtime's shape", logs, name)
+		}
+	}
+}
+
 // One census names every tree-volume-layout Sandbox it refuses, with its reason, and how many,
-// beside any legacy per-claim Sandbox, and none of the pods this runtime built: the operator clears
-// them all before the next boot rather than one per refused boot.
+// beside any legacy per-claim Sandbox, and neither the pods this runtime built nor the issue
+// Sandbox whose next launch replaces its disk: the operator clears them all before the next boot
+// rather than one per refused boot.
 func TestTheBootCensusNamesEveryTreeVolumeLayoutSandboxInOneRefusal(t *testing.T) {
 	g := newRig(t, nil)
 	g.spawn(controllerSpec(t))
 	g.spawn(rootSpec(t))
-	built := []string{SandboxName(rootToken), SandboxName(controllerToken)}
+	built := []string{SandboxName(rootToken), SandboxName(controllerToken), "legion-legion-legion-209"}
 	refused := map[string]string{
-		"legion-legion-legion-209": "owns no volume",
-		"legion-legion-legion-300": `owns a volume claim template named "tree"`,
-		"legion-legion-legion-301": "runs containers [worker], not exactly the launchers its labels name",
+		"legion-legion-controller-old": "owns no volume",
+		"legion-legion-legion-300":     `owns a volume claim template named "tree"`,
+		"legion-legion-legion-301":     "runs containers [worker], not exactly the launchers its labels name",
 	}
 	for _, object := range []*unstructured.Unstructured{
-		withoutVolume(sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...)),
+		sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...),
+		sandboxRunning(t, "legion-legion-controller-old", map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}, string(claim.RoleController)),
 		withTreeVolume(t, sandboxRunning(t, "legion-legion-legion-300", claimLabels(claim.RoleArchitect), workflowContainers()...)),
-		withoutVolume(sandboxRunning(t, "legion-legion-legion-301", claimLabels(claim.RoleTester), "worker")),
+		sandboxRunning(t, "legion-legion-legion-301", claimLabels(claim.RoleTester), "worker"),
 	} {
 		if err := g.dyn.Tracker().Create(sandboxGVR, object, testNamespace); err != nil {
 			t.Fatal(err)
 		}
 	}
-	err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject)
+	err := rejectLegacyIssueSandboxes(g.ctx, g.dyn.Resource(sandboxGVR).Namespace(testNamespace), testProject, slogTo(io.Discard))
 	if err == nil {
 		t.Fatal("census = nil, want a refusal naming every tree-volume-layout Sandbox")
 	}
@@ -220,18 +262,7 @@ func workflowContainers() []string {
 // is named `tree`, the template that layout gave the tree root's Sandbox and the controller's.
 func withTreeVolume(t *testing.T, u *unstructured.Unstructured) *unstructured.Unstructured {
 	t.Helper()
-	templates, found, err := unstructured.NestedSlice(u.Object, "spec", "volumeClaimTemplates")
-	if err != nil || !found || len(templates) != 1 {
-		t.Fatalf("test setup: %s carries templates %v (%v), want the one issue template to rename", u.GetName(), templates, err)
-	}
-	template := templates[0].(map[string]any)
-	if err := unstructured.SetNestedField(template, "tree", "metadata", "name"); err != nil {
-		t.Fatal(err)
-	}
-	if err := unstructured.SetNestedSlice(u.Object, []any{template}, "spec", "volumeClaimTemplates"); err != nil {
-		t.Fatal(err)
-	}
-	return u
+	return withClaimTemplate(t, u, "tree")
 }
 
 // sandboxRunning is a Sandbox as the API would hold it, whose pod runs containers by these names.

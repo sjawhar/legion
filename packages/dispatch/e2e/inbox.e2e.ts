@@ -14,6 +14,7 @@ import {
   getIssue,
   getIssueEvents,
   patchIssue,
+  putProjectDefaultAssignee,
   replyToCommentDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
@@ -1257,6 +1258,37 @@ test("the Inbox opens on the reader's own questions, every visit, and ?assignee=
   } finally {
     await alice.close();
     await bob.close();
+  }
+});
+
+test("an agent's issue in a project with a default assignee reaches that person's Inbox, and one without a default reaches nobody's", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Ops" });
+  await putProjectDefaultAssignee("CORE", { assignee: "alice" }, { as: "user", login: "alice" });
+
+  // The shared token holds nothing and names nobody: only CORE's default can assign this.
+  const defaulted = await createIssue({ project: "CORE", title: "Defaulted issue" }, session);
+  expect(defaulted.assignee).toBe("alice");
+  const defaultedAsk = await createAsk(defaulted.key, { question: "Defaulted decision" }, session);
+  // Negative control: OPS names nobody, so its issue stays unassigned and reaches no Inbox.
+  const unowned = await createIssue({ project: "OPS", title: "Unowned issue" }, session);
+  expect(unowned.assignee).toBeNull();
+  const unownedAsk = await createAsk(unowned.key, { question: "Unowned decision" }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(page.getByTestId(`ask-${defaultedAsk.id}`)).toBeVisible();
+    await expect(page.getByTestId(`ask-${unownedAsk.id}`)).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath(`inbox-project-default-assignee-${testInfo.project.name}.png`),
+      fullPage: true,
+    });
+  } finally {
+    await alice.close();
   }
 });
 

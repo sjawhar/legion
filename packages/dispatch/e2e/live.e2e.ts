@@ -507,11 +507,19 @@ test("live: a fresh page load opens the socket and stays within a bounded reques
   // which the Conversation's own list shares rather than fetching again - the margin's own
   // list of the issue's asks and the Conversation's, which asks the same route for each
   // ask's thread (`?thread=1`) and so is a request of its own, not the margin's shared,
-  // the issue's message threads, the two one-row event reads the unread mark needs (the
-  // first event past the watermark, and the issue's head), Conversation's live-agent query,
-  // the one block-schema fetch every document surface shares for the session, the header's
-  // lookup of the project's architecture source, the header's read of the repository mappings,
-  // me/agents/state, credential requests waiting on the viewer, and `me/replies?limit=1`.
+  // the issue's message threads, the two one-row event reads the unread mark
+  // needs (the first event past the watermark, and the issue's head),
+  // Conversation's live-agent query, the one block-schema fetch every document
+  // surface shares for the session, the header's read of the project's
+  // architecture sources (the `Components:` line offers its picker only when the
+  // project has one; the component tree itself is fetched only once the picker
+  // opens, never on load), the header's read of the repository mappings (an issue
+  // that resolves to no repository, as this one does, shows the `Repository:` item only
+  // when its project maps one), me/agents/state, whose unread replies the Agents badge
+  // counts on every page (the sidebar's on desktop, the compact header's on phone), and
+  // the credential requests waiting on the viewer, which the Needs-you badge counts beside
+  // the inbox on every page, and `me/replies?limit=1`, whose total the Replies badge counts on
+  // every page (the sidebar's on desktop, the compact header's on phone).
   // The Conversation pages no event log at all now that the history is the Activity tab's,
   // and the Activity panel is unmounted until its tab is opened. The phone project (iphone)
   // does not fetch the sidebar while its drawer is closed, so it uses 18. Asserted exactly

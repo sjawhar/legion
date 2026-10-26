@@ -56,10 +56,10 @@ async function roveToSilent(page: Page): Promise<Locator> {
   return row;
 }
 
-/** Back on the row itself - a click beside its controls, which is how a reader leaves a written
- *  composer without its Discard prompt - and pinned from the keyboard. */
-async function pinFromRow(row: Locator, place: string): Promise<void> {
-  await row.getByText(place).click();
+/** Back on the row itself - a click on its directory, beside its controls, which is how a reader
+ *  leaves a written composer without its Discard prompt - and pinned from the keyboard. */
+async function pinFromRow(row: Locator): Promise<void> {
+  await row.locator("[data-agent-dir]").click();
   await expect(row).toBeFocused();
   await row.page().keyboard.press("Shift+P");
 }
@@ -193,7 +193,7 @@ test.describe("agents page pins", () => {
       await page.keyboard.type(" can you take this");
       await expect(field).toHaveValue("@Silent can you take this");
 
-      await pinFromRow(silentRow, "box-1 · /srv/silent");
+      await pinFromRow(silentRow);
       await expect(rows.nth(0)).toHaveAttribute("data-agent-row", "silent-session");
       await expect(silentRow).toBeFocused();
       await expect(opener).toHaveAttribute("aria-expanded", "true");
@@ -242,7 +242,7 @@ test.describe("agents page pins", () => {
       await silentRow.getByRole("button", { name: "Reply" }).first().click();
       await expect(cancelReply).toBeVisible();
       await field.fill("Yes, go ahead");
-      await pinFromRow(silentRow, "box-1 · /srv/silent");
+      await pinFromRow(silentRow);
 
       await expect(rows.nth(0)).toHaveAttribute("data-agent-row", "silent-session");
       await expect(silentRow).toBeFocused();
@@ -291,7 +291,7 @@ test.describe("agents page pins", () => {
       await silentRow.getByRole("button", { name: "Reply" }).first().click();
       await expect(silentRow.getByRole("button", { name: "Cancel reply" })).toBeVisible();
       await field.fill("Yes, go ahead");
-      await pinFromRow(silentRow, "box-1 · /srv/silent");
+      await pinFromRow(silentRow);
       await expect(silentRow).toBeFocused();
       await expect(field).toHaveValue("Yes, go ahead");
       await opener.click();
@@ -337,7 +337,7 @@ test.describe("agents page pins", () => {
       await page.keyboard.type("Status please");
       await page.keyboard.press("Control+Enter");
       await expect(field).toBeDisabled();
-      await pinFromRow(silentRow, "box-1 · /srv/silent");
+      await pinFromRow(silentRow);
 
       await expect(rows.nth(0)).toHaveAttribute("data-agent-row", "silent-session");
       await expect(silentRow).toBeFocused();
@@ -378,7 +378,7 @@ test.describe("agents page pins", () => {
       const uploading = silentRow.getByRole("button", { name: "Uploading file…" });
       await expect(uploading).toBeDisabled();
 
-      await pinFromRow(silentRow, "box-1 · /srv/silent");
+      await pinFromRow(silentRow);
       await expect(shownAgentRows(page).nth(0)).toHaveAttribute("data-agent-row", "silent-session");
       await expect(uploading).toBeDisabled();
       upload.release();
@@ -443,7 +443,7 @@ test.describe("agents page pins", () => {
       await expect(conversation).toContainText("Third question");
       await expect(conversation).toContainText("First answer");
 
-      await pinFromRow(staleRow, "box-1 · /srv/stale");
+      await pinFromRow(staleRow);
       await expect(shownAgentRows(page).nth(0)).toHaveAttribute("data-agent-row", "stale-session");
       await expect(conversation).toContainText("Third question");
       await expect(conversation).toContainText("Second answer");
@@ -571,7 +571,7 @@ test.describe("agents page pins", () => {
       await fold.click();
       await staleRow.getByRole("button", { exact: true, name: "Stale" }).click();
       await expect(staleRow.getByRole("textbox", { name: "Comment" })).toBeVisible();
-      await pinFromRow(staleRow, "box-1 · /srv/stale");
+      await pinFromRow(staleRow);
       await expect(staleRow).toHaveCount(1);
       await expect(staleRow).toBeHidden();
 
