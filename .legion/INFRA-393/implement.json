@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-393",
+  "completed": "2026-10-26T13:25:00Z",
+  "round": "third forward merge of main (415f9ddb1494) into the retro head a9091561867187cfe7e57a54c4be055251e22ec0, which GitHub reported CONFLICTING. The merge commit is 85a3e2196a8c51d6211918d2ce8417d31f50fb31 (jj new legion/INFRA-393 \"main\"@origin, no rebase). In packages/envoy/CHANGELOG.md, the one conflict, both sides' Unreleased / Added entries are kept; that file has no version headings, so nothing moved under a release. packages/envoy/AGENTS.md merged with no conflict, and against main the only line that differs is this pull request's embedder row. Main added no migration.",
+  "fingerprint": {
+    "before": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea at a9091561867187cfe7e57a54c4be055251e22ec0",
+    "after": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea at 85a3e2196a8c51d6211918d2ce8417d31f50fb31",
+    "verdict": "unchanged",
+    "comment": "https://github.com/sjawhar/legion/pull/2208#issuecomment-6417057799"
+  },
+  "proof": [
+    {
+      "criterion": "The forward merge leaves the branch's diff unchanged, and the bare gates hold at the new head (rebase re-check)",
+      "surface": "the merged tree in the issue workspace against a local Postgres 17 + pgvector, and GitHub Actions at the new head",
+      "command": "the unchanged-diff fingerprint at both heads; go build ./... and go vet over api, embed, embedqueue, store and cmd/dispatch; go test -count=1 ./internal/dispatch/embed/... ./internal/dispatch/embedqueue/...; go test -count=1 -run 'RoutesTable|WriteRouteIndex|Coverage|Meaning|Migration' ./internal/dispatch/api/ ./internal/dispatch/store/",
+      "observed": "fingerprint 337b617b… at both heads; build and vet clean; embed, embedqueue, api and store ok; GitHub reports MERGEABLE, 65 files +7205/−1289, the same as the retro head; Tests 40329926318, PR Title 40329926327, Legion Envoy and Contracts 40329926395 and Docs 40329926461 were queued and Worker Image 40329926524 pending when I completed",
+      "headSha": "85a3e2196a8c51d6211918d2ce8417d31f50fb31",
+      "negativeControl": "the last head whose diff changed, ec6ea9e0b9ad, moved the fingerprint 6a1249c2… → 337b617b…; this merge keeps 337b617b…, so under the unchanged-fingerprint rule round 4's real-surface proof still holds (coverage route 5/5 current on a fresh database, no bearer → 401)"
+    }
+  ],
+  "filesChanged": [
+    "merge commit only: packages/envoy/CHANGELOG.md (both sides kept)"
+  ],
+  "deviations": [],
+  "openQuestions": []
+}
