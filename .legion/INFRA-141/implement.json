@@ -2,37 +2,49 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T15:18:25Z",
-  "round": "generation 3, sent back from retro at 69fdd6bc for R2 (unbounded store calls on the write routes and every HTTP path that reaches the bus) and R1 (a live session reported gone by GET /v1/registry/<id>), per the architect's rulings of 13:40Z and 14:16Z; no merge of main (MERGEABLE)",
+  "completed": "2026-10-26T16:41:00Z",
+  "round": "generation 3, review 5655062345 at cc183a6f: four fixes per the architect's ruling of 16:02Z (restated 16:28Z after the pod relaunch); the work the interrupted turn left in the working copy was reviewed, completed and verified; no merge of main",
   "proof": [
     {
-      "criterion": "R2: every listener HTTP route that writes does its store work inside sendRequestBudget, so a bus that is connected but silent gets the named 503 with Retry-After: 1 instead of no answer",
-      "surface": "the real envoy-listener binary built at this head, connected to a real NATS through a TCP relay that is then frozen; driven with curl",
-      "command": "bash smoke.sh listener-new: subscribe ses_a (bus up); freeze; POST /v1/interests/subscribe (ses_new), POST /v1/roles/set (ses_a, smoke-role), DELETE /v1/interests/ses_a, DELETE /v1/sessions/ses_a",
-      "observed": "subscribe 503 in 3.503270 s, roles/set 503 in 3.504839 s, DELETE /v1/interests 503 in 3.504480 s, DELETE /v1/sessions 503 in 3.502418 s, each 'envoy: the message bus did not answer: <the call>: context deadline exceeded' with Retry-After: 1",
-      "headSha": "7093f375b213f6a74c1052df7cce481959525465",
-      "negativeControl": "The same rig with the listener built from the accepted head 69fdd6bc: all four got no answer, 'curl: (52) Empty reply from server' at 10.002, 10.002, 10.003 and 10.002 s"
+      "criterion": "(1) A role claim's rollback and the old holder's topic cleanup run even when the request has ended, and the role reaper removes a role topic whose claim names another session or none",
+      "surface": "go test of ./internal/store against the in-process NATS (real role and interest buckets)",
+      "command": "cd packages/envoy && go test ./internal/store -count=3 -run 'TestAClaimsCleanupsOutliveTheRequestThatMadeIt|TestTheRoleReaperRemovesARoleTopicWhoseClaimNamesAnotherSessionOrNone|TestTheRoleReaperPutsBackATopicWhoseClaimLandsAsItIsRemoved' -v",
+      "observed": "3 of 3 pass: with the request's context ended, the old holder loses the role's topic and a failed claim is rolled back, while a claim that landed keeps its topic; the reaper removes a planted stale topic after two passes on the same revision and puts back the topic of a claim that lands as it removes it",
+      "headSha": "74318aa80638e83228654a802185d26cc3d07c30",
+      "negativeControl": "go test -overlay with kv.go from cc183a6f: 'the old holder's topic' and 'a failed claim's rollback' time out waiting for the cleanup; 'after pass 2 ses_superseded's topics = [notifications.slack.> notifications.role.r], want [notifications.slack.>]'"
     },
     {
-      "criterion": "R2 sweep: the GitHub CI record, the Slack, GhostWispr and GitHub publishes and /healthz finish inside their callers' waits with their current answers; R1: GET /v1/registry/<id> answers 200 with no topics for a live session whose key only the interest bucket refuses, and Dispatch's envoy client finds it; each pinned by a test that fails first",
-      "surface": "go test of ./cmd/listener and ./internal/cistore against the in-process NATS behind the listener test relays (relay.arm, and a new subjectStallRelay that stalls only $JS./$KV. subjects), the real handlers, and Dispatch's internal/dispatch/envoy client against an httptest server over registerV1Routes",
-      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip <the four testpg tests> -timeout 25m; go test ./internal/webhook/... ./internal/cistore/... ./internal/store ./internal/session ./internal/integration -count=1",
-      "observed": "cmd/listener ok 366.896s, no --- FAIL: TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget (7 routes, 3.50-3.59 s), TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget (3 role-store stalls, ~3.9 s), TestAGitHubCIDeliveryAnswersAFrozenBusInsideTheRecordWait (503 in 4.0 s), TestTheWebhookPublishesAnswerAFrozenBusInsideTheirCallersWait (Slack 2.5 s, GhostWispr and GitHub 1.0 s when the caller drops at 1 s), TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget (200 degraded in 3.0 s), TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses (registry 200 with no topics; Dispatch's client finds both sessions), and the tester's tests; internal/webhook ok 4.563s, internal/cistore ok 11.929s (incl. TestAQueuedCallerWhoseContextEndsLeavesTheQueue), internal/store ok 18.701s, internal/session ok 7.371s, internal/integration ok 97.459s; e2e-local exit 0, bus-down send 503 in 3.503734 s, client EnvoyApiError 503; build, vet, gofmt, check-private-names.sh clean",
-      "headSha": "7093f375b213f6a74c1052df7cce481959525465",
-      "negativeControl": "go test -overlay with the pre-fix files: the write routes answered after 10.0 s (one roles/set case after 40.0 s); /healthz after 10.0 s; GET /v1/registry/<3987-byte id> 413 and ses:bad 400; Dispatch's client 'envoy listener: session not found'; the CI delivery past its bound; the cistore queue test '0 callers queued … want 1'"
+      "criterion": "(2) A joined store error is the store's answer only when every part is; (4) a JetStream check that does not answer within healthzBudget makes /healthz 503 unhealthy",
+      "surface": "go test of ./cmd/listener: writeStoreError's real answer for each error shape, and /healthz behind a relay that stalls only $JS./$KV. subjects",
+      "command": "cd packages/envoy && go test ./cmd/listener -count=3 -run '^(TestAJoinedStoreErrorIsTheStoresAnswerOnlyWhenEveryPartIs|TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget)$' -v",
+      "observed": "3 of 3 pass: a lost claim joined with a dropped connection, with no responders, or wrapped by a single %w is the 503 with Retry-After: 1; a lost claim alone or joined with no key keeps the route's status; /healthz answers 503 unhealthy naming the dependency and 'context deadline exceeded' inside 3.5 s for both stalls",
+      "headSha": "74318aa80638e83228654a802185d26cc3d07c30",
+      "negativeControl": "go test -overlay with api.go and main.go from cc183a6f: 'storeAnswered(\"nats: key exists\\nread tcp: connection reset by peer\") = true, want false' (and the other three join rows); '/healthz with every JetStream request stalled = 200 map[error:interest KV unavailable: context deadline exceeded status:degraded], want 503 unhealthy'"
+    },
+    {
+      "criterion": "Nothing else regresses",
+      "surface": "the full suites against the in-process NATS; scripts/e2e-local.sh against the real binary and a real NATS",
+      "command": "cd packages/envoy && go test ./internal/store ./internal/session ./internal/webhook/... ./internal/cistore/... ./internal/integration -count=1; go test ./cmd/listener -count=1 -skip <the four testpg tests> -timeout 25m; bash scripts/e2e-local.sh",
+      "observed": "internal/store ok 19.600s, internal/session ok 7.667s, internal/webhook ok 4.081s, internal/cistore ok 11.774s, internal/integration ok 97.149s; cmd/listener ok 362.611s; e2e-local exit 0, bus-down send 503 in 3.503165 s, client EnvoyApiError 503; build, vet, gofmt, check-private-names.sh clean",
+      "headSha": "74318aa80638e83228654a802185d26cc3d07c30",
+      "negativeControl": "the overlay failures above are the pre-fix behaviour on the same rigs"
     }
   ],
   "filesChanged": [
-    "acafc88f — internal/bus/kv.go (bus.Bounded), internal/store/kv.go (UpsertWithin, Remove(ctx), SetRoleWithPrevious(ctx), bounded puts/deletes/role releases), internal/session/registry.go (PutWithin, Delete(ctx), Refresh on bus.Bounded), cmd/listener/api.go (storeAnswered, writeStoreError; subscribe, unsubscribe, DELETE /v1/interests/<id>, POST /v1/roles/set, DELETE /v1/sessions/<id> under sendRequestBudget; R1 in sessionEntryHandler), role_holder.go, tests (write_routes_frozen_bus_test.go new, interest_key_refused_list_test.go, api_test.go and mechanical ctx migrations), AGENTS.md, docs/architecture.md, CHANGELOG.md",
-    "7093f375 — internal/webhook/{webhook,github,slack,ghostwispr}.go (PublishWithin under the request; CIRecorder takes ctx), internal/cistore/{cistore,combine,write}.go (recordWait = 2 × recordBudget, queue wait and KV calls bounded by ctx), cmd/listener/main.go (/healthz under healthzBudget), tests (webhook_frozen_bus_test.go and healthz_jetstream_stall_test.go new, cistore burst_test.go, fakes), AGENTS.md, docs/architecture.md, CHANGELOG.md"
+    "packages/envoy/internal/store/kv.go — detachedCleanup (context.WithoutCancel plus roleCleanupBudget 3.5 s) for the rollback and the old holder's cleanup; ReapRoleClaims runs reapRoleTopics (two passes on the same revision, conditional removal, put-back of a claim that lands)",
+    "packages/envoy/internal/store/role_topics_test.go (new)",
+    "packages/envoy/cmd/listener/api.go — storeAnswer splits an errors.Join (also under single-%w wrappers): answered only when every part is",
+    "packages/envoy/cmd/listener/main.go — /healthz: a KV ping or ConsumerInfo that did not answer within healthzBudget is 503 unhealthy",
+    "packages/envoy/cmd/listener/write_routes_frozen_bus_test.go — TestAJoinedStoreErrorIsTheStoresAnswerOnlyWhenEveryPartIs; the control comment now names a hard claim of another role",
+    "packages/envoy/cmd/listener/healthz_jetstream_stall_test.go — expects 503 unhealthy",
+    "packages/envoy/AGENTS.md (incl. the former :2041 sentence), docs/architecture.md, CHANGELOG.md"
   ],
   "trickyParts": [
-    "Abandoned writes can land after the 503: interest and session Puts are idempotent and last-writer-wins as before; conditional deletes and role-claim Create/Update are CAS on the revision read, so they never overwrite a later write; once ctx ends, a failed claim's rollback and the old holder's cleanup are not started, so an interest record can name a role topic its session does not hold until the next claim or unsubscribe (role delivery reads the claim, not the topic). cistore's abandoned Create/Update is a CAS at the revision read.",
-    "The CI record is bounded at 4 s (two cistore write budgets) rather than 2 s, because TestASlowKVCallOnALiveConnectionIsWaitedFor requires a slow-but-live KV call inside one budget to be waited for; GitHub's own limit is 10 s.",
-    "Batched cistore callers share the bound of the caller writing the batch; Slack's publish runs under 2.5 s from the handler's start (Slack waits 3 s); GhostWispr has no published deadline and keeps the request ctx with the 5 s publish cap."
+    "The role reaper removes a role topic only when two consecutive passes (every 5 min) find it unbacked on the same record revision, and conditionally on that revision, because a claim writes its claimant's topic before the claim itself; after removing, it rereads the claim and puts back the topic of one that landed meanwhile.",
+    "The route waits for a detached cleanup only while its budget lasts; a cleanup that fails after the request ended is logged at WARN."
   ],
   "deviations": [
-    "The retro notes drafted before the send-back are held outside the workspace for the next retro."
+    "The retro notes drafted before the send-backs are held outside the workspace for the next retro."
   ],
   "openQuestions": []
 }
