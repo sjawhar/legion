@@ -575,7 +575,7 @@ func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Poin
 		t.Fatal("the written room's replica went while the room is resident")
 	}
 	waitFor(t, 10*time.Second, "the written room's replica to hold a copy", func() bool {
-		if resident.hold(artifactID, live) == nil {
+		if resident.hold() == nil {
 			return false
 		}
 		resident.mu.Unlock()

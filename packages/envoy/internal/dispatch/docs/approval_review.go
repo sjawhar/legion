@@ -24,7 +24,7 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reaso
 
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
-// sequence was kept, its own time and id. Every review written once migration 0118 committed
+// sequence was kept, its own time and id. Every review written once migration 0120 committed
 // carries a sequence, whichever release wrote it: this release's WriteReview writes it, and the
 // migration's deferred trigger gives one to a review the release before it writes during a
 // rollout or a rollback. A row without one was committed before that migration, so every row that
@@ -61,7 +61,7 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // event is appended and its sequence written after. The update that writes the sequence runs the
 // foreign-key checks again, since Postgres re-checks a row its own transaction inserted, and so asks
 // for the same FOR KEY SHARE locks the insert took: the transaction already holds them, so the
-// request never waits. Migration 0118's trigger, which gives the release
+// request never waits. Migration 0120's trigger, which gives the release
 // before this one's reviews their sequence, would give this row its sequence too, but only at the
 // commit, the first moment the event exists for every release; so WriteReview writes it itself,
 // and the row is right for any read the caller makes before it commits. The trigger then finds the
@@ -106,7 +106,7 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 
 // latestApprovedReviewQuery selects the newest approval of the document $1 names. Like
 // latestReviewByQuery it reads one row from artifact_reviews_by_artifact_event_seq (migration
-// 0118), the index in ReviewOrder's own order, rather than sorting every review of the document.
+// 0120), the index in ReviewOrder's own order, rather than sorting every review of the document.
 const latestApprovedReviewQuery = `
 	select ` + ReviewColumns + `
 	from artifact_reviews

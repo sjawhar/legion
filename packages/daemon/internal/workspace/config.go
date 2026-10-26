@@ -23,14 +23,18 @@ import (
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
 // runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
 // exceptions are the fetch's transfers and the checks of what the repository cache streamed, under
-// FetchTimeout, and the shared clone's own clone, under CloneTimeout (both below).
+// FetchTimeout (the repository cache's own first clone under CacheFetchTimeout instead), the
+// shared clone's own clone, under CloneTimeout (both below), and the cache's repack
+// (repocache.repackTimeout, through FeedGitWithin).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the one bound for everything whose duration follows the repository's size and
-// the network's speed in a fetch, once it may start: every attempt of a transfer from GitHub, and,
-// for a feed filled from the repository cache, the cache's stream and its verification too, all
-// together (Fetch). It is long enough for a large repository's slow but steadily progressing
-// transfer to finish.
+// FetchTimeout is the bound of each stage of a fetch whose duration follows the repository's size
+// and the network's speed, once it may start (Fetch): a feed filled from the repository cache gets
+// one for the cache's stream and its verification together and another for the delta from GitHub,
+// every attempt of it included; a clone or a fetch from GitHub alone gets one. It is long enough
+// for a large repository's slow but steadily progressing transfer to finish. A request may set its
+// own (FetchRequest.Bound), which the repository cache does for its first clone alone
+// (CacheFetchTimeout).
 const FetchTimeout = 30 * time.Minute
 
 // CloneTimeout is the one bound ensureRepoClone gives its size-following steps, together, as the
@@ -44,7 +48,8 @@ const CloneTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
 // hold the runner's own slow-command budget (RunChecked), each of the fetch's transfers and checks
-// holds what remains of FetchTimeout instead (Fetch), and each size-following step of the shared
+// holds what remains of its request's bound instead (Fetch, FetchRequest.Bound), a command run with
+// FeedGitWithin holds the timeout it is given, and each size-following step of the shared
 // clone's clone holds what remains of CloneTimeout (ensureRepoClone) — never a budget shared
 // across the whole provisioning sequence.
 type Command struct {
@@ -491,8 +496,10 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 }
 
 // runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
-// budget: runCommand itself calls it with run.Timeout(); Fetch calls it with what remains of
-// FetchTimeout for each attempt of its clone, and ensureRepoClone with CloneTimeout.
+// budget: runCommand itself calls it with run.Timeout(); Fetch calls it with what remains of its
+// request's bound (FetchRequest.Bound, FetchTimeout by default) for each of its transfers and
+// checks; FeedGitWithin with the timeout its caller gives it (the repository cache's repack); and
+// ensureRepoClone with CloneTimeout.
 func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")

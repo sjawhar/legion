@@ -45,13 +45,48 @@ func RemoveStaleGitLocks(workspace Workspace, now time.Time, log func(string)) e
 
 // RemoveStaleFeedLocks removes every git lock file in the bare repository gitDir, a feed: the
 // `<file>.lock` a fetch killed mid-update leaves beside a ref, packed-refs, HEAD or the shallow
-// file, which blocks every later update of that file. Objects are never touched. Each removal is
-// logged with the lock's path and age, and a lock it cannot remove is an error naming it. A feed's
+// file, which blocks every later update of that file. It also removes the `tmp_pack_*` and
+// `tmp_idx_*` files a transfer killed mid-pack leaves under objects/pack: git writes a received
+// pack under such a name and renames it once whole, so one left there is a pack that never
+// arrived, which nothing reads and which a feed a retried fetch finds would otherwise carry,
+// and hard-link into the issue's clone. No other object is touched. Each removal is
+// logged with the file's path and age, and one it cannot remove is an error naming it. A feed's
 // only writer is Fetch, called by one process at a time: a pod's workspace-fetch, its first init
 // container and the one container that mounts the feed writable, or the repository cache's process
-// under its write lock, so no lock there is held by anyone when Fetch starts.
+// under its maint mutex, which also keeps its repack from running beside a fetch (repocache's
+// refresh), so no lock, transfer or repack there is live when Fetch starts.
 func RemoveStaleFeedLocks(gitDir string, now time.Time, log func(string)) error {
-	return removeLocksUnder(gitDir, "", now, log, "a feed's only writer is the fetch now starting")
+	why := "a feed's only writer is the fetch now starting"
+	if err := removeLocksUnder(gitDir, "", now, log, why); err != nil {
+		return err
+	}
+	// The partial packs are looked for only where git writes them, and only when neither objects
+	// nor objects/pack is a link: a glob follows one, and would remove files outside the feed.
+	// A linked or missing directory is left for foreignFeed, which refuses the feed after this.
+	pack := filepath.Join(gitDir, "objects", "pack")
+	for _, dir := range []string{filepath.Dir(pack), pack} {
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			return nil
+		}
+	}
+	partial, err := filepath.Glob(filepath.Join(pack, "tmp_*"))
+	if err != nil {
+		return err
+	}
+	for _, path := range partial {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("read the partial pack %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove the partial pack %s: %w", path, err)
+		}
+		log(fmt.Sprintf("removed the partial pack %s, last written %s ago: %s", path, now.Sub(info.ModTime()).Round(time.Second), why))
+	}
+	return nil
 }
 
 // removeLocksUnder removes every `*.lock` file under dir but those under skip, logging each with
