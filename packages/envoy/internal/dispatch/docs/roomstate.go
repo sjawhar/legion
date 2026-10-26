@@ -63,9 +63,11 @@ type roomState struct {
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
 	durableAppends atomic.Int64
-	// roomGeneration counts this room's own in-process invalidations (a reload, a failure, a
-	// settlement's own commit): a settlement compares the value it started at against the room's
-	// current one to tell a read still good from one a change since has invalidated.
+	// roomGeneration moves at each of this room's own in-process invalidations (a reload, a
+	// failure, a settlement's own commit): a settlement compares the value it started at against
+	// the room's current one to tell a read still good from one a change since has invalidated.
+	// Every value is drawn from the service's one counter (nextRoomGeneration), so it also tells
+	// this state from any state that replaced it.
 	roomGeneration uint64
 	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
 	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
@@ -260,20 +262,28 @@ func (s *Service) hasDurableAppend(room string) bool {
 	return state.durableAppends.Load() > 0
 }
 
-// hasWriteInFlight is whether this process has durable work of room's document under way that is
-// about to advance the room instance's cursor: an open live-write transaction (liveWrite, whose
-// publish takes its versions in), a browser append the room's persistence has not landed
-// (durableAppends), or a settlement running on the room (settleRoomWithin, which takes in the
-// version its repair is stored at). The stale-room evictor asks it before it closes a room
-// another process's write left behind: closing one of these rooms would take the room out from
-// under the writer that is mid-write on it.
-func (s *Service) hasWriteInFlight(room string) bool {
+// hasOpenLiveWrite is whether an open live-write transaction of this process is writing room's
+// document (liveWrite). The stale-room evictor asks it before it closes a room another process's
+// write left behind, because that writer alone is out of reach of the confirmation the evictor
+// makes under the document's advisory lock (roomBehindDurableHead): an open write holds no lock
+// between its operations, and between its commit and its publish it has moved the cursor of the
+// room it forked past what that room holds (Ledger.takeRoomCursors, publish), so the room it
+// publishes into is the room the evictor would close.
+//
+// The other writers of this process take the document's lock and are ordered by that
+// confirmation instead, so they are not asked about here. A browser's append (appendUpdate,
+// under withRoomLock) and a settlement (settleRoomWithin, under lockSettlementCursor) each either
+// advance the instance's cursor before they drop the lock or are refused by the gate on a room
+// behind the head (ErrRoomBehindHead), and a cursor moves only by the version after the one it
+// stands at (advanceRoomCursor), so a room the confirmation finds behind is one none of them can
+// bring back to the head.
+func (s *Service) hasOpenLiveWrite(room string) bool {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return false
 	}
 	defer s.unlockState(room, state)
-	return state.liveWriter != nil || state.durableAppends.Load() > 0 || state.settling > 0
+	return state.liveWriter != nil
 }
 
 func (s *Service) roomFailure(room string) error {
