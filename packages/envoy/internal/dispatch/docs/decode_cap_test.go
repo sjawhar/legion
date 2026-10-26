@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -731,8 +733,11 @@ func parkedFork(t *testing.T, parked int) *crdt.Doc {
 // load decodes, and each can still split two structs once what it waits for arrives, but the state
 // vector counts none of them. The clock sum alone, the filter refuseUndecodable answered on before,
 // let such a fork through. The ceiling it answers on now (structCeiling) is never below the total,
-// and one fork short of the cap is still let through.
+// and one fork short of the cap is still let through. The forks here have no room behind them, as a
+// cold write's has not (coldFork), so the fork's own total is what answers.
 func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *testing.T) {
+	service := &Service{}
+	cold := &liveWrite{cold: true}
 	past := parkedFork(t, maxUpdateItems/(1+splitsAStructCanCause)+1)
 	if clocks := clockSum(past); clocks > 16 {
 		t.Fatalf("the fork's clocks sum to %d, want the handful its integrated text takes", clocks)
@@ -741,7 +746,7 @@ func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *tes
 	if structs <= maxUpdateItems || structCeiling(past) < structs {
 		t.Fatalf("the fork's struct total is %d and its ceiling %d, want the total past the %d cap and the ceiling at or above it", structs, structCeiling(past), maxUpdateItems)
 	}
-	err := refuseUndecodable(past)
+	err := service.refuseUndecodable(cold, past, nil)
 	if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "this change would leave the document's live state past the 1048576 items ygo decodes in one update") {
 		t.Fatalf("refuseUndecodable of a fork past the cap with parked structs: %v, want ErrDocumentTooLarge naming the cap", err)
 	}
@@ -750,9 +755,111 @@ func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *tes
 	if structs := countRoomStructs(short); structCeiling(short) < structs {
 		t.Fatalf("the short fork's struct total is %d and its ceiling %d, want the ceiling at or above it", structs, structCeiling(short))
 	}
-	if err := refuseUndecodable(short); err != nil {
+	if err := service.refuseUndecodable(cold, short, nil); err != nil {
 		t.Fatalf("refuseUndecodable of a fork far short of the cap: %v, want nil", err)
 	}
+}
+
+// typedRoom is a room's live document whose state holds about structs structs, of which runs come
+// to a few hundred structs in a decoded copy of it: a browser's text typed at the front of a text
+// one character at a time in one edit, each character a struct of its own in any copy
+// (typeAndDelete gives why), and then runs keystrokes typed one after another, each in a
+// transaction of its own, as keystrokes reach a room, a hundred into each of a run of texts so no
+// keystroke walks far to its place. The room keeps each keystroke a struct; a decode of its state
+// merges each text's hundred into one (squashRuns, crdt/transaction.go:134-289 in sjawhar/ygo
+// v1.51.3-sami.2).
+func typedRoom(t *testing.T, structs, runs int) *crdt.Doc {
+	t.Helper()
+	const keystrokes = 100
+	live := newDocumentCopy()
+	text := live.GetText("t")
+	live.Transact(func(txn *crdt.Transaction) {
+		for range structs - runs {
+			text.Insert(txn, 0, "x", nil)
+		}
+	})
+	for i := range runs {
+		typed := live.GetText(fmt.Sprintf("typed-%d", i/keystrokes))
+		live.Transact(func(txn *crdt.Transaction) { typed.Insert(txn, i%keystrokes, "y", nil) })
+	}
+	return live
+}
+
+// liveWriteOn is a write whose fork was read from live, as warmFork reads one from its room: a
+// decode of live's state with the write's own client id. It returns the fork, and the updates an
+// operation writing write on the fork records there, as applyLive records them.
+func liveWriteOn(t *testing.T, live *crdt.Doc, write func(fork *crdt.Doc)) (*liveWrite, *crdt.Doc, [][]byte) {
+	t.Helper()
+	lw := &liveWrite{clientID: crdt.NewClientID(), forkedFrom: weak.Make(live)}
+	fork := newDocumentCopy(crdt.WithClientID(lw.clientID))
+	if err := crdt.ApplyUpdateV1(fork, crdt.EncodeStateAsUpdateV1(live, nil), nil); err != nil {
+		t.Fatalf("fork the room: %v", err)
+	}
+	var updates [][]byte
+	unsubscribe := fork.OnUpdate(func(update []byte, _ any) { updates = append(updates, append([]byte(nil), update...)) })
+	write(fork)
+	unsubscribe()
+	return lw, fork, updates
+}
+
+// An operation's write is weighed against the room it will be published into, not the fork it
+// ran on: a room whose keystrokes each stay a struct counts far more than its decoded fork, and a
+// write the fork's count clears can still carry the room past the decode cap. The room's count
+// refuses it, on what the write adds to a copy of the room. A write well short of the cap passes
+// on the ceiling alone, with no count of anything.
+func TestAWriteIsRefusedAsUndecodableByTheRoomItsForkUndercounts(t *testing.T) {
+	t.Run("past the cap on the room, within it on the fork", func(t *testing.T) {
+		const runs, inserted = 30_000, 100_000
+		live := typedRoom(t, maxUpdateItems-120_000+runs, runs)
+		var forkedBefore uint64
+		write, fork, updates := liveWriteOn(t, live, func(fork *crdt.Doc) {
+			forkedBefore = countRoomStructs(fork)
+			text := fork.GetText("t")
+			fork.Transact(func(txn *crdt.Transaction) {
+				for range inserted {
+					text.Insert(txn, 0, "w", nil)
+				}
+			})
+		})
+		// What refuseUndecodable answered on before: the written fork's own total, within the cap.
+		// The fork holds one struct for each text's hundred keystrokes, the room one for each.
+		roomCount, forked := countRoomStructs(live), countRoomStructs(fork)
+		if forked > maxUpdateItems || roomCount < forkedBefore+runs*99/100 {
+			t.Fatalf("the room counts %d structs, its fork %d before the write and %d after, want the written fork within the %d cap and the room %d past the fork before it",
+				roomCount, forkedBefore, forked, maxUpdateItems, runs*99/100)
+		}
+		service := &Service{}
+		counts := recordWriteCounts(service)
+		err := service.refuseUndecodable(write, fork, updates)
+		if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "this change would leave the document's live state past the 1048576 items ygo decodes in one update") {
+			t.Fatalf("refuseUndecodable of a write the room cannot take: %v, want ErrDocumentTooLarge naming the cap", err)
+		}
+		requireCounted(t, counts, true)
+		// Published, the write would have carried the room past the cap.
+		for _, update := range updates {
+			if err := crdt.ApplyUpdateV1(live, update, "publish"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if after := countRoomStructs(live); after <= maxUpdateItems {
+			t.Fatalf("the room counts %d structs once the write is published, want past the %d cap", after, maxUpdateItems)
+		}
+	})
+
+	t.Run("well short of the cap", func(t *testing.T) {
+		live := typedRoom(t, 2_000, 1_000)
+		write, fork, updates := liveWriteOn(t, live, func(fork *crdt.Doc) {
+			text := fork.GetText("t")
+			fork.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "a short write", nil) })
+		})
+		service := &Service{}
+		counts := recordWriteCounts(service)
+		if err := service.refuseUndecodable(write, fork, updates); err != nil {
+			t.Fatalf("refuseUndecodable of a short write to a short room: %v, want nil", err)
+		}
+		requireNeverCounted(t, counts)
+		runtime.KeepAlive(live)
+	})
 }
 
 // structCount is how many structs doc's whole state holds, as ygo's decoder counts them against

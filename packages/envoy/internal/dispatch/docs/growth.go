@@ -351,23 +351,100 @@ func elements(size pmdoc.DocumentSize) string {
 	return fmt.Sprintf("more than %d", pmdoc.MaxDocumentElements)
 }
 
-// refuseUndecodable is the refusal of a write that leaves fork, its transaction's copy of the live
-// document, past the decode cap, or nil: a struct total (countRoomStructs) past the maxUpdateItems
-// structs ygo decodes in one update. The bound is asked first without an encode
-// (structCeiling), which clears every fork short of the cap; past it the ceiling says nothing,
-// since the clock sum in it counts characters rather than structs (this file's doc comment gives
-// the figures), and the fork's structs are counted to find out: an encode of its state and a walk
-// of it, which allocates nothing per struct, where a decode of that state into a fresh document
-// would hold a second copy of it. The count is never below what a decode of the state reads,
-// since it adds the splits parked structs can still cause, so it refuses every state a decode
-// would. A state past the cap is refused whether or not the write grew the document: storing it
-// would leave every read unable to load it.
-func refuseUndecodable(fork *crdt.Doc) error {
-	if structCeiling(fork) <= maxUpdateItems || countRoomStructs(fork) <= maxUpdateItems {
-		return nil
+// refuseUndecodable is the refusal of an operation of write's transaction that would leave the
+// room's live document past the decode cap, or nil: a struct total (countRoomStructs) past the
+// maxUpdateItems structs ygo decodes in one update. The operation ran on fork, its transaction's
+// copy of the room, and recorded updates there; write.updates are the transaction's earlier
+// operations, which are in the fork and in no room until the transaction publishes, and the
+// publish applies every one of them to the room (publishLiveWrite), so the question is asked of
+// all of them together.
+//
+// The fork cannot answer for the room. It is a decode of the room's state, and ygo merges into
+// one struct each run of typing a decode delivers at once (squashRuns, crdt/transaction.go:134-289
+// in sjawhar/ygo v1.51.3-sami.2), which the room took keystroke by keystroke and holds a struct a
+// keystroke - a thousand one-character transactions counted 1,000 structs on the document they
+// were typed into and 1 on its copy - so a fork can count far below the room it was forked from,
+// and a write the fork's count clears could carry the room past the cap once published. The room
+// is asked instead as the three server writes outside applyLive ask it (leavesPastDecodeCap), each
+// step answering only where the one before cannot:
+//
+//   - the ceiling of the room's struct total (structCeiling) and what the transaction's updates add
+//     at most (updatesAdd): within the cap, the write fits. It costs no encode and clears every
+//     document well short of the cap.
+//   - in the measurer's turn (elementMeasurer.structsAfter), the room's exact struct total: past
+//     the cap, the write is refused; with what the updates add at most and still within the cap,
+//     the write fits.
+//   - in the same turn, the transaction's updates applied to a copy of the room, whose struct
+//     total they raise by as much as they raise the room's at least (leavesPastDecodeCap gives
+//     why): within the cap with that added, the write fits.
+//
+// What the turn costs, and why it runs one at a time, is leavesPastDecodeCap's. Nothing the
+// operation holds here is a transaction on the room: it wrote the fork, and the fork's read of the
+// room ended before the operation began (warmFork), so the encode can take the room document's
+// lock. A browser's edit landing between the count and the publish is the peer update hook's to
+// bound (structTotal).
+//
+// A write with no room behind it - a cold fork, built from the store while no room held the
+// document (coldFork), or a room evicted since the fork read it - reaches a room that loads from
+// the store once it publishes, and a load decodes the store's state in one update (Load,
+// stateThrough), the way the fork was decoded, with the transaction's updates folded into it,
+// where the fork took each as a transaction of its own and so merged no run a decode would not.
+// So the fork's own total answers for that room: its ceiling first, then its count, an encode of
+// its state and a walk of it, where a decode of that state into a fresh document would hold a
+// second copy of it.
+//
+// Each count is never below what a decode of the state reads, since it adds the splits parked
+// structs can still cause, so it refuses every state a decode would. A state past the cap is
+// refused whether or not the write grew the document: storing it would leave every read unable
+// to load it.
+func (s *Service) refuseUndecodable(write *liveWrite, fork *crdt.Doc, updates [][]byte) error {
+	if s.leavesRoomPastDecodeCap(write, fork, updates) {
+		return fmt.Errorf("%w: this change would leave the document's live state past the %d items ygo decodes in one update; shorten the change, or split the document",
+			ErrDocumentTooLarge, maxUpdateItems)
 	}
-	return fmt.Errorf("%w: this change would leave the document's live state past the %d items ygo decodes in one update; shorten the change, or split the document",
-		ErrDocumentTooLarge, maxUpdateItems)
+	return nil
+}
+
+// leavesRoomPastDecodeCap is refuseUndecodable's question: whether updates, with write's earlier
+// updates, leave the room write's fork was read from past the decode cap.
+func (s *Service) leavesRoomPastDecodeCap(write *liveWrite, fork *crdt.Doc, updates [][]byte) bool {
+	live := write.forkedFrom.Value()
+	if live == nil {
+		return structCeiling(fork) > maxUpdateItems && countRoomStructs(fork) > maxUpdateItems
+	}
+	transaction := append(append(make([][]byte, 0, len(write.updates)+len(updates)), write.updates...), updates...)
+	adds, bounded := updatesAdd(transaction)
+	if bounded && structCeiling(live)+adds <= maxUpdateItems {
+		return false
+	}
+	unapplied := false
+	after := s.measurer.structsAfter(live, serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) {
+		if err := applyTransactionWrites(copied, transaction); err != nil {
+			// Each update applied to the fork, a decode of the same room; one that does not
+			// apply to the copy leaves a count that cannot be trusted to hold all of it.
+			slog.Error("dispatch: apply a transaction's writes to a copy of its room to count them", "room", write.artifactID, "error", err)
+			unapplied = true
+		}
+	}})
+	return unapplied || after > maxUpdateItems
+}
+
+// updatesAdd is the most structs applying updates, a transaction's own writes, can add to a
+// document, and whether a walk of each bounds it: each struct an update carries, but a skip, with
+// the splits its integration can cause, and the splits each delete range can cause, the arithmetic
+// the peer update hook charges a browser's update (peerWeighing.added). Every struct of a
+// transaction's update is its own new item, which no room holds yet. An update the walk refuses
+// is bounded by nothing, and its document is counted.
+func updatesAdd(updates [][]byte) (uint64, bool) {
+	var adds uint64
+	for _, update := range updates {
+		tally, err := walkUpdate(update, fromRoom, nil)
+		if err != nil {
+			return 0, false
+		}
+		adds += (tally.structs-tally.skips)*(1+splitsAStructCanCause) + tally.deleteRanges*splitsAStructCanCause
+	}
+	return adds, true
 }
 
 // clockSum is the sum of doc's state vector. It bounds the structs doc has integrated from above,
@@ -402,7 +479,7 @@ func structCeiling(doc *crdt.Doc) uint64 {
 // serverWrite is one of the server's writes into a room's live document outside applyLive - the
 // block-id stamp (stampBlockIDs), the sweep of unrecorded marks (unmarkExpired) and settlement's
 // repair of a returning answer (withholdAnswers) - as leavesPastDecodeCap asks the decode cap of
-// it.
+// it, or the updates of an applyLive transaction, as refuseUndecodable asks it of them.
 type serverWrite struct {
 	// adds is the most structs the write can add to the document, derived by its writer from what
 	// it writes and stated where it is derived; bounded is false for a write no such count bounds,

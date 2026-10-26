@@ -175,31 +175,33 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	if atTheBound && (weighed.inserted >= maxPeerInsertAtTheBound || (crept && weighed.inserted > 0)) {
 		return documentTooLarge()
 	}
-	// A heavy update waits for its share of the bound before it takes the room's admission lock,
-	// so the room's other browsers do not wait behind it; what the room admits on is then weighed
-	// as it stands once the wait is over.
+	// A heavy update waits for its share of the bound before it reserves its addition to the
+	// room's struct total, so what the room admits on is weighed as it stands once the wait is
+	// over, and the room's other browsers are not weighed against a reservation that waits.
 	if weighed.ownApplyHeap(len(info.Update)) > unweighedApplyHeapBytes {
 		defer s.applyHeaps.hold(heap)()
 	}
 	added := weighed.added()
-	// What the room's struct total admits on must still hold when the apply lands: two browsers
-	// of one room weighed at once could each pass the cap's check, and together pass the cap.
-	structs.lockAdmissions()
-	defer structs.unlockAdmissions()
-	if !structs.admits(info.Doc, added) {
+	// The reservation is what keeps two browsers of one room weighed at once from each passing
+	// the cap's check and together passing the cap: each counts the other's addition while it
+	// is in flight (structTotal.reserve). No lock is held across the apply, so another browser
+	// of the room is weighed and applied while this apply runs, its observers included.
+	if !structs.reserve(info.Doc, added) {
 		return documentTooLarge()
 	}
 	if s.budget.full.Load() && s.refusedUnderPressure(&weighed) {
+		structs.unreserve(added)
 		return &websocket.PeerClose{
 			Code:   contracts.DocumentBusyCloseCode,
 			Reason: contracts.DocumentBusyCloseReason,
 		}
 	}
 	err := structs.applying(info.Origin, apply)
-	// Taken after the apply returns, so a recount that read the total's admissions before its
-	// encode cannot miss what this apply integrated (structTotal.recount). An apply that failed
-	// is taken all the same: it can have integrated structs before it failed.
-	structs.took(added)
+	// Moved to what the hook admitted only after the apply returns, so a recount that read the
+	// total's admissions before its encode cannot miss what this apply integrated
+	// (structTotal.recount). An apply that failed is moved all the same: it can have integrated
+	// structs before it failed.
+	structs.landed(added)
 	return err
 }
 
@@ -324,38 +326,54 @@ const structTotalRecheck = maxUpdateItems / 64
 // place that sees each of them, whoever wrote it, is the document's update observer: ygo fires it
 // for every transaction it commits, even one that writes nothing, with the transaction's origin
 // (crdt/doc.go:462-464, :541-556), on the committing goroutine. So the total registers an
-// observer of its own (observed), and the hook names the origin of the apply it is running while
+// observer of its own (observed), and the hook names the origin of each apply it is running while
 // it runs it (applying): ygo's peer, the origin ygo applies a browser's update with
-// (provider/websocket/peer_update.go:84-97). A transaction of any other origin marks the total
+// (provider/websocket/peer_update.go:84-97). Several browsers' applies can run at once, each its
+// own peer, so the origins are a multiset. A transaction of any other origin marks the total
 // stale. A list of the server's writes would miss the next one added; the observer cannot. A stale
 // total within structTotalStaleMargin of the cap is confirmed by an exact count before the hook
 // admits on it; further from the cap the server's writes, each bounded by its own check, are
 // trusted not to have used the margin up.
 //
-// The total's three counters order a count against the hook's admissions without a lock across
-// the walk: a count reads admitted and writes before it encodes, and the hook adds an apply's
-// addition only once the apply has returned, its observer included. An apply that landed before the
-// encode and was added after the read is counted twice, which overstates the total; none can be
-// missed. The same holds for writes, so a write that landed after a count's encode leaves the
-// total stale.
+// The hook reserves an update's addition before its apply and holds no lock across the apply:
+// ygo fires a transaction's update observers after it has released the document's lock, on the
+// committing goroutine (crdt/doc.go:648-651), so a lock held from the check through the apply
+// would hold every other browser of the room while one apply sat in an observer
+// (TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth holds one there). Under a
+// short lock (admissions) the hook checks the running total, which counts every reservation in
+// flight, with the update's addition against the cap, confirming it by a count where admits says
+// so, and adds the addition to inflight; it then applies with no lock, and once the apply returns,
+// failed or not, moves the addition from inflight to admitted (landed). Two browsers weighed at
+// once therefore each count the other's addition, and cannot together pass the cap.
+//
+// The running total is counted + (admitted - countedAdmitted) + inflight, and a count racing an
+// apply never makes it undercount. A count reads admitted and writes before it encodes the room
+// (recount). An apply that moved to admitted before that read had returned, so it landed before
+// the encode, and the count holds it while countedAdmitted already takes it out: counted once.
+// An apply in flight at the read and landing before the encode is in the count, and still in
+// inflight, or in admitted past countedAdmitted once it moves: counted twice, which overstates the
+// total. One landing after the encode is in inflight or moves to admitted after the read: counted
+// once. A move adds to admitted before it takes from inflight, and running reads inflight before
+// admitted, so a move between running's two reads is seen at least once. The same order holds
+// for writes, so a write that landed after a count's encode leaves the total stale.
 type structTotal struct {
 	live weak.Pointer[crdt.Doc]
 	// count is countRoomStructs, but for a test's, which counts the counts.
 	count func(doc *crdt.Doc) uint64
 
-	// admissions is held by the hook from its check of the total through the apply and the
-	// addition that follow, so the total it admits on is the total the apply lands on.
+	// admissions is held by the hook from its check of the total to its reservation (reserve),
+	// never across an apply, so two reservations are checked one after the other.
 	admissions sync.Mutex
 
-	// originMu guards origin and inApply, the apply the hook is running, which the observer reads
-	// on whatever goroutine commits a transaction.
+	// originMu guards origins, the origin of each apply the hook is running and how many of its
+	// applies are running, which the observer reads on whatever goroutine commits a transaction.
 	originMu sync.Mutex
-	origin   any
-	inApply  bool
+	origins  map[any]int
 
-	// admitted is the sum of every addition the hook has admitted, and writes the number of
-	// transactions the observer has seen that were not a hook's apply; both only grow.
-	admitted, writes atomic.Uint64
+	// inflight is the sum of the additions the hook has reserved whose applies have not yet
+	// returned. admitted is the sum of every addition whose apply has returned, and writes the
+	// number of transactions the observer has seen that were not a hook's apply; both only grow.
+	inflight, admitted, writes atomic.Uint64
 
 	// mu guards the last count - counted, with admitted and writes as they were read before it -
 	// and the hook's last confirmation: whether one was taken and admitted when it was.
@@ -375,59 +393,79 @@ func newStructTotal(live *crdt.Doc) *structTotal {
 	return total
 }
 
-// observed is the total's update observer: a transaction that is not the hook's apply marks the
-// total stale.
+// observed is the total's update observer: a transaction that is not one of the hook's applies
+// marks the total stale.
 func (t *structTotal) observed(_ []byte, origin any) {
 	t.originMu.Lock()
-	hook := t.inApply && origin == t.origin
+	hook := t.origins[origin] > 0
 	t.originMu.Unlock()
 	if !hook {
 		t.writes.Add(1)
 	}
 }
 
-// applying runs apply, which applies an update with origin, as the hook's own apply.
+// applying runs apply, which applies an update with origin, as one of the hook's own applies.
 func (t *structTotal) applying(origin any, apply func() error) error {
 	if t == nil {
 		return apply()
 	}
 	t.originMu.Lock()
-	t.origin, t.inApply = origin, true
+	if t.origins == nil {
+		t.origins = make(map[any]int)
+	}
+	t.origins[origin]++
 	t.originMu.Unlock()
 	defer func() {
 		t.originMu.Lock()
-		t.origin, t.inApply = nil, false
+		if t.origins[origin]--; t.origins[origin] == 0 {
+			delete(t.origins, origin)
+		}
 		t.originMu.Unlock()
 	}()
 	return apply()
 }
 
-func (t *structTotal) lockAdmissions() {
-	if t != nil {
-		t.admissions.Lock()
+// reserve reports whether doc, the room's live document, can take added more structs within the
+// decode cap beside every reservation in flight (admits), and if it can, reserves added for an
+// apply the caller then makes and ends with landed, or abandons with unreserve.
+func (t *structTotal) reserve(doc *crdt.Doc, added uint64) bool {
+	if t == nil {
+		return t.admits(doc, added)
 	}
+	t.admissions.Lock()
+	defer t.admissions.Unlock()
+	if !t.admits(doc, added) {
+		return false
+	}
+	t.inflight.Add(added)
+	return true
 }
 
-func (t *structTotal) unlockAdmissions() {
-	if t != nil {
-		t.admissions.Unlock()
-	}
-}
-
-// took adds added, an admitted update's addition, to the total.
-func (t *structTotal) took(added uint64) {
+// landed moves added, a reservation whose apply has returned, from inflight to admitted: to
+// admitted first, so a running total read between the two never misses it.
+func (t *structTotal) landed(added uint64) {
 	if t != nil {
 		t.admitted.Add(added)
+		t.inflight.Add(-added)
 	}
 }
 
-// running is the total as it stands - the last count and what the hook admitted since - and
-// whether a write the hook did not see has landed since the count.
+// unreserve gives back added, a reservation no apply followed.
+func (t *structTotal) unreserve(added uint64) {
+	if t != nil {
+		t.inflight.Add(-added)
+	}
+}
+
+// running is the total as it stands - the last count, what the hook admitted since and what it
+// has in flight - and whether a write the hook did not see has landed since the count. inflight is
+// read before admitted (structTotal gives why).
 func (t *structTotal) running() (total uint64, stale bool) {
 	t.mu.Lock()
 	counted, admitted, writes := t.counted, t.countedAdmitted, t.countedWrites
 	t.mu.Unlock()
-	return counted + t.admitted.Load() - admitted, t.writes.Load() != writes
+	inflight := t.inflight.Load()
+	return counted + inflight + t.admitted.Load() - admitted, t.writes.Load() != writes
 }
 
 // roomStructs is the room's struct total as it stands, which the apply heap's estimate takes as
@@ -444,18 +482,22 @@ func (t *structTotal) roomStructs(doc *crdt.Doc) uint64 {
 }
 
 // admits reports whether doc, the room's live document, can take added more structs within the
-// decode cap. The running total answers when it is within the cap and either fresh or more than
-// structTotalStaleMargin short of it. A total past the cap is confirmed by an exact count before
-// it refuses, unless a confirmation was taken while the total was fresh and less than
+// decode cap, beside every reservation in flight, which the running total counts; reserve calls it
+// under the admissions lock. The running total answers when it is within the cap and either fresh
+// or more than structTotalStaleMargin short of it. A total past the cap is confirmed by an exact
+// count before it refuses, unless a confirmation was taken while the total was fresh and less than
 // structTotalRecheck has been admitted since, which answers on the running total instead; a stale
-// total near the cap is always confirmed. A confirmation re-bases the total and nothing else.
+// total near the cap is always confirmed. A confirmation re-bases the total and nothing else: the
+// reservations in flight stay counted beside it.
 //
-// The count runs on the browser's read loop, so that browser's next frame waits for it: an encode
-// of the room's state and a walk of it, whose walk allocates nothing per struct and whose encode
-// allocates its growing buffer. Measured on 2026-10-26 at a mebibyte of a room's shape, a
-// 3,035,240-byte state: 71 to 80 ms and 9.5 to 10.6 MB in about 21,660 allocations a count
-// (BenchmarkStructTotalConfirmation). It does not take the measurer's turn, which would put a
-// keystroke behind another room's element count or a server write's decode.
+// The count runs on the browser's read loop, so that browser's next frame waits for it, and under
+// the admissions lock, so the room's other browsers' reservations wait for it too, though none of
+// their applies does: an encode of the room's state and a walk of it, whose walk allocates
+// nothing per struct and whose encode allocates its growing buffer. Measured on 2026-10-26 at a
+// mebibyte of a room's shape, a 3,035,240-byte state: 71 to 80 ms and 9.5 to 10.6 MB in about
+// 21,660 allocations a count (BenchmarkStructTotalConfirmation). It does not take the measurer's
+// turn, which would put a keystroke behind another room's element count or a server write's
+// decode.
 //
 // A nil total, a room no load listed, is counted afresh for each update.
 func (t *structTotal) admits(doc *crdt.Doc, added uint64) bool {

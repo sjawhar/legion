@@ -730,7 +730,7 @@ func TestAnUpdatePastTheRoomsStructTotalIsRefused(t *testing.T) {
 func TestARunningStructTotalPastTheCapIsConfirmedBeforeItRefuses(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 	total, counts := countedStructTotal(t, replica)
-	total.took(maxUpdateItems)
+	total.admitted.Add(maxUpdateItems)
 	update := peerTyping(t, room, "y")
 	weighed := peerWeighing{held: room.StateVector()}
 	if _, err := walkUpdate(update, fromPeer, &weighed); err != nil {
@@ -768,7 +768,7 @@ func TestAStaleStructTotalNearTheCapIsConfirmedBeforeItAdmits(t *testing.T) {
 			service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 			total, counts := countedStructTotal(t, replica)
 			held, _ := total.running()
-			total.took(maxUpdateItems - row.short - held)
+			total.admitted.Add(maxUpdateItems - row.short - held)
 			if row.stale {
 				// A server write: a transaction on the room of an origin that is not a hook's
 				// apply, as Server.Apply's are.
@@ -885,7 +885,7 @@ func TestTheMeasurersCountReBasesTheStructTotal(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 	service.measurer.interval = noInterval
 	total, counts := countedStructTotal(t, replica)
-	total.took(maxUpdateItems / 2)
+	total.admitted.Add(maxUpdateItems / 2)
 	rendering := headings(1)
 	replica.publishSize(&rendering)
 	service.measurer.waitIdle()
@@ -893,6 +893,152 @@ func TestTheMeasurersCountReBasesTheStructTotal(t *testing.T) {
 	if got, stale := total.running(); counts.Load() != 1 || got != countRoomStructs(room) || stale {
 		t.Fatalf("after the measurer's count the total is %d (stale %t, %d counts), want the room's exact count %d", got, stale, counts.Load(), countRoomStructs(room))
 	}
+}
+
+// heldApply starts the hook on update for room from a browser whose origin is origin, with an
+// apply that applies update and then waits inside the apply until release is closed, as an apply
+// whose update observer is still running does. It returns once the apply holds, and the channel
+// the hook's answer arrives on.
+func heldApply(t *testing.T, service *Service, room *crdt.Doc, update []byte, origin any, release <-chan struct{}) <-chan error {
+	t.Helper()
+	inside, answered := make(chan struct{}), make(chan error, 1)
+	go func() {
+		answered <- service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: update, Origin: origin}, func() error {
+			err := crdt.ApplyUpdateV1(room, update, origin)
+			close(inside)
+			<-release
+			return err
+		})
+	}()
+	select {
+	case <-inside:
+	case err := <-answered:
+		t.Fatalf("the hook answered %v without holding inside the apply", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the hook never reached the apply")
+	}
+	return answered
+}
+
+// A browser's update is weighed and applied while another browser's apply to the same room is
+// still running, as it is while that apply sits in one of the room's update observers
+// (TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth): the hook holds no lock across an
+// apply. The struct total counts the held apply's addition while it is in flight, so it is never
+// below what the room holds, and neither apply marks it stale, though the two ran at once.
+func TestAPeerUpdateIsAppliedWhileAnotherBrowsersApplyIsStillRunning(t *testing.T) {
+	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	total, counts := countedStructTotal(t, replica)
+	first, second := peerTyping(t, room, "a"), peerTyping(t, room, "b")
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHeld)
+	alpha, beta := new(int), new(int)
+	firstAnswer := heldApply(t, service, room, first, alpha, release)
+
+	secondAnswer := make(chan error, 1)
+	var secondApplied atomic.Bool
+	go func() {
+		secondAnswer <- service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: second, Origin: beta}, func() error {
+			secondApplied.Store(true)
+			return crdt.ApplyUpdateV1(room, second, beta)
+		})
+	}()
+	select {
+	case err := <-secondAnswer:
+		if err != nil || !secondApplied.Load() {
+			t.Fatalf("the hook answered %v (applied %t) for the second browser's keystroke, want it admitted", err, secondApplied.Load())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second browser's keystroke waited on the first browser's apply")
+	}
+	if running, stale := total.running(); running < countRoomStructs(room) || stale {
+		t.Fatalf("with the first apply in flight the total is %d (stale %t), want no less than the room's exact count %d and fresh", running, stale, countRoomStructs(room))
+	}
+
+	releaseHeld()
+	if err := <-firstAnswer; err != nil {
+		t.Fatalf("the hook answered %v for the first browser's keystroke, want it admitted", err)
+	}
+	running, stale := total.running()
+	if running < countRoomStructs(room) || stale {
+		t.Fatalf("after both applies the total is %d (stale %t), want no less than the room's exact count %d and fresh", running, stale, countRoomStructs(room))
+	}
+	if counts.Load() != 0 {
+		t.Fatalf("the hook counted the room %d times, want none for two keystrokes far short of the cap", counts.Load())
+	}
+	runtime.KeepAlive(replica)
+}
+
+// Two browsers' updates weighed at once near the cap cannot both pass it: the first's addition is
+// reserved while its apply runs, and the second is weighed against the total with it. A
+// confirmation the second takes re-bases the count and leaves the reservation in flight counted.
+// Reservations racing each other admit exactly as many additions as the cap has room for.
+func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T) {
+	const n = 10
+	added := uint64(n * (1 + splitsAStructCanCause))
+
+	t.Run("one held inside its apply", func(t *testing.T) {
+		service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+		total := replica.structs
+		// The room's count stands where one addition fits and two do not.
+		near := maxUpdateItems - added - added/2
+		var counts atomic.Int64
+		total.count = func(*crdt.Doc) uint64 {
+			counts.Add(1)
+			return near
+		}
+		total.recount(room)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseHeld)
+		firstAnswer := heldApply(t, service, room, gcFrameFrom(7, n), new(int), release)
+
+		before := crdt.EncodeStateAsUpdateV1(room, nil)
+		err, called := weighInto(service, room, gcFrameFrom(8, n))
+		requireRefusedTooLarge(t, err, called, room, before)
+		if counts.Load() != 2 {
+			t.Fatalf("the room was counted %d times, want its re-basing and the second update's confirmation", counts.Load())
+		}
+		releaseHeld()
+		if err := <-firstAnswer; err != nil {
+			t.Fatalf("the hook answered %v for the first update, want it admitted", err)
+		}
+		if running, _ := total.running(); running != near+added {
+			t.Fatalf("the total is %d once the first update landed, want the count's %d and its %d", running, near, added)
+		}
+		runtime.KeepAlive(replica)
+	})
+
+	t.Run("racing reservations", func(t *testing.T) {
+		_, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+		total := replica.structs
+		const fit, racers = 3, 8
+		near := maxUpdateItems - fit*added - added/2
+		total.count = func(*crdt.Doc) uint64 { return near }
+		total.recount(room)
+		start := make(chan struct{})
+		var passed atomic.Int64
+		var wg sync.WaitGroup
+		for range racers {
+			wg.Go(func() {
+				<-start
+				if total.reserve(room, added) {
+					passed.Add(1)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		if passed.Load() != fit {
+			t.Fatalf("%d of %d racing reservations passed, want the %d the cap has room for", passed.Load(), racers, fit)
+		}
+		if running, _ := total.running(); running != near+fit*added || running > maxUpdateItems {
+			t.Fatalf("the total is %d with the reservations in flight, want %d and within the %d cap", running, near+fit*added, maxUpdateItems)
+		}
+		runtime.KeepAlive(replica)
+	})
 }
 
 // applyHeapEstimate is the estimate the hook computes for update arriving at room, a room no load
