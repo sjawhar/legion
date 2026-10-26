@@ -2,48 +2,82 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-256",
-  "completed": "2026-10-26T21:50:00Z",
+  "completed": "2026-10-26T22:30:00Z",
   "generation": 4,
-  "round": 3,
-  "codeHead": "e918e18311172723c25e3b20e6455a453df03ac7",
-  "testedHead": "9831541acb57e551dda5c7016ba9fa58c288aba8",
+  "round": 4,
+  "codeHead": "17accb0879a288f5b0528c2fb105d1d9e4affadd",
+  "testedHead": "59014acfb089b05178a5b8ddaa97c5befc249cbb",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran Dispatch's browser suite and my red tests at the head with my own harness, and re-ran the pill-against-GitHub comparison with the fixed rule. The round-1 workflow proof (code 9bb73cab, unchanged) and the round-2 proxy and hint probes stand: proxy.go, proxy_test.go, check-pr-text.sh and pr-title.yaml are byte-identical between 13bd6a70 and e918e183."
+    "how": "Drove the changed proxy with real GitHub bodies, ran the live Dispatch server's proxy and the browser suite at the head, and ran the unit cases including the new app-keyed rows. check-pr-text.sh, pr-title.yaml and the pill's keying and filter rule are unchanged since round 3, so the round-1 workflow proof and the round-3 60/60 real-data agreement stand."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round-2 finding 1: the checks pill drops checks of events GitHub does not evaluate for a pull request",
-      "surface": "Dispatch's real server and web build in Playwright (chromium and iphone), with the e2e fake GitHub serving the pull request, its check runs and its workflow runs (packages/dispatch/e2e)",
-      "command": "bun run e2e e2e/github-checks.e2e.ts from packages/dispatch (own harness: Postgres 15443, DISPATCH_E2E_PORT 18266); bun test web/src/features/issue/IssuePage.test.tsx -t 'merged pull request'",
-      "observed": "6 passed: cancelled-then-passed shows checks: success, failed-on-one-event shows checks: failure, and my red spec (a failed pull_request_review_comment run plus a queued workflow_dispatch run beside a passing pull_request run) shows checks: success. Unit: 6 pass, 0 fail, my red case included",
-      "headSha": "9831541acb57e551dda5c7016ba9fa58c288aba8",
-      "negativeControl": "The same spec at 2df03e03 (before e918e183): 2 failed, Expected 'checks: success', Received 'checks: failure'"
+      "criterion": "Review round 2 finding 1: the proxy passes on only check_suite_id, event and name per workflow run, and a page of 100 real runs (over 1 MiB) no longer fails",
+      "surface": "ProxyREST and the real githubapp client over HTTP at 17accb08, fed GitHub's own actions/runs answers captured with gh from sjawhar/legion (throwaway Go test in the package, deleted afterwards)",
+      "command": "gh api repos/sjawhar/legion/actions/runs?per_page=100 > runs100.json; gh api 'repos/sjawhar/legion/actions/runs?head_sha=98dda6bc...&per_page=100' > runs-2261.json; go test ./internal/dispatch/githubapi -run TestZZTesterRealBodies -v",
+      "observed": "runs100.json is 1,294,259 bytes with 100 runs (total_count 40000). The proxy answered 200 with 7,915 bytes, 100 runs, total 40000, each run exactly {check_suite_id, event, name} matching GitHub's in order; no '@', head_commit or actor in the body; Content-Type application/json. runs-2261.json: 168,972 -> 1,105 bytes, 14 runs, same check. Through the live Dispatch server (e2e harness, fake GitHub), a signed-in read of one commit's workflow runs now returns only those three fields (round 2's body passed head_sha through). The filtered query got 404 GITHUB_PATH_REFUSED and an anonymous read got 401",
+      "headSha": "17accb0879a288f5b0528c2fb105d1d9e4affadd",
+      "negativeControl": "A 200 body that is not JSON, or whose check_suite_id is a string, gets 502 GITHUB_UPSTREAM 'GitHub answered the workflow runs with a body that does not decode'"
     },
     {
-      "criterion": "The checks pill shows what GitHub's merge reads, on real pull requests",
-      "surface": "Live GitHub data for the 60 newest sjawhar/legion pull requests, judged by the pill's rule as at e918e183 (copied into a throwaway script) against GitHub's own pull-request rollup state (pullRequest.commits.statusCheckRollup)",
-      "command": "bun $TMPDIR/pill/compare.ts 60 sjawhar/legion",
-      "observed": "agree=60 disagree=0. #2234 (queued pull_request_review_comment run) is now success, as GitHub's rollup is",
-      "headSha": "e918e18311172723c25e3b20e6455a453df03ac7",
-      "negativeControl": "The rule without the event filter (13bd6a70): 58 of 60 (#2234 pending against SUCCESS). The old any-red rule: 40 of 60 (#2258 is open and CLEAN with rollup SUCCESS, and the old rule shows failure)"
-    },
-    {
-      "criterion": "Round-2 finding 2: the code head has CI and no conflict",
-      "surface": "GitHub Actions on sjawhar/legion#2247",
-      "command": "gh api repos/sjawhar/legion/actions/runs?head_sha=e918e183...; gh pr view 2247 --json mergeStateStatus; git diff origin/main...9831541a --stat",
-      "observed": "Code head e918e183 was pushed without a trailer and has runs: Tests 40405244351, PR Title 40405382450, Docs, Worker Image and Legion Envoy and Contracts, all still queued at 21:45Z (read as queued, not waited for). mergeStateStatus BLOCKED (no longer DIRTY). The diff against main touches only this pull request's files. Handoff-only head 9831541a carries skip-checks: true",
-      "headSha": "9831541acb57e551dda5c7016ba9fa58c288aba8",
-      "negativeControl": "At 28e8947f (round 2) there were no runs at all and the state was DIRTY"
+      "criterion": "Review round 2 findings 2 and 3: check runs are read before workflow runs; the app-keyed branch is tested; the pill still shows what GitHub's merge reads",
+      "surface": "Dispatch's real server and web build in Playwright (chromium and iphone) with the e2e fake GitHub; the IssuePage unit suite",
+      "command": "bun run e2e e2e/github-checks.e2e.ts (own harness); bun test web/src/features/issue/IssuePage.test.tsx -t 'merged pull request'",
+      "observed": "Browser: 6 passed, including the tester's spec for events GitHub does not evaluate. Unit: 8 pass, 0 fail (the two new external-App rows included). GitHubLink.tsx now awaits the check-runs pages before reading the workflow runs",
+      "headSha": "59014acfb089b05178a5b8ddaa97c5befc249cbb",
+      "negativeControl": "The tester's browser spec failed at 2df03e03 (before e918e183): Expected 'checks: success', Received 'checks: failure'"
     }
   ],
   "observations": [
-    "Permissions: the pill now also reads actions/runs through Dispatch's GitHub App. The App already reads actions/runs for the delivery page (packages/envoy/internal/dispatch/delivery/github_runs.go:178,209). [INFERENCE] It holds actions:read where installed. The review App's token is refused 403 on theorem-labs/agent-infra's actions/runs, so I could not run the real-data comparison there. Where an installation lacks actions:read, the pill's query fails and the pill is dropped, never shown green (readEveryPage throws on a missing workflow_runs list; GitHubLink.tsx's comment says a failed read drops only the pill).",
-    "CI at e918e183 was still queued when I read it. A required red there sends the issue back from a later phase."
+    "CI at code head 17accb08, read at 22:25Z: Tests 40411056889, Docs, Legion Envoy and Contracts and Worker Image queued; PR Title 40411149206 pending. Read as queued, not waited for. The handoff head 59014acf carries skip-checks: true and touches only .legion/.",
+    "The 16 MiB limit holds a full page by a wide margin: 100 real runs are 1.29 MB.",
+    "Dispatch's App still needs Actions: read; packages/envoy/cmd/dispatch/AGENTS.md now says so, and that without it the pill disappears."
   ],
   "rounds": [
+    {
+      "round": 3,
+      "codeHead": "e918e18311172723c25e3b20e6455a453df03ac7",
+      "testedHead": "9831541acb57e551dda5c7016ba9fa58c288aba8",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "Re-ran Dispatch's browser suite and my red tests at the head with my own harness, and re-ran the pill-against-GitHub comparison with the fixed rule. The round-1 workflow proof (code 9bb73cab, unchanged) and the round-2 proxy and hint probes stand: proxy.go, proxy_test.go, check-pr-text.sh and pr-title.yaml are byte-identical between 13bd6a70 and e918e183."
+      },
+      "failures": [],
+      "failed": 0,
+      "proof": [
+        {
+          "criterion": "Round-2 finding 1: the checks pill drops checks of events GitHub does not evaluate for a pull request",
+          "surface": "Dispatch's real server and web build in Playwright (chromium and iphone), with the e2e fake GitHub serving the pull request, its check runs and its workflow runs (packages/dispatch/e2e)",
+          "command": "bun run e2e e2e/github-checks.e2e.ts from packages/dispatch (own harness: Postgres 15443, DISPATCH_E2E_PORT 18266); bun test web/src/features/issue/IssuePage.test.tsx -t 'merged pull request'",
+          "observed": "6 passed: cancelled-then-passed shows checks: success, failed-on-one-event shows checks: failure, and my red spec (a failed pull_request_review_comment run plus a queued workflow_dispatch run beside a passing pull_request run) shows checks: success. Unit: 6 pass, 0 fail, my red case included",
+          "headSha": "9831541acb57e551dda5c7016ba9fa58c288aba8",
+          "negativeControl": "The same spec at 2df03e03 (before e918e183): 2 failed, Expected 'checks: success', Received 'checks: failure'"
+        },
+        {
+          "criterion": "The checks pill shows what GitHub's merge reads, on real pull requests",
+          "surface": "Live GitHub data for the 60 newest sjawhar/legion pull requests, judged by the pill's rule as at e918e183 (copied into a throwaway script) against GitHub's own pull-request rollup state (pullRequest.commits.statusCheckRollup)",
+          "command": "bun $TMPDIR/pill/compare.ts 60 sjawhar/legion",
+          "observed": "agree=60 disagree=0. #2234 (queued pull_request_review_comment run) is now success, as GitHub's rollup is",
+          "headSha": "e918e18311172723c25e3b20e6455a453df03ac7",
+          "negativeControl": "The rule without the event filter (13bd6a70): 58 of 60 (#2234 pending against SUCCESS). The old any-red rule: 40 of 60 (#2258 is open and CLEAN with rollup SUCCESS, and the old rule shows failure)"
+        },
+        {
+          "criterion": "Round-2 finding 2: the code head has CI and no conflict",
+          "surface": "GitHub Actions on sjawhar/legion#2247",
+          "command": "gh api repos/sjawhar/legion/actions/runs?head_sha=e918e183...; gh pr view 2247 --json mergeStateStatus; git diff origin/main...9831541a --stat",
+          "observed": "Code head e918e183 was pushed without a trailer and has runs: Tests 40405244351, PR Title 40405382450, Docs, Worker Image and Legion Envoy and Contracts, all still queued at 21:45Z (read as queued, not waited for). mergeStateStatus BLOCKED (no longer DIRTY). The diff against main touches only this pull request's files. Handoff-only head 9831541a carries skip-checks: true",
+          "headSha": "9831541acb57e551dda5c7016ba9fa58c288aba8",
+          "negativeControl": "At 28e8947f (round 2) there were no runs at all and the state was DIRTY"
+        }
+      ],
+      "observations": [
+        "Permissions: the pill now also reads actions/runs through Dispatch's GitHub App. The App already reads actions/runs for the delivery page (packages/envoy/internal/dispatch/delivery/github_runs.go:178,209). [INFERENCE] It holds actions:read where installed. The review App's token is refused 403 on theorem-labs/agent-infra's actions/runs, so I could not run the real-data comparison there. Where an installation lacks actions:read, the pill's query fails and the pill is dropped, never shown green (readEveryPage throws on a missing workflow_runs list; GitHubLink.tsx's comment says a failed read drops only the pill).",
+        "CI at e918e183 was still queued when I read it. A required red there sends the issue back from a later phase."
+      ]
+    },
     {
       "round": 2,
       "codeHead": "13bd6a70498903ef7f142e9255d69f72904e16a3",
