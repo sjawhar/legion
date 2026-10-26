@@ -5,7 +5,6 @@ package cmdtest
 
 import (
 	"bytes"
-	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -46,13 +45,19 @@ type Process struct {
 }
 
 // Start starts cmd, which failures call name, with its standard output and error captured in
-// Output, and kills it when the test ends if it is still running.
+// Output, and kills it when the test ends if it is still running. It closes every file in
+// cmd.ExtraFiles once cmd.Start returns, whether the process started or not: a started process
+// holds its own copies from then on, so a socket a HeldPort passed it is released when it exits.
 func Start(t testing.TB, name string, cmd *exec.Cmd) *Process {
 	t.Helper()
 	exited := make(chan struct{})
 	process := &Process{Cmd: cmd, Output: &LockedBuffer{}, Exited: exited, name: name}
 	cmd.Stdout, cmd.Stderr = process.Output, process.Output
-	if err := cmd.Start(); err != nil {
+	err := cmd.Start()
+	for _, file := range cmd.ExtraFiles {
+		_ = file.Close()
+	}
+	if err != nil {
 		t.Fatalf("start %s: %v", name, err)
 	}
 	go func() {
@@ -111,69 +116,51 @@ func (p *Process) WaitForOutput(t testing.TB, lines ...string) {
 	}
 }
 
-// handedOut is every port FreeTCPPort has handed to a test that has not ended yet.
-var (
-	handedOutMu sync.Mutex
-	handedOut   = map[int]bool{}
-)
-
-// freePortLow and freePortHigh bound the ports FreeTCPPort hands out: below the range a kernel
-// takes ports from for itself (Linux's default 32768-60999, and the 49152-65535 macOS and Windows
-// use), for a listener on port 0 and for an outgoing connection's source port alike. So no socket
-// the kernel places a port for, a booting process's own connection to its database among them,
-// takes one of these while its process boots.
-const (
-	freePortLow  = 20000
-	freePortHigh = 32767
-)
-
-// FreeTCPPort is a loopback port, for a process to serve on, that nothing listened on a moment ago
-// and that FreeTCPPort hands to no other caller of this binary until the test it went to ends.
-//
-// The port is free from the moment this returns until its process binds it. In CI run 40162140539
-// a test drew a second port in that window and was handed the first again: one process of a pair
-// exited on "address already in use" for port 35881 while a health check of that port passed,
-// which of the servers that test runs only the pair's other process could have answered. So this
-// chooses each port number itself and skips one it handed out before binding anything. A listener
-// on port 0 would bind the port before it could be checked, and the process the port went to could
-// lose its own bind in that moment.
-//
-// Only the callers of this function are kept apart: a socket bound by number to a port in this
-// range can still take the port before its process binds it, and that process then exits on the
-// bind.
-func FreeTCPPort(t testing.TB) int {
-	t.Helper()
-	return freeTCPPortFrom(t, func() int { return freePortLow + rand.IntN(freePortHigh-freePortLow+1) })
+// HeldPort is a loopback TCP port the kernel chose, held by a listening socket from the moment
+// HoldPort returns until the process the test passes it to serves on it, so no other program can
+// take the port in between.
+type HeldPort struct {
+	// Port is the port the kernel chose.
+	Port int
+	// Addr is the address the socket listens on, 127.0.0.1:Port.
+	Addr string
+	// file holds the listening socket until Start has handed it to the process.
+	file *os.File
 }
 
-// freeTCPPortFrom is FreeTCPPort with the port numbers it tries coming from candidate, which a
-// test replaces to propose a port it chose.
-func freeTCPPortFrom(t testing.TB, candidate func() int) int {
+// HoldPort opens a listening socket on a loopback port the kernel chooses, for the test to hand to
+// the process it starts with Pass. The test's copy closes once Start has started that process, or
+// when the test ends.
+func HoldPort(t testing.TB) *HeldPort {
 	t.Helper()
-	handedOutMu.Lock()
-	defer handedOutMu.Unlock()
-	var refused error
-	for range 1000 {
-		port := candidate()
-		if handedOut[port] {
-			continue
-		}
-		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-		if err != nil {
-			refused = err
-			continue
-		}
-		_ = listener.Close()
-		handedOut[port] = true
-		t.Cleanup(func() {
-			handedOutMu.Lock()
-			defer handedOutMu.Unlock()
-			delete(handedOut, port)
-		})
-		return port
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
 	}
-	t.Fatalf("pick a port: 1000 tries found none free that this binary has not handed out; the last bind said %v", refused)
-	return 0
+	// The file is a descriptor of its own for the socket, so the socket stays listening once the
+	// listener is closed.
+	file, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		t.Fatalf("hold a loopback port: take the listening socket's descriptor: %v", err)
+	}
+	// A File closed twice closes its descriptor once, so this is safe after Start has closed it.
+	t.Cleanup(func() { _ = file.Close() })
+	addr := listener.Addr().(*net.TCPAddr)
+	return &HeldPort{Port: addr.Port, Addr: addr.String(), file: file}
+}
+
+// Pass hands the held socket to cmd: it adds the socket to cmd.ExtraFiles and sets envName to the
+// descriptor number the process inherits it as. It appends to cmd.Env, or to this process's
+// environment when cmd.Env is nil, so call it after cmd.Env is assigned. Start then closes the
+// test's copy.
+func (h *HeldPort) Pass(cmd *exec.Cmd, envName string) {
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	// ExtraFiles entry i is descriptor 3+i in the process.
+	cmd.Env = append(cmd.Env, envName+"="+strconv.Itoa(3+len(cmd.ExtraFiles)))
+	cmd.ExtraFiles = append(cmd.ExtraFiles, h.file)
 }
 
 // LockedBuffer is a buffer a process's output, or a logger, writes from more than one goroutine
