@@ -2,23 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T11:42:20Z",
-  "headTested": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
-  "round": 5,
+  "completed": "2026-10-26T11:51:01Z",
+  "headTested": "9925ae620014aeba2a3eca43c7f9fae25a012815",
+  "round": 6,
   "rebaseCheck": {
-    "verifiedHead": "842cc8f985c22b98a36cf191cda018e95ae22ea7 (code ec6ea9e0)",
-    "newHead": "aedb7656131e018f7e3e10d7a60b2f9f64645486 (code ec6ea9e0)",
+    "verifiedHead": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb (round 4, full; round 5 re-check)",
+    "newHead": "071574374a973d97be5b4181ca7dfd8bac606081 (code 9925ae620014)",
     "before": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
     "after": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
-    "verdict": "unchanged: no code since round 4, bare gates only"
+    "verdict": "rebase re-check ec6ea9e0 → 9925ae62: fingerprint unchanged, bare gates only"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Read the runs on GitHub at ec6ea9e0 myself: Tests 40297256033 attempt 3 has lint, typecheck and test success, Legion Envoy and Contracts 40297256195 attempt 2 succeeded, and PR Title, Docs and Worker Image succeeded. The round changed no code (aedb7656 against 842cc8f9 touches only .legion/)."
+    "how": "Computed the fingerprint myself at ec6ea9e0 and at 07157437: 337b617b… at both, with an empty interdiff. Smoke-booted the merge head's binary on Azure myself (coverage 13/13, search hit, no-bearer 401)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
+    {
+      "criterion": "Rebase re-check after the second forward merge of main: the fingerprint is unchanged and the bare gates hold at the new code head",
+      "surface": "the issue workspace (fingerprint), and envoy-dispatch built at 9925ae62 on a copy of the rolled round-4/5 database (Postgres 17.11 + pgvector 0.8.0), DISPATCH_EMBEDDER=azure keyless against the live embed-v-4-0 deployment",
+      "command": "normalized diff from fork_point(main@origin | head) to head, with ~(.legion | docs/solutions), sha256, at ec6ea9e0 and at 07157437; a comment inserted with session_replication_role = replica; serve.sh EMBED_MODE=azure DB=r6a; coverage route; GET /api/v1/search?q=coastal beacon optics maintenance&project=TST",
+      "observed": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea at both heads (forks f2c17ded→7f6ef46f→8298fc71); schema_migrations max 119; boot pass 'added=1', coverage place azure, items 13 current 13 lacking 0 failed 0; the trigger-less lighthouse comment was the first hit, degraded null; 0 ERROR lines",
+      "headSha": "9925ae620014aeba2a3eca43c7f9fae25a012815",
+      "negativeControl": "the coverage route with no bearer → 401"
+    },
     {
       "criterion": "Code head unchanged since round 4: the required checks are green and the server still embeds everything with no command (bare gates after a no-code round)",
       "surface": "GitHub Actions on PR #2208 at ec6ea9e0; envoy-dispatch built at the workspace head (aedb7656, code identical to ec6ea9e0) on a copy of round 4's rolled database, DISPATCH_EMBEDDER=azure keyless against the live embed-v-4-0 deployment",
@@ -180,8 +188,18 @@
       "negativeControl": "the old binary's backfill-embeddings fails on the new schema (person-run, removed with this release)"
     }
   ],
-  "ci": "code head ec6ea9e0: Tests 40297256033 (attempt 3), Legion Envoy and Contracts 40297256195 (attempt 2), PR Title 40297256135, Docs 40297256157, Worker Image 40297256247 all success; required lint, typecheck, test, pr-title success",
-  "openAtCompletion": "GitHub reports PR #2208 CONFLICTING with main (8298fc710323): main's 383b889d and 8298fc71 changed packages/contracts/CHANGELOG.md, packages/envoy/CHANGELOG.md and packages/envoy/internal/dispatch/api/server_test.go, which this branch also changes. The implementer's forward merge is needed, and the architect is told",
+  "ci": "code head 9925ae62: Tests 40317776949 (lint, typecheck, test), Legion Envoy and Contracts 40317776875, Docs 40317776942, Worker Image 40317776803 queued and PR Title 40317889859 pending when read; not waited on, not re-run",
+  "round5": {
+    "headTested": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+    "rebaseCheck": {
+      "verifiedHead": "842cc8f985c22b98a36cf191cda018e95ae22ea7 (code ec6ea9e0)",
+      "newHead": "aedb7656131e018f7e3e10d7a60b2f9f64645486 (code ec6ea9e0)",
+      "before": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
+      "after": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
+      "verdict": "unchanged: no code since round 4, bare gates only"
+    },
+    "ci": "code head ec6ea9e0: Tests 40297256033 (attempt 3), Legion Envoy and Contracts 40297256195 (attempt 2), PR Title 40297256135, Docs 40297256157, Worker Image 40297256247 all success; required lint, typecheck, test, pr-title success"
+  },
   "round4": {
     "headTested": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
     "rebaseCheck": {
