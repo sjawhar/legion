@@ -1044,20 +1044,34 @@ func ArtifactVersionEventPayload(
 
 // stampBlockIDs stamps the block ids doc's tree lacks or repeats on the tree as it stands
 // (rewriteLive), and returns the stamped tree, how many ids it minted, and each ask block whose
-// id it changed. Its caller decides from a read of its own whether any id needs repair, so a
-// document that needs none opens no transaction, and records the stamped asks
-// (recordStampedAskBlocks) once it holds the room's state lock, which no Yjs transaction takes.
-// A document whose state already could not be decoded is stamped nothing and opens no
-// transaction: the stamp adds an item for every id it mints, so it would carry such a document
-// further past what ygo can decode, and it returns errPastDecodeCap before it writes. That is
-// asked of room's document as it stands, before rewriteLive's transaction (Service.pastDecodeCap).
-func (s *Service) stampBlockIDs(room string, doc *crdt.Doc, origin any) (*pmdoc.Node, int, []stampedAsk, error) {
-	if s.pastDecodeCap(room, doc) {
+// id it changed. Its caller decides from a read of its own whether any id needs repair, and how
+// many (repairs, pmdoc.BlockIDRepairCount), so a document that needs none opens no transaction,
+// and records the stamped asks (recordStampedAskBlocks) once it holds the room's state lock, which
+// no Yjs transaction takes.
+//
+// A document the stamp would carry past the decode cap is stamped nothing and opens no
+// transaction: it returns errPastDecodeCap before it writes, having asked of the write before
+// rewriteLive's (Service.leavesPastDecodeCap). What the stamp adds is at most one struct for each
+// repair: pmdoc.Update writes a minted id as one attribute set (pmdoc/update.go:164-178), a map
+// item whose origin is the attribute's last item, whole, so it splits nothing (crdt/yxml.go:
+// 510-525 in sjawhar/ygo v1.51.3-sami.2), and it writes nothing of the rest of the tree, which
+// the stamp read in the same transaction and hands back as it was (pmdoc/update.go:65-70). A
+// browser's edit landing after the caller's read can leave more blocks to stamp than it counted;
+// the stamp then writes nothing, so it never adds more than it was answered on, and the next
+// settlement, which that edit schedules, stamps them.
+func (s *Service) stampBlockIDs(doc *crdt.Doc, origin any, repairs int) (*pmdoc.Node, int, []stampedAsk, error) {
+	stamp := serverWrite{adds: uint64(repairs), bounded: true, apply: func(copied *crdt.Doc) {
+		_, _, _ = rewriteLive(copied, nil, func(live *pmdoc.Node) bool { return pmdoc.EnsureBlockIDsCount(live) > 0 })
+	}}
+	if s.leavesPastDecodeCap(doc, stamp) {
 		return nil, 0, nil, errPastDecodeCap
 	}
 	minted := 0
 	var stamped []stampedAsk
 	tree, _, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
+		if pmdoc.BlockIDRepairCount(live) > repairs {
+			return false
+		}
 		before := askBlockOrder(live)
 		minted = pmdoc.EnsureBlockIDsCount(live)
 		if minted > 0 && len(before) > 0 {
@@ -1366,21 +1380,21 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	reconciled := read
 	var renamed []stampedAsk
-	if pmdoc.BlockIDRepairCount(read) > 0 {
+	if repairs := pmdoc.BlockIDRepairCount(read); repairs > 0 {
 		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) (bool, error) {
 			var minted int
 			var stampErr error
-			reconciled, minted, renamed, stampErr = s.stampBlockIDs(room, doc, origin)
+			reconciled, minted, renamed, stampErr = s.stampBlockIDs(doc, origin, repairs)
 			return minted > 0, stampErr
 		})
 		keep(slot, update)
 		switch {
 		case errors.Is(err, errPastDecodeCap):
 			// The stamp wrote nothing (stampBlockIDs), so the settlement carries on with the tree it
-			// read, ids unrepaired, rather than ending: a document's clocks never fall, so one past
-			// the cap would refuse every later stamp too, and a settlement that ended here would
-			// leave its browsers' edits unversioned until it was rebuilt. Nothing failed, so no
-			// settle failure is counted.
+			// read, ids unrepaired, rather than ending: a document at the decode cap stays there
+			// short of a rebuild, so it would refuse every later stamp too, and a settlement that
+			// ended here would leave its browsers' edits unversioned until it was rebuilt. Nothing
+			// failed, so no settle failure is counted.
 			reconciled = read
 			s.logPastDecodeCap(room, "settlement's block-id stamp")
 		case err != nil:
@@ -1793,14 +1807,15 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		if err != nil {
 			return false, err
 		}
-		if pmdoc.BlockIDRepairCount(read) == 0 {
+		repairs := pmdoc.BlockIDRepairCount(read)
+		if repairs == 0 {
 			return false, nil
 		}
 		if s.afterBackfillRead != nil {
 			s.afterBackfillRead(artifactID)
 		}
 		before, beforeErr := renderTree(read)
-		stamped, minted, stampRenamed, err := s.stampBlockIDs(artifactID, doc, origin)
+		stamped, minted, stampRenamed, err := s.stampBlockIDs(doc, origin, repairs)
 		report.Stamped = minted
 		renamed = stampRenamed
 		if err != nil {
@@ -1814,7 +1829,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		case errors.Is(err, errPastDecodeCap):
 			// The stamp wrote nothing (stampBlockIDs): the document is left as it is, and the
 			// backfill goes on to the next one, as it does past a document that is stopping.
-			report.Skipped = "document past the decode cap"
+			report.Skipped = "the stamp would carry the document past the decode cap"
 			s.logPastDecodeCap(artifactID, "block-id backfill")
 		case err != nil:
 			report.Err = fmt.Errorf("stamp document: %w", err)

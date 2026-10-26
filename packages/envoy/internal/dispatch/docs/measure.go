@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 	"weak"
@@ -42,20 +43,21 @@ import (
 // runs, until that count ends.
 //
 // The one count at a time is a turn the counts take (turn), and the same turn runs the decode-cap
-// confirmations of the server's writes outside applyLive (Service.pastDecodeCap), for the same
-// reason: each decodes a whole room's state into a fresh copy of the document. A confirmation must
-// answer before its write goes on, where a count is queued and stored later, so it does not join
-// the queue: it takes the turn on its writer's goroutine and waits for it (decodes). Both hold
-// turn, a mutex rather than a place in the queue, because a queued confirmation would need the
-// worker started for a job no replica owns and a channel back to its writer, while the mutex keeps
-// the measurer's zero value ready and leaves stop as it is: a confirmation is never queued, so a
-// stop has nothing of it to drop, and one in flight holds nothing but its own copy, which goes when
-// it returns.
+// counts of the server's writes outside applyLive (Service.leavesPastDecodeCap), for the same
+// reason: each encodes a whole room's state, and one near the cap decodes that state into a fresh
+// copy of the document and writes on it. A write's count must answer before its write goes on,
+// where an element count is queued and stored later, so it does not join the queue: it takes the
+// turn on its writer's goroutine and waits for it (structsAfter). Both hold turn, a mutex rather
+// than a place in the queue, because a queued write's count would need the worker started for a
+// job no replica owns and a channel back to its writer, while the mutex keeps the measurer's zero
+// value ready and leaves stop as it is: a write's count is never queued, so a stop has nothing of
+// it to drop, and one in flight holds nothing but its own encode and copy, which go when it
+// returns.
 type elementMeasurer struct {
-	// turn is held for each count's parse and struct walk and each confirmation's decode, so that
+	// turn is held for each count's parse and struct walk and each server write's count, so that
 	// no two run at once. No one holding it waits on a room: a count parses a string it already
-	// holds, and a struct walk or a confirmation takes only the lock of the document it encodes,
-	// which its caller does not hold.
+	// holds, and a struct walk or a write's count takes only the lock of the document it encodes,
+	// which its caller does not hold, and of the copy it makes.
 	turn sync.Mutex
 
 	mu sync.Mutex
@@ -75,6 +77,10 @@ type elementMeasurer struct {
 	// beforeCount runs in the worker once it has taken a rendering and before it parses it. Nil
 	// outside tests; tests use it to count the parses and to hold one while renderings arrive.
 	beforeCount func(markdown string)
+	// measuredWrite runs in the turn once a server write's count (structsAfter) has counted the
+	// room's document, and says whether it went on to copy the document and write on the copy. Nil
+	// outside tests; tests use it to see which writes were counted, and how.
+	measuredWrite func(copied bool)
 }
 
 // minInterval is the least time between two counts of one room: roomCountInterval, or a test's.
@@ -183,13 +189,44 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	}
 }
 
-// decodes reports whether doc's whole state decodes as one update (stateDecodes), once it has
-// waited for the measurer's turn: the decode-cap confirmation of a server write outside applyLive
-// (Service.pastDecodeCap), which holds a whole copy of doc while it runs.
-func (m *elementMeasurer) decodes(doc *crdt.Doc) bool {
+// structsAfter is the struct total doc, a room's live document, would hold after write, as far as
+// leavesPastDecodeCap needs it, once it has waited for the measurer's turn: doc's own total
+// (countRoomStructs) where that is past the cap, that total with what the write adds at most where
+// the sum is within it, and otherwise that total with what the write added to a copy of doc: the
+// copy's total after the write less its total before. A write the copy shows taking structs away
+// is credited none of them. The copy is a decode of doc's state into a fresh document with doc's
+// client id, so the write's own items take the clocks they would take in doc; it holds a whole
+// second document while it is counted, and is dropped when this returns.
+func (m *elementMeasurer) structsAfter(doc *crdt.Doc, write serverWrite) uint64 {
 	m.turn.Lock()
 	defer m.turn.Unlock()
-	return stateDecodes(doc)
+	live := countRoomStructs(doc)
+	switch {
+	case live > maxUpdateItems:
+		m.writeMeasured(false)
+		return live
+	case write.bounded && live+write.adds <= maxUpdateItems:
+		m.writeMeasured(false)
+		return live + write.adds
+	}
+	m.writeMeasured(true)
+	copied := newDocumentCopy(crdt.WithClientID(doc.ClientID()))
+	if err := crdt.ApplyUpdateV1(copied, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+		// A state whose total is within the cap is within what a decode reads; one that still
+		// does not decode cannot be written to and loaded again.
+		slog.Error("dispatch: copy a room's document to count a server write on it", "error", err)
+		return maxUpdateItems + 1
+	}
+	before := countRoomStructs(copied)
+	write.apply(copied)
+	return live + max(countRoomStructs(copied), before) - before
+}
+
+// writeMeasured runs the test's hook on a server write's count, if it has one.
+func (m *elementMeasurer) writeMeasured(copied bool) {
+	if m.measuredWrite != nil {
+		m.measuredWrite(copied)
+	}
 }
 
 // stop ends the measurer for Shutdown: no worker starts after it, the queue is dropped, a room

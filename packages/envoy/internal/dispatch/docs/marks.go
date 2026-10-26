@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"time"
 
@@ -839,40 +840,89 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 
 // unmarkExpired removes from room's live document each of expired that it still holds. It unmarks
 // them all in one transaction on the room itself, which cannot be rolled back once begun, so a
-// document whose state already could not be decoded is refused before that transaction opens
-// (Service.pastDecodeCap, errPastDecodeCap) and left as it was: each mark it removes writes new
-// format items around the text it covered, carrying the document further past what ygo can decode.
+// document the sweep would carry past the decode cap is refused before that transaction opens
+// (Service.leavesPastDecodeCap, errPastDecodeCap) and left as it was. What the sweep adds is
+// bounded by the runs of text the marks cover in a read of the room taken first (markedRuns),
+// unmarkRunStructs a run; a browser's edit landing after that read that leaves the marks on more
+// runs leaves the sweep writing nothing, so it never adds more than it was answered on, and the
+// next settlement's pass sweeps them.
 func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
 	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		if s.pastDecodeCap(room, doc) {
+		read, readErr := s.liveTree(room, doc)
+		if readErr != nil {
+			sweepErr = readErr
+			return
+		}
+		runs := markedRuns(read, expired)
+		sweep := serverWrite{adds: uint64(runs) * unmarkRunStructs, bounded: true, apply: func(copied *crdt.Doc) {
+			fragment := copied.GetXmlFragment(fragmentName)
+			copied.Transact(func(txn *crdt.Transaction) { _ = unmarkFound(txn, fragment, expired, math.MaxInt) })
+		}}
+		if runs > 0 && s.leavesPastDecodeCap(doc, sweep) {
 			sweepErr = errPastDecodeCap
 			return
 		}
 		transact, release := s.serviceTransact(transact)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
-		// The tree is read inside the transaction that unmarks it, under the document's lock: a
-		// walk of the live tree outside one takes no lock and can read a peer's write halfway.
-		transact(func(txn *crdt.Transaction) {
-			fresh, readErr := treeOfTransaction(txn, fragment)
-			if readErr != nil {
-				sweepErr = readErr
-				return
-			}
-			for _, mark := range expired {
-				if _, _, found := pmdoc.FindMark(fresh, mark.Type, mark.ID); !found {
-					continue
-				}
-				if err := pmdoc.Unmark(txn, fragment, mark.Type, mark.ID); err != nil {
-					sweepErr = documentSchemaError(err)
-					return
-				}
-			}
-		})
+		transact(func(txn *crdt.Transaction) { sweepErr = unmarkFound(txn, fragment, expired, runs) })
 	})
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		sweepErr = err
 	}
 	return sweepErr
+}
+
+// unmarkFound removes, in txn, each of expired that fragment's tree still holds, unless the marks
+// cover more than limit runs of its text (markedRuns), when it removes none. The tree is read
+// inside the transaction that unmarks it, under the document's lock: a walk of the live tree
+// outside one takes no lock and can read a peer's write halfway.
+func unmarkFound(txn *crdt.Transaction, fragment *crdt.YXmlFragment, expired []pmdoc.MarkRef, limit int) error {
+	fresh, err := treeOfTransaction(txn, fragment)
+	if err != nil {
+		return err
+	}
+	if markedRuns(fresh, expired) > limit {
+		return nil
+	}
+	for _, mark := range expired {
+		if _, _, found := pmdoc.FindMark(fresh, mark.Type, mark.ID); !found {
+			continue
+		}
+		if err := pmdoc.Unmark(txn, fragment, mark.Type, mark.ID); err != nil {
+			return documentSchemaError(err)
+		}
+	}
+	return nil
+}
+
+// unmarkRunStructs is the most structs unmarking one run of text adds to a document. pmdoc.Unmark
+// formats each run of the text's delta that carries the mark (pmdoc/find.go:1046-1064), and ygo's
+// Format of one key over a run writes at most two format items - the mark's end where the run
+// begins (insertAttributes, crdt/ytext.go:1070-1081 in sjawhar/ygo v1.51.3-sami.2) and its value
+// restored where the run ends (insertNegatedAttributes, :1087-1107) - and splits at most two
+// items, the one holding the run's start (findTextPos, :1007-1029) and the one holding its end
+// (:868-871). The format items it meets inside the run it deletes, which adds no struct.
+const unmarkRunStructs = 4
+
+// markedRuns is how many runs of text in tree carry one of marks: each text node's mark of a
+// mark's type and id counts once, as pmdoc.Unmark formats each run of a text's delta carrying it,
+// and the reader makes one text node of each run (pmdoc/read.go:96-127).
+func markedRuns(tree *pmdoc.Node, marks []pmdoc.MarkRef) int {
+	wanted := make(map[pmdoc.MarkRef]struct{}, len(marks))
+	for _, mark := range marks {
+		wanted[mark] = struct{}{}
+	}
+	runs := 0
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		for _, mark := range node.Marks {
+			id, _ := mark.Attrs["id"].(string)
+			if _, found := wanted[pmdoc.MarkRef{Type: mark.Type, ID: id}]; found && node.Type == "text" {
+				runs++
+			}
+		}
+		return true
+	})
+	return runs
 }

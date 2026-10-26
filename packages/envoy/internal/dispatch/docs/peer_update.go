@@ -290,8 +290,10 @@ func (w *peerWeighing) added() uint64 {
 }
 
 // structTotalStaleMargin is how near the cap a stale struct total must be for the hook to confirm
-// it by an exact count before it admits on it: an eighth of the cap, the most decodeCapRecheck lets
-// a document's clocks grow between two of the server writes' own confirmations (growth.go).
+// it by an exact count before it admits on it: an eighth of the cap, about as many structs as the
+// heaviest document one upload admits encodes to (maxUpdateItems). The server's writes that leave
+// the total stale each ask the decode cap of what they leave themselves (refuseUndecodable,
+// leavesPastDecodeCap in growth.go).
 const structTotalStaleMargin = maxUpdateItems / 8
 
 // structTotalRecheck is how much the hook must have admitted since its last confirmation before a
@@ -318,9 +320,9 @@ const structTotalRecheck = maxUpdateItems / 64
 // Those writes are every transaction on the room that is not a hook's apply: the server's own
 // writes (Server.Apply - an API write's publish, settlement and its repairs, the mark sweep, the
 // block-id stamp - and an update injected through ygo, allowInject), which ask the decode cap in
-// their own way (refuseUndecodable, pastDecodeCap) and are bounded there, not here. The one place
-// that sees each of them, whoever wrote it, is the document's update observer: ygo fires it for
-// every transaction it commits, even one that writes nothing, with the transaction's origin
+// their own way (refuseUndecodable, leavesPastDecodeCap) and are bounded there, not here. The one
+// place that sees each of them, whoever wrote it, is the document's update observer: ygo fires it
+// for every transaction it commits, even one that writes nothing, with the transaction's origin
 // (crdt/doc.go:462-464, :541-556), on the committing goroutine. So the total registers an
 // observer of its own (observed), and the hook names the origin of the apply it is running while
 // it runs it (applying): ygo's peer, the origin ygo applies a browser's update with

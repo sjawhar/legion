@@ -55,10 +55,17 @@ type settlementReconciliation struct {
 
 // askRepair is one server-owned attribute repair settlement made to the ask block carrying blockID
 // in the tree it read, which set makes again on that block in the live document (repairLive).
+// attributes is how many of the block's attributes set can write, or unboundedRepair for a repair
+// that rewrites the block's content (decidedWording), which no count of attributes bounds
+// (settlementReconciliation.addedStructs).
 type askRepair struct {
-	blockID string
-	set     func(*pmdoc.Node) bool
+	blockID    string
+	set        func(*pmdoc.Node) bool
+	attributes int
 }
+
+// unboundedRepair is askRepair.attributes for a repair whose writes no count of attributes bounds.
+const unboundedRepair = -1
 
 // copiedBlock is one block settlement wrote a copy's attributes into: its id and its source.
 type copiedBlock struct {
@@ -80,13 +87,14 @@ func (r *settlementReconciliation) logCopiedBlocks(artifactID string) {
 	}
 }
 
-// repair runs set on node, the ask block carrying blockID in the tree settlement read, and records
-// it for repairLive when it changed the block.
-func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set func(*pmdoc.Node) bool) bool {
+// repair runs set, which writes at most attributes of the block's attributes, on node, the ask
+// block carrying blockID in the tree settlement read, and records it for repairLive when it changed
+// the block.
+func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set func(*pmdoc.Node) bool, attributes int) bool {
 	if !set(node) {
 		return false
 	}
-	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: set})
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: set, attributes: attributes})
 	return true
 }
 
@@ -102,7 +110,7 @@ func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, a
 		return false
 	}
 	rewrite := serverRewrite{node: node, ask: ask, copied: copied, found: found, answer: wroteAnswer, repair: len(r.repairs), event: -1}
-	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, copied, false)})
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, copied, false), attributes: len(askServerAttributeNames)})
 	if event != nil {
 		rewrite.event = len(r.events)
 		r.events = append(r.events, *event)
@@ -144,6 +152,28 @@ func (r *settlementReconciliation) repairLive(live *pmdoc.Node) bool {
 func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, error) {
 	_, repaired, err := rewriteLive(doc, origin, r.repairLive)
 	return repaired, err
+}
+
+// addedStructs bounds the structs the reconciliation's repairs add to the document they are
+// written into (writeLive), and reports whether any bound holds. Each repair sets attributes on
+// the one block it lands on (repairLive), at most askRepair.attributes of them, and pmdoc.Update
+// writes each attribute it sets as one map item whose origin is the attribute's last item, whole,
+// so it splits nothing (pmdoc/update.go:164-178; crdt/yxml.go:510-525 in sjawhar/ygo
+// v1.51.3-sami.2), and each it deletes as a deletion of that item, which adds no struct; it writes
+// nothing of the rest of the tree, read in the same transaction and handed back as it was
+// (pmdoc/update.go:65-70). An answer is one of those attributes: its text is the value of one
+// item, however long. A repair that rewrites a block's wording (decidedWording) can write any
+// number of elements and runs of text, which no count of attributes bounds, so a reconciliation
+// holding one has no bound and is always counted (leavesPastDecodeCap).
+func (r *settlementReconciliation) addedStructs() (uint64, bool) {
+	var adds uint64
+	for _, repair := range r.repairs {
+		if repair.attributes == unboundedRepair {
+			return 0, false
+		}
+		adds += uint64(repair.attributes)
+	}
+	return adds, true
 }
 
 // nameVersion completes the reconciliation at the version the settled document is at, writing
@@ -253,7 +283,7 @@ func (s *Service) reconcileAskBlocks(
 	var reconciled settlementReconciliation
 	for _, invalid := range invalidBlocks {
 		delete(rows, invalid.id)
-		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error())) {
+		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error()), 1) {
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner,
 				artifactID,
@@ -334,7 +364,7 @@ func (s *Service) reconcileAskBlocks(
 				slog.Error("dispatch: cannot write a decided ask's wording back into its block",
 					"ask", ask.ID, "artifact", artifactID, "block", block.id, "error", err)
 			case changed:
-				reconciled.repairs = append(reconciled.repairs, askRepair{blockID: block.id, set: decidedWording(ask)})
+				reconciled.repairs = append(reconciled.repairs, askRepair{blockID: block.id, set: decidedWording(ask), attributes: unboundedRepair})
 				reworded = true
 				slog.Info("dispatch: wrote a decided ask's wording back into its block",
 					"ask", ask.ID, "artifact", artifactID, "block", block.id, "state", ask.State)
@@ -387,7 +417,7 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.repairAsk(block.node, block.id, ask, "", &repaired)
 		}
 	}
-	reconciled.withholdAnswers(artifactID, func() bool { return s.pastDecodeCap(artifactID, live) }, tree, before)
+	reconciled.withholdAnswers(artifactID, func(write serverWrite) bool { return s.leavesPastDecodeCap(live, write) }, tree, before)
 
 	for _, ask := range rows {
 		// Only an open ask is retracted: an answered or resolved one is already closed, its

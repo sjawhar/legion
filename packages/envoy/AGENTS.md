@@ -350,8 +350,8 @@ that read loaded and no in-flight credit. A browser's room load takes no lock th
 a room that loads while `coldFork` reads the store is forked from instead and the stored copy is
 dropped undecoded, and one that loads later is forked from at the write's next operation. Every
 mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading
-its own; `applyLive` lets that tree go before the one check that decodes a second copy of the
-state (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
+its own; `applyLive` lets that tree go before the one check that encodes the whole fork to count
+its structs (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
 publish loads the room (`releaseFork`), since a pooled connection's context can keep the write
 reachable long after it answered (LEGION-504). The `nodeToken` hash streams the token's encoding
 (`pmdoc.WriteTokenJSON`) rather than holding it whole.

@@ -3,6 +3,8 @@ package docs
 import (
 	"log/slog"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -62,14 +64,16 @@ type serverRewrite struct {
 // render cannot be weighed, so its answers all stay out, and the settlement that renders it next
 // fails as it would have.
 //
-// pastDecodeCap asks whether the room's document the repairs will be written into (writeLive)
-// already holds a state ygo could not decode (Service.pastDecodeCap). One that does has no room for
-// any answer whatever its rendering weighs, since an answer's text is new items in it, so every
-// answer stays out and none is given back. It is asked here, before anything is written, only when
-// an answer would be written back, since past the clock sum it confirms by decoding the whole
-// state, and answered the way a full document is rather than as a failed write: three failures in
-// a row fail the room (maxSettleFailures, retrySettleLocked), and the ask already keeps the answer.
-func (r *settlementReconciliation) withholdAnswers(artifactID string, pastDecodeCap func() bool, tree *pmdoc.Node, before string) {
+// leavesPastDecodeCap asks whether the repairs, answers and all, would leave the room's document
+// they will be written into (writeLive) past the decode cap (Service.leavesPastDecodeCap), with
+// the repairs as the write and their bound as what it adds (addedStructs). Where they would, the
+// document has no room for any answer whatever its rendering weighs, so every answer stays out
+// and none is given back; the repairs left without them are written as the settlement made them.
+// It is asked here, before anything is written, only when an answer would be written back, since
+// near the cap it counts the document and writes the repairs on a copy of it, and answered the
+// way a full document is rather than as a failed write: three failures in a row fail the room
+// (maxSettleFailures, retrySettleLocked), and the ask already keeps the answer.
+func (r *settlementReconciliation) withholdAnswers(artifactID string, leavesPastDecodeCap func(serverWrite) bool, tree *pmdoc.Node, before string) {
 	var answered []int
 	for index, rewrite := range r.rewrites {
 		if rewrite.answer {
@@ -79,9 +83,11 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, pastDecode
 	if len(answered) == 0 {
 		return
 	}
+	adds, bounded := r.addedStructs()
+	repairs := serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) { _, _ = r.writeLive(copied, nil) }}
 	var err error
 	rendered := false
-	if pastDecodeCap() {
+	if leavesPastDecodeCap(repairs) {
 		err = errPastDecodeCap
 	} else {
 		var after string

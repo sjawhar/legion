@@ -833,15 +833,16 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // document encoding to more than this is refused by ygo and answered as CAP_EXCEEDED with the count.
 // No single upload reaches it: the heaviest document pmdoc's element limit admits encodes to about
 // 131,000 items, an eighth of it. Repeated versions can take a live state to it, so every joined
-// write (applyLive) decodes its state before appending once its clocks sum past this cap
-// (refuseUndecodable, growth.go), and the block-id stamp, the sweep of unrecorded marks and
-// settlement's repair of a returning answer, which write into the live document outside
-// applyLive, ask the same of the document as it stands and leave one that does not decode as it
-// was (Service.pastDecodeCap; growth.go's own doc comment names the three). The clock sum is only
-// the cheap first question, never the answer: it counts characters, where this cap counts items,
-// so a busy document sums past it long before it holds that many - 1,050,470 clocks at a mebibyte
-// of typed-over markdown, and 1,310,720 at 256 KiB after a mebibyte of typing and deleting, both
-// of which decode (growth.go gives the figures).
+// write (applyLive) counts its state's structs before appending once a ceiling of them without an
+// encode passes this cap (refuseUndecodable, structCeiling, growth.go), and the block-id stamp,
+// the sweep of unrecorded marks and settlement's repair of a returning answer, which write into
+// the live document outside applyLive, ask whether the document their write would leave stays
+// within it and leave the document as it was where it would not (Service.leavesPastDecodeCap;
+// growth.go's own doc comment names the three). The clock sum in that ceiling is only the cheap
+// first question, never the answer: it counts characters, where this cap counts items, so a busy
+// document sums past it long before it holds that many - 1,050,470 clocks at a mebibyte of
+// typed-over markdown, and 1,310,720 at 256 KiB after a mebibyte of typing and deleting, both of
+// which decode (growth.go gives the figures).
 //
 // It is also the pending queue every decode of document bytes takes, whether the service builds
 // the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the

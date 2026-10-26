@@ -178,10 +178,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	}}); err != nil {
 		return err
 	}
-	// Every write is refused when the live state it leaves could not be decoded, the one check
-	// that decodes a whole second copy of the document. The tree before the write has served
-	// every use it has, so it is let go first: the decode runs beside the fork and the tree the
-	// write left, not a third tree (LEGION-504).
+	// Every write is refused when the live state it leaves would be past the decode cap, the one
+	// check that encodes the whole fork once its ceiling passes the cap. The tree before the write
+	// has served every use it has, so it is let go first: the encode runs beside the fork and the
+	// tree the write left, not a third tree (LEGION-504).
 	before, weighedFrom = nil, nil
 	if err := refuseUndecodable(fork); err != nil {
 		return err

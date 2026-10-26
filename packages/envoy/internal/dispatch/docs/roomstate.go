@@ -23,9 +23,8 @@ import (
 // holder releases the state through its own unlock, and ygo's OnUnloadDocument releases it when
 // the room is the last thing to go (releaseUnloadedRoom).
 //
-// What a release drops - the unrecorded marks' first sightings, the writes that have logged the
-// document past the decode cap and the last confirmation of it, and the closed flag - is what a
-// restart drops too.
+// What a release drops - the unrecorded marks' first sightings, the writes that have logged
+// leaving the document alone at the decode cap, and the closed flag - is what a restart drops too.
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
@@ -64,11 +63,9 @@ type roomState struct {
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
 	// pastDecodeCap names each server write outside applyLive that has logged leaving this room's
-	// document alone past the decode cap (logPastDecodeCap), nil until one has. decodeCap is the
-	// last confirmation of whether the document's whole state decodes, taken once its clock sum had
-	// passed the cap, with that sum (Service.pastDecodeCap); nil until one is taken.
+	// document alone because the write would carry it past the decode cap (logPastDecodeCap), nil
+	// until one has.
 	pastDecodeCap  map[string]struct{}
-	decodeCap      *decodeCapAnswer
 	durableAppends atomic.Int64
 	// roomGeneration counts this room's own in-process invalidations (a reload, a failure, a
 	// settlement's own commit): a settlement compares the value it started at against the room's
