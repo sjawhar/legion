@@ -2,34 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-256",
-  "completed": "2026-10-26T21:57:00Z",
+  "completed": "2026-10-26T23:20:00Z",
   "generation": 4,
-  "round": 2,
-  "reviewedCodeHead": "e918e18311172723c25e3b20e6455a453df03ac7",
-  "decision": "changes_requested",
+  "round": 3,
+  "reviewedCodeHead": "17accb0879a288f5b0528c2fb105d1d9e4affadd",
+  "decision": "approved",
   "critical": 0,
-  "important": 3,
+  "important": 0,
   "minor": 0,
-  "ci": "At 21:55Z, Tests, PR Title, Docs, Worker Image and Legion Envoy and Contracts at code head e918e183 were still queued (lint 121861195052, typecheck 121861195115, test 121861194772, pr-title 121861725406). A request for changes does not wait for them.",
-  "roundOneThreads": "PRRT_kwDORFy7ds6wcEUC (check-pr-text.sh hint) and PRRT_kwDORFy7ds6wcEUO (AGENTS.md): fixed in 4dffee8f. The implementer resolved both, and I accept both.",
-  "thermonuclear": "Both run once at e918e183. Deep review: the proxy allow-list held against every bypass tried, and the forward merge e877dbf9 adds nothing beyond main and the conflict resolution. The pill's rule matched GitHub's statusCheckRollup on 39 of 39 recent sjawhar/legion pull requests. Findings: the 1 MiB response cap, the parallel-read race, the proxy returning more data than the pill reads, and docs. Code quality: test gaps (app-keyed branch, a workflow-runs-only failure), fake types written out three times, positional regex groups.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/githubapi/proxy.go",
-      "description": "Line 86 sends GitHub's workflow-runs body to the browser unchanged. One run is about 12.8 KB, because it carries the full repository, head_repository and head_commit objects. gh api repos/sjawhar/legion/actions/runs?per_page=100 returned 1,291,575 bytes, more than client.go's responseLimit (1 MiB). So a head with about 82 or more runs gets 502 GITHUB_UPSTREAM, and the whole pill disappears where before it showed. The same body also gives any signed-in person commit messages and author and committer emails of private repositories, but the pill reads only check_suite_id, event and name. Fix: the proxy returns only those three fields of each run (with total_count)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/issue/GitHubLink.tsx",
-      "description": "Line 127 reads the check runs and the workflow runs in parallel. A workflow run created between the two reads has check runs with no matching workflow run. They then take the app key and skip the event filter, so the pill can show pending or failure until the next refetch. Fix: read the check runs first, then the workflow runs. A workflow run exists before its check runs, so every suite already seen matches."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/issue/IssuePage.test.tsx",
-      "description": "Nothing runs the app-keyed branch (GitHubLink.tsx:84-90): every fixture has a matching workflow run. Add rows for an external App's check run with no workflow run: two runs of one name and App (older failed, newer passed -> success), and one name from two App ids (one failed -> failure). Docs: packages/envoy/cmd/dispatch/AGENTS.md:376-388 and README.md:1173 must say that the pill drops runs of events GitHub does not evaluate, and that it needs the App's Actions: read (without it, actions/runs is 403 and the pill disappears)."
-    }
+  "scope": "The architect narrowed round 3: are the three items of review 5659670415 fixed, and is CI green at the code head. A correctness or security defect still blocks; cleanup goes to Fast-follow.",
+  "ci": "Required set on main (ruleset): lint, typecheck, test, pr-title. Newest pull_request run head 17accb08: lint 121882170229, typecheck 121882169967, test 121882170263 success; pr-title 121881855366 (pull_request run 40411149206) and 121881641246 (pull_request_review run 40411085279) success, older pr-title runs cancelled and replaced. Compare 17accb08...1f3f2dc9: ahead, 2 files, handoffsOnly true. Legion Envoy and Contracts run 40411056760 (not required) was still queued at 23:18Z; I ran its proxy packages locally: go test ./internal/dispatch/githubapi/ ./internal/dispatch/githubapp/ ok.",
+  "itemsVerified": [
+    "1. proxy.go: only actions/runs reads within 16 MiB (ReadWithin); on 200 it re-encodes total_count and each run's check_suite_id, event and name; an undecodable body is 502; other statuses pass through. Pinned by TestProxyPassesOnOnlyTheWorkflowRunFieldsTheWebAppReads and TestProxyTrimsAPageOfWorkflowRunsLargerThanTheGeneralLimit.",
+    "2. GitHubLink.tsx:129-136 awaits every check-run page before the first workflow-run page.",
+    "3. IssuePage.test.tsx gains two external-App rows (suites 20 and 21 match no workflow run). packages/envoy/cmd/dispatch/AGENTS.md and README.md name the evaluated events and the Actions: read dependency. bun test IssuePage.test.tsx: 53 pass."
   ],
-  "fastFollow": "Fake GitHub's check-run, workflow-run and pull shapes are written out in three files (export them from fake-github.ts, as fake-broker.ts does). proxy.go reads capture group 3 by position (use a named group). readEveryPage guesses the query separator from the path. The test 'keeps ... when only its check-runs lookup fails' fails both reads; rename it, or fail only actions/runs.",
-  "prBody": "I removed my round-1 'Not proven / risk' bullet that called the pill a finding outside this pull request; this pull request now fixes it. I added the Actions: read dependency as a risk."
+  "threads": "All five of my threads are answered and resolved: PRRT_kwDORFy7ds6wcEUC, PRRT_kwDORFy7ds6wcEUO (round 1), PRRT_kwDORFy7ds6weMCI, PRRT_kwDORFy7ds6weMCO, PRRT_kwDORFy7ds6weMCU (round 2). I accept all five. No bot threads.",
+  "thermonuclear": "Both run once on 5c6a9c9c..17accb08. No correctness or security defect. Both confirm the three findings are closed. The deep review also checked that a re-run keeps its check suite on microsoft/vscode run 40408416682.",
+  "keyFindings": [],
+  "fastFollow": "No test reaches proxy.go's workflow-runs 502 (undecodable body) or a non-200 pass-through (403 without Actions: read), and none pins the check-runs-then-workflow-runs order. ProxyREST checks match[3] three times and wraps ReadWithin in a closure; a proxyWorkflowRuns helper reads more simply. The workflowRuns comment says the web app reads total_count, which it does not. The fake GitHub's check-run, workflow-run and pull shapes are written out in three files. readEveryPage guesses the query separator. The test 'only its check-runs lookup fails' fails both reads. The trigger list is written out in five places, and pr-title.yaml says 'loses nothing' twice."
 }
