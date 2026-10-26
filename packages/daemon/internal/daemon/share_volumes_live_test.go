@@ -30,7 +30,7 @@ import (
 // TestShareVolumesMountInAnIssuePodLive writes every case's legion.yaml, holds each to the pod
 // block the loader must read from it, launches the `shares` case's issue pod, and holds that pod,
 // as the API server recorded it, to the block: the claim and the export as volumes, each mounted in
-// every role container, the claim read-only and the export writable, under gVisor. It writes
+// the roles container, the claim read-only and the export writable, under gVisor. It writes
 // `<case> <namespace>/<pod> <legion.yaml>` per case to LEGION_E2E_RESULT (`-` for a case it does
 // not launch) for the script.
 func TestShareVolumesMountInAnIssuePodLive(t *testing.T) {

@@ -289,3 +289,6 @@ docs/site/media/.work/
 # Base-revision plugin copy written by packages/pi-envoy/scripts/smoke-registration-stall.sh;
 # a killed run skips the trap that removes it.
 packages/pi-envoy/extensions/.smoke-base-*.ts
+
+# Python bytecode (scripts/e2e/lib/as-role.py and any other script run or imported locally).
+__pycache__/

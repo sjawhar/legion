@@ -67,3 +67,33 @@ func TestGoogleLoginMintNamesAGoogleOutageAsUpstream(t *testing.T) {
 		t.Fatalf("Mint of a service-account value = %v, want stored-value", err)
 	}
 }
+
+// TestGoogleLoginMintNamesARateLimitAsUpstream: a rate limit is not the login's owner's to fix, so
+// Google's rate-limit answers are upstream, never refused: a 429, and a 403 naming the
+// rateLimitExceeded reason Google's usage limits give. Google sends no X-RateLimit-Remaining, so
+// the status and the body are what tell it. A 4xx that is no rate limit stays refused.
+func TestGoogleLoginMintNamesARateLimitAsUpstream(t *testing.T) {
+	value := `{"type":"authorized_user","client_id":"client-id","client_secret":"client-secret","refresh_token":"refresh-token"}`
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		class  string
+	}{
+		{"a 429", http.StatusTooManyRequests, `{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}`, "upstream"},
+		{"a 403 rateLimitExceeded", http.StatusForbidden, `{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}`, "upstream"},
+		{"a 403 that is no rate limit", http.StatusForbidden, `{"error":"access_denied"}`, "refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			_, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), secrets.MintRequest{Value: value})
+			if got := secrets.MintErrorClass(err); got != tc.class || strings.Contains(err.Error(), "a rate limit") != (tc.class == "upstream") {
+				t.Fatalf("Mint against Google's %s = %v (class %s), want class %s", tc.name, err, got, tc.class)
+			}
+		})
+	}
+}

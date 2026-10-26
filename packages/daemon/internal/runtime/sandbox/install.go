@@ -95,25 +95,26 @@ func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace,
 }
 
 // rejectLegacyIssueSandboxes refuses the project's Sandboxes whose pod is not one this runtime
-// builds: its containers must be exactly the launcher roles of the kind its labels name
-// (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
-// controller's, and it must own exactly the volumes that kind's Sandbox owns — none at all for an
-// issue, whose disk is its own pod's ephemeral volume, and the one `issue` claim template for the
-// controller, whose session outlives its pods (treeVolumeLayout). So a per-claim Sandbox of the
-// layout before issue pods (one worker container), the controller Sandbox a daemon before issue
-// pods made (role=controller, one worker container), a pod missing a launcher, one with a
-// container more, a Sandbox whose labels name no kind, and a Sandbox of the tree-volume layout
-// before per-issue volumes (the tree root's `tree` template, and that layout's controller, which
-// owns no volume) are each refused. An issue Sandbox still owning the one `issue` template the
-// release before the pod-owned disk gave it is not refused: volumeClaimTemplates is immutable in
-// the CRD, so the only way out of that shape is the delete-and-create of the issue's next launch,
-// and a boot refusal would stop the whole daemon until an operator deleted one Sandbox per open
-// issue by hand. It is logged by name instead, so the pending migration is visible without
-// holding anything up. A repository cache's Sandbox (labelled legion.dev/cache) is judged by its
-// own shape alone (cacheSandboxShape), never as a pod of a kind, and refused, as
-// `cache Sandbox <name>`, when it is not one this runtime builds. The refusal names every one of
-// them, each with its reason, and how many there are, so an operator removes them all before the
-// next boot rather than one per refused boot.
+// builds: its containers must be exactly the one container of the kind its labels name
+// (podKindOf), `roles` for an issue Sandbox and `controller` for the project controller's, or, for
+// an issue Sandbox alone, one container per workflow role, the layout before one container
+// (earlierLayout), whose pod the next launch of any of its roles replaces (movedLayout); and it
+// must own exactly the volumes that kind's Sandbox owns — none at all for an issue, whose disk is
+// its own pod's ephemeral volume, and the one `issue` claim template for the controller, whose
+// session outlives its pods (treeVolumeLayout). So a per-claim Sandbox of the layout before issue
+// pods (one worker container), the controller Sandbox a daemon before issue pods made
+// (role=controller, one worker container), a pod with any other set of containers, a Sandbox whose
+// labels name no kind, and a Sandbox of the tree-volume layout before per-issue volumes (the tree
+// root's `tree` template, and that layout's controller, which owns no volume) are each refused. An
+// issue Sandbox still owning the one `issue` template the release before the pod-owned disk gave
+// it is not refused: volumeClaimTemplates is immutable in the CRD, so the only way out of that
+// shape is the delete-and-create of the issue's next launch, and a boot refusal would stop the
+// whole daemon until an operator deleted one Sandbox per open issue by hand. It is logged by name
+// instead, so the pending migration is visible without holding anything up. A repository cache's
+// Sandbox (labelled legion.dev/cache) is judged by its own shape alone (cacheSandboxShape), never
+// as a pod of a kind, and refused, as `cache Sandbox <name>`, when it is not one this runtime
+// builds. The refusal names every one of them, each with its reason, and how many there are, so an
+// operator removes them all before the next boot rather than one per refused boot.
 func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string, log *slog.Logger) error {
 	list, err := sandboxes.List(ctx, metav1.ListOptions{LabelSelector: labelProject + "=" + project})
 	if err != nil {
@@ -200,7 +201,9 @@ func treeVolumeLayout(object unstructured.Unstructured, kind podKind) (reason st
 }
 
 // legacyIssueSandbox is why object's pod is not the one this runtime builds for kind, the kind its
-// labels name (podKindOf), following its name in the census's refusal, or "" when it is one.
+// labels name (podKindOf), following its name in the census's refusal, or "" when it is one: its
+// kind's one container, or an issue pod of the earlier layout (earlierLayout), which the next launch
+// of any of its roles replaces (movedLayout).
 func legacyIssueSandbox(object unstructured.Unstructured, kind podKind) string {
 	containers, found, err := unstructured.NestedSlice(object.Object, "spec", "podTemplate", "spec", "containers")
 	if err != nil || !found {
@@ -215,15 +218,11 @@ func legacyIssueSandbox(object unstructured.Unstructured, kind podKind) string {
 		name, _ := container["name"].(string)
 		names = append(names, name)
 	}
-	roles := kind.roles()
-	want := make([]string, 0, len(roles))
-	for _, role := range roles {
-		want = append(want, string(role))
+	if slices.Equal(names, []string{kind.container()}) {
+		return ""
 	}
-	slices.Sort(names)
-	slices.Sort(want)
-	if !slices.Equal(names, want) {
-		return fmt.Sprintf(" runs containers %v, not exactly the launchers its labels name %v", names, want)
+	if _, issue := kind.(issuePod); issue && earlierLayout(names) {
+		return ""
 	}
-	return ""
+	return fmt.Sprintf(" runs containers %v, not the one container %s its labels name", names, kind.container())
 }
