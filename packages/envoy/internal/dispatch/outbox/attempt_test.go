@@ -37,6 +37,10 @@ func (p *countingPublisher) Publish(item contracts.Envelope) error {
 	return p.fail
 }
 
+func (p *countingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *countingPublisher) attempted() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -84,9 +88,10 @@ func TestAConnectionFailureEndsTheAttemptAtItsFirstDestination(t *testing.T) {
 	}
 }
 
-// A destination whose record write fails ends the attempt: the store is failing, and every
-// destination published after it would go unrecorded and be published again on each retry.
-func TestAFailedRecordWriteEndsTheAttempt(t *testing.T) {
+// A batch whose record write fails is left as a process that died before the write leaves it:
+// unmarked, with nothing recorded and no attempt counted, so a later scan publishes it again
+// (recordBatch).
+func TestABatchWhoseRecordWriteFailsStaysUnmarked(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	event := seedThreeDestinationEvent(t, database, broker)
@@ -102,12 +107,11 @@ func TestAFailedRecordWriteEndsTheAttempt(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	firstAttempt(t, database, event)
-	if topics := publisher.attempted(); len(topics) != 1 {
-		t.Fatalf("one attempt published %v with the record write failing, want only its first destination", topics)
-	}
-	if destinations, _ := publishedDestinations(t, database, event.ID); len(destinations) != 0 {
-		t.Fatalf("published_destinations = %v, though every record write fails", destinations)
+	waitFor(t, 5*time.Second, "the event's three destinations sent", func() bool { return len(publisher.attempted()) >= 3 })
+	destinations, attempts := publishedDestinations(t, database, event.ID)
+	if len(destinations) != 0 || attempts != 0 || publishedAt(t, database, event.ID) != nil {
+		t.Fatalf("published_destinations = %v, attempt_count = %d, published = %v, though the record write failed",
+			destinations, attempts, publishedAt(t, database, event.ID) != nil)
 	}
 }
 

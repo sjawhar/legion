@@ -28,19 +28,30 @@ const (
 	retryInterval       = 5 * time.Second
 	compactInterval     = 24 * time.Hour
 	documentTopicPrefix = "notifications.dispatch.document."
+
 	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
 	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
 	// recursive query and stall the outbox scan.
 	maxCommentThreadDepth = 32
+	// recordTimeout bounds the write of a batch's outcome (recordBatch), which a stopping process
+	// still makes after its context has ended: one statement, which a healthy database answers in
+	// milliseconds, so a write that takes longer is a database the batch's claim is left to.
+	recordTimeout = 5 * time.Second
 )
 
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
 type Publisher interface {
-	Publish(contracts.Envelope) error
+	// PublishAsync sends item without waiting for NATS's answer, and returns a channel that
+	// receives the outcome once: nil once NATS accepted item, or why it did not. Items sent one
+	// after another reach NATS in the order they were sent (bus.Client.PublishAsync).
+	PublishAsync(contracts.Envelope) <-chan error
 }
 
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
+	// Store is what the outbox reads and records events through. cmd/dispatch gives it a store on
+	// a pool of its own (store.Pool.Outbox), so the requests queued on the shared pool never hold
+	// a publish back.
 	Store     *store.Store
 	Publisher Publisher
 	Broker    *events.Broker
@@ -99,9 +110,8 @@ func scan(ctx context.Context, deps Deps) {
 }
 
 // pendingEvent is one row of a scan, read out before anything is published: an open cursor
-// holds its pooled connection until it closes, so publishing - a network round trip, a
-// follower lookup, and a write per event - inside the loop would hold one of the pool's four
-// connections across all of it. The rows are drained first and the work done after.
+// holds its pooled connection until it closes, and publishing a batch reads followers and
+// authors through the same pool, so the rows are drained first and the work done after.
 type pendingEvent struct {
 	event        model.Event
 	attempts     int
@@ -115,48 +125,175 @@ type pendingEvent struct {
 	failureLog string
 }
 
+// scanBatch claims a batch and publishes it as one window. Every event's envelope is sent to each
+// of its destinations, in id order and each event's destinations in turn, before any answer is
+// waited for, so a batch costs one NATS round trip rather than one per destination, and
+// NATS takes the envelopes in the order they were sent: on the stream, on the role lanes and on
+// each issue's subject, a batch's events arrive in id order. Then every answer is read, and what
+// the batch came to is written in one statement (recordBatch). An event is marked published only
+// once NATS accepted each of its destinations; one that failed is backed off, so the events
+// queued behind it are not stuck behind it.
+//
+// A send NATS could not take at all because the client has no connection (bus.ErrUnavailable)
+// is no fault of its event: nothing after it in the batch is sent, since it would meet the same
+// connection, and that event and every one after it are released rather than backed off, so the
+// next scan takes them again in id order. An event backed off for an outage would reach its
+// issue's subject after the later events of that issue, which the Legion daemon then drops as
+// stale by their sequence.
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	pending, blocked, err := scanPendingEvents(ctx, deps)
 	if err != nil {
 		return 0, false, err
 	}
 
-	for _, item := range pending {
+	attempts := make([]*attempt, len(pending))
+	unavailable := false
+	for index, item := range pending {
 		if item.failure != nil {
-			if retryEvent(ctx, deps, item, item.failureLog, item.failure) {
-				blocked = true
-			}
 			continue
 		}
-		if err := publish(
-			ctx, deps, item.event, item.slug, item.route, publishedDestinationSet(item.destinations),
-		); err != nil {
-			if retryEvent(ctx, deps, item, "dispatch outbox: publish event", err) {
-				blocked = true
-			}
-			continue
-		}
-		if _, err := deps.Store.Pool.Exec(ctx, `
-			update events set published_at = now(), next_attempt_at = null where id = $1 and published_at is null
-		`, item.event.ID); err != nil {
-			retryEvent(ctx, deps, item, "dispatch outbox: mark event published", err)
-			blocked = true
+		attempts[index] = send(ctx, deps, item.event, item.slug, item.route, publishedDestinationSet(item.destinations))
+		if errors.Is(attempts[index].ended, bus.ErrUnavailable) {
+			slog.Error("dispatch outbox: NATS is unreachable, so the rest of the batch waits for the next scan",
+				"event_id", item.event.ID, "error", attempts[index].ended)
+			unavailable = true
+			break
 		}
 	}
-	return len(pending), blocked, nil
+	outcomes := make([]outcome, len(pending))
+	for index, item := range pending {
+		outcomes[index] = settle(ctx, item, attempts[index])
+	}
+	// Written even when ctx has ended: a process stopping mid-batch records what NATS already
+	// accepted, so the next process does not send it again.
+	record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if err := recordBatch(record, deps, outcomes); err != nil {
+		return len(pending), true, err
+	}
+	return len(pending), blocked || unavailable, nil
 }
 
-// retryEvent reports a failed event under what and backs it off, so the events queued behind
-// one that cannot be published are not stuck behind it. It reports whether the batch is
-// blocked: an event whose retry could not be written stays eligible immediately, and a scan
-// that carried on would select the same batch forever.
-func retryEvent(ctx context.Context, deps Deps, item pendingEvent, what string, cause error) bool {
-	slog.Error(what, "event_id", item.event.ID, "error", cause)
-	if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
-		slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
-		return true
+// outcomeState is what an event of a batch came to.
+type outcomeState string
+
+const (
+	// published: NATS accepted every destination of the event.
+	published outcomeState = "published"
+	// backedOff: the event failed, and waits retry.Delay of its attempts before it is tried again.
+	backedOff outcomeState = "backed_off"
+	// released: the event was not tried to the end, because NATS was unreachable or the process
+	// is stopping, so its claim is cleared and no attempt is counted.
+	released outcomeState = "released"
+)
+
+// outcome is what one event of a batch came to, as recordBatch writes it.
+type outcome struct {
+	id    int64
+	state outcomeState
+	// reached is every destination the attempt reached, in the order it sent them.
+	reached []string
+	// attempts and retryAt are the backed-off event's attempt count and next attempt.
+	attempts int
+	retryAt  time.Time
+}
+
+// settle waits for the answers to item's attempt (nil when it was never sent) and returns what the
+// event came to.
+func settle(ctx context.Context, item pendingEvent, a *attempt) outcome {
+	result := outcome{id: item.event.ID}
+	if item.failure != nil {
+		return backOff(result, item, item.failureLog, item.failure)
 	}
-	return false
+	if a == nil {
+		result.state = released
+		return result
+	}
+	a.wait(ctx)
+	result.reached = a.reached
+	if err := a.err(); err != nil {
+		// NATS unreachable, or the process stopping before every answer came, is no failure of
+		// the event's own.
+		if errors.Is(a.ended, bus.ErrUnavailable) || ctx.Err() != nil {
+			result.state = released
+			return result
+		}
+		return backOff(result, item, "dispatch outbox: publish event", err)
+	}
+	result.state = published
+	return result
+}
+
+// backOff reports item's failure under what and returns result backed off by retry.Delay of the
+// attempt it now counts.
+func backOff(result outcome, item pendingEvent, what string, cause error) outcome {
+	slog.Error(what, "event_id", item.event.ID, "error", cause)
+	result.state = backedOff
+	result.attempts = item.attempts + 1
+	if result.attempts == retry.DeadLetterAttempts {
+		slog.Error("dispatch outbox: event reached dead-letter threshold", "event_id", item.event.ID, "attempts", result.attempts)
+	}
+	result.retryAt = time.Now().Add(retry.Delay(result.attempts))
+	return result
+}
+
+// recordBatch writes what each event of a batch came to, in one statement and so all of it or
+// none: the destinations an event reached are added to its published_destinations, and it is
+// marked published, backed off, or released (left due at once). Each row is guarded on
+// published_at is null, like every terminal write here. A write that fails leaves the whole batch
+// unmarked, which is what a process that dies between NATS's acknowledgements and this write
+// leaves too: the next scan publishes the batch again, and JetStream drops each repeat inside its
+// duplicate window by its MsgId.
+func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
+	if len(outcomes) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(outcomes))
+	states := make([]string, 0, len(outcomes))
+	attempts := make([]*int32, 0, len(outcomes))
+	retryAt := make([]*time.Time, 0, len(outcomes))
+	var reachedIDs []int64
+	var reachedTopics []string
+	for _, result := range outcomes {
+		ids = append(ids, result.id)
+		states = append(states, string(result.state))
+		if result.state == backedOff {
+			attempts = append(attempts, new(int32(result.attempts)))
+			retryAt = append(retryAt, new(result.retryAt))
+		} else {
+			attempts = append(attempts, nil)
+			retryAt = append(retryAt, nil)
+		}
+		for _, topic := range result.reached {
+			reachedIDs = append(reachedIDs, result.id)
+			reachedTopics = append(reachedTopics, topic)
+		}
+	}
+	if _, err := deps.Store.Pool.Exec(ctx, `
+		with outcome as (
+			select * from unnest($1::bigint[], $2::text[], $3::int[], $4::timestamptz[])
+				as o(id, state, attempts, retry_at)
+		), reached as (
+			select id, array_agg(topic order by position) as topics
+			from unnest($5::bigint[], $6::text[]) with ordinality as r(id, topic, position)
+			group by id
+		)
+		update events e set
+			published_destinations = e.published_destinations || array(
+				select t.topic from unnest(r.topics) with ordinality as t(topic, position)
+				where t.topic <> all(e.published_destinations)
+				order by t.position
+			),
+			published_at = case when o.state = 'published' then now() end,
+			attempt_count = coalesce(o.attempts, e.attempt_count),
+			next_attempt_at = o.retry_at
+		from outcome o
+		left join reached r on r.id = o.id
+		where e.id = o.id and e.published_at is null
+	`, ids, states, attempts, retryAt, reachedIDs, reachedTopics); err != nil {
+		return fmt.Errorf("record the batch's outcome: %w", err)
+	}
+	return nil
 }
 
 func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
@@ -226,56 +363,43 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 	return pending, unreadable, nil
 }
 
-func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {
-	attempts++
-	if attempts == retry.DeadLetterAttempts {
-		slog.Error("dispatch outbox: event reached dead-letter threshold", "event_id", eventID, "attempts", attempts)
-	}
-	_, err := deps.Store.Pool.Exec(ctx, `
-		update events
-		set attempt_count = $2, next_attempt_at = $3
-		where id = $1 and published_at is null
-	`, eventID, attempts, time.Now().Add(retry.Delay(attempts)))
-	if err != nil {
-		return fmt.Errorf("schedule event retry: %w", err)
-	}
-	return nil
-}
-
-// publish publishes event to each of its destinations. A destination NATS denies (a role route
-// outside Dispatch's grant, say) holds back none of the others: it is left unrecorded, and the
-// denials are returned joined once every destination was tried, so the event is retried. Any other
-// failure, of the connection or of the store, ends the attempt at once, since every destination
-// after it would fail the same way, and is returned joined with the denials before it. Each
-// destination that succeeded is recorded (publishDestination), so the retry publishes only the
-// rest.
-func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
+// send starts event's attempt: its envelope is sent to each of its destinations not in delivered
+// (publishDestinations), and the attempt returned holds the answers still to come (attempt.wait).
+// A destination NATS denies (a role route outside Dispatch's grant, say) holds back none of the
+// others: it is left unreached, and the denial fails the attempt once every destination was
+// tried, so the event is retried. Any other failure that comes back before anything is sent, of
+// the connection or of the store, ends the attempt at once, since every destination after it would
+// fail the same way. The destinations the attempt reached are recorded with the batch
+// (recordBatch), so a retry publishes only the rest.
+func send(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) *attempt {
+	a := &attempt{delivered: delivered}
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
-		return nil
+		return a
 	}
 	item, err := envelope(event, slug)
 	if err != nil {
-		return err
+		a.ended = err
+		return a
 	}
 	if err := item.Validate(); err != nil {
-		return fmt.Errorf("validate envelope: %w", err)
+		a.ended = fmt.Errorf("validate envelope: %w", err)
+		return a
 	}
-	a := &attempt{delivered: delivered}
-	err = publishDestinations(ctx, deps, event, item, route, a)
-	return errors.Join(append(a.denied, err)...)
+	a.ended = publishDestinations(ctx, deps, event, item, route, a)
+	return a
 }
 
-// publishDestinations publishes item to each of event's destinations in turn, and returns the
-// first error that ends the attempt; the denials it goes on past are in a.
+// publishDestinations sends item to each of event's destinations in turn, and returns the first
+// error that ends the attempt.
 func publishDestinations(ctx context.Context, deps Deps, event model.Event, item contracts.Envelope, route *string, a *attempt) error {
-	if err := publishDestination(ctx, deps, event.ID, item, a, "publish owner topic", item.Topic); err != nil {
+	if err := publishDestination(deps, event.ID, item, a, "publish owner topic", item.Topic); err != nil {
 		return err
 	}
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
 		payloadString(event.Payload, "target") != ""
 	if event.Notify && !targeted {
 		if !suppressesCurrentRoute(event.Payload, route) {
-			if err := publishRoute(ctx, deps, event.ID, item, a, route); err != nil {
+			if err := publishRoute(deps, event.ID, item, a, route); err != nil {
 				return err
 			}
 		}
@@ -286,23 +410,87 @@ func publishDestinations(ctx context.Context, deps Deps, event model.Event, item
 	if err := publishFollowerRoutes(ctx, deps, event.ID, item, event, a); err != nil {
 		return err
 	}
-	return publishPreviousClaimant(ctx, deps, event.ID, item, event, a)
+	return publishPreviousClaimant(deps, event.ID, item, event, a)
 }
 
-// attempt is one pass over an event's destinations: the ones already reached, and the denials
-// (bus.ErrPublishDenied) the pass went on past.
+// attempt is one pass over an event's destinations. delivered holds the destinations the event
+// reached before this pass and those this pass sent, so that none is sent twice; sent is what this
+// pass sent, in order, with each one's answer to come. wait reads those answers into reached, the
+// destinations NATS accepted or refused (bus.ErrRefused), denied, the denials
+// (bus.ErrPublishDenied) the pass went on past, and failed, every other failure. ended is the
+// error that ended the pass before it sent everything.
 type attempt struct {
 	delivered map[string]struct{}
+	sent      []sentDestination
+	reached   []string
 	denied    []error
+	failed    []error
+	ended     error
 }
 
-// publishSessionRoutes publishes item to each session's own topic, naming a failure or a denial by
+// sentDestination is one destination an attempt sent, named by label and id in what it reports
+// (`publish route "role:reviewer": …`), since a subject alone does not say which of the event's
+// destinations it was, and the channel its answer comes on.
+type sentDestination struct {
+	eventID int64
+	topic   string
+	label   string
+	id      string
+	answer  <-chan error
+}
+
+// wait reads the answer to each destination the attempt sent, in the order it sent them, until ctx
+// ends. An answer that does not come before then counts as a failure: the destination is not
+// known to be reached.
+func (a *attempt) wait(ctx context.Context) {
+	for _, sent := range a.sent {
+		var err error
+		select {
+		case err = <-sent.answer:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+		if err := a.answer(sent, err); err != nil {
+			a.failed = append(a.failed, err)
+		}
+	}
+	a.sent = nil
+}
+
+// answer records NATS's answer err to sent. A destination NATS accepted is reached. One NATS
+// refuses (bus.ErrRefused: the envelope is past the server's max payload, or its subject is past
+// NATS's limit or holds whitespace, as an unbounded document slug or a bearer's session id can make
+// it) is refused the same way however often it is retried, so it is logged, once, and reached like
+// a publication. A denial (bus.ErrPublishDenied) is added to denied. Any other failure is returned,
+// named by the destination's label and id.
+func (a *attempt) answer(sent sentDestination, err error) error {
+	switch {
+	case err == nil:
+	case errors.Is(err, bus.ErrPublishDenied):
+		a.denied = append(a.denied, fmt.Errorf("%s %q: %w", sent.label, sent.id, err))
+		return nil
+	case !errors.Is(err, bus.ErrRefused):
+		return fmt.Errorf("%s %q: %w", sent.label, sent.id, err)
+	default:
+		slog.Error("dispatch outbox: destination refused", "event_id", sent.eventID, "topic", sent.topic, "error", err)
+	}
+	a.reached = append(a.reached, sent.topic)
+	return nil
+}
+
+// err is why the attempt failed - its denials, its other failures and the error that ended it,
+// joined - or nil when every destination it sent was reached.
+func (a *attempt) err() error {
+	return errors.Join(append(append(a.denied, a.failed...), a.ended)...)
+}
+
+// publishSessionRoutes sends item to each session's own topic, naming a failure or a denial by
 // label and the session.
-func publishSessionRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, a *attempt, sessionIDs []string, label string) error {
+func publishSessionRoutes(deps Deps, eventID int64, item contracts.Envelope, a *attempt, sessionIDs []string, label string) error {
 	for _, sessionID := range sessionIDs {
 		routed := item
 		routed.Topic = contracts.AgentSubject(sessionID)
-		if err := publishDestination(ctx, deps, eventID, routed, a, label, sessionID); err != nil {
+		if err := publishDestination(deps, eventID, routed, a, label, sessionID); err != nil {
 			return err
 		}
 	}
@@ -314,7 +502,7 @@ func publishSessionRoutes(ctx context.Context, deps Deps, eventID int64, item co
 // no longer lists this session as live) and a release somebody else made. Like the follower
 // routes this ignores Notify — the losing session must hear it whoever acted, and it would
 // otherwise learn only by subscribing to the whole issue.
-func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
+func publishPreviousClaimant(deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	if event.Type != "issue.claimed" && event.Type != "issue.released" {
 		return nil
 	}
@@ -322,7 +510,7 @@ func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item
 	if sessionID == "" || event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
 		return nil
 	}
-	return publishSessionRoutes(ctx, deps, eventID, item, a, []string{sessionID}, "publish claim change to")
+	return publishSessionRoutes(deps, eventID, item, a, []string{sessionID}, "publish claim change to")
 }
 
 // payloadPreviousClaimSession reads the session id out of an event payload's previous claim,
@@ -380,7 +568,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 			sessionIDs = append(sessionIDs, follower.SessionID)
 		}
 	}
-	return publishSessionRoutes(ctx, deps, eventID, item, a, sessionIDs, "publish follower route to")
+	return publishSessionRoutes(deps, eventID, item, a, sessionIDs, "publish follower route to")
 }
 
 // publishAuthorRoutes delivers a human comment-thread action directly to the involved
@@ -468,7 +656,7 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		}
 	}
 
-	return publishSessionRoutes(ctx, deps, eventID, item, a, targets, "publish author route to")
+	return publishSessionRoutes(deps, eventID, item, a, targets, "publish author route to")
 }
 
 func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.Actor, bool, error) {
@@ -584,41 +772,32 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 	return delivered
 }
 
-// publishDestination publishes item to its topic once per event: a destination the event already
-// reached is skipped, and one it reaches is recorded. A destination NATS refuses (bus.ErrRefused:
-// the envelope is past the server's max payload, or its subject is past NATS's limit or holds
-// whitespace, as an unbounded document slug or a bearer's session id can make it) is refused the
-// same way however often it is retried, so it is logged, once, and recorded like a publication, and
-// the event goes on to its other destinations. A destination NATS denies (bus.ErrPublishDenied) is
-// left unrecorded and its denial added to a, and the attempt goes on; every other error ends it.
-// Either is named by label and id (`publish route "role:reviewer": …`), since a subject alone does
-// not say which of the event's destinations it was.
-func publishDestination(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, a *attempt, label, id string) error {
+// publishDestination sends item to its topic once per event: a destination the event already
+// reached, or this attempt already sent, is skipped. The answer is read later (attempt.wait),
+// except one that came back before anything was sent: a refusal or a denial is kept for wait to
+// read, and any other failure - NATS unreachable (bus.ErrUnavailable), say - ends the attempt,
+// named by label and id.
+func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *attempt, label, id string) error {
 	if _, ok := a.delivered[item.Topic]; ok {
 		return nil
 	}
-	if err := deps.Publisher.Publish(item); err != nil {
-		switch {
-		case errors.Is(err, bus.ErrPublishDenied):
-			a.denied = append(a.denied, fmt.Errorf("%s %q: %w", label, id, err))
-			return nil
-		case !errors.Is(err, bus.ErrRefused):
+	a.delivered[item.Topic] = struct{}{}
+	sent := sentDestination{eventID: eventID, topic: item.Topic, label: label, id: id, answer: deps.Publisher.PublishAsync(item)}
+	select {
+	case err := <-sent.answer:
+		if err != nil && !errors.Is(err, bus.ErrPublishDenied) && !errors.Is(err, bus.ErrRefused) {
 			return fmt.Errorf("%s %q: %w", label, id, err)
 		}
-		slog.Error("dispatch outbox: destination refused", "event_id", eventID, "topic", item.Topic, "error", err)
+		answered := make(chan error, 1)
+		answered <- err
+		sent.answer = answered
+	default:
 	}
-	if _, err := deps.Store.Pool.Exec(ctx, `
-		update events
-		set published_destinations = array_append(published_destinations, $2)
-		where id = $1 and published_at is null and not ($2 = any(published_destinations))
-	`, eventID, item.Topic); err != nil {
-		return fmt.Errorf("%s %q: record published destination: %w", label, id, err)
-	}
-	a.delivered[item.Topic] = struct{}{}
+	a.sent = append(a.sent, sent)
 	return nil
 }
 
-func publishRoute(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, a *attempt, route *string) error {
+func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt, route *string) error {
 	if route == nil || *route == "" {
 		return nil
 	}
@@ -634,7 +813,7 @@ func publishRoute(ctx context.Context, deps Deps, eventID int64, item contracts.
 	default:
 		return fmt.Errorf("unsupported route %q", *route)
 	}
-	return publishDestination(ctx, deps, eventID, item, a, "publish route", *route)
+	return publishDestination(deps, eventID, item, a, "publish route", *route)
 }
 
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {

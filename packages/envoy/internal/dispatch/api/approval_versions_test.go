@@ -958,4 +958,8 @@ func eventDeliveries(t *testing.T, database *store.Store, documentService docs.A
 // its event.
 type acceptingPublisher struct{}
 
-func (acceptingPublisher) Publish(contracts.Envelope) error { return nil }
+func (acceptingPublisher) PublishAsync(contracts.Envelope) <-chan error {
+	accepted := make(chan error, 1)
+	accepted <- nil
+	return accepted
+}
