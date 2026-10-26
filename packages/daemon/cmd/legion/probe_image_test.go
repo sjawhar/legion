@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/capabilities/capabilitiestest"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
@@ -313,6 +314,34 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 
 	if want := "\nprobe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=skipped" + capabilityMarks + thisBinarysContract + "\n"; code != 0 || !strings.HasSuffix(stdout, want) {
 		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want the OK line %q", code, stdout, stderr, want)
+	}
+}
+
+// An image built for a deployment that turns Oh My Pi's browser off carries no Chromium: without
+// --skip-browser the probe refuses it on the browser row, and with the flag it passes, its table's
+// browser row unchecked and its OK line's capabilities mark browser-skipped, which the daemon's
+// probe Sandbox refuses (bootprobe.CapabilitiesChecked).
+func TestProbeImageWithSkipBrowserPassesAnImageWithNoBrowser(t *testing.T) {
+	omp := imageOmp(t)
+	img := inImage(t, thisBinarysContract, omp)
+	img.without(t, "chromium")
+
+	code, stdout, stderr := probeImage(img.flags("--skip-agent-models")...)
+	if code != 1 || !strings.HasSuffix(stderr, "legion probe-image: capability browser is missing: chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable\n") {
+		t.Fatalf("probe-image without --skip-browser = %d %q %q, want exit 1 on the browser row", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = probeImage(img.flags("--skip-agent-models", "--skip-browser")...)
+
+	want := "\nprobe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=skipped capabilities=browser-skipped model-fallback=off daemon-api-version=" + thisBinarysContract + "\n"
+	if code != 0 || !strings.HasSuffix(stdout, want) {
+		t.Fatalf("probe-image --skip-browser = %d %q %q, want the OK line %q", code, stdout, stderr, want)
+	}
+	if row := "probe-image: capability browser: " + capabilities.StatusUnchecked + " (not checked (--skip-browser): "; !strings.Contains(stdout, row) {
+		t.Errorf("stdout = %q, want the browser row %q…", stdout, row)
+	}
+	if bootprobe.CapabilitiesChecked(stdout) {
+		t.Errorf("CapabilitiesChecked(%q) = true, want the daemon to read the browser-skipped line as unchecked", stdout)
 	}
 }
 

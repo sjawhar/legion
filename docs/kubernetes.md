@@ -407,6 +407,12 @@ mark for the deployment's capability report ([The deployment's capability report
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
+`--skip-browser` leaves the browser row unchecked, for the build of an image meant for a deployment
+that turns Oh My Pi's browser off (`browser.enabled: false`) and so carries no Chromium: that row
+reads `unchecked`, and the OK line carries `capabilities=browser-skipped` in place of
+`capabilities=checked`. The daemon's probe never passes the flag and refuses that line, so such an
+image runs only where no probe runs, under `runtime: tmux`. Oh My Pi downloads Chrome for Testing
+on first use when it finds no browser, so the deployment's own overlay must turn the browser off.
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
