@@ -380,9 +380,9 @@ rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --con
 # ---- capacity: the pool's room for the run's pods ------------------------------------------------
 # No pod asks for or keeps off another pod's node (LEGION-632: every issue pod owns its volume and
 # shares nothing with another pod), so the scheduler bin-packs the run's pods where the legion pool
-# has room, and Karpenter adds nodes under the pool's limits. Every container reserves cpu and memory
-# (run_resources), so the room is counted in pods of the run's largest reservation, an issue pod's
-# six-role sum, against what the pool's Ready nodes have free and what its limits leave.
+# has room, and Karpenter adds nodes under the pool's limits. An issue pod's one `roles` container
+# reserves cpu and memory for all six roles (run_resources' `issue`), so the room is counted in pods
+# of that one reservation, against what the pool's Ready nodes have free and what its limits leave.
 
 # pool_pod_room prints, as JSON, how many of the run's pods the legion pool can place now
 # (lib/stage4b-room.jq pool_room): the pod's reservation (cores, bytes); each pool node that is
@@ -1449,14 +1449,18 @@ end_claim_process() {
 # role_generation_ended observes end_claim_process kill landing on its one role: the killed
 # generation's role-init is gone from the pod's `roles` container, while the pod, that container
 # (its id and restart count) and every role-init of another role that ran before the kill (role,
-# generation and pid) are still there. A role that launches meanwhile, a sibling's first or next
-# generation the daemon started, is no part of the kill and is not read. A changed pod or container,
-# or a peer gone, is a kill that reached more than its role: it is written as the run's violation,
-# which until_true's next poll aborts on, naming it (a fail inside a poll would only end the poll's
-# own output, which until_true discards).
+# generation and pid) are still there. The first generation of a role that had none at the kill,
+# which the daemon may start meanwhile, is no part of the kill and is not read; a peer's next
+# generation replaces a role-init the kill had to leave, so it is a peer gone. A changed pod or
+# container, or a peer gone, is a kill that reached more than its role: it is written as the run's
+# violation, which until_true's next poll aborts on, naming it (a fail inside a poll would only end
+# the poll's own output, which until_true discards). A read of the pod, its container or its
+# role-inits that fails says nothing either way: the poll waits and the next one reads again.
 role_generation_ended() {
-  local inits identity lost violation=
-  if [ "$(op get pod "$ended_pod" -o jsonpath='{.metadata.uid}')" != "$ended_pod_uid" ]; then
+  local inits identity lost uid violation=
+  if ! uid=$(op get pod "$ended_pod" -o jsonpath='{.metadata.uid}'); then
+    return 1
+  elif [ "$uid" != "$ended_pod_uid" ]; then
     violation="the kill of $ended_role generation $ended_generation replaced pod $ended_pod_uid"
   elif ! identity=$(roles_container_identity "$ended_pod"); then
     return 1
@@ -2484,6 +2488,13 @@ collect_transcripts() {
     cp -R "$profile_agent/sessions/." "$evidence/transcripts/controller/"
   fi
 }
+# remove_negative_config removes full-agent-negative's workspace file, should the run end between
+# its write and its removal. It runs in the pod's `roles` container, which mounts the issue's volume
+# at the same /legion path every role sees, so it needs no live planner: the run may end with the
+# planner killed, between generations or never relaunched.
+remove_negative_config() {
+  [ -z "$negative_config_pod" ] || roles_exec "$negative_config_pod" rm -f "$negative_config_workspace/.omp/config.yml"
+}
 cleanup() {
   local status=$? p teardown_failed=""
   # A second signal must not cut the teardown short, and a closed output must not end it.
@@ -2499,8 +2510,7 @@ cleanup() {
   # The review pair exists only once tree-moved has named the reviewer's session; a run cut before
   # that has nothing to record.
   [ -z "$pair_session" ] || record_pair >/dev/null 2>&1
-  # full-agent-negative's workspace file, should the run end between its write and its removal.
-  [ -z "$negative_config_pod" ] || pod_exec "$negative_config_pod" planner sh -c "rm -f '$negative_config_workspace/.omp/config.yml'" >/dev/null 2>&1
+  remove_negative_config >/dev/null 2>&1
   stop_pid "$daemon_pid"
   [ -z "$block_tree" ] || set_status "$block_tree" "done"
   collect_transcripts
@@ -2932,7 +2942,7 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
 # The run needs run_pods_at_once pods placed at once (tree 1's root and its two children beside tree
-# 2's root), each reserving an issue pod's six-role sum; whatever already runs on the pool's nodes,
+# 2's root), each holding the issue pod reservation; whatever already runs on the pool's nodes,
 # of any namespace, counts against it, as does what the pool's limits already hold.
 room=$(pool_pod_room) || blocked "the operator context could not read the legion NodePool, its nodes or the cluster's pods"
 pod_reservation=$(jq -r '"\(.pod.cpu) CPU, \(.pod.memory / 1073741824) GiB"' <<<"$room")
@@ -3704,20 +3714,25 @@ fixture_dir=/legion/workspaces/$repo/${tree2,,}
 # codegraph_warm_up_lines: every warm-up line any role of tree 2's pod has logged, each timestamped
 # and behind its role's prefix, kept as the evidence every read below judges (so a wait that times
 # out leaves the file its fail line names). The match is anchored at the line start, the timestamp
-# and the role's prefix then the shim's own `[legion] codegraph warm-up for `: an agent's tool
-# arguments (`tool_execution_start <tool> <args>`) go to the same stream and could carry those words,
-# but such a line starts with the frame's own words after the prefix and never matches.
+# and the role's prefix then the shim's own `[legion] codegraph warm-up for `, which passes over an
+# agent's tool call as the shim logs it (`tool_execution_start <tool> <args>`, its arguments cut at
+# 80 characters, internal/shim/shim.go). The anchor does not make the line unforgeable: the shim's
+# stderr is also Oh My Pi's, which a role's agent can write a whole line to, and the launcher writes
+# the rest of a line longer than 64 KiB behind the role's prefix again (internal/launcher/launcher.go
+# maxLogLine). So the line names the shim that built the index only as far as no agent of the run
+# writes such a line, which nothing the run asks of them does; whether the index is built is read
+# from `codegraph status` after it, never from the line.
 codegraph_warm_up_lines() { op logs "$pod" -c roles --timestamps | grep -E '^[^ ]+ [a-z]+: \[legion\] codegraph warm-up for ' >"$evidence/codegraph-warm-up.txt"; }
-# codegraph_built: a role shim of the pod logged the warm-up's success line, anchored the same way
-# and in the success line's own shape, so no line an agent's tool arguments could carry passes.
+# codegraph_built: a role's log carries the warm-up's success line, anchored the same way and in the
+# success line's own shape.
 codegraph_built() { codegraph_warm_up_lines && grep -qE '^[^ ]+ [a-z]+: \[legion\] codegraph warm-up for .* built the index: codegraph (init|index) took ' "$evidence/codegraph-warm-up.txt"; }
 # warm_up_built_elapsed CREATED reads timestamped `roles` container log lines on stdin and prints
 # `<role> <seconds>` for the first success line: the role of its `<role>: ` prefix, and the whole
 # seconds from CREATED, the pod's creationTimestamp, to its timestamp. With no success line it
 # prints nothing and returns 1. Past the timestamp and the prefix a shim's line begins `[legion] `,
 # and the pattern is the success line's whole shape from there (a case pattern matches the whole
-# word, so its leading literal anchors it): a line an agent's tool arguments could carry starts with
-# the frame's own words and never matches.
+# word, so its leading literal anchors it), which a tool call as the shim logs it never matches;
+# codegraph_warm_up_lines says what the anchor does not rule out.
 warm_up_built_elapsed() {
   local created=$1 stamp role rest
   while read -r stamp role rest; do

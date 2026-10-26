@@ -1,9 +1,9 @@
 """Resolve the role's agent process in this pod and run second-owner's credential probes.
 
 scripts/e2e/multi-repo-acceptance.sh streams this file over `kubectl exec -i` into the pod's one
-`roles` container and from there into the role's own namespaces (its role_enter: the role's
-`legion launcher role-init`'s user, mount, PID and IPC namespaces, then its worker-shim's user
-namespace), where it runs as
+`roles` container and from there into the role's own namespaces (lib/role-namespaces.sh's
+role_enter_sh: the role's `legion launcher role-init`'s user, mount, PID and IPC namespaces, then
+its worker-shim's user namespace), where it runs as
 
     python3 -I - <proc root> <T repo> <O repo> <O owner> <GitHub base URL> <trusted root>
 

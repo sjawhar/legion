@@ -77,12 +77,24 @@ wait`,
     expect(kill.stderr.toString()).toContain("runs no worker-shim");
     expect(kill.stdout.toString()).toBe("helper alive\n");
   }, 120_000);
+
+  test("a child naming worker-shim in a later argv word is not the shim", () => {
+    // argv `bash -c <script> worker-shim`: worker-shim is argv[3], not argv[1]. The decoy waits in
+    // bash's builtin read on a FIFO it holds open itself, so it starts no process of its own.
+    const fifo = join(dir, "decoy.fifo");
+    const lines = `. ${JSON.stringify(lib)}\nmkfifo ${JSON.stringify(fifo)}\nbash -c 'exec 3<>"$1"; read -r -t 300 -u 3 _' worker-shim ${JSON.stringify(fifo)} & h=$!\nsleep 0.2\nsh -c "$role_kill_sh" role-kill $$; rc=$?\nkill -0 $h && echo "decoy alive"\nkill -KILL $h\nexit $rc`;
+    const kill = Bun.spawnSync(["bash", "-c", lines]);
+    expect(kill.exitCode).toBe(1);
+    expect(kill.stderr.toString()).toContain("runs no worker-shim");
+    expect(kill.stdout.toString()).toBe("decoy alive\n");
+  }, 120_000);
 });
 
 describe("role_generation_ended", () => {
   let runs = 0;
-  // BEFORE is the pod's role generations at the kill, AFTER what a poll reads.
-  function poll(before: string, after: string) {
+  // BEFORE is the pod's role generations at the kill, AFTER what a poll reads; OP is the pod uid
+  // the poll's `op get pod` prints, or `fails` for a read that exits 1 with nothing printed.
+  function poll(before: string, after: string, op = "uid-a") {
     const evidence = join(dir, `evidence-${++runs}`);
     const result = Bun.spawnSync(
       [
@@ -93,13 +105,13 @@ mkdir -p ${JSON.stringify(evidence)}
 evidence=${JSON.stringify(evidence)}
 ended_pod=pod-a ended_pod_uid=uid-a ended_role=implementer ended_generation=2 ended_identity=container-1
 ended_peers=$(awk '$1 != "implementer"' <<<"$BEFORE")
-op() { echo uid-a; }
+op() { [ "$OP" != fails ] || return 1; echo "$OP"; }
 roles_container_identity() { echo container-1; }
 role_inits() { printf '%s' "$AFTER"; }
 ${fn("role_generation_ended")}
 if role_generation_ended; then echo ended; else echo waiting; fi`,
       ],
-      { env: { ...process.env, BEFORE: before, AFTER: after } }
+      { env: { ...process.env, BEFORE: before, AFTER: after, OP: op } }
     );
     expect(result.stderr.toString()).toBe("");
     const violation = join(evidence, "pane-endpoint-violation.txt");
@@ -128,11 +140,71 @@ if role_generation_ended; then echo ended; else echo waiting; fi`,
     });
   });
 
+  test("a pod read that fails is a wait, no violation", () => {
+    expect(poll(before, "architect 1 10\nplanner 1 30\n", "fails")).toEqual({
+      out: "waiting\n",
+      violation: "",
+    });
+  });
+
+  test("a pod of another uid is a violation", () => {
+    const result = poll(before, before, "uid-b");
+    expect(result.out).toBe("waiting\n");
+    expect(result.violation).toContain("replaced pod uid-a");
+  });
+
   test("a peer gone or replaced is a violation naming it", () => {
     const result = poll(before, "architect 2 11\nplanner 1 30\n");
     expect(result.out).toBe("waiting\n");
     expect(result.violation).toContain(
       "ended another role's generation in pod pod-a: gone architect 1 10;"
     );
+  });
+});
+
+// The teardown removes full-agent-negative's workspace file with the planner killed: the removal
+// must not go through the planner's namespaces, which a killed planner no longer has.
+describe("remove_negative_config", () => {
+  function teardown(pod: string) {
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `set -euo pipefail
+negative_config_pod=${JSON.stringify(pod)} negative_config_workspace=/legion/workspaces/o/r/legsmoke-3
+pod_exec() { echo "no role-init of $2 runs in this container" >&2; return 1; }
+roles_exec() { echo "roles_exec $*"; }
+${fn("remove_negative_config")}
+remove_negative_config && echo removed`,
+    ]);
+    return { out: result.stdout.toString(), code: result.exitCode };
+  }
+
+  test("removes the file in the roles container, no planner needed", () => {
+    expect(teardown("pod-3")).toEqual({
+      out: "roles_exec pod-3 rm -f /legion/workspaces/o/r/legsmoke-3/.omp/config.yml\nremoved\n",
+      code: 0,
+    });
+  });
+
+  test("no file written is nothing to remove", () => {
+    expect(teardown("")).toEqual({ out: "removed\n", code: 0 });
+  });
+});
+
+// Every script that enters a role finds its worker-shim by argv[1] alone, through role_enter_sh,
+// rather than by a matcher of its own that a later argv word could satisfy.
+describe("role entry", () => {
+  test("multi-repo-acceptance.sh enters a role through role-namespaces.sh's role_enter_sh", () => {
+    const script = readFileSync(join(import.meta.dir, "..", "multi-repo-acceptance.sh"), "utf8");
+    expect(script).toContain('. "$script_dir/lib/role-namespaces.sh"');
+    expect(script).toContain('sh -c "$role_enter_sh" role-enter');
+    expect(script).not.toMatch(/grep -qx worker-shim|^role_enter=/m);
+  });
+
+  test("role_enter_sh takes the shim by argv[1] alone", () => {
+    const text = readFileSync(lib, "utf8");
+    const enter = /^role_enter_sh='[\s\S]*?^'$/m.exec(text)?.[0] ?? "";
+    expect(enter).toContain('| sed -n 2p)\\" = worker-shim ]');
+    expect(enter).not.toContain("grep -qx worker-shim");
   });
 });

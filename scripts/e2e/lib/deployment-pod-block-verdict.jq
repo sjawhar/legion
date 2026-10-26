@@ -13,8 +13,8 @@
 # Output: {process, missing, wrong}:
 #   process    {pid, comm} of the process holding the most of the block's env names (the lowest pid
 #              on a tie), or null when no process holds one;
-#   missing    what the block names and the pod lacks: a volume, a projected source, a mount in a
-#              role container, an env name on that process;
+#   missing    what the block names and the pod lacks: a volume, a projected source, a mount in the
+#              `roles` container, an env name on that process;
 #   wrong      what the pod carries differently: its ServiceAccount, a volume's kind or object (a
 #              Secret, ConfigMap or PersistentVolumeClaim by name, an NFS export by server and
 #              path), a projected token's audience, expiry or path, a mount's sub_path or read_only,

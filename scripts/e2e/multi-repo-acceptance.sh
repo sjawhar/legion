@@ -484,7 +484,7 @@ require_pod_for_issue() {
 #
 # `kubectl exec` carries none of a role's own variables, and an issue pod's one `roles` container
 # holds every role's directories while each role sees only its own, so a probe run in the bare
-# container cannot be the role's. role_enter (below) takes the probe from the `roles` container
+# container cannot be the role's. role_enter_sh (below) takes the probe from the `roles` container
 # into the role's own namespaces, and lib/as-role.py resolves the role's agent process there and
 # runs the credential probes under that process's own environment; its header says how the agent
 # is told apart from the shim's other children and why the probes are built as they are. It is
@@ -530,42 +530,21 @@ resolve_trusted_root() {
   fi
 }
 
-# role_enter is the shell that runs its arguments, after the role, inside that role of the issue
-# pod's one container: it finds the role's `legion launcher role-init` by its argv (the word
-# `role-init` and `--role <role>` before the shim's `--`), refusing a role that runs none or two;
-# enters that role-init's user, mount, PID and IPC namespaces (gVisor refuses the setgroups a plain
-# nsenter makes, hence --preserve-credentials), where /proc is the role's own and role-init its PID
-# 1; and from there the user namespace of its worker-shim (role-init's child), so the command runs
-# as the role's own user with the role's own mounts. The Stage 4a harness enters a role the same way
-# (packages/daemon/internal/runtime/sandbox/live_test.go, roleEnter).
-# shellcheck disable=SC2016 # the shell runs in the pod, so nothing in it expands here
-role_enter='role=$1; shift
-found=
-for d in /proc/[0-9]*; do
-  args=$(tr "\0" "\n" <"$d/cmdline" 2>/dev/null) || continue
-  printf "%s\n" "$args" | sed "/^--$/q" | grep -qx role-init || continue
-  [ "$(printf "%s\n" "$args" | sed -n "/^--$/q; /^--role$/{n;p;q;}")" = "$role" ] || continue
-  [ -z "$found" ] || { echo "role $role runs two role-inits, pids $found and ${d#/proc/}" >&2; exit 125; }
-  found=${d#/proc/}
-done
-[ -n "$found" ] || { echo "role $role runs no role-init in this container" >&2; exit 125; }
-exec nsenter -t "$found" -U -m -p -i --preserve-credentials -- sh -c "
-shim=
-for d in /proc/[0-9]*; do
-  [ \"\$(sed -n \"s/^PPid:[[:space:]]*//p\" \"\$d/status\" 2>/dev/null)\" = 1 ] || continue
-  tr \"\\0\" \"\\n\" <\"\$d/cmdline\" 2>/dev/null | grep -qx worker-shim || continue
-  [ -z \"\$shim\" ] || { echo \"the role runs two worker-shims under its role-init\" >&2; exit 125; }
-  shim=\${d#/proc/}
-done
-[ -n \"\$shim\" ] || { echo \"the role runs no worker-shim under its role-init\" >&2; exit 125; }
-exec nsenter -t \"\$shim\" -U --preserve-credentials -- \"\$@\"" role "$@"'
+# role_enter_sh (lib/role-namespaces.sh, which the Stage 4b proof enters a role with too) runs its
+# arguments, after the role, inside that role of the issue pod's one container: it finds the role's
+# `legion launcher role-init` by its argv, refusing a role that runs none or two; enters that
+# role-init's user, mount, PID and IPC namespaces, where /proc is the role's own and role-init its
+# PID 1; and from there the user namespace of its worker-shim (role-init's child whose argv[1] is
+# worker-shim), so the command runs as the role's own user with the role's own mounts.
+# shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
+. "$script_dir/lib/role-namespaces.sh"
 
 # as_role_probe <pod> <role> <proc root> <github url> <trusted root> runs lib/as-role.py inside the
-# role (role_enter) of the pod's `roles` container with that file as stdin, and prints its JSON
+# role (role_enter_sh) of the pod's `roles` container with that file as stdin, and prints its JSON
 # object.
 as_role_probe() {
   local pod=$1 role=$2 proc_root=$3 github_url=$4 trusted_root=$5
-  kubectl exec -i "$pod" -c roles -- sh -c "$role_enter" role-enter "$role" python3 -I - \
+  kubectl exec -i "$pod" -c roles -- sh -c "$role_enter_sh" role-enter "$role" python3 -I - \
     "$proc_root" "$LEGION_E2E_REPO_T" "$LEGION_E2E_REPO_O" "$o_owner" "$github_url" "$trusted_root" <"$as_role_script"
 }
 
