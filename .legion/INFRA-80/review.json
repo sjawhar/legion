@@ -2,37 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T07:08:30Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T07:53:30Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "kind": "round 17: forward merge 261787696ec8 of main@2216dbc86e35 after retro; fingerprint changed, so a new round",
+  "kind": "round 18, narrow by the architect's decision: the fix for review 5648528335 (7ad1c609da45) and the required checks at its code head",
   "lastReview": {
-    "id": 5648116086,
-    "state": "APPROVED",
-    "commitId": "22824dfe36d8fd0efe210e115a2448021db32297"
-  },
-  "fingerprint": {
-    "atLastReview": "22824dfe36d8 c037869c19fbb114687b0f29ddc27646c17fa943b205f5041ece5a57a83b3f7a",
-    "atHead": "b7251ccf7ed8 1feb7d7e75f14785c9ffefbc27a3b98c3aa78a0570f55256a0ea8720fac16baf",
-    "restricted": "excluding packages/daemon/internal/runtime/sandbox/operatorpod.go as well: 78ccb817c013774496643de18002f7d66f159d93f32c0b04bc52b100fa45172e at both heads"
+    "id": 5648528335,
+    "state": "CHANGES_REQUESTED",
+    "commitId": "ffb68a71af372667d1326f864ed416c408a6d9f6"
   },
   "verified": [
-    "the one conflict, the imageEnv doc comment at operatorpod.go:18-28, keeps #2222's CGO_ENABLED sentence and this PR's HOME/OMP_PROFILE clause; no conflict markers; operatorpod.go's other two PR hunks unchanged",
-    "contract 37 agrees across version.go, the daemon-api fixture, pi-legion and claude-envoy package.json and the claude-envoy bundle; main still at 36",
-    "thermonuclear pair: go build, go vet, sandbox/config/podsafety tests ok; check-dist in sync; skills guard 12 pass"
+    "7ad1c609da45 changes only docs/kubernetes.md:172-174: OMP writes logs and models.db under the profile, every session is a row in the session database; true of mainEnvironment (manifest.go:881-886) and consistent with operatorpod.go:24-25",
+    "thread PRRT_kwDORFy7ds6wKkuT answered with the fixing commit; resolved by the implementer; 34 threads, 0 unresolved"
   ],
   "ci": {
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "261787696ec8 (compare to b7251ccf lists only .legion/)",
-    "state": "pending/queued at 07:08Z; a request for changes does not wait on it"
+    "ciHead": "ff87f8e6b5d1 (code of 7ad1c609da45; compare to 864ce0be lists only .legion/INFRA-80/test.json)",
+    "checks": "typecheck success 07:39:33Z, lint success 07:43:33Z, test success 07:52:32Z, pr-title success (latest 07:41:48Z)"
   },
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:172",
-      "description": "Says the worker image's HOME must be writable because 'OMP writes sessions, logs, and models.db under ~/.omp/profiles/legion'. This PR removed the pvc session store, so every pod now runs with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE (manifest.go:881, podsafety.go:11-14) and writes no session under the profile; the PR's own imageEnv comment (operatorpod.go:24-25) says 'whose sessions a pod never writes'. Fix: drop 'sessions' from that parenthesis."
-    }
-  ]
+  "keyFindings": []
 }
