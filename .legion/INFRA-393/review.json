@@ -2,28 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T01:13:00Z",
-  "round": 2,
-  "codeHeadReviewed": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
-  "decision": "approved",
+  "completed": "2026-10-26T10:06:00Z",
+  "round": 3,
+  "codeHeadReviewed": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+  "fingerprint": "5b39834357873eda556fc65bea2c3ea1b7c61683 6a1249c243518bfa396fa76c11c72279e76b00c493c526c337249351b723ab24 -> 842cc8f985c22b98a36cf191cda018e95ae22ea7 337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea: changed, so a new round; the interdiff of the two normalized diffs is only the migration renumbering 0117/0118 -> 0118/0119 with its references, embeddingsPendingSinceVersion 117 -> 118, and the route pin 137 -> 138",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "keyFindings": [],
-  "roundOneFindings": [
-    "Finding 1 (no Contract change census): fixed; the PR body's census re-run at f29797a6693c matches: in-tree counts 12/12/71/158/109/2/20 for its patterns, no importer outside packages/envoy, and the deployment repository at f25712bb9c2d gives 0 hits for backfill-embeddings, embeddings_backfill_progress, DISPATCH_EMBEDDER, DISPATCH_AZURE_ and search/coverage, and 7 azureTenantId hits that are stack config of two other programs, none an input of gcp:Dispatch.",
-    "Finding 2 (legacy dead rows re-admitted on Bedrock): fixed in f29797a6693c by 0117's update setting dead_model to us.cohere.embed-v4:0 where dead, with TestMigrationAddsPendingSince and TestCoverLeavesARowDeadUnderBedrockDeadUntilAnotherIdentity; both E2E lines drive it with the pre-fix binary as negative control. Thread PRRT_kwDORFy7ds6wGpIQ answered.",
-    "Minor 3 (script line refs): fixed in f29797a6693c. Thread PRRT_kwDORFy7ds6wGpIS answered.",
-    "Minor 4 (stale backfill wording in search_meaning_test.go): fixed in f29797a6693c."
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "CI: Tests run 40297256033, job test (step 'Test the concurrent packages under the race detector')",
+      "description": "The required check `test` is red at the code head ec6ea9e0: TestRunEndsAnOperatorSpawnInFlightWithTheDrainAndNamesIt in packages/daemon/internal/daemon (inflight_test.go:546: 'stopped in 2.417283157s with the operator's spawn ... waiting in the runtime; it was answered 500'). This PR touches nothing under packages/daemon, and the same workflow passed on main at 7f6ef46fd42f (run 40294298505), so the failure reads as a timing flake; a head whose required check is red cannot be approved. Remedy: `gh run rerun 40297256033 --failed`, then complete so the round reads the rerun."
+    }
   ],
-  "judgedNotDefects": [
-    "Deep review hardening: azure.go's LimitedReader refuses an oversized JSON value but accepts a valid answer followed by trailing bytes past the 16 MiB cap, since Decode stops after the first value; reading stays bounded at cap+1 and the vectors returned are valid, so no error is hidden. The comment at azure.go:221-222 slightly overstates it.",
-    "Code quality P2: coverage_test.go grows from 967 to 1,005 lines; a same-package Go test file of that size is no defect and no repository rule caps it."
+  "verifiedThisRound": [
+    "Thermonuclear deep review APPROVE at 842cc8f9: migration set contiguous (main's 0117, then 0118 and 0119 with censuses), the four migration-set tests pass, main's changes since f2c17ded touch none of embed, embedqueue, search or gcp:Dispatch, and every in-tree reference to this PR's migrations reads 0118/0119.",
+    "Thermonuclear code quality APPROVE at 842cc8f9: no conflict-resolution artifacts in the CHANGELOGs or README.",
+    "E2E (implementer) and E2E (tester) both cover round 4 at ec6ea9e0, with negative controls; the provider that answered in each live run is Azure AI Foundry (Cohere Embed v4, deployment embed-v-4-0) through a keyless Entra sign-in; the Bedrock runs had no AWS credential, so no Bedrock call answered.",
+    "Reviewer's own PR-body lines 'Look at first' and 'Not proven / risk' renumbered to 0118, as the architect asked."
   ],
-  "censusRollout": "The subcommand removal is the spec's acceptance ('the backfill-embeddings subcommand goes') with zero callers; the boot and gcp:Dispatch refusals apply only to settings and inputs this PR introduces, which nothing sets today, so no existing caller is refused and warn-first has no caller to warn.",
-  "thermonuclear": {
-    "deepReview": "APPROVE at a48bfa07 (same code as f29797a6693c): 0117 ordering sound in one migration transaction, the historical identity assumption holds, census conclusions supported; one Minor hardening (trailing-overflow detection in the Azure body cap).",
-    "codeQuality": "CHANGES at a48bfa07 on one P2 (coverage_test.go past 1,000 lines), judged not a defect."
-  },
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head 2bd38f8733e4 (newest pull_request run): all four completed success; compare to a48bfa07 touches only .legion/INFRA-393/implement.json and test.json. The non-required 'Legion Envoy and Contracts' workflow (run 40251184593) was still queued; the implementer ran the embed, embedqueue, store and cmd/dispatch suites against Postgres at f29797a6693c."
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head ec6ea9e0b9ad (newest pull_request run): lint, typecheck, pr-title success; test failure (run 40297256033). Compare to 842cc8f9 touches only .legion/."
 }
