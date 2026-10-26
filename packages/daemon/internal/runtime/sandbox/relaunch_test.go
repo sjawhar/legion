@@ -87,7 +87,7 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	}
 	pod := g.pod(name)
 	if err := loc.Validate(); err != nil || loc.Sandbox.PodUID != string(pod.UID) || loc.Runtime != runtime.RuntimeSandbox ||
-		loc.Sandbox.Name != name || loc.Sandbox.Container != string(spec.Role) || loc.Sandbox.Generation != spec.Generation ||
+		loc.Sandbox.Name != name || loc.Sandbox.Container != workerContainer || loc.Sandbox.Generation != spec.Generation ||
 		loc.Incarnation != runtime.SandboxIncarnation(string(pod.UID), spec.Generation) || loc.Claim != workerToken {
 		t.Fatalf("locator %+v (%v), want the tester process in issue pod uid %s", loc, err, pod.UID)
 	}
@@ -152,7 +152,7 @@ func TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt(t *testing.T) {
 	if root.Sandbox.Name != worker.Sandbox.Name || root.Sandbox.PodUID != worker.Sandbox.PodUID {
 		t.Fatalf("role locators root=%+v worker=%+v, want one issue pod", root.Sandbox, worker.Sandbox)
 	}
-	if root.Sandbox.Container != string(claim.RoleArchitect) || worker.Sandbox.Container != string(claim.RoleTester) {
+	if root.Sandbox.Container != workerContainer || worker.Sandbox.Container != workerContainer {
 		t.Fatalf("containers root=%q worker=%q", root.Sandbox.Container, worker.Sandbox.Container)
 	}
 	for _, write := range g.writes()[writes:] {
@@ -806,7 +806,7 @@ func TestASuspendedSandboxsInstallingResumeReplacesAndInstallsNothing(t *testing
 	}
 }
 
-// Stage 4b's finished-idle-planner-death: `kill 1` in a role container ends that role's launcher,
+// Stage 4b's finished-idle-planner-death: `kill 1` in an issue pod's `roles` container ends its launcher,
 // the kubelet restarts the container under restartPolicy Always, and the new launcher connects
 // before the pod status drops the killed instance's terminated state. The replacement generation
 // is judged by its own launcher, not by that stale status: reading it as dead reported every
@@ -829,7 +829,7 @@ func TestAReplacementGenerationOutlivesTheKilledInstancesTerminatedStatus(t *tes
 			}
 		}
 	})
-	g.eventually("the store to see the killed role container", func() bool {
+	g.eventually("the store to see the killed roles container", func() bool {
 		status := containerStatus(g.r.storedPod(name), workerContainer)
 		return status != nil && status.State.Terminated != nil
 	})

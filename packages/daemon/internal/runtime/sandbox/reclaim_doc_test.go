@@ -107,7 +107,7 @@ func TestTheReclaimParagraphNeverDeletesWhatItExempts(t *testing.T) {
 	}
 }
 
-// issueVolumeDirectories is what a role container and the pod are told to write under the issue's
+// issueVolumeDirectories is what a role and the pod are told to write under the issue's
 // volume, taken from the two renderers that tell them: roleEnvironment, which carries the role's
 // temporary directory, its XDG homes and the three tool caches, and the issue pod's agentEnv, which
 // carries uv's cache and Pythons. A value under TreeRoot is on that volume, since TreeRoot is where
