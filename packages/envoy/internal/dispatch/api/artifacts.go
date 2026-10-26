@@ -104,9 +104,14 @@ const issueUploadRoute = http.MethodPost + " /api/v1/issues/{key}/artifacts"
 // to a closed issue would otherwise go up in full only to be refused. register mounts it ahead of
 // the keyed layer, so the refusal claims no key. The handler's locked check still decides an issue
 // that closes meanwhile; this one only spares the body. A caller that resolves to nobody is left
-// to the route's own 401.
+// to the route's own 401, and a malformed Idempotency-Key to the keyed layer's 400, which reads no
+// body either and refuses the request's form before anything is looked up.
 func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if _, present, err := requestKeyHeader(r); present && err != nil {
+			handler(w, r)
+			return
+		}
 		actor, human, err := s.optionalActor(r)
 		if err != nil {
 			handler(w, r)
