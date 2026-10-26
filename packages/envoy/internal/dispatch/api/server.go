@@ -367,12 +367,13 @@ func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 // confirms, a revoked token) it cancels the connection's context, on which the document server and
 // the delivery socket close the socket. The check runs beside the handler, which holds pooled
 // connections of its own while it admits the socket, so it marks a context of its own for the pool
-// (store.ErrNestedAcquire).
+// (store.ErrNestedAcquire), and it resolves on a context detached from the access-log line, which
+// names the caller the socket was admitted as (accesslog.Detached).
 func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, closeConnection := context.WithCancel(r.Context())
 		defer closeConnection()
-		check := r.WithContext(store.WithTransactionTracking(ctx))
+		check := r.WithContext(store.WithTransactionTracking(accesslog.Detached(ctx)))
 		go func() {
 			heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 			defer heartbeat.Stop()
@@ -390,6 +391,13 @@ func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc 
 		}()
 		handler(w, r.WithContext(ctx))
 	}
+}
+
+// heartbeatRequest is r for resolving a stream's caller again on a heartbeat: detached from the
+// access-log line, which names the caller the stream was admitted as, since a re-resolution that
+// reads only the bearer's credential would otherwise replace the session the request named.
+func heartbeatRequest(r *http.Request) *http.Request {
+	return r.WithContext(accesslog.Detached(r.Context()))
 }
 
 type apiError struct {

@@ -7,25 +7,45 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// logBuffer is a log sink the server's goroutines may write while the test reads it.
+type logBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // captureLog sends the default logger's lines to a buffer for the test's lifetime, as the
 // deployment's own logger writes them: a text handler, the one cmd/dispatch installs.
-func captureLog(t *testing.T) *bytes.Buffer {
+func captureLog(t *testing.T) *logBuffer {
 	t.Helper()
-	var logged bytes.Buffer
+	logged := &logBuffer{}
 	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
-	return &logged
+	return logged
 }
 
 // accessLines are the access-log lines a buffer holds, in order.
-func accessLines(t *testing.T, logged *bytes.Buffer) []string {
+func accessLines(t *testing.T, logged *logBuffer) []string {
 	t.Helper()
 	var lines []string
 	for _, line := range strings.Split(logged.String(), "\n") {
@@ -96,7 +116,7 @@ func TestABearersRequestIsNamedByItsSessionAndCarriesNoToken(t *testing.T) {
 		t.Fatalf("one request wrote %d access-log lines:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 	line := lines[0]
-	for _, want := range []string{`method=POST`, `route=/api/v1/issues`, `caller_kind=session`, `caller=session-0123456789abcdef`, `status=201`} {
+	for _, want := range []string{`method=POST`, `route=/api/v1/issues`, `caller_kind=session`, `caller=session-0123456789abcdef`, `credential=shared-token`, `status=201`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("access-log line %q does not carry %q", line, want)
 		}
@@ -132,6 +152,32 @@ func TestARefusedRequestIsLoggedWithNoCaller(t *testing.T) {
 	}
 	if strings.Contains(lines[0], "not-a-token") {
 		t.Fatalf("access-log line %q carries the refused bearer", lines[0])
+	}
+}
+
+// A socket that outlives its request resolves its caller again on every heartbeat, and that
+// resolution names no one on the line: a shared-token bearer's re-resolution would otherwise
+// replace the session the socket was admitted as with a nameless shared token.
+func TestASocketsHeartbeatLeavesTheSessionItWasAdmittedAs(t *testing.T) {
+	_, _, deps := newTestServer(t, testServerOptions{streamHeartbeat: 10 * time.Millisecond})
+	logged := captureLog(t)
+	socket := accesslog.Handler("/ws/doc/{room}", directServer(deps).whileCallerResolves(func(w http.ResponseWriter, r *http.Request) {
+		accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
+		accesslog.Note(r.Context(), accesslog.KindSession, "session-0123456789abcdef")
+		time.Sleep(100 * time.Millisecond) // ten heartbeats
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
+	request.Header.Set("Authorization", "Bearer agent-token")
+	socket.ServeHTTP(httptest.NewRecorder(), request)
+
+	lines := accessLines(t, logged)
+	if len(lines) != 1 {
+		t.Fatalf("one socket wrote %d access-log lines:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for _, want := range []string{`caller_kind=session`, `caller=session-0123456789abcdef`} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("access-log line %q does not carry %q", lines[0], want)
+		}
 	}
 }
 

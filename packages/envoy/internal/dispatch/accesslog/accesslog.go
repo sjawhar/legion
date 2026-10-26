@@ -1,13 +1,14 @@
 // Package accesslog writes Dispatch's one line per served request.
 //
-// Dispatch kept no record of who called it: when its database saturated on 2026-10-25 nobody
-// could name the callers behind the requests it was serving (dispatch://INFRA-324,
-// dispatch://INFRA-351). Handler wraps one route and logs, when the request ends, the method, the
-// route pattern (never a path's ids alone), the caller the authentication layer resolved, the
+// Dispatch kept no record of who called it: when its database saturated nobody could name the
+// callers behind the requests it was serving. Handler wraps one route and logs, when the request
+// ends, the method, the route pattern (never a path's ids alone), the caller the authentication
+// layer resolved and the credential behind it, the address and user agent it came from, the
 // status, the time it took and the bytes of body it wrote.
 //
-// The line never carries a token, a cookie, a request body or a response body: the only
-// caller-written text in it is the request path, which is clipped to pathBytes.
+// The line never carries a token, a cookie, a query string, a request body or a response body.
+// The text in it a caller wrote - the method, the path, the session id a bearer names, the
+// address a proxy forwarded and the user agent - is each clipped to fieldBytes.
 package accesslog
 
 import (
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
 // The caller kinds the line names, one per way Dispatch authenticates a request.
@@ -43,11 +46,13 @@ const (
 // Message is the line every served request writes, so a log reader greps one string.
 const Message = "dispatch: request"
 
-// pathBytes bounds the request path the line keeps, as the previous-token log bounds the caller
-// fields it writes (auth.previousTokenCallerBytes): the path is the caller's own text.
-const pathBytes = 256
+// fieldBytes bounds the caller-written text the line keeps (the request path and a named
+// session's id), as the previous-token log bounds the caller fields it writes
+// (auth.previousTokenCallerBytes).
+const fieldBytes = 256
 
 // callerKey carries the request's recorder, which the authentication layer names the caller on.
+// A nil *recorder under it masks the request's recorder (Detached).
 type callerKey struct{}
 
 // recorder is one request's response writer and its line's facts. It wraps the server's writer
@@ -56,14 +61,17 @@ type callerKey struct{}
 // artifact download still streams through the server's own copy.
 type recorder struct {
 	http.ResponseWriter
-	// mu guards kind and id alone: a stream's handler runs beside the goroutine that resolves
-	// its caller again on every heartbeat (api.whileCallerResolves), and that goroutine can
-	// name the caller while the handler is still writing.
-	mu      sync.Mutex
-	kind    string
-	id      string
-	status  int
-	written int64
+	// mu guards kind, id and credential alone: Note may run on another goroutine than the
+	// handler's while the handler is still writing.
+	mu   sync.Mutex
+	kind string
+	id   string
+	// credential is the owner or subject a bearer's credential proved, kept when the bearer then
+	// names a session (which is text the caller wrote), so the line still says whose credential
+	// acted. Empty when the caller is that credential itself, a person, or the shared token.
+	credential string
+	status     int
+	written    int64
 }
 
 func (rec *recorder) WriteHeader(status int) {
@@ -87,7 +95,8 @@ func (rec *recorder) Write(body []byte) (int, error) {
 func (rec *recorder) ReadFrom(body io.Reader) (int64, error) {
 	from, ok := rec.ResponseWriter.(io.ReaderFrom)
 	if !ok {
-		return io.Copy(rec.ResponseWriter, body)
+		// Copy through Write, which counts, without handing io.Copy this ReadFrom again.
+		return io.Copy(writerOnly{rec}, body)
 	}
 	if rec.status == 0 {
 		rec.status = http.StatusOK
@@ -96,6 +105,9 @@ func (rec *recorder) ReadFrom(body io.Reader) (int64, error) {
 	rec.written += written
 	return written, err
 }
+
+// writerOnly hides every method of its writer but Write.
+type writerOnly struct{ io.Writer }
 
 func (rec *recorder) Flush() {
 	if flusher, ok := rec.ResponseWriter.(http.Flusher); ok {
@@ -123,13 +135,17 @@ func (rec *recorder) Unwrap() http.ResponseWriter { return rec.ResponseWriter }
 
 // Handler serves one route and logs the request when it ends. route is the route's own pattern
 // (`/api/v1/issues/{key}`), mounted once, so the line groups a route's requests together whatever
-// ids their paths carry.
+// ids their paths carry. A handler that panics (an artifact download whose store fails mid-stream
+// aborts with http.ErrAbortHandler) still writes its line, marked aborted=true, as the panic
+// passes on to net/http.
 func Handler(route string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &recorder{ResponseWriter: w, kind: KindAnonymous}
+		completed := false
+		defer func() { rec.write(route, r, time.Since(start), !completed) }()
 		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), callerKey{}, rec)))
-		rec.write(route, r, time.Since(start))
+		completed = true
 	})
 }
 
@@ -141,42 +157,74 @@ func HandlerFunc(route string, next http.HandlerFunc) http.HandlerFunc {
 
 // Note records who the server took this request's sender for. The authentication layer calls it
 // wherever it resolves a caller, and the last resolution wins: a bearer is noted by what its
-// token proved and then by the session it named, which is the caller a reader wants.
+// token proved and then by the session it named, which is the caller a reader wants. Since that
+// session is text the caller wrote, a session named after a bearer credential keeps the
+// credential as the line's `credential`: `token:<owner>`, `service:<subject>` or `shared-token`.
 func Note(ctx context.Context, kind, id string) {
-	rec, ok := ctx.Value(callerKey{}).(*recorder)
-	if !ok {
+	rec, _ := ctx.Value(callerKey{}).(*recorder)
+	if rec == nil {
 		return
 	}
 	rec.mu.Lock()
+	switch {
+	case kind == KindSession && rec.kind == KindSharedToken:
+		rec.credential = KindSharedToken
+	case kind == KindSession && (rec.kind == KindToken || rec.kind == KindService):
+		rec.credential = rec.kind + ":" + rec.id
+	case kind != KindSession:
+		rec.credential = ""
+	}
 	rec.kind, rec.id = kind, id
 	rec.mu.Unlock()
 }
 
-func (rec *recorder) write(route string, r *http.Request, elapsed time.Duration) {
+// Detached returns ctx with its request's recorder masked, so a caller resolved on it names no
+// one on the line. A connection that resolves its caller again on every heartbeat
+// (api.whileCallerResolves, the event streams) does so on it: the line names the caller the
+// request was admitted as, and a heartbeat that resolves only the bearer's credential would
+// otherwise replace the session the request named.
+func Detached(ctx context.Context) context.Context {
+	return context.WithValue(ctx, callerKey{}, (*recorder)(nil))
+}
+
+func (rec *recorder) write(route string, r *http.Request, elapsed time.Duration, aborted bool) {
 	rec.mu.Lock()
-	kind, id := rec.kind, rec.id
+	kind, id, credential := rec.kind, rec.id, rec.credential
 	rec.mu.Unlock()
 	status := rec.status
 	if status == 0 {
-		// A handler that wrote nothing at all answered 200 with an empty body.
+		// A handler that wrote nothing answered 200 with an empty body, unless it panicked,
+		// in which case net/http answers 500 or drops the connection.
 		status = http.StatusOK
+		if aborted {
+			status = http.StatusInternalServerError
+		}
 	}
-	slog.Info(Message,
-		"method", r.Method,
+	attrs := []any{
+		"method", clip(r.Method),
 		"route", route,
-		"path", clipPath(r.URL.Path),
+		"path", clip(r.URL.EscapedPath()),
 		"caller_kind", kind,
-		"caller", id,
+		"caller", clip(id),
+		"address", clip(auth.ForwardedAddress(r)),
+		"user_agent", clip(r.UserAgent()),
 		"status", status,
 		"elapsed_ms", elapsed.Milliseconds(),
 		"bytes", rec.written,
-	)
+	}
+	if credential != "" {
+		attrs = append(attrs, "credential", credential)
+	}
+	if aborted {
+		attrs = append(attrs, "aborted", true)
+	}
+	slog.Info(Message, attrs...)
 }
 
-// clipPath cuts a path to pathBytes, dropping a rune the cut splits.
-func clipPath(path string) string {
-	if len(path) <= pathBytes {
-		return path
+// clip cuts caller-written text to fieldBytes, dropping a rune the cut splits.
+func clip(text string) string {
+	if len(text) <= fieldBytes {
+		return text
 	}
-	return strings.ToValidUTF8(path[:pathBytes], "")
+	return strings.ToValidUTF8(text[:fieldBytes], "")
 }

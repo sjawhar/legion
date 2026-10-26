@@ -991,27 +991,38 @@ Dispatch writes one line per served request, always, with no setting to turn it 
 written at INFO when the request ends, through the process's own logger:
 
 ```
-time=2026-10-25T05:55:15.446Z level=INFO msg="dispatch: request" method=GET route=/api/v1/issues path=/api/v1/issues caller_kind=user caller=alice status=200 elapsed_ms=10 bytes=3
+time=2026-10-25T05:55:15.446Z level=INFO msg="dispatch: request" method=POST route=/api/v1/issues path=/api/v1/issues caller_kind=session caller=session-0123456789abcdef address=203.0.113.9 user_agent=dispatch-cli/1.0 status=201 elapsed_ms=10 bytes=412 credential=shared-token
 ```
 
 | Field | What it holds |
 | --- | --- |
 | `method` | The request's HTTP method. |
-| `route` | The route's own pattern (`/api/v1/issues/{key}`), so one route's requests group together whatever ids their paths carry. |
-| `path` | The request path, without its query string, cut to 256 bytes. |
-| `caller_kind` | How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, or one refused before its handler ran). |
+| `route` | The route's own pattern (`/api/v1/issues/{key}`), so one route's requests group together whatever ids their paths carry; `unmatched` for a path under `/api`, `/v1`, `/auth`, `/ws` or `/healthz` that no route answers. |
+| `path` | The request path as it was sent, still escaped (`a%2Fb` stays `a%2Fb`), without its query string. |
+| `caller_kind` | How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path). |
 | `caller` | Who that is: the person's lowercase email, the session id, the personal token's owner, or the service-account subject. `shared-token` and `anonymous` name nobody. |
-| `status` | The response status. |
+| `address` | The rightmost `X-Forwarded-For` entry, the address the load balancer in front of Dispatch saw, or the connection's own address when there is none. |
+| `user_agent` | The request's `User-Agent`. With `address`, it tells apart callers that share one credential. |
+| `status` | The response status. A handler that panicked before writing is logged as `500`. |
 | `elapsed_ms` | How long the request took, in milliseconds. A websocket's line is written when its connection ends, so it carries the connection's whole life. |
 | `bytes` | The response body the handler wrote. A websocket upgrade is `101` with `0` bytes: its frames are written on the connection it took. |
+| `credential` | Only on a `session` line: the credential that named the session, since the session id is the caller's own text. `token:<owner>`, `service:<subject>` or `shared-token`. |
+| `aborted` | Only when the handler panicked (an artifact download whose store fails mid-stream aborts this way): `true`. The line is still written, and the panic still reaches the server. |
 
-The line never carries a token, a cookie, a request body or a response body, and the only
-caller-written text in it is `path`.
+The line never carries a token, a cookie, a query string, a request body or a response body. The
+text in it a caller wrote, `method`, `path`, a session's `caller`, `address` and `user_agent`, is
+each cut to 256 bytes.
+
+A websocket or event stream resolves its caller again on every heartbeat, and that resolution
+does not change the line: it names the caller the connection was admitted as.
 
 Every route the server answers writes one: every `/api/v1` route, the document and delivery
-websockets, `/auth/*` and the GitHub proxy `/api/github/rest/`. The dashboard's own pages and
-assets write none, so a browser's page loads do not bury the callers. `/healthz`, which a load
-balancer calls every few seconds, writes none either.
+websockets, `/auth/*`, the GitHub proxy `/api/github/rest/`, and the 404 an `unmatched` path gets
+(a known path called with a method its route does not serve is one too). The dashboard's own
+pages and assets write none, so a browser's page loads do not bury the callers. `/healthz`, which
+a load balancer calls every few seconds, writes none either. Two answers are given before any
+route runs and write none: the `403` a cookie request from another origin gets, and the `421` a
+request for another host gets on a server with local sign-in.
 
 ## Routes
 

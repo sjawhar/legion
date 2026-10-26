@@ -318,6 +318,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if !r.issueSession(w, req, email, subject) {
 		return
 	}
+	accesslog.Note(req.Context(), accesslog.KindUser, email)
 	http.Redirect(w, req, pending.next, http.StatusFound)
 }
 
@@ -418,6 +419,9 @@ func signInUnconfigured(w http.ResponseWriter) {
 // that must be answered as one.
 var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
 
+// unmatchedRoute is the access-log route of a request under serverRoots that no route answers.
+const unmatchedRoute = "unmatched"
+
 // assetRoots hold Vite's content-hashed build output: a file there never changes under its name,
 // because a changed file is written under a new one.
 var assetRoots = []string{"/assets"}
@@ -436,11 +440,15 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
 	normalized := filepath.Clean("/" + requestedPath)
 	if isReservedPath(normalized, serverRoots) {
-		api.WriteJSON(w, http.StatusNotFound, map[string]string{
-			"code":  "NOT_FOUND",
-			"error": "no route for " + req.Method + " " + requestedPath,
-			"hint":  "GET /api/v1 lists every route",
-		})
+		// An unknown API path writes its access-log line too, so a client calling a route that
+		// does not exist is visible beside the callers of the routes that do.
+		accesslog.HandlerFunc(unmatchedRoute, func(w http.ResponseWriter, req *http.Request) {
+			api.WriteJSON(w, http.StatusNotFound, map[string]string{
+				"code":  "NOT_FOUND",
+				"error": "no route for " + req.Method + " " + req.URL.Path,
+				"hint":  "GET /api/v1 lists every route",
+			})
+		})(w, req)
 		return
 	}
 	if r.ctx.WebDistDir == "" {
