@@ -2,46 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-440",
-  "completed": "2026-10-26T13:32:00Z",
-  "round": 2,
+  "completed": "2026-10-26T15:44:00Z",
+  "round": 3,
   "verdictProvider": "provider not verified (this session's system prompt names model anthropic/claude-opus-5-5; the transcript's per-turn provider was not read)",
-  "headTested": "e57e4be32d506fcf6fde3a22e9d30286f4462db3 (code head; 3ce13297 adds only .legion/INFRA-440/implement.json)",
+  "headTested": "1c08eb908fced3f754e88c058f221d6f8cd60829 (code head; 898338dc adds only .legion/INFRA-440/implement.json)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command on my own lane (real Go Dispatch server via e2e/run-server.sh, Postgres 17.11/pgvector database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243; env /legion/scratch/tmp/infra440-test/env.sh) after rebuilding web/dist at e57e4be3: `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts` -> 13 passed, 1 skipped (2.5 min), the round-1 red test 'a long agent name with no space never widens the Conversation tab' (dc657f64, unchanged) green on both projects. Its negative control reproduced independently: the same test with the fix undone by injected CSS ([data-agent-name]{min-width:auto;overflow-wrap:normal}) -> 2 failed, Expected 390, Received 530."
+    "how": "Re-ran the implementer's command on my own lane (real Go Dispatch server via e2e/run-server.sh, Postgres 17.11/pgvector database dispatch_test_e2e, ports 18877/19121-19124, Playwright Chromium 1243; env /legion/scratch/tmp/infra440-test/env.sh) after rebuilding web/dist at 1c08eb90: `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts` -> 14 passed, 2 skipped (phone-only rows on chromium). Its new iphone row fails when the phone layout is forced back onto one line by injected CSS (expected <= 38, received 144). The credential proof was a throwaway spec; I drove the same surface independently (below) with a spec of my own."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round-1 failure: a long agent name with no space never widens the Conversation tab (turn and reply) at 390 and 1280 px",
-      "surface": "real Go Dispatch server (e2e/run-server.sh) + Postgres 17.11/pgvector + Playwright Chromium 1243 (chromium 1280 and iphone 390 projects) in the issue pod, tester lane ports 18877/19121-19124, database dispatch_test_e2e",
-      "command": "cd packages/dispatch && source /legion/scratch/tmp/infra440-test/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts",
-      "observed": "13 passed, 1 skipped; the width row passes on both projects (scrollWidth == clientWidth at 390 and 1280; the 40-character title breaks mid-word inside the turn byline, screenshot r2-shots-head turn-b.png); claim.e2e.ts's long-holder row passes",
-      "headSha": "e57e4be32d506fcf6fde3a22e9d30286f4462db3",
-      "negativeControl": "the same test with [data-agent-name]{min-width:auto !important;overflow-wrap:normal !important} injected -> 2 failed at 'page width at 390px': Expected 390, Received 530"
+      "criterion": "Review finding 1: the Inbox ask card's asker stays readable at 390 px beside the copy-handles button and the live link",
+      "surface": "real Go Dispatch server + Postgres 17.11/pgvector + Playwright Chromium 1243, iphone (390) and chromium (1280) projects, tester lane",
+      "command": "cd packages/dispatch && source /legion/scratch/tmp/infra440-test/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-name.e2e.ts e2e/claim.e2e.ts; plus scratch spec /legion/scratch/tmp/infra440-test/zz-tester-r3.e2e.ts (ask card row)",
+      "observed": "the new row passes on iphone. My probe: at 390 px 'Waiting on you' takes a line of its own and the asker and time share the next (tops 468/484/498); a 68-character title reads 'Legion implementer f…' (about 20 characters, the full name in its tooltip) where round 2 read 'Le…'; 'Short (for alice)' is whole. At 1280 the turn, asker and time stay on one line (tops 676/676/676) with the 68-character title uncut. No page wider than its viewport.",
+      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
+      "negativeControl": "the new row with injected CSS restoring one row ([data-testid^=turn-]{flex-basis:auto} and its group nowrap) -> fails 'the asker's name is not cut short': Expected <= 38, Received 144"
     },
     {
-      "criterion": "Truncating hosts still ellipsize at 390 px and no page widens or squeezes a name after the component-wide min-w-0 [overflow-wrap:anywhere]",
-      "surface": "same harness, iphone (390) and chromium (1280): ten pages (issue page, Conversation, Activity, a second claimed issue, Inbox, Agents, project List and Board, Replies, live page) seeded with a 68-character spaced title, a 40-character unbroken title and a short one, claims, turns, replies, asks and margin comments",
-      "command": "scratch spec /legion/scratch/tmp/infra440-test/zz-tester-probe4.e2e.ts (not committed): `bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/zz-tester-probe4.e2e.ts`",
-      "observed": "claim chip at 390 and 1280: one line (24 px high), its name element nowrap with text-overflow: ellipsis and cut ('Claimed by * Legion implementer for... * just now', screenshot claim-chip.png); no page wider than its viewport on any of the ten pages at either width; no name narrower than 60 px; the only name over 4 lines is the 68-character spaced title in a 159 px Conversation byline at 390, which wraps at word boundaries (5 lines) where the base build overflowed the page",
-      "headSha": "e57e4be32d506fcf6fde3a22e9d30286f4462db3",
-      "negativeControl": "the base build (f1ea47ae, /legion/scratch/tmp/infra440/dist-base) with the same 40-character unbroken title overflows the Conversation reply byline past the viewport (screenshot r2-shots-base turn-a.png)"
+      "criterion": "Review finding 2 (Security, untrusted input): a credential approval line shows the full session id and says in words when it isn't running or could not be checked",
+      "surface": "same harness; fake broker pending credential request in the Inbox and its record page /credentials/record-probe, iphone and chromium",
+      "command": "scratch spec /legion/scratch/tmp/infra440-test/zz-tester-r3.e2e.ts 'credential line, forged request id beside a real enrollment': live session 019a2b3c-real-session-0001 enrolled, request names forged 019a2b3c-forged-claim-9999; then page.route 503 on /api/v1/agents",
+      "observed": "Inbox and record page read 'The session that enrolled: Real agent · 019a2b3c-real-session-0001 · /home/alice/legion · devbox-alice' then 'session:019a2b3c… · 019a2b3c-forged-claim-9999 isn't running.'; with the agents list failing both lines read 'session:019a2b3c… · couldn't check whether <full id> is running.'; the full id wraps inside the record grid at 390 (scrollWidth 390); inbox.e2e.ts -g credential 8 passed on both projects",
+      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
+      "negativeControl": "the agents list routed to 503 -> the line says 'couldn't check', never 'isn't running' or a running place"
     },
     {
-      "criterion": "Round-1 acceptance re-run at the new head: Claimed by, a Conversation turn, an Inbox ask card and a margin comment show the current title, the running state and a live link; one registry read, none per agent; List/Board keyboard paths",
+      "criterion": "Review findings 3-9 on their reader surface: attribution read once, full id behind the short form, a margin thread's composer names its root author",
       "surface": "same harness, chromium and iphone",
-      "command": "same run as the first entry (agent-name.e2e.ts rows :189, :260, :290, :335, :388)",
-      "observed": "all pass on both projects",
-      "headSha": "e57e4be32d506fcf6fde3a22e9d30286f4462db3",
-      "negativeControl": "base build of web/src (f1ea47ae) -> 9 failed / 1 skipped on behaviour assertions (round 1, re-run by the tester at 09b5058b)"
+      "command": "scratch specs zz-tester-r3.e2e.ts (accessibility snapshots, same-prefix ids) and zz-tester-r3b.e2e.ts (margin composer)",
+      "observed": "claim chip and Conversation byline with an owner: img 'Running', link 'Short', text '(for alice)' (the attribution once, the link named by its visible name); the ask card's live link 'Open live conversation with Short (for alice)'; two untitled sessions 019a2b3c-aaaa-… and 019a2b3c-bbbb-… both read 'session:019a2b3c…' and each carries its own full id as title, state not-running; an expanded margin thread's composer reads 'Replying to' + img 'Running' + link 'Margin agent' (/agents/e2e-agent-aaaa/live) for an agent root and 'Replying to alice' for a person's root",
+      "headSha": "1c08eb908fced3f754e88c058f221d6f8cd60829",
+      "negativeControl": "the round-2 head read the margin composer chip as 'Replying to ' with no author (review finding, reproduced in the implementer's negative control); the base build f1ea47ae fails agent-name.e2e.ts 9 rows on behaviour assertions (round 1)"
     }
   ],
   "observations": [
-    "Inbox ask card at 390 px: the asker reads 'Le...' (a 48 px button with its chevron) in a 292 px nowrap row of 'Waiting on you' (102 px), the asker block (108 px: the button, then the live link's 44 px touch target with its glyph at the left edge) and '· just now' (50 px). The base build showed about 13 characters there because it had no live link. Round 2 does not change this: the same measurements with the fix's overflow-wrap undone. The full name stays in the button's tooltip, the copy handles and the DOM (the acceptance row's toContainText passes). This is a layout tradeoff for the reviewer to judge, not a criterion failure.",
-    "Round-1 exploration still holds at this head: round 2 changes only the outer span's classes (AgentName.tsx:55,182) and packages/dispatch/AGENTS.md; the link, registry and polling code are unchanged since 09b5058b."
+    "Credential line with no source prefix: the request's own id line has no lead-in ('' in SOURCE_PREFIX.request), as before this pull request; the enrollment line keeps 'The session that enrolled:'.",
+    "At 390 px the ask card's live link keeps its 44 px touch box, which leaves a visible gap before '· just now'; layout only, no overlap."
   ],
-  "ci": "At e57e4be3 when read: Tests 40329227536 queued, Legion Envoy and Contracts 40329227665 (lint, typecheck, unit, browser suite) queued, Docs 40329227534 pending, Worker Image 40329227486 pending, PR Title 40329387328 queued.",
-  "harnessNote": "Postgres on 127.0.0.1:55432 runs from the tester container; the implementer's setup.sh now probes the port instead of pg_ctl status, so it no longer starts a second postmaster."
+  "ci": "At 1c08eb90 when read: Tests 40349942940 queued, Legion Envoy and Contracts 40349942860 (lint, typecheck, unit, browser suite) pending, Docs 40349942800 queued, Worker Image 40349943083 queued, PR Title queued (24 runs from thread activity)."
 }
