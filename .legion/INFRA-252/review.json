@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-252",
+  "completed": "2026-10-26T05:01:00Z",
+  "round": 1,
+  "reviewedCodeHead": "6c58a2716d7c3f88f27de83605e3ce7f94530bab",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 5,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/record/project.go",
+      "description": "Two definitions of a live tree: Waiting (l.63) counts a held root as live from the line before the hold, LiveRoots/TreeLive (l.108-122) from Waiting's output, which drops it. A labelled todo child of a held root is not recorded in its tree (engine.go:329 TreeLive false), is recorded as its own root with no RecordedAncestor, is skipped by the sweep, and takes a slot and an architect. Reproduced by a throwaway admit test at 6c58a271: LEGION-300 under held LEGION-214 under live LEGION-168 took slot index 1 with one architect start."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/daemon/repositories.go",
+      "description": "The D2 hold ignores D1: RecordedAncestor is computed for any todo recorded root (l.704) and Waiting drops it with no lifecycle/hand-over check, while AdoptionRefusal refuses release CHILD_NOT_ADOPTABLE. A root that ran (tree_lifecycles row) or a carried orphan, todo again under an unreleased child of live T, waits in no line and cannot be released until T lingers; nobody is told. Reproduced at 6c58a271: waiting = nil with a slot free; release refusal CHILD_NOT_ADOPTABLE 'it ran as a tree of its own'."
+    },
+    {
+      "severity": "important",
+      "file": "AGENTS.md",
+      "description": "l.200 says a held root queues again once a person moves 'its parent, or an ancestor' out from under the tree. A recorded ancestor's event is prepared with reread=false (repositories.go:662) and its record keeps tree T (a re-parent never moves a recorded tree), so Waiting keeps holding the root while T's release_children answers 403 ISSUE_OUTSIDE_TREE (its Dispatch walk no longer reaches T). Fix the behaviour (re-read on a recorded issue's parent change) or narrow the sentence."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/intake/facts.go",
+      "description": "settleObserved (l.789) carries Reread onto the Delivered event but not RecordedAncestor; withAncestry set it on the Observed view only (repositories.go:685). An issue recorded between preparation and apply has its delivered event write RecordedAncestor '' (recordObservation), dropping the hold, so the root takes a slot."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/daemon/workflow.go",
+      "description": "Avoidable reads: boot reconcile (l.437) runs prepareIssue per todo summary, each withAncestry opening its own transaction, reading the whole issues table and starting a fresh Dispatch cache, inside the readiness attempt; `own` (repositories.go:704) is computed for unlabelled todo issues that never queue; every unrecorded issue's event (any status) re-walks every parented queued root's chain sequentially, so one failing ancestor read naks unrelated events. Build one ancestry for the listing, skip own for !HandedOver, bound the reread."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workflow/adopt.go",
+      "description": "AdoptionRefusal reads the target root and TreeLive (all issues and slots) per child (l.57-68) though adoptChildren shares one tree and adoptQueuedRoots already holds LiveRoots; batched into the Fast-follow line."
+    }
+  ],
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality both CHANGES at 775c4340 (code 6c58a271); findings 1-2 confirmed by throwaway admit tests on the reviewer's own Postgres",
+  "ci": "At 6c58a271, read 2026-10-26T05:00Z: PR Title 40270101341 success; Docs 40270033658 success; Tests 40270033720 in_progress; Worker Image 40270033702 in_progress; Legion Envoy and Contracts 40270033722 queued. Required: lint, typecheck, test, pr-title. Compare 6c58a271...775c4340 touches only .legion/."
+}
