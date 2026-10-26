@@ -2,16 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-393",
-  "completed": "2026-10-26T00:59:30Z",
-  "headTested": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
-  "round": 3,
+  "completed": "2026-10-26T09:18:41Z",
+  "headTested": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+  "round": 4,
+  "rebaseCheck": {
+    "verifiedHead": "5b39834357873eda556fc65bea2c3ea1b7c61683 (code f29797a6)",
+    "newHead": "d5e863cc8a09d12c219333d7aef5e112798645ee (code ec6ea9e0)",
+    "before": "6a1249c243518bfa396fa76c11c72279e76b00c493c526c337249351b723ab24",
+    "after": "337b617b2a85409abb1f3a62ea309c046801380cf48692fec142a1e160b9f4ea",
+    "verdict": "changed: full round",
+    "whatChanged": "diff of the normalized diffs: migrations 0117/0118 renamed 0118/0119 and every reference to them (README, CHANGELOG, coverage.go and coverage_test.go comments, embeddingsPendingSinceVersion 118), and routes_table_test's registeredRoutes 137→138; nothing else"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: my own 0116 database built through main's binary, with dead and Bedrock-embedded rows. The head's binary on Bedrock left both dead rows dead under us.cohere.embed-v4:0 with no canary; on Azure it re-admitted them once and reached 8/8 current. The pre-fix binary on a copy recorded no dead_model and counted them foreign. This reproduces both proof entries."
+    "how": "Drove the same surface independently: my own database, created by main's 7f6ef46f binary at its 0117 with dead and Bedrock rows, migrated by the merge head to 0119 under Bedrock, served by main's binary through the roll, then run on Azure. I saw the same migration order, full coverage and the trigger-less comment found by meaning, and the coverage route refused a request with no bearer."
   },
   "failed": 0,
   "failures": [],
   "proof": [
+    {
+      "criterion": "The merged head migrates after main's 0117 and a deployment that keeps Bedrock leaves rows dead before this release dead; an old release keeps serving through the roll",
+      "surface": "real envoy-dispatch built at the merge head ec6ea9e0 on a database main's own envoy-dispatch (7f6ef46f, schema 0117) created through its API (project TST, 5 issues, 3 comments), with the earlier release's queue state written in SQL (5 Bedrock vectors, TST-4 and one comment dead at 10/12); Postgres 17.11 + pgvector 0.8.0 in the issue pod",
+      "command": "serve.sh EMBED_MODE=custom EMBED_ENV=AWS_REGION=us-east-1 BIN=envoy-dispatch-r4 DB=r4a; psql schema_migrations >= 115, the dead rows, to_regclass('embeddings_backfill_progress'); then serve.sh BIN=envoy-dispatch-main2 (7f6ef46f) on the same database: POST a comment and an issue, GET /api/v1/search?q=boiler",
+      "observed": "schema_migrations 115,116,117,118,119; embeddings_backfill_progress gone; both dead rows dead_model us.cohere.embed-v4:0 at 10/12; coverage pass 'foreignVectorsDropped=0 … foreignDeadReadmitted=0 identityStepsSkipped=false items=8 current=5 lacking=1 failed=2', no WARN. Main's binary on the 0119 schema: comment 201, issue 201, search answered (keyword, as that process had no embedder); both rows have pending_since",
+      "headSha": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+      "negativeControl": "the coverage route with no bearer → 401"
+    },
+    {
+      "criterion": "After the merge the server embeds everything after boot with no command, pre-trigger items included, through Azure, and search ranks only vectors of the configured identity",
+      "surface": "the same database after the roll, the head's binary with DISPATCH_EMBEDDER=azure keyless against the live embed-v-4-0 deployment",
+      "command": "insert one comment with session_replication_role = replica; serve.sh EMBED_MODE=azure DB=r4a; coverage route; GET /api/v1/search?q=walking on ice in the north atlantic&project=TST",
+      "observed": "'coverage pass … added=1 repaired=0 foreignVectorsDropped=5 … foreignDeadReadmitted=2 identityStepsSkipped=false items=11'; within 18 s coverage place azure model embed-v-4-0 items 11 current 11 lacking 0 failed 0 oldest null; the query (no shared word) returned the trigger-less glacier comment first, degraded null; the old release's two roll-time rows current",
+      "headSha": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+      "negativeControl": "DISPATCH_AZURE_EMBED_DEPLOYMENT=embed-v-4-0-typo on a copy holding 4 Bedrock vectors (r4c) → WARN, 'identityStepsSkipped=true', the 4 vectors still there and no row dead"
+    },
+    {
+      "criterion": "Each Azure background call carries at most 96 texts and 320,000 bytes (merged head)",
+      "surface": "copy r4d of the rolled database plus the 50 pending 32,000-character CJK comments (cjk-burst.sql), head binary on Azure keyless",
+      "command": "serve.sh EMBED_MODE=azure DB=r4d; poll coverage until lacking 0; psql group the 50 rows by embedded_at",
+      "observed": "lacking 0 after 65 s; 17 calls, at most 3 bodies and 287,988 bytes each; no row with attempts or dead; 0 ERROR lines",
+      "headSha": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+      "negativeControl": "the pre-fix binary on the same seed in round 2 (t2g) → one call of 50 bodies, 4,799,720 bytes"
+    },
+    {
+      "criterion": "Settings and the census entries a person invokes still hold after the merge (main also changed settings.go and the infra provider): the settings list, the boot refusals, the default boot, backfill-embeddings removed, the gcp:Dispatch Azure input refusals",
+      "surface": "the head's envoy-dispatch; pulumi preview (CLI 3.268.0, local file backend) of four YAML programs with envoy-infra:gcp:Dispatch, plugin pulumi-resource-envoy-infra built at the merge head",
+      "command": "envoy-dispatch settings; envoy-dispatch backfill-embeddings; serve.sh with DISPATCH_AZURE_TENANT_ID only, DISPATCH_EMBEDDER=Azure, an http:// endpoint, both credentials, and nothing new; pulumi preview --non-interactive for bothcreds, noendpoint, noquota, good",
+      "observed": "settings lists DISPATCH_EMBEDDER and the 8 DISPATCH_AZURE_* rows; backfill-embeddings exit 2; each refusal exit 1 naming the setting; nothing new: WARN 'meaning search unavailable … needs an AWS region', coverage identity/place null; preview refused bothcreds ('…the key and keyless credential forms are exclusive…'), noendpoint ('azureEmbedEndpoint is required when azureTenantId is set…') and noquota ('azureEmbedTokensPerMinute is required…')",
+      "headSha": "ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb",
+      "negativeControl": "the good keyless shape → past the Azure checks, stopped only by the program's missing gcp provider"
+    },
     {
       "criterion": "Bedrock stays today's behaviour for a deployment that sets nothing new: a row dead before this release stays dead (review round 1, finding 2)",
       "surface": "main's envoy-dispatch (fork point f2c17ded) built a 0116 database (Postgres 17.11 + pgvector 0.8.0, issue pod) through its API: project TST, 5 issues, 3 comments. SQL then wrote the old queue's state: 6 Bedrock vectors (model us.cohere.embed-v4:0) and TST-4 plus one comment dead at 10 confirmed failures / 12 attempts. The head's binary booted on copies of it",
@@ -133,7 +173,15 @@
       "negativeControl": "the old binary's backfill-embeddings fails on the new schema (person-run, removed with this release)"
     }
   ],
-  "ci": "code head 2bd38f8733e43435607f9d83926f951609eff2ab (f29797a6 plus its handoff): PR Title 40251184426 success, Docs 40251185149 success, typecheck success; Tests 40251184583, Legion Envoy and Contracts 40251184593, Worker Image 40251184603 in progress when read (not waited on, not re-run); 081799e3 is handoff-only (skip-checks)",
+  "ci": "code head ec6ea9e0b9ad4cb4cf072d6e0424e6ebed64e5eb: Tests 40297256033, Legion Envoy and Contracts 40297256195, Docs 40297256157, PR Title 40297256135, Worker Image 40297256247 all queued when read (not waited on, not re-run); d5e863cc is handoff-only (skip-checks)",
+  "round3": {
+    "headTested": "f29797a6693cd2e99908e95cd0e5b9012bfb6e90",
+    "implementerProof": {
+      "verdict": "verified",
+      "how": "Drove the same surface independently: my own 0116 database built through main's binary, with dead and Bedrock-embedded rows. The head's binary on Bedrock left both dead rows dead under us.cohere.embed-v4:0 with no canary; on Azure it re-admitted them once and reached 8/8 current. The pre-fix binary on a copy recorded no dead_model and counted them foreign. This reproduces both proof entries."
+    },
+    "note": "round 3's entries (headSha f29797a6…) and earlier rounds' follow round 4's in proof"
+  },
   "round2": {
     "headTested": "55eb49eb71c11bf1b4f5c05566a01a04204ffa78",
     "implementerProof": {
@@ -159,6 +207,7 @@
   },
   "risks": [
     "round 1's risk 3 stands as documented and accepted: EstimateTokens under-counts dense text about 3.5x, so background pacing of dense text can pass the Azure quota and meet 429s, which the queue retries as throttles; not exercised against a full quota here",
-    "A row the release before 0117 confirms dead during the roll records no dead_model, so a Bedrock deployment re-admits it once (documented in 0117 and the README); not driven"
+    "A row the release before 0117 confirms dead during the roll records no dead_model, so a Bedrock deployment re-admits it once (documented in 0117 and the README); not driven",
+    "Main's 0117 (architecture sources) is stop-the-world, so a release carrying it and this branch's 0118/0119 deploys stop-the-world because of main's migration, not this branch's (implementer's note; 0118/0119 themselves let the old release keep serving, observed above)"
   ]
 }
