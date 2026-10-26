@@ -2,7 +2,7 @@ import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-quer
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api, type WriteBounds } from "../../api/client";
+import { api, issueStateRequest, type WriteBounds } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type {
   Agent,
@@ -1025,6 +1025,8 @@ export function ConversationTab({
         ...current,
         [marked]: next,
       })),
+    request: (mark: { issueKey: string; seq: number }) =>
+      issueStateRequest(mark.issueKey, { last_read_seq: mark.seq }),
     send: async (mark: { issueKey: string; seq: number }, bounds) => ({
       issueKey: mark.issueKey,
       next: await api.putIssueState(mark.issueKey, { last_read_seq: mark.seq }, bounds),

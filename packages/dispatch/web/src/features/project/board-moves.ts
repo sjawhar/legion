@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, issuePatchRequest } from "../../api/client";
 import { boardMoveMutationKey } from "../../api/queries";
 import type { IssueSummary, UpdateIssueInput } from "../../api/types";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -56,6 +56,7 @@ export function useBoardMoves(
     inline: true,
     label: ({ key }: { input: UpdateIssueInput; key: string }) => `${key} moved on the board`,
     target: ({ key }) => `issue:${key}`,
+    request: ({ input, key }) => issuePatchRequest(key, input),
     write: ({ input, key }, bounds) => api.patchIssue(key, input, bounds),
     mutationKey: boardMoveMutationKey(project),
     scope: { id: `board:${project}` },

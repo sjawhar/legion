@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-import type { WriteBounds } from "../../api/client";
+import type { WriteBounds, WriteRequest } from "../../api/client";
 import { plainWrite, useWrites } from "./write-store";
 
 /** One read mark: what it is for (`key`) and what a send carries (`value`). */
@@ -20,7 +20,11 @@ export interface SendMarkOnceOptions<T, R> {
   readonly wake?: unknown;
   /** What the marks of this view are ordered on: one mark of it goes out after the one before. */
   readonly target: string;
-  /** One attempt of the mark's write, under the bounds the write store gives it. */
+  /** The request a mark of `value` makes, which a mark waiting behind the one before is kept as
+   *  for a reload (`WriteSpec.request`). */
+  readonly request: (value: T) => WriteRequest;
+  /** One attempt of the mark's write, under the bounds the write store gives it: it makes
+   *  `request(value)`. */
   readonly send: (value: T, bounds: WriteBounds) => Promise<R>;
   readonly onSuccess?: (result: R) => void;
 }
@@ -41,6 +45,7 @@ export function useSendMarkOnce<T, R>({
   shouldSend,
   target,
   wake,
+  request,
   send,
   onSuccess,
 }: SendMarkOnceOptions<T, R>): void {
@@ -48,21 +53,22 @@ export function useSendMarkOnce<T, R>({
   // The mark this view last sent, so a re-render does not send its key again; compared by
   // identity, so an ending can tell its own write from a newer one with the same key.
   const sent = useRef<ReadMark<T> | undefined>(undefined);
-  const latest = useRef({ mark, onSuccess, send, target });
-  latest.current = { mark, onSuccess, send, target };
+  const latest = useRef({ mark, onSuccess, request, send, target });
+  latest.current = { mark, onSuccess, request, send, target };
   const key = mark?.key;
   // biome-ignore lint/correctness/useExhaustiveDependencies: wake is a trigger the effect does not read.
   useEffect(() => {
     const current = latest.current.mark;
     if (!shouldSend || current === undefined || sent.current?.key === current.key) return;
     sent.current = current;
-    const { send: write } = latest.current;
+    const { request: requestOf, send: write } = latest.current;
     writes
       .run({
         detail: null,
         kind: plainWrite,
         label: "Read mark",
         presentation: "quiet",
+        request: requestOf(current.value),
         target: latest.current.target,
         write: (bounds) => write(current.value, bounds),
       })

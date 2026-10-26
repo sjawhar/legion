@@ -1,7 +1,7 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api } from "../../api/client";
+import { agentStateRequest, api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
 import type {
   Message,
@@ -110,6 +110,7 @@ function useSendReadMark<V>(
   useSendMarkOnce({
     mark: value === undefined ? undefined : { key: dedupeKey(value), value: input(value) },
     onSuccess: (next: UserAgentState) => storeAgentState(queryClient, sessionId, next),
+    request: (body: UserAgentStateInput) => agentStateRequest(sessionId, body),
     send: (body: UserAgentStateInput, bounds) => api.putAgentState(sessionId, body, bounds),
     shouldSend: unread !== 0,
     target: `read:agent:${sessionId}`,

@@ -170,7 +170,7 @@ export const plainWrite = defineWriteKind<null>({
 });
 
 /** One write to make: its kind and record, what the indicator names it, where it shows, the
- *  target it is ordered on, and one attempt of it. */
+ *  target it is ordered on, the request it makes, and one attempt of it. */
 export interface WriteSpec<T, D, K> {
   readonly kind: WriteKind<D, K>;
   readonly detail: D;
@@ -178,8 +178,15 @@ export interface WriteSpec<T, D, K> {
   readonly presentation: Presentation;
   readonly inline?: boolean;
   /** Writes to one target go out in press order: a later one waits while an earlier one is still
-   *  being tried. */
+   *  being tried. A write of a kind that is made again from its request (no `resume`) names its
+   *  `request` with its target. */
   readonly target?: string;
+  /** The request the write makes, as its press names it: a write waiting its turn is kept as this,
+   *  so a reload makes it again in its place, and nothing of its attempt runs until its turn
+   *  comes. Every attempt of it must make it (`OneRequestPerWriteError`). Required of a write of a
+   *  kind without `resume` that names a `target`; left out elsewhere, the request is kept as its
+   *  first attempt goes out. */
+  readonly request?: WriteRequest;
   /** The key of a write the surface makes again after it ended without Dispatch's verdict (the
    *  reader stopped it): that write's own, so Dispatch answers it with what the first did. Left
    *  out, the press gets a key of its own. */
@@ -210,8 +217,9 @@ interface Settlement {
   readonly reject: (reason: unknown) => void;
 }
 
-/** What the store holds of a write beside it: how to make it, the request it last went out as,
- *  what stops its trying, its file, the press that awaits it, and how its turn starts. */
+/** What the store holds of a write beside it: how to make it, the request its press named or it
+ *  last went out as, what stops its trying, its file, the press that awaits it, and how its turn
+ *  starts. */
 interface Entry {
   write: Write;
   readonly attempt: Attempt<unknown>;
@@ -299,8 +307,15 @@ export class Writes {
 
   /** Makes `spec`'s write, stamped with the person signed in now, and answers with Dispatch's 2xx,
    *  `null` for a write that landed with no answer to give, or rejects with its refusal - or
-   *  `SendStoppedError` once the reader stops it. */
+   *  `SendStoppedError` once the reader stops it. A write on a line of a kind made again from its
+   *  request that names none is a page bug, refused at once: waiting its turn, it could not be
+   *  kept for a reload without running its attempt. */
   run<T, D, K>(spec: WriteSpec<T, D, K>): Promise<T | null> {
+    if (spec.target !== undefined && spec.request === undefined && spec.kind.resume === undefined) {
+      return Promise.reject(
+        new TypeError(`${spec.label}: a write on a line names its request (WriteSpec.request)`)
+      );
+    }
     const press = Promise.withResolvers<unknown>();
     const login = signedInLogin(this.#client);
     const key = spec.key ?? newSendKey();
@@ -312,7 +327,7 @@ export class Writes {
       file: spec.file,
       held: false,
       press,
-      request: null,
+      request: spec.request ?? null,
       stop: new AbortController(),
       turn: undefined,
       write: {
@@ -334,7 +349,6 @@ export class Writes {
       },
     };
     this.#join(entry, "sending");
-    if (entry.write.status === "queued") this.#plan(entry);
     return press.promise as Promise<T | null>;
   }
 
@@ -599,6 +613,7 @@ export class Writes {
         : undefined;
     writeUnderKey(entry.attempt, entry.write.key, {
       login: entry.write.login,
+      planned: entry.request ?? undefined,
       sent: (request) => {
         if (!current()) return;
         entry.request = request;
@@ -784,27 +799,6 @@ export class Writes {
   #show(entry: Entry, write: Write): void {
     entry.write = write;
     if (this.#entries.get(write.id) === entry) this.#publish();
-  }
-
-  /** Keeps `entry`, which waits its turn before any attempt of it went out, with the request it
-   *  will make, so a reload makes it again in its place in the line: its attempt is asked for the
-   *  request (`sent`) and stopped there, before anything goes out. A kind that makes its writes
-   *  again from its own record (`resume`) needs none. */
-  #plan(entry: Entry): void {
-    if (entry.request !== null || kinds.get(entry.write.kind)?.resume !== undefined) return;
-    const planned = new Error("the request is planned, not sent");
-    const sent = (request: WriteRequest) => {
-      if (entry.request === null && this.#entries.get(entry.write.id) === entry) {
-        entry.request = request;
-        this.#keep(entry);
-      }
-      throw planned;
-    };
-    try {
-      entry.attempt({ key: entry.write.key, login: entry.write.login, sent }).catch(() => {});
-    } catch {
-      // The attempt stopped at its request, as it was asked to.
-    }
   }
 
   #publish(): void {

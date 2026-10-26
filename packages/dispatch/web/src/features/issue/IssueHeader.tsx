@@ -12,7 +12,7 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 
-import { api, apiErrorCodeIn, apiErrorMessage } from "../../api/client";
+import { api, apiErrorCodeIn, apiErrorMessage, issuePatchRequest } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
@@ -201,6 +201,7 @@ export function IssueHeader({
     inline: (input) => !statusPickOnly(input),
     label: (input) => issueUpdateLabel(issue.key, input),
     target: () => `issue:${issue.key}`,
+    request: (input) => issuePatchRequest(issue.key, input),
     onSettled: (_data, error) => {
       drafts.onIssueSettled(error);
     },
@@ -218,6 +219,7 @@ export function IssueHeader({
     write: (labels: string[], bounds) => api.patchIssue(issue.key, { labels }, bounds),
     label: () => `Labels of ${issue.key}`,
     target: () => `issue:${issue.key}`,
+    request: (labels) => issuePatchRequest(issue.key, { labels }),
     onSuccess: (next) => {
       if (next !== null) mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });

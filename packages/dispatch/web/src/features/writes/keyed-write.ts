@@ -161,13 +161,15 @@ function pause(
 }
 
 /** How one keyed write is tried: `login` is the person who pressed it, sent on every attempt so
- *  Dispatch refuses it under anyone else's session; `signal` stops the trying; `sent` is told each
- *  attempt's request as it goes out; `uploading` is told how much of an upload's body each attempt
- *  has sent; `failed` is told each attempt that ended without Dispatch's verdict; `unauthorized`
- *  is told each attempt Dispatch answers `401`, the person's session having lapsed. */
+ *  Dispatch refuses it under anyone else's session; `planned` is the request it was kept as before
+ *  any attempt of it went out, which every attempt must make; `signal` stops the trying; `sent` is
+ *  told each attempt's request as it goes out; `uploading` is told how much of an upload's body
+ *  each attempt has sent; `failed` is told each attempt that ended without Dispatch's verdict;
+ *  `unauthorized` is told each attempt Dispatch answers `401`, the person's session having lapsed. */
 export interface KeyedWriteOptions {
   readonly failed?: () => void;
   readonly login?: string;
+  readonly planned?: WriteRequest;
   readonly sent?: (request: WriteRequest) => void;
   readonly signal?: AbortSignal;
   readonly unauthorized?: () => void;
@@ -198,23 +200,23 @@ export class OneRequestPerWriteError extends Error {
  * after a request there failed at the connection or went silent - starts that backoff over and ends
  * a wait early: the write's own transport failure followed by another route's answer resets
  * nothing, nor does an answer while it was reachable all along. However many attempts reach
- * Dispatch, the key makes it act once. Resolves with the 2xx,
- * or `null` for a write that landed with no answer to give - `409 KEY_COMMITTED`, or a replay
- * that did not keep the first answer - and for a `DELETE` an earlier attempt of which may have
- * landed and which Dispatch now answers `404` (the thing is gone either way). Rejects with
- * anything else at once: a 4xx, its refusal; an error of the page's own. Every attempt must make
- * the same request (`OneRequestPerWriteError`). `signal` stops the trying between attempts - a
- * wait ends at once, an attempt in flight is let finish, since it may already have reached
+ * Dispatch, the key makes it act once. Resolves with the 2xx, or `null` for a write that landed
+ * with no answer to give - `409 KEY_COMMITTED`, or a replay that did not keep the first answer -
+ * and for a `DELETE` an earlier attempt of which may have landed and which Dispatch now answers
+ * `404` (the thing is gone either way). Rejects with anything else at once: a 4xx, its refusal; an
+ * error of the page's own. Every attempt must make the same request, the one the write was
+ * `planned` as if it was (`OneRequestPerWriteError`). `signal` stops the trying between attempts -
+ * a wait ends at once, an attempt in flight is let finish, since it may already have reached
  * Dispatch and its answer is still the write's - and the write then rejects with
  * `SendStoppedError`.
  */
 export async function writeUnderKey<T>(
   attempt: (bounds: WriteBounds) => Promise<T>,
   key: string,
-  { failed, login, sent, signal, unauthorized, uploading }: KeyedWriteOptions = {}
+  { failed, login, planned, sent, signal, unauthorized, uploading }: KeyedWriteOptions = {}
 ): Promise<T | null> {
   let backoff = FIRST_BACKOFF_MS;
-  let first: WriteRequest | undefined;
+  let first: WriteRequest | undefined = planned;
   // Whether an attempt went out that the page has no answer to: a resent `DELETE` then finds the
   // thing already gone.
   let unanswered = false;

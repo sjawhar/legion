@@ -370,6 +370,52 @@ function pathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
+// The requests of the writes that wait their turn on a line (`WriteSpec.request`), each the exact
+// request its client method sends: a surface names it at the press, so a write waiting behind
+// another is kept as it for a reload, and nothing of the write's attempt runs before its turn.
+
+/** `PATCH /api/v1/issues/{key}`: one change of an issue's fields (`patchIssue`). */
+export function issuePatchRequest(key: string, input: UpdateIssueInput): WriteRequest {
+  return { body: input, method: "PATCH", path: `/api/v1/issues/${pathSegment(key)}` };
+}
+
+/** `POST /api/v1/agents/{session}/messages`: a person's message to one session
+ *  (`createAgentMessage`). */
+export function agentMessageRequest(
+  sessionID: string,
+  input: CreateAgentMessageInput
+): WriteRequest {
+  return { body: input, method: "POST", path: `/api/v1/agents/${pathSegment(sessionID)}/messages` };
+}
+
+/** `PUT /api/v1/me/asks/{id}/snooze` (`snoozeAsk`). */
+export function askSnoozeRequest(id: string, snoozedUntil: string): WriteRequest {
+  return {
+    body: { snoozed_until: snoozedUntil },
+    method: "PUT",
+    path: `/api/v1/me/asks/${pathSegment(id)}/snooze`,
+  };
+}
+
+/** `PUT /api/v1/me/threads/{id}/read`: a thread's read mark (`markThreadRead`). */
+export function threadReadRequest(threadId: string, readThrough: string): WriteRequest {
+  return {
+    body: { read_through: readThrough },
+    method: "PUT",
+    path: `/api/v1/me/threads/${pathSegment(threadId)}/read`,
+  };
+}
+
+/** `PUT /api/v1/me/issues/{key}/state`: the person's state of an issue (`putIssueState`). */
+export function issueStateRequest(key: string, input: Partial<UserIssueState>): WriteRequest {
+  return { body: input, method: "PUT", path: `/api/v1/me/issues/${pathSegment(key)}/state` };
+}
+
+/** `PUT /api/v1/me/agents/{session}/state`: the person's state of a session (`putAgentState`). */
+export function agentStateRequest(sessionID: string, input: UserAgentStateInput): WriteRequest {
+  return { body: input, method: "PUT", path: `/api/v1/me/agents/${pathSegment(sessionID)}/state` };
+}
+
 /** The owner's artifact list, the route an upload posts to. */
 function artifactsPath(owner: ArtifactOwner): string {
   if ("issue" in owner) return `/api/v1/issues/${pathSegment(owner.issue)}/artifacts`;
@@ -835,10 +881,7 @@ export class DispatchApiClient {
   }
 
   patchIssue(key: string, input: UpdateIssueInput, bounds: WriteBounds): Promise<Issue> {
-    return this.send<Issue>(
-      { body: input, method: "PATCH", path: `/api/v1/issues/${pathSegment(key)}` },
-      bounds
-    );
+    return this.send<Issue>(issuePatchRequest(key, input), bounds);
   }
 
   /** `DELETE /api/v1/issues/{key}/claim`: release the claim. A human may release any claim;
@@ -861,11 +904,7 @@ export class DispatchApiClient {
   /** `PUT /api/v1/me/asks/{id}/snooze`: fold this inbox row away for the caller until
    *  `snoozedUntil` (RFC3339). Human-only, like the inbox itself. */
   snoozeAsk(id: string, snoozedUntil: string, bounds: WriteBounds): Promise<AskSnooze> {
-    return this.put<AskSnooze>(
-      `/api/v1/me/asks/${pathSegment(id)}/snooze`,
-      { snoozed_until: snoozedUntil },
-      bounds
-    );
+    return this.send<AskSnooze>(askSnoozeRequest(id, snoozedUntil), bounds);
   }
 
   /** `DELETE /api/v1/me/asks/{id}/snooze`: bring the row back now. A row that is not snoozed
@@ -931,11 +970,7 @@ export class DispatchApiClient {
    *  forward to `readThrough` (RFC3339, the newest reply shown). Answers 204 whether or not it
    *  moved. */
   async markThreadRead(threadId: string, readThrough: string, bounds: WriteBounds): Promise<void> {
-    await this.put(
-      `/api/v1/me/threads/${pathSegment(threadId)}/read`,
-      { read_through: readThrough },
-      bounds
-    );
+    await this.send(threadReadRequest(threadId, readThrough), bounds);
   }
 
   async removeAskFollower(id: string, sessionId: string, bounds: WriteBounds): Promise<void> {
@@ -1005,7 +1040,7 @@ export class DispatchApiClient {
     input: CreateAgentMessageInput,
     bounds: WriteBounds
   ): Promise<Message> {
-    return this.post<Message>(`/api/v1/agents/${pathSegment(sessionID)}/messages`, input, bounds);
+    return this.send<Message>(agentMessageRequest(sessionID, input), bounds);
   }
 
   listAgentMessages(sessionID: string): Promise<MessageRead[]> {
@@ -1273,7 +1308,7 @@ export class DispatchApiClient {
     input: Partial<UserIssueState>,
     bounds: WriteBounds
   ): Promise<UserIssueState> {
-    return this.put<UserIssueState>(`/api/v1/me/issues/${pathSegment(key)}/state`, input, bounds);
+    return this.send<UserIssueState>(issueStateRequest(key, input), bounds);
   }
 
   getMyAgentState(): Promise<UserAgentStates> {
@@ -1285,11 +1320,7 @@ export class DispatchApiClient {
     input: UserAgentStateInput,
     bounds: WriteBounds
   ): Promise<UserAgentState> {
-    return this.put<UserAgentState>(
-      `/api/v1/me/agents/${pathSegment(sessionID)}/state`,
-      input,
-      bounds
-    );
+    return this.send<UserAgentState>(agentStateRequest(sessionID, input), bounds);
   }
 
   whoAmI(): Promise<AuthenticatedUser> {

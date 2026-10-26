@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
-import { ApiError, NetworkError, type WriteBounds } from "../../api/client";
+import { ApiError, NetworkError, type WriteBounds, type WriteRequest } from "../../api/client";
 import { useSendMarkOnce } from "./useSendMarkOnce";
 import { writesOf } from "./write-store";
 
@@ -23,6 +23,11 @@ function renderMark(send: (value: string) => Promise<void>, initial: Props) {
   let succeeded = 0;
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
+  const request = (value: string): WriteRequest => ({
+    body: { value },
+    method: "PUT",
+    path: "/api/v1/me/threads/t/read",
+  });
   const hook = renderHook(
     (props: Props) =>
       useSendMarkOnce({
@@ -30,10 +35,12 @@ function renderMark(send: (value: string) => Promise<void>, initial: Props) {
         onSuccess: () => {
           succeeded += 1;
         },
+        // A mark waiting its turn is kept as its request, and nothing of `send` runs until its
+        // turn comes (`Writes`).
+        request,
         send: (value: string, bounds: WriteBounds) => {
-          // As every client write does, the request is told to `sent` before it goes out: a mark
-          // waiting its turn is planned there, and nothing past it runs (`Writes`).
-          bounds.sent?.({ body: { value }, method: "PUT", path: "/api/v1/me/threads/t/read" });
+          // As every client write does, the request is told to `sent` before it goes out.
+          bounds.sent?.(request(value));
           sent.push(value);
           keys.push(bounds.key);
           return send(value);

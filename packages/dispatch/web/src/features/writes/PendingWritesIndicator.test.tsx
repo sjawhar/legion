@@ -184,6 +184,7 @@ test("a write waiting its turn reads Waiting to send and can be discarded", asyn
           kind: plainWrite,
           label,
           presentation: "indicator",
+          request: patch,
           target: "issue:CORE-1",
           write: (bounds) => {
             bounds.sent?.(patch);

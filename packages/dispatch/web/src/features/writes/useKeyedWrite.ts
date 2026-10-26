@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 
-import type { WriteBounds } from "../../api/client";
+import type { WriteBounds, WriteRequest } from "../../api/client";
 import { newSendKey } from "../../lib/send-key";
 import { retriesUnderItsKey } from "./keyed-write";
 import { plainWrite, useWrites } from "./write-store";
@@ -16,11 +16,10 @@ import { plainWrite, useWrites } from "./write-store";
  *  write Dispatch made and has no answer to give for (`409 KEY_COMMITTED`, or a replay of an answer
  *  it did not keep): a landing all the same, which `onSuccess` handles - a create form lets go of
  *  its draft and says what was made (`LandedWithoutAnswer`) rather than opening it. */
-export interface KeyedWriteOptions<TData, TVariables, TContext>
-  extends Omit<
-    UseMutationOptions<TData | null, DefaultError, TVariables, TContext>,
-    "mutationFn" | "networkMode"
-  > {
+export type KeyedWriteOptions<TData, TVariables, TContext> = Omit<
+  UseMutationOptions<TData | null, DefaultError, TVariables, TContext>,
+  "mutationFn" | "networkMode"
+> & {
   /** What the shell's pending-writes indicator names this write, in the reader's words. */
   readonly label: (variables: TVariables) => string;
   /** One attempt of the write, under the bounds the store gives it: its key, its login and its
@@ -29,15 +28,23 @@ export interface KeyedWriteOptions<TData, TVariables, TContext>
   /** Whether this surface shows a refusal itself (a form the reader is in front of): the
    *  indicator then shows the write only while it is out. A function decides it per write. */
   readonly inline?: boolean | ((variables: TVariables) => boolean);
-  /** What the write is ordered on: writes to one target - one issue's fields - go out in press
-   *  order, so an older one never lands after a newer one. */
-  readonly target?: (variables: TVariables) => string | undefined;
   /** An upload's file, kept across a reload with the write. */
   readonly file?: (variables: TVariables) => File | undefined;
   /** Whether the write ends the person's session (a sign-out): a lapse of it lets the write go
    *  rather than holding it for the next sign-in (`WriteSpec.endsWithSession`). */
   readonly endsWithSession?: boolean;
-}
+} & KeyedWriteLine<TVariables>;
+
+/** What a write is ordered on, and the request it makes there: writes to one target - one issue's
+ *  fields - go out in press order, so an older one never lands after a newer one, and one waiting
+ *  its turn is kept as its `request` - the one `write` makes - for a reload, with nothing of
+ *  `write` run until its turn comes (`WriteSpec.request`). A write with no target names neither. */
+export type KeyedWriteLine<TVariables> =
+  | { readonly target?: undefined; readonly request?: undefined }
+  | {
+      readonly target: (variables: TVariables) => string | undefined;
+      readonly request: (variables: TVariables) => WriteRequest;
+    };
 
 /** Whether `a` and `b` are the same variables: one value, or two that serialise alike (a form
  *  built afresh at each submit); variables that do not serialise are only themselves. */
@@ -89,6 +96,7 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
   file,
   inline,
   label,
+  request,
   target,
   write,
   ...options
@@ -120,6 +128,7 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
           kind: plainWrite,
           label: label(variables),
           presentation: "indicator",
+          request: request?.(variables),
           target: target?.(variables),
           write: (bounds) => write(variables, bounds),
         })

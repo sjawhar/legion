@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { api, apiErrorMessage } from "../../api/client";
+import { agentMessageRequest, api, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import type { Message } from "../../api/types";
 import {
@@ -133,6 +133,8 @@ export function AgentConversationPage(): ReactNode {
       void queryClient.invalidateQueries({ queryKey: agentMessagesQuery(session).queryKey });
     },
     target: ({ session }) => `session:${session}`,
+    request: ({ request, session }) =>
+      agentMessageRequest(session, { body: switchCommand(request), delivery: "steer" }),
     write: ({ request, session }, bounds) =>
       api.createAgentMessage(session, { body: switchCommand(request), delivery: "steer" }, bounds),
   });

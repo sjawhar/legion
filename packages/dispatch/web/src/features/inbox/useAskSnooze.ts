@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api } from "../../api/client";
+import { api, askSnoozeRequest } from "../../api/client";
 import { inboxQuery } from "../../api/queries";
 import type { InboxRow } from "../../api/types";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -119,6 +119,7 @@ export function useAskSnoozeMany(): AskSnoozeManyWrite {
             kind: plainWrite,
             label: "Ask snoozed",
             presentation: "indicator",
+            request: askSnoozeRequest(id, until),
             target: `ask-snooze:${id}`,
             write: (bounds) => api.snoozeAsk(id, until, bounds),
           })
