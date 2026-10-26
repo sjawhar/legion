@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-391",
-  "completed": "2026-10-26T01:09:41Z",
+  "completed": "2026-10-26T01:57:42Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2209",
   "proof": [
     {
@@ -84,6 +84,22 @@
       "observed": "Both saves 200; each architecture-sync printed two Synced lines at the heads GitHub reports (sjawhar/legion eaed0d352170 on the second run, sjawhar/legion-smoke cc50e1512a12); CORE-1 reads `Components: daemon-api, smoke-worker`; the collision branch fails sjawhar/legion-smoke alone and sjawhar/legion keeps 36 components; browser suite `17 passed (1.2m)`",
       "headSha": "02b464b10f9c9a5807941169678f689dd866fc04",
       "negativeControl": "ids [daemon-api, not-a-component] -> `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
+    },
+    {
+      "criterion": "Review round 2: a source save accepts only the name of a branch that exists and refuses a SHA, a relative ref or a refs/ path with 409 SOURCE_ACCESS, writing nothing; a saved source keeps its branch after such a re-save",
+      "surface": "This head's Dispatch server (packages/dispatch/e2e/run-server.sh, port 18710, Postgres 17 database r2head) and the previous head fa2dacfbb399's (git archive under $TMPDIR, port 18711, database r2base), both reading real GitHub through the implement App's gh behind the throwaway two-call shim (/legion/scratch/tmp/infra391/a2/shim.ts, port 19015); evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6406509456",
+      "command": "bash /legion/scratch/tmp/infra391/skew/commitish.sh: PUT /api/v1/projects/CI/architecture-sources/sjawhar/legion-smoke with branch = cc50e1512a12… (the branch's SHA), infra-391/architecture~1, infra-391/architecture^, HEAD, refs/heads/infra-391/architecture, infra-391; then save infra-391/architecture, `dispatch architecture-sync --project CI`, and re-save onto the SHA, ~1, HEAD and the refs/ path",
+      "observed": "Every commit-ish save: HTTP 409 {\"code\":\"SOURCE_ACCESS\",\"error\":\"the branch does not exist: <value> on sjawhar/legion-smoke\"}, sources []; the save by name 200 and the sync `Synced CI architecture from sjawhar/legion-smoke@infra-391/architecture: commit cc50e1512a12…`; each re-save 409 and sources still [infra-391/architecture, cc50e1512a12, 3 components]; one settings.architecture_source.updated event (infra-391/architecture)",
+      "headSha": "b64d85e642ad62a792970adf53cea2443e2579f1",
+      "negativeControl": "The previous head fa2dacfbb399 on the same rig: the SHA, ~1, ^, HEAD and refs/heads/infra-391/architecture saves each HTTP 200, stored as the source's branch (only the prefix infra-391 refused)"
+    },
+    {
+      "criterion": "The browser suite holds at the round-2 head with the fake GitHub answering the exact branch read",
+      "surface": "Dispatch's browser suite (Playwright, Chromium) on its own Postgres 17 database e2ehead in the issue pod",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts e2e/live.e2e.ts e2e/keyboard-palette.e2e.ts --project=chromium --reporter=line",
+      "observed": "57 passed (3.7m), 1 skipped (live.e2e.ts:519, phone-only by its own test.skip)",
+      "headSha": "b64d85e642ad62a792970adf53cea2443e2579f1",
+      "negativeControl": "TestArchitectureSourcePutRefusesACommitThatIsNoBranch run against the fa2dacfbb399 handler: the SHA and main~1 PUTs answered 200 where the test wants 409 (failing output recorded by the round's worker before the handler change)"
     }
   ],
   "filesChanged": [
@@ -165,7 +181,11 @@
     "skills/dispatch/references/issues.md",
     "skills/legion-architect/SKILL.md",
     "packages/dispatch/web/src/features/settings/ArchitectureSourcesSection.test.tsx",
-    "docs/solutions/testing/prove-a-size-dependent-github-read-on-a-scratch-branch-and-drive-dispatch-against-real-github-through-a-loopback-app-proxy-INFRA-390.md"
+    "docs/solutions/testing/prove-a-size-dependent-github-read-on-a-scratch-branch-and-drive-dispatch-against-real-github-through-a-loopback-app-proxy-INFRA-390.md",
+    "packages/envoy/internal/dispatch/githubapp/client.go",
+    "packages/envoy/internal/dispatch/githubapp/client_test.go",
+    "packages/envoy/internal/dispatch/api/architecture_source_older_clients_test.go",
+    "packages/dispatch/e2e/fake-github.ts"
   ],
   "trickyParts": [
     "Harness for every later role: /legion/harness/setup.sh (idempotent) and /legion/harness/env.sh (source for harness commands only). Rootless Postgres 17 + pgvector on 127.0.0.1:55433 (template1 recreated with ICU en-US so rank_test's collation check runs), PLAYWRIGHT_BROWSERS_PATH=/legion/harness/ms-playwright, per-role lanes by LEGION_ROLE (implementer 18710/19011-19014, tester 18720/19021-19024, reviewer 18730/19031-19034), DISPATCH_TEST_DATABASE_URL=dispatch_test_<role>. createdb your own e2e database and `create extension vector` in it.",
@@ -176,7 +196,8 @@
     "envoy-client's envoy-config.test.ts 'still running after 10 s' timing test is flaky in this gVisor pod at base and head alike (failed 1 of 3 at base 83f63201, 2 of 3 at head); unrelated to this change.",
     "GitHub reported the PR CONFLICTING against main f2c17ded5305 (one line of docs/site/src/content/docs/dispatch/for-agents.md); forward merge 97ddf0a48fc4, fingerprint ae5997ef5aa8ec567c0cd426d448bd0c88dfbc9c5a385604eccfc09939dc8fca before and after (unchanged), comment https://github.com/sjawhar/legion/pull/2209#issuecomment-6402718062.",
     "The no-route test (isNoRoute in dispatch-http.ts) keys on 404 NOT_FOUND with a message starting `no route for `, which the Go router answers for an unknown route; a 404 NOT_FOUND for an unknown project says `not found` and must stay an error, so the fallback never turns an unknown project into `no model`.",
-    "The dispatch CLI prints a dashboard link from its own configuration; logs posted on this public repository's pull request have the tailnet host replaced by example-tailnet (a first post that carried it was deleted at once)."
+    "The dispatch CLI prints a dashboard link from its own configuration; logs posted on this public repository's pull request have the tailnet host replaced by example-tailnet (a first post that carried it was deleted at once).",
+    "GitHub's commits/{ref} resolves any commit-ish; git/ref/heads/{name} is exact (404 for main~1, HEAD, refs/heads/main, a prefix, and an escaped foo%2F..%2Fx). The unescaped `..` form is normalized by GitHub, which is why the name is path-escaped whole and the answered ref is compared to refs/heads/<branch>."
   ],
   "deviations": [
     "The CLI's failed-source line names the components a re-saved source still shows (`The previous model of <repo> stays up (N components).`) when the row has no commit but keeps components; the plan named only the commit and never-imported lines, and the never-imported line was false after a re-save (seen in the real-GitHub run).",
@@ -186,7 +207,9 @@
     "Review round 1: this release's syncArchitectureSources also falls back to an older Dispatch's singular sync on its no-route 404 (not asked by the reviewer; the same skew would have failed every architecture-sync between the plugin publish and the Dispatch deploy). --repo keeps no fallback: an older server cannot address a source by repository.",
     "Round 1, by the architect's ruling relayed 2026-10-26 (dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830): the source save now reads the branch head with the installation's token (githubapp Client.Ref) before any write and refuses a missing branch with 409 SOURCE_ACCESS; an immediate refusal in the census, since the save it replaces stored a source no sync can import.",
     "Round 1: forward-merged main a9c9542fb738 (#2202) on a GitHub-reported conflict; fingerprint 2c8e63a1d606 -> 72772984d6d2 (changed: four test files adapted to #2202's 40-hex SHA, Accept: application/vnd.github.sha and 422 fakes; no production line of the branch changed).",
-    "Round 1: docs/solutions INFRA-390 learning (from main) named the removed singular PUT; updated to the per-repository routes in fa2dacfbb399."
+    "Round 1: docs/solutions INFRA-390 learning (from main) named the removed singular PUT; updated to the per-repository routes in fa2dacfbb399.",
+    "Review round 2: the save's branch check reads the exact ref (new githubapp.Client.Branch, GET git/ref/heads/{branch}, answer must name refs/heads/<branch> with a 40-hex sha) instead of Ref; 404/409/422 and any other ref are ErrNoBranch -> 409 SOURCE_ACCESS. No shape check of the value: the exact read decides, so a branch whose name looks like a SHA still saves. The sync keeps Ref.",
+    "Review round 2 fast-follow (done this round on the architect's instruction): the older-client singular-route tests and captureSourceWarnings moved to architecture_source_older_clients_test.go; the GitHub fake stays in architecture_source_test.go."
   ],
   "openQuestions": [
     "Local go test of the whole internal/dispatch tree is not a green signal in this pod: api (about 1055 s) and docs (about 748 s) pass the 10-minute default only with a longer -timeout; TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves needs a database whose default collation is not byte order, the micromamba Postgres here is; pmdoc's linearity timings and files' S3 test (Docker) fail here. None of those files differs between base, branch and main; CI is the record for them."
