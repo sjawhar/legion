@@ -8,7 +8,7 @@ import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { dangerText, textMutedOnSurface } from "../../theme/classes";
 import { cutDecisionBlocks } from "../doc/decision-blocks";
 import { VersionDiff } from "../doc/VersionDiff";
-import { actorLabel } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 
 /**
  * The diff between the version a human approved and the version the request names, with every
@@ -73,7 +73,7 @@ export function EarlierApproval({ approval }: { approval: AskApproval }): ReactN
         <time dateTime={approved.at} title={approved.at}>
           {approved.at.slice(0, 10)}
         </time>{" "}
-        by {actorLabel(approved.by)}.
+        by <AgentName actor={approved.by} inline />.
       </p>
       <DisclosureToggle
         expanded={diffOpen}
