@@ -20,7 +20,7 @@
       "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium --project=iphone --repeat-each=2 phone-landing.e2e.ts",
       "observed": "12 passed (6.6m)",
       "headSha": "a5a1d3850cead76b83304302e79d53b2a5ffa40a",
-      "negativeControl": "Mutation tests, each undone afterwards. (1) ConversationTab.tsx:957 changed to `const newestShown = shown.at(0);` (the pre-fix landing): the forced-order and failed-read rows failed 4 of 4, at 'forced open' and 'after the refetch: the newest card shares a point with the composer'. (2) `onFirstPlacement={forgetConversationScroll}` removed from IssuePage.tsx: the leave-while-loading row failed 2 of 2 at 'back on the Conversation: the newest card shares a point with the composer ... {x:24,y:494,...}'."
+      "negativeControl": "Mutation tests, each undone afterwards. (1) ConversationTab.tsx:956 changed to `const newestShown = shown.at(0);` (the pre-fix landing): the forced-order and failed-read rows failed 4 of 4, at 'forced open' and 'after the refetch: the newest card shares a point with the composer'. (2) `onFirstPlacement={forgetConversationScroll}` removed from IssuePage.tsx: the leave-while-loading row failed 2 of 2 at 'back on the Conversation: the newest card shares a point with the composer ... {x:24,y:494,...}'."
     }
   ]
 }
