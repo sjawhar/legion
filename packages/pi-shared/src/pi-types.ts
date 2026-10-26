@@ -275,6 +275,8 @@ export interface CommandContext {
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };
+  /** The host's `ctx.isIdle()`: false while a turn runs. Legion's own test hosts may leave it out. */
+  readonly isIdle?: () => boolean;
 }
 
 /** The host's text block (`TextContent` in `@oh-my-pi/pi-ai`), as far as this package writes it. */
@@ -420,11 +422,12 @@ export interface PiApi {
   /**
    * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
    * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
-   * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
+   * tool batch; `deliverAs: "followUp"` queues it behind the running turn without starting one.
+   * The host queues the send, so the prompt's `message_start` comes after this returns.
    */
   readonly sendUserMessage: (
     content: string | readonly ContentBlock[],
-    options?: { readonly deliverAs: "aside" }
+    options?: { readonly deliverAs: "aside" | "followUp" }
   ) => void;
   /**
    * Runs text as if typed at the session's own terminal: a built-in its host can run headless, an

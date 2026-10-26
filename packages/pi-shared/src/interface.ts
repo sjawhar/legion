@@ -16,7 +16,7 @@ import type { LegionRoleClaimBridge } from "./role-claim-bridge";
  * `task` subagent, so a per-instance callback stored here would be the last instance's, not the
  * pane's (docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md).
  */
-export const ENVOY_PLUGIN_INTERFACE_VERSION = 3;
+export const ENVOY_PLUGIN_INTERFACE_VERSION = 4;
 export const ENVOY_PLUGIN_INTERFACE_KEY = Symbol.for("legion.pi-shared.envoy-plugin-interface");
 /** Set by the Legion entry's factory to `{ from: import.meta.url, envoyInterface: <version> }`;
  * the daemon's boot gate reads it from `globalThis` to prove the Legion plugin loaded. */
@@ -38,6 +38,14 @@ export interface EnvoyPluginInterface {
   readonly injectedUserTurns: Map<string, SessionUserTurns>;
   /** The transcript of the session this process bootstrapped as its Legion identity. */
   readonly bootstrappedSession: { file: string | undefined };
+  /**
+   * The session whose first turn a Legion command (`/legion-controller-start`) or the daemon's
+   * start prompt starts after Oh My Pi's startup, and when that start was sent (ms since epoch;
+   * undefined until sent). Both are undefined once that session's first run starts or the session
+   * shuts down. The Envoy entry holds its startup-card wake while it names the Envoy entry's own
+   * session, so the start turn stays the session's first.
+   */
+  readonly startupTurn: { session: string | undefined; sentAt: number | undefined };
 }
 
 type EnvoyPluginInterfaceReading =
@@ -81,6 +89,7 @@ export function envoyPluginInterface(): EnvoyPluginInterface {
     },
     injectedUserTurns: new Map(),
     bootstrappedSession: { file: undefined },
+    startupTurn: { session: undefined, sentAt: undefined },
   };
   store[ENVOY_PLUGIN_INTERFACE_KEY] = created;
   return created;

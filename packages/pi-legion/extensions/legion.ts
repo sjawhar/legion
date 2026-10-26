@@ -268,8 +268,25 @@ export default function legionExtension(pi: PiApi): void {
     resentNoticeId = recreatedNotice.id;
     return { message: workspaceRecreatedMessage(recreatedNotice) };
   });
-  pi.on("agent_start", async () => {
+  // The startup-turn mark (`EnvoyPluginInterface.startupTurn`) names a session until its first run
+  // starts: the start turn, or a turn the operator started first, which the start message then
+  // follows. A `task` subagent's run has its own session id and clears nothing; nor does any
+  // subagent's shutdown. Read only at this build's interface version: a session that is not
+  // Legion's may run beside an Envoy entry speaking another.
+  const clearStartupTurn = (context: SessionContext): void => {
+    const reading = readEnvoyPluginInterface();
+    if (reading.kind !== "present") return;
+    const mark = reading.iface.startupTurn;
+    if (mark.session !== context.sessionManager.getSessionId()) return;
+    mark.session = undefined;
+    mark.sentAt = undefined;
+  };
+  pi.on("agent_start", async (_event, context) => {
     recreatedNotice = undefined;
+    clearStartupTurn(context);
+  });
+  pi.on("session_shutdown", async (_event, context) => {
+    clearStartupTurn(context);
   });
   // The recovery kept the saved copy in the process's live context, so once it is sent again
   // every later request of this process would carry it twice: the first copy, where the history
@@ -402,6 +419,17 @@ export default function legionExtension(pi: PiApi): void {
       await controllerSession.claim(context);
       registerLegionTool();
       await activateLegionTool();
+    },
+  });
+
+  pi.registerCommand("legion-controller-start", {
+    description:
+      "Send the Legion controller's start message as its first turn; `legion controller start` passes this command on Oh My Pi's command line",
+    // A command, not a send from session_start: Oh My Pi holds every session_start send and drains
+    // them at the end of its startup, so a turn started there runs before the TUI listens or any
+    // input is read. Oh My Pi runs command-line words after its startup wait, once the TUI listens.
+    handler: async (_args, context) => {
+      await controllerSession.sendStartMessage(context);
     },
   });
 }
