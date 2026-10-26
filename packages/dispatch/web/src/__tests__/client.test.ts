@@ -2,6 +2,7 @@ import { expect, jest, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 
 import {
+  AnswerNotKeptError,
   ApiError,
   apiErrorMessage,
   createApiClient,
@@ -10,8 +11,11 @@ import {
   isDeliveryNotConfigured,
   isRetryableQueryError,
   isUnauthorized,
+  NetworkError,
   REQUEST_DEADLINE_MS,
   RequestTimeoutError,
+  UnreadableAnswerError,
+  type UploadImplementation,
 } from "../api/client";
 
 interface RecordedRequest {
@@ -288,9 +292,9 @@ test("a write given a deadline is held to it", async () => {
   });
 });
 
-// An attempt's deadline is the whole answer's: the attempt is made again under its key, so headers
-// that arrive in time with a body that never ends are no answer either.
-test("a write given a deadline is held to it, its body included", async () => {
+// An attempt's deadline is on Dispatch's silence, its body included: headers that arrive in time
+// with a body that then stops are no answer, and the attempt is made again under its key.
+test("a write given a deadline is held to it once its body goes silent", async () => {
   await onFakeClock(async () => {
     const stub = heldFetch();
     const api = createApiClient(stub.fetch);
@@ -318,6 +322,131 @@ test("a write given a deadline is held to it, its body included", async () => {
 
     expect(await sent).toBeInstanceOf(RequestTimeoutError);
   });
+});
+
+/** An upload transport the test drives: `progress` as each piece of the body goes up, `answer`
+ *  once Dispatch has it, and it fails as the browser's does once its signal aborts. */
+function heldUpload(): {
+  answer: (response: Response) => void;
+  progress: () => void;
+  upload: UploadImplementation;
+  uploads: number;
+} {
+  const held = {
+    answer: (_response: Response) => {},
+    progress: () => {},
+    upload: ((_path, init, progress) => {
+      held.uploads += 1;
+      const { promise, reject, resolve } = Promise.withResolvers<Response>();
+      held.answer = resolve;
+      held.progress = progress;
+      init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      return promise;
+    }) as UploadImplementation,
+    uploads: 0,
+  };
+  return held;
+}
+
+// W23. An attempt is cut off only after 15 s with no progress, so an upload whose body keeps going
+// up lands however long it takes - here 60 s - while one that goes silent for 16 s is given up,
+// for the caller to make again under its key.
+test("an upload that streams for 60 s lands, and one silent for 16 s is cut off", async () => {
+  await onFakeClock(async () => {
+    const transport = heldUpload();
+    const api = createApiClient(stubFetch().fetch, transport.upload);
+    const file = new File(["x".repeat(1024)], "big.bin");
+    const uploaded = outcome(
+      api.uploadArtifact(
+        { issue: "CORE-1" },
+        { file, name: "big.bin" },
+        {
+          ...keyed("upload-1"),
+          deadlineMs: 15_000,
+        }
+      )
+    );
+    for (let second = 0; second < 60; second += 5) {
+      jest.advanceTimersByTime(5_000);
+      transport.progress();
+    }
+    transport.answer(
+      Response.json({ artifact: { id: "a" }, version: { number: 1 } }, { status: 201 })
+    );
+    expect(await uploaded).toMatchObject({ artifact: { id: "a" } });
+
+    const silent = outcome(
+      api.uploadArtifact(
+        { issue: "CORE-1" },
+        { file, name: "big.bin" },
+        {
+          ...keyed("upload-2"),
+          deadlineMs: 15_000,
+        }
+      )
+    );
+    transport.progress();
+    jest.advanceTimersByTime(16_000);
+    expect(await silent).toBeInstanceOf(RequestTimeoutError);
+    expect(transport.uploads).toBe(2);
+  });
+});
+
+// W28. Errors are classified by kind: a connection that failed is a `NetworkError`, a 2xx whose
+// body is not JSON is an `UnreadableAnswerError` (both tried again under the key), and a replayed
+// 2xx reading ANSWER_NOT_KEPT is a landing with no answer. A 2xx that only happens to say
+// ANSWER_NOT_KEPT without being a replay is the resource itself.
+test("a write's failures are classified by kind", async () => {
+  const failing = createApiClient(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  expect(
+    await outcome(failing.createIssue({ project: "CORE", title: "x" }, keyed("k")))
+  ).toBeInstanceOf(NetworkError);
+
+  const proxyPage = createApiClient(async () => new Response("<html>502</html>", { status: 200 }));
+  expect(
+    await outcome(proxyPage.createIssue({ project: "CORE", title: "x" }, keyed("k")))
+  ).toBeInstanceOf(UnreadableAnswerError);
+
+  const notKept = { code: "ANSWER_NOT_KEPT", error: "answer too large" };
+  const replayed = createApiClient(async () =>
+    Response.json(notKept, { headers: { "Idempotency-Replayed": "?1" }, status: 201 })
+  );
+  const landed = await outcome(replayed.createIssue({ project: "CORE", title: "x" }, keyed("k")));
+  expect(landed).toBeInstanceOf(AnswerNotKeptError);
+  expect(landed).toMatchObject({ code: "ANSWER_NOT_KEPT", status: 201 });
+
+  const fresh = createApiClient(async () => Response.json(notKept, { status: 201 }));
+  expect(await fresh.createIssue({ project: "CORE", title: "x" }, keyed("k"))).toEqual(
+    notKept as never
+  );
+
+  const busy = createApiClient(async () =>
+    Response.json(
+      { code: "KEY_IN_FLIGHT", error: "running" },
+      { headers: { "Retry-After": "2" }, status: 409 }
+    )
+  );
+  expect(
+    await outcome(busy.createIssue({ project: "CORE", title: "x" }, keyed("k")))
+  ).toMatchObject({
+    code: "KEY_IN_FLIGHT",
+    retryAfterMs: 2_000,
+  });
+});
+
+// W26. Every write names the person who pressed it (`Dispatch-Login`), so Dispatch refuses it
+// under anyone else's session; a write with no login says nothing.
+test("a write carries the login of the person who pressed it", async () => {
+  const stub = stubFetch();
+  const api = createApiClient(stub.fetch);
+  await api.patchIssue("CORE-1", { status: "done" }, { key: "k", login: "alice" });
+  await api.putIssueState("CORE-1", { pinned: true }, { login: "alice" });
+  await api.patchIssue("CORE-1", { status: "done" }, { key: "k" });
+  expect(stub.requests.map(({ init }) => new Headers(init?.headers).get("Dispatch-Login"))).toEqual(
+    ["alice", "alice", null]
+  );
 });
 
 // The caller's own abort is the caller's: it ends the request as itself, not as a timeout, and
@@ -866,7 +995,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.getMyAgentState();
   await api.putAgentState("planner-session", { cleared_before: "2026-09-15T20:51:00.000Z" });
   await api.whoAmI();
-  await api.logout(keyed("write-11"));
+  await api.logout();
   await api.githubRest("repos/acme/dispatch");
   await api.getDeliverySettings();
   await api.putDeliverySettings({
@@ -998,7 +1127,6 @@ test("every POST and PATCH sends its Idempotency-Key, and no PUT or DELETE does"
   await api.createArtifactComment("artifact-1", { body: "Looks good" }, bounds);
   await api.createDeliverySessionGroup({ name: "Pair", sessions: ["planner"] }, bounds);
   await api.updateDeliverySessionGroup("group-1", { name: "Trio" }, bounds);
-  await api.logout(bounds);
   await api.approveCredentialRecord("record-1", {}, bounds);
   await api.denyCredentialRecord("record-1", {}, bounds);
   await api.lookupMachineCredential("ABCD1234", bounds);

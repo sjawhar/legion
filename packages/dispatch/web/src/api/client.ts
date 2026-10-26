@@ -1,10 +1,15 @@
 import {
+  answerNotKept,
+  DISPATCH_LOGIN_HEADER,
   IDEMPOTENCY_ANSWER_NOT_KEPT,
   IDEMPOTENCY_KEY_COMMITTED,
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_REPLAYED_HEADER,
+  type IdempotencyLandedCode,
 } from "@legion/contracts";
+
+import { reachable } from "./reachability";
 
 import type {
   Agent,
@@ -90,6 +95,18 @@ export type FetchImplementation = (
   init?: RequestInit
 ) => Promise<Response>;
 
+/**
+ * How an upload reaches Dispatch: `init` (its body a multipart form) sent to `path`, answered with
+ * Dispatch's response, and `progress` called as each piece of the body goes up and as the answer
+ * comes back. The browser's `fetch` reports no upload progress, so a large file on a slow line
+ * would look silent for as long as it uploads; `xhrUpload` is the one that reports it.
+ */
+export type UploadImplementation = (
+  path: string,
+  init: RequestInit,
+  progress: () => void
+) => Promise<Response>;
+
 /** The largest body a write the page lets finish as it goes (`keepalive`) may carry: the browser
  *  caps every such request's body together at 64 KiB. */
 const maxKeepaliveBodyBytes = 30 * 1024;
@@ -105,25 +122,54 @@ export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
   readonly state: UserIssueState | undefined;
+  /** How long Dispatch asked the client to wait before it asks again (`Retry-After`), if it said. */
+  readonly retryAfterMs: number | undefined;
 
-  constructor(status: number, payload: ErrorPayload) {
+  constructor(status: number, payload: ErrorPayload, retryAfterMs?: number) {
     super(payload.error ?? `Dispatch request failed (${status})`);
     this.name = "ApiError";
     this.code = payload.code;
     this.status = status;
     this.state = payload.state;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
-/** How long the page waits for Dispatch - first for a GET's response headers, then between the
- *  pieces of its body - before it gives the request up (`RequestTimeoutError`). A read Dispatch
- *  never answers, or stops answering halfway, would otherwise hold its page loading for good;
- *  given up, it is retried by the queries' shared policy, as a dropped connection is. A body that
- *  keeps arriving downloads however long it takes: the deadline is on the silence, not the
- *  download. */
+/** A request the browser could not get an answer to at all: the connection failed or dropped
+ *  (`fetch`'s and XHR's own error). It is no refusal - the request may have reached Dispatch - so
+ *  a read is asked again by the queries' policy and a write again under its key. */
+export class NetworkError extends Error {
+  readonly path: string;
+
+  constructor(path: string, cause: unknown) {
+    super("Dispatch could not be reached", { cause });
+    this.name = "NetworkError";
+    this.path = path;
+  }
+}
+
+/** A 2xx whose body is not JSON - a proxy's page, a body cut short - so it says nothing of what
+ *  Dispatch did. The write is asked again under its key, and Dispatch answers the repeat with the
+ *  first's answer. */
+export class UnreadableAnswerError extends Error {
+  readonly status: number;
+
+  constructor(status: number, cause: unknown) {
+    super(`Dispatch answered ${status} with a body that is not JSON`, { cause });
+    this.name = "UnreadableAnswerError";
+    this.status = status;
+  }
+}
+
+/** How long the page lets Dispatch go silent on a request - no response headers yet, no piece of
+ *  its body, and for an upload no piece of the request body sent either - before it gives the
+ *  request up (`RequestTimeoutError`). A read Dispatch never answers, or stops answering halfway,
+ *  would otherwise hold its page loading for good; given up, it is retried by the queries' shared
+ *  policy, as a dropped connection is. A body that keeps moving, either way, goes on however long
+ *  it takes: the deadline is on the silence, not the transfer. */
 export const REQUEST_DEADLINE_MS = 30_000;
 
-/** A request Dispatch did not answer within its deadline, which the page then aborted. It is no
+/** A request Dispatch went silent on for its deadline, which the page then aborted. It is no
  *  refusal: the request may still have reached Dispatch, so only a read, or a write made again
  *  under its key (`writeUnderKey`), is asked again. */
 export class RequestTimeoutError extends Error {
@@ -136,27 +182,39 @@ export class RequestTimeoutError extends Error {
   }
 }
 
-/** How a caller bounds one attempt of a request: how long Dispatch may take to answer it, its body
- *  included (`null` for no limit; left out, a GET is held to `REQUEST_DEADLINE_MS` of silence -
- *  its headers, then each piece of its body - and every other method has no deadline). */
+/** How a caller bounds one attempt of a request: how long Dispatch may go silent on it (`null` for
+ *  no limit; left out, `REQUEST_DEADLINE_MS` for a GET, and no limit for any other method). */
 export interface RequestBounds {
   readonly deadlineMs?: number | null;
 }
 
+/** Every method a write goes as: the one list `WriteRequest.method` and the check of a kept write
+ *  (`write-storage.ts`) are both read from. */
+export const WRITE_METHODS = ["DELETE", "PATCH", "POST", "PUT"] as const;
+
+export type WriteMethod = (typeof WRITE_METHODS)[number];
+
 /** One write as it goes to Dispatch: its method, its path and its body - JSON, a multipart form
  *  (an upload), or none. A kept write is this, made again after a reload (`send`). */
 export interface WriteRequest {
-  readonly method: "DELETE" | "PATCH" | "POST" | "PUT";
+  readonly method: WriteMethod;
   readonly path: string;
   readonly body?: unknown;
 }
 
+/** A `PUT` or a `DELETE`: the same write however often it is made, so it goes with no key. */
+export interface IdempotentRequest extends WriteRequest {
+  readonly method: "DELETE" | "PUT";
+}
+
 /** One attempt of a write: the key that names the person's action - minted by the caller when the
  *  person acts, and the same on every attempt of it (`Idempotency-Key`, sent on a `POST` and a
- *  `PATCH`) - the attempt's deadline, and `sent`, told the request as it goes out, for a caller
- *  that keeps it to make again. */
+ *  `PATCH`) - the login of the person who pressed it (`Dispatch-Login`, sent on every write, so
+ *  Dispatch refuses it under anyone else's session), the attempt's silence deadline, and `sent`,
+ *  told the request as it goes out, for a caller that keeps it to make again. */
 export interface WriteBounds extends RequestBounds {
   readonly key: string;
+  readonly login?: string;
   readonly sent?: (request: WriteRequest) => void;
 }
 
@@ -165,27 +223,30 @@ export interface WriteBounds extends RequestBounds {
  *  press's bounds over whole; one that only ever makes it once passes none. */
 export interface IdempotentBounds extends RequestBounds {
   readonly key?: string;
+  readonly login?: string;
   readonly sent?: (request: WriteRequest) => void;
 }
 
-/** A write Dispatch had already made, with no answer it can give for it: the first answer was too
- *  large for it to keep, so the repeat came back with the first one's status and no resource
- *  (`IDEMPOTENCY_ANSWER_NOT_KEPT`), or the answer was lost before Dispatch stored it, so the
- *  repeat came back `409 KEY_COMMITTED` (`isKeyCommitted`). The write landed; its caller reads
- *  what it wrote again, and shows no refusal. */
+/** A write Dispatch had already made, with no answer it can give for it (`code`): the first
+ *  answer was too large for it to keep, so the repeat came back with the first one's status and
+ *  no resource (`IDEMPOTENCY_ANSWER_NOT_KEPT`), or the answer was lost before Dispatch stored it,
+ *  so the repeat came back `409 KEY_COMMITTED` (`isKeyCommitted`). The write landed; its caller
+ *  reads what it wrote again, and shows no refusal. */
 export class AnswerNotKeptError extends Error {
+  readonly code: IdempotencyLandedCode;
   readonly status: number;
 
-  constructor(status: number, message: string) {
+  constructor(code: IdempotencyLandedCode, status: number, message: string) {
     super(message);
     this.name = "AnswerNotKeptError";
+    this.code = code;
     this.status = status;
   }
 }
 
 /** Whether Dispatch is still running the first request under this write's key: nothing ran, and
  *  the write is asked again under the same key. */
-export function isKeyInFlight(error: unknown): boolean {
+export function isKeyInFlight(error: unknown): error is ApiError {
   return (
     error instanceof ApiError && error.status === 409 && error.code === IDEMPOTENCY_KEY_IN_FLIGHT
   );
@@ -354,9 +415,80 @@ function pathWithQuery(path: string, values: object): string {
   return search ? `${path}?${search}` : path;
 }
 
+/** The wait `Retry-After` names, in milliseconds: its delay-seconds form, which is the one
+ *  Dispatch sends. */
+function retryAfterMs(response: Response): number | undefined {
+  const seconds = Number(response.headers.get("Retry-After") ?? Number.NaN);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined;
+}
+
 async function errorFrom(response: Response): Promise<ApiError> {
   const payload = (await response.json().catch(() => ({}))) as ErrorPayload;
-  return new ApiError(response.status, payload);
+  return new ApiError(response.status, payload, retryAfterMs(response));
+}
+
+/** The statuses whose response carries no body, which `new Response` refuses one for. */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
+
+/** `XMLHttpRequest`'s response headers (`getAllResponseHeaders`), as `Headers`. */
+function headersOf(xhr: XMLHttpRequest): Headers {
+  const headers = new Headers();
+  for (const line of xhr
+    .getAllResponseHeaders()
+    .trim()
+    .split(/[\r\n]+/u)) {
+    const colon = line.indexOf(":");
+    if (colon > 0) headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+  }
+  return headers;
+}
+
+/**
+ * An upload through `XMLHttpRequest`, the one transport whose upload progress every engine the
+ * suite runs reports (`upload.onprogress`), so a file on a slow line is never mistaken for a
+ * silent Dispatch: `progress` runs as each piece of the body goes up, as the response's headers
+ * arrive, and as each piece of the answer does. The request fails as `fetch` does - a `TypeError`
+ * for a connection that failed, the signal's reason once `init.signal` aborts.
+ */
+export function xhrUpload(
+  makeXhr: () => XMLHttpRequest = () => new XMLHttpRequest()
+): UploadImplementation {
+  return (path, init, progress) => {
+    const { promise, reject, resolve } = Promise.withResolvers<Response>();
+    const xhr = makeXhr();
+    const signal = init.signal ?? undefined;
+    const aborted = () => xhr.abort();
+    xhr.open(init.method ?? "POST", path);
+    xhr.withCredentials = init.credentials === "include";
+    for (const [name, value] of new Headers(init.headers)) xhr.setRequestHeader(name, value);
+    xhr.upload.onprogress = progress;
+    xhr.onprogress = progress;
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState === xhr.HEADERS_RECEIVED) progress();
+    };
+    xhr.onload = () => {
+      signal?.removeEventListener("abort", aborted);
+      resolve(
+        new Response(NULL_BODY_STATUSES.has(xhr.status) ? null : xhr.responseText, {
+          headers: headersOf(xhr),
+          status: xhr.status,
+          statusText: xhr.statusText,
+        })
+      );
+    };
+    xhr.onerror = () => {
+      signal?.removeEventListener("abort", aborted);
+      reject(new TypeError("Failed to upload"));
+    };
+    xhr.onabort = () => reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    if (signal?.aborted === true) {
+      reject(signal.reason);
+      return promise;
+    }
+    signal?.addEventListener("abort", aborted, { once: true });
+    xhr.send(init.body as XMLHttpRequestBodyInit | null | undefined);
+    return promise;
+  };
 }
 
 /** `response` with its body watched: `arrived` runs as each piece of it does, for a reader that
@@ -386,16 +518,20 @@ function watchBody(response: Response, arrived: () => void): Response {
 }
 
 export class DispatchApiClient {
-  constructor(private readonly fetchImpl: FetchImplementation) {}
+  /** `upload` is the transport of a multipart form; left out, it goes by `fetchImpl`, which
+   *  reports no upload progress, so an upload's deadline then runs from its send. */
+  constructor(
+    private readonly fetchImpl: FetchImplementation,
+    private readonly upload?: UploadImplementation
+  ) {}
 
-  /** One request to Dispatch, answered with what `read` makes of its response. A GET is held to
-   *  `REQUEST_DEADLINE_MS` of silence: that long for its response's headers, and that long again
-   *  between the pieces of its body, so a body that keeps arriving downloads however slowly and
-   *  one that stops arriving fails as headers that never come do, the error body `errorFrom`
-   *  reads included. Every other method has no deadline. A caller's `deadlineMs` (`null` for
-   *  none) holds the whole answer instead, `read` included: it bounds one attempt of a request
-   *  the caller makes again (`writeUnderKey`). A caller's `init.signal` still aborts the request,
-   *  as itself. */
+  /** One request to Dispatch, answered with what `read` makes of its response. It is held to a
+   *  deadline on Dispatch's silence - `deadlineMs`, or `REQUEST_DEADLINE_MS` for a GET that names
+   *  none, and none for any other method that names none - that starts over as the request's body
+   *  goes up (an upload's), as the response's headers arrive and as each piece of its body does,
+   *  `read` included: a transfer that keeps moving goes on however slowly, either way, and one
+   *  that stops fails as headers that never come do. A caller's `init.signal` still aborts the
+   *  request, as itself. */
   private async exchange<T>(
     path: string,
     init: RequestInit,
@@ -412,17 +548,10 @@ export class DispatchApiClient {
     const deadline = new AbortController();
     let timer = setTimeout(() => deadline.abort(), limit);
     const caller = init.signal ?? undefined;
-    // The default deadline is on Dispatch's silence: it starts over as the headers arrive and as
-    // each piece of the body does, so a large read on a slow line is never cut off and asked for
-    // again from the start. A caller's own deadline bounds the whole answer, since the caller
-    // repeats the request rather than waiting it out.
-    const arrived =
-      deadlineMs === undefined
-        ? () => {
-            clearTimeout(timer);
-            timer = setTimeout(() => deadline.abort(), limit);
-          }
-        : undefined;
+    const arrived = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => deadline.abort(), limit);
+    };
     try {
       const signal =
         caller === undefined ? deadline.signal : AbortSignal.any([caller, deadline.signal]);
@@ -439,23 +568,28 @@ export class DispatchApiClient {
     }
   }
 
-  /** Dispatch's response to one request, or its refusal as an `ApiError`. `arrived` runs as the
-   *  response's headers do and as each piece of its body does, the body of a refusal included. */
+  /** Dispatch's response to one request, or its refusal as an `ApiError`; a connection that
+   *  failed is a `NetworkError`. `arrived`, for a request held to a deadline, runs as the
+   *  request's body goes up (an upload's), as the response's headers arrive and as each piece of
+   *  its body does, the body of a refusal included. Any answer of Dispatch's own - one below 500,
+   *  which no gateway gives for a Dispatch that is down - says it can be reached (`reachable`). */
   private async answered(path: string, init: RequestInit, arrived?: () => void): Promise<Response> {
-    const answer = await this.fetchImpl(path, {
-      credentials: "same-origin",
-      ...init,
-    });
-    if (arrived === undefined) {
-      if (!answer.ok) throw await errorFrom(answer);
-      return answer;
+    const sent = { credentials: "same-origin", ...init } satisfies RequestInit;
+    let answer: Response;
+    try {
+      answer =
+        sent.body instanceof FormData && this.upload !== undefined
+          ? await this.upload(path, sent, arrived ?? (() => {}))
+          : await this.fetchImpl(path, sent);
+    } catch (error) {
+      // An abort is the deadline's or the caller's (`exchange`), never the network's.
+      if (init.signal?.aborted === true) throw error;
+      throw new NetworkError(path, error);
     }
-    arrived();
-    const response = watchBody(answer, arrived);
-    if (!response.ok) {
-      throw await errorFrom(response);
-    }
-
+    if (answer.status < 500) reachable("answer");
+    arrived?.();
+    const response = arrived === undefined ? answer : watchBody(answer, arrived);
+    if (!response.ok) throw await errorFrom(response);
     return response;
   }
 
@@ -479,38 +613,47 @@ export class DispatchApiClient {
    * answer, a reload resuming it - is answered with what the first did rather than done twice; a
    * `PUT` or a `DELETE` is the same however often it is made, so it carries none, and one with a
    * small body is let finish as the page goes (`keepalive`). The key is the caller's, minted when
-   * the person acts (`PendingWrites.run`), never here. A JSON body goes as JSON and a multipart
-   * form as itself; `bounds.sent` is told the request as it goes out. Answers what Dispatch
-   * answered (nothing for an empty body), or rejects with its refusal; a replay of an answer
-   * Dispatch did not keep rejects with `AnswerNotKeptError`.
+   * the person acts (`Writes.run`), never here; so is `bounds.login` (`Dispatch-Login`), the
+   * person who pressed it. A JSON body goes as JSON and a multipart form as itself, through the
+   * upload transport; `bounds.sent` is told the request as it goes out. Answers what Dispatch
+   * answered (nothing for an empty body), or rejects with its refusal; a 2xx whose body is not
+   * JSON rejects with `UnreadableAnswerError`, and a replay of an answer Dispatch did not keep
+   * with `AnswerNotKeptError`.
    */
-  send<T>(request: WriteRequest, { deadlineMs, key, sent }: IdempotentBounds): Promise<T> {
+  send<T>(request: WriteRequest, bounds: WriteBounds): Promise<T>;
+  send<T>(request: IdempotentRequest, bounds?: IdempotentBounds): Promise<T>;
+  send<T>(request: WriteRequest, { deadlineMs, key, login, sent }: IdempotentBounds = {}) {
     const { body, method, path } = request;
     const idempotent = method === "PUT" || method === "DELETE";
-    const json = body === undefined || body instanceof FormData ? undefined : JSON.stringify(body);
+    const form = body instanceof FormData ? body : undefined;
+    const json = body === undefined || form !== undefined ? undefined : JSON.stringify(body);
     const keepalive =
       idempotent && (json === undefined || utf8.encode(json).byteLength < maxKeepaliveBodyBytes);
     const init: RequestInit = {
-      ...(body === undefined ? {} : { body: json ?? (body as FormData) }),
+      ...(form !== undefined ? { body: form } : json !== undefined ? { body: json } : {}),
       headers: {
         ...(idempotent || key === undefined ? {} : { [IDEMPOTENCY_KEY_HEADER]: key }),
+        ...(login === undefined ? {} : { [DISPATCH_LOGIN_HEADER]: login }),
         ...(json === undefined ? {} : { "Content-Type": "application/json" }),
       },
       ...(keepalive ? { keepalive: true } : {}),
       method,
     };
     sent?.(request);
-    return this.exchange(path, init, deadlineMs, async (response) => {
+    return this.exchange(path, init, deadlineMs, async (response): Promise<T> => {
       const text = await response.text();
-      const answer: unknown = text === "" ? undefined : JSON.parse(text);
+      let answer: unknown;
+      try {
+        answer = text === "" ? undefined : JSON.parse(text);
+      } catch (error) {
+        throw new UnreadableAnswerError(response.status, error);
+      }
       if (
-        response.headers.has(IDEMPOTENCY_REPLAYED_HEADER) &&
-        typeof answer === "object" &&
-        answer !== null &&
-        Reflect.get(answer, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT
+        answerNotKept(response.status, response.headers.has(IDEMPOTENCY_REPLAYED_HEADER), answer)
       ) {
-        const reason = Reflect.get(answer, "error");
+        const reason = Reflect.get(answer as object, "error");
         throw new AnswerNotKeptError(
+          IDEMPOTENCY_ANSWER_NOT_KEPT,
           response.status,
           typeof reason === "string" ? reason : "Dispatch did not keep this write's answer"
         );
@@ -612,9 +755,11 @@ export class DispatchApiClient {
     repo: string,
     bounds: WriteBounds
   ): Promise<ArchitectureSource> {
-    return this.post<ArchitectureSource>(
-      `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}/sync`,
-      {},
+    return this.send<ArchitectureSource>(
+      {
+        method: "POST",
+        path: `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}/sync`,
+      },
       bounds
     );
   }
@@ -1141,8 +1286,10 @@ export class DispatchApiClient {
     return this.json<AuthenticatedUser>("/auth/whoami");
   }
 
-  logout(bounds: WriteBounds): Promise<{ ok: true }> {
-    return this.post<{ ok: true }>("/auth/logout", {}, bounds);
+  /** Ends this browser's session. `/auth/logout` sits outside Dispatch's keyed layer and is the
+   *  same however often it is made, so it goes with no key. */
+  logout(): Promise<{ ok: true }> {
+    return this.json<{ ok: true }>("/auth/logout", { method: "POST" });
   }
 
   /** A read through Dispatch's GitHub proxy; it makes no write. */
@@ -1232,10 +1379,16 @@ export class DispatchApiClient {
   }
 }
 
+/** A client over `fetchImpl`. The page's own (`api`) sends its uploads through `XMLHttpRequest`
+ *  (`xhrUpload`), so their progress counts against the silence deadline; one given a `fetchImpl`
+ *  of its own sends them through it unless it is given an `upload` too. */
 export function createApiClient(
-  fetchImpl: FetchImplementation = (...args) => fetch(...args)
+  fetchImpl?: FetchImplementation,
+  upload?: UploadImplementation
 ): DispatchApiClient {
-  return new DispatchApiClient(fetchImpl);
+  return fetchImpl === undefined
+    ? new DispatchApiClient((...args) => fetch(...args), upload ?? xhrUpload())
+    : new DispatchApiClient(fetchImpl, upload);
 }
 
 export const api = createApiClient();

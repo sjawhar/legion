@@ -16,6 +16,7 @@ import { useSyncExternalStore } from "react";
 import { applyDelta, applyRevs } from "../features/delivery/lib/applyDelta";
 import type { DeliveryFreshness } from "../features/delivery/lib/freshness";
 import { ApiError } from "./client";
+import { reachable } from "./reachability";
 import type {
   DeliveryLiveBody,
   DeliveryLiveDelta,
@@ -542,6 +543,8 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       cancelStuck?.();
       cancelStuck = undefined;
       update({ since: null, state: "open", stuck: false });
+      // Dispatch is reachable: a write waiting out its backoff is asked again now.
+      reachable("socket");
       for (const sub of subs.values()) sendSubscribe(sub);
     });
     next.addEventListener("message", (event) => {
