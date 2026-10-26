@@ -89,6 +89,8 @@ type Result =
       reason?: string;
       input?: Record<string, unknown>;
       additionalContext?: string;
+      /** A `tool_result` handler's replacement for the call's own result. */
+      content?: Array<{ type: string } & Record<string, unknown>>;
     }
   | undefined;
 type Handler = (event: unknown, ctx: unknown) => Promise<Result>;
@@ -975,6 +977,66 @@ describe("a write that passes unreviewed is recorded and said", () => {
     expect(result?.block).toBeUndefined();
     expect(result?.additionalContext).toContain("unknown flag");
     expect(g.entries).toMatchObject([{ outcome: "error", decision: "allow" }]);
+  });
+  // Outside review of #2159 at 31c5cca3b, finding 8: the note was handed back only as the
+  // `tool_call` result's additionalContext, which the loop delivers for a call it dispatched that
+  // succeeded. A write an eval cell makes through the tool bridge has no loop context at all
+  // (sdk.ts gives the bridge a context with no sink), so its note was dropped and the agent was
+  // told nothing. The note now rides on the call's own result too.
+  test("F8: the note rides on the call's own result, which a bridged call reads", async () => {
+    const g = bind({
+      hasUI: false,
+      env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
+      complete: untilAborted,
+    });
+    const call = await g.device("js-bash-1", "dispatch_comment", COMMENT);
+    const note = call?.additionalContext ?? "";
+    expect(note).toContain("The call ran unreviewed.");
+    const sent = await g.event("tool_result", {
+      toolCallId: "js-bash-1",
+      content: [{ type: "text", text: "dispatch comment: sent" }],
+    });
+    expect(sent?.content).toEqual([
+      { type: "text", text: "dispatch comment: sent" },
+      { type: "text", text: note },
+    ]);
+    // Delivered once: a second result for the same call carries nothing more.
+    expect(await g.event("tool_result", { toolCallId: "js-bash-1", content: [] })).toBeUndefined();
+    // A backgrounded call keeps its snapshot and still gets its note.
+    const background = bind({ hasUI: false, complete: async () => ({ text: REVISE }) });
+    const warned = await background.device("js-bash-2", "dispatch_comment", COMMENT);
+    expect(warned?.additionalContext).toContain("advisor-gate");
+    const carried = await background.event("tool_result", {
+      toolCallId: "js-bash-2",
+      details: { async: { state: "running" } },
+      content: [{ type: "text", text: "started" }],
+    });
+    expect(carried?.content?.at(-1)).toEqual({
+      type: "text",
+      text: warned?.additionalContext ?? "",
+    });
+    // A rebuttal acknowledgement rides along the same way.
+    const rebutted = bind({ hasUI: false });
+    await rebutted.write(
+      "js-bash-3",
+      "xd://dispatch_comment",
+      '{"issue":"X-1","body":"b","advisor_rebuttal":"a link"}'
+    );
+    const ack = await rebutted.device("js-bash-3", "dispatch_comment", { issue: "X-1", body: "b" });
+    const onResult = await rebutted.event("tool_result", {
+      toolCallId: "js-bash-3",
+      content: [{ type: "text", text: "sent" }],
+    });
+    expect(onResult?.content?.at(-1)).toEqual({
+      type: "text",
+      text: ack?.additionalContext ?? "",
+    });
+    // A call the gate refused carries no note: its refusal is the result.
+    const blocked = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
+    expect((await blocked.device("js-bash-4", "dispatch_comment", COMMENT))?.block).toBe(true);
+    expect(
+      await blocked.event("tool_result", { toolCallId: "js-bash-4", content: [] })
+    ).toBeUndefined();
   });
 });
 

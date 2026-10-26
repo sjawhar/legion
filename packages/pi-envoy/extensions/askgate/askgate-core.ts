@@ -80,9 +80,12 @@
 // it is `warn` or `block`; any other value is ignored, and the first gated call shows one notice that
 // names it and the switch. Else the session's latest `experiments` entry (the experiments
 // extension's record): its `askgate_block` arm off is `warn`, and anything else is `block`. `warn`
-// runs a revised call and returns the reason as additional context, which the fork delivers only
-// when the call succeeds and ran through the agent loop (a failing call, or a write made from eval,
-// drops it); `block` refuses a revised call with the reason as the call's error result. Each entry
+// runs a revised call and returns the reason as additional context; `block` refuses a revised call
+// with the reason as the call's error result. Every note the gate hands back (a warn revise, a
+// write that went out unreviewed, a rebuttal, a breaker trip) also rides on the call's own result,
+// appended as one text block on its `tool_result` event: the loop's own sink takes additional
+// context only for a call the loop dispatched that succeeded, so a failing call, and every call
+// an eval cell makes through the tool bridge, would otherwise drop the note. Each entry
 // records the mode it ran under as `verdictMode`.
 //
 // Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
@@ -231,6 +234,8 @@ export const GATE_ROLES = ["askgate", "default"] as const;
 export type GateRole = (typeof GATE_ROLES)[number];
 export const GATE_EFFORT = "high";
 const REBUTTAL_CAP = 64;
+/** How many undelivered notices the gate keeps (`notices`), as it caps unspent rebuttals. */
+const NOTICE_CAP = 64;
 const MODES = ["warn", "block"] as const;
 /** The custom entry type the experiments extension records a session's arms under. */
 const EXPERIMENTS_ENTRY_TYPE = "experiments";
@@ -358,6 +363,19 @@ export type ToolCallEvent = { toolName: string; toolCallId: string; input: Input
 export type ToolCallResult =
   | { block?: boolean; reason?: string; input?: Input; additionalContext?: string }
   | undefined;
+/** One block of a tool's result, as the host's `tool_result` event carries it. */
+export type ResultBlock = { type: string } & Record<string, unknown>;
+/**
+ * The `tool_result` event: a handler may give back the call's content, which the runner then
+ * returns to whoever called the tool. Oh My Pi emits it for every call, the ones an eval cell
+ * makes included, which is what makes it the one surface every caller reads.
+ */
+export type ToolResultEvent = {
+  toolCallId: string;
+  details?: unknown;
+  content?: readonly ResultBlock[];
+};
+export type ToolResultResult = { content: ResultBlock[] } | undefined;
 export type GateCtx = {
   agent: { kind: string };
   hasUI: boolean;
@@ -2035,6 +2053,25 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       snapshots.delete(toolCallId);
       removeSnapshots(snapshot);
     };
+    /**
+     * What each gated call is owed back: the note of a write that went out unreviewed, a warn
+     * mode revise, a rebuttal or a breaker trip, by tool call id. The `tool_call` result's
+     * `additionalContext` reaches the agent only through the loop's own sink, which a call made
+     * from an eval cell never has (the bridge calls the tool with no loop context), so the note
+     * is put on the call's own result as well, where every caller reads it. Delivered once, and
+     * at most NOTICE_CAP are kept, since a call that never reports a result leaves its own.
+     */
+    const notices = new Map<string, string>();
+    const rememberNotice = (toolCallId: string, notice: string) => {
+      notices.set(toolCallId, notice);
+      if (notices.size > NOTICE_CAP) notices.delete(notices.keys().next().value as string);
+    };
+    const deliverNotice = (event: ToolResultEvent): ToolResultResult => {
+      const notice = notices.get(event.toolCallId);
+      if (notice === undefined) return undefined;
+      notices.delete(event.toolCallId);
+      return { content: [...(event.content ?? []), { type: "text", text: notice }] };
+    };
     // A snapshot goes only once the command that reads it has run. A result that reports a
     // backgrounded job's start comes before the shell runs it (`startedInBackground`), and nothing
     // later names that call's id, so its snapshot is kept until `session_shutdown`; a new gated
@@ -2044,9 +2081,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       if (isRecord(event.result) && startedInBackground(event.result.details)) return;
       releaseSnapshots(event.toolCallId);
     });
-    pi.on("tool_result", (event: { toolCallId: string; details?: unknown }) => {
-      if (startedInBackground(event.details)) return;
-      releaseSnapshots(event.toolCallId);
+    pi.on("tool_result", (event: ToolResultEvent): ToolResultResult => {
+      if (!startedInBackground(event.details)) releaseSnapshots(event.toolCallId);
+      return deliverNotice(event);
     });
     pi.on("agent_end", (event: { messages?: readonly Message[]; willContinue?: boolean }) => {
       if (event.willContinue) return;
@@ -2808,6 +2845,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       } catch {
         // The entry is best effort; the call still runs.
       }
+      // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
+      // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
+      // never sees reads like a gate that is working.
+      if (decision.result?.additionalContext !== undefined)
+        rememberNotice(event.toolCallId, decision.result.additionalContext);
       return revised === undefined ? decision.result : { ...decision.result, input: revised };
     };
 
