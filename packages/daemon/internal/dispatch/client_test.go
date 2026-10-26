@@ -310,6 +310,97 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	}
 }
 
+// While an approval request is open the artifact read names it and whose turn it waits on; once a
+// review answered it, the ask Dispatch still names is no open request, and the read names none.
+func TestApprovalNamesOnlyAnOpenRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/artifacts/artifact-7":
+			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
+				"state": "awaiting", "latest_version": 4, "ask_id": "ask-approval", "waiting_on": "agent"}})
+		case "/api/v1/artifacts/artifact-9":
+			writeJSON(t, w, map[string]any{"id": "artifact-9", "issue_key": "LEGION-9", "approval": map[string]any{
+				"state": "changes_requested", "latest_version": 4, "version": 4, "reason": "why", "ask_id": "ask-answered"}})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+	awaiting, err := client.Approval(context.Background(), "artifact-7")
+	if err != nil {
+		t.Fatalf("read awaiting approval: %v", err)
+	}
+	if awaiting.AskID != "ask-approval" || awaiting.WaitingOn != "agent" {
+		t.Fatalf("awaiting approval = %#v, want the open request ask-approval waiting on the agent", awaiting)
+	}
+	answered, err := client.Approval(context.Background(), "artifact-9")
+	if err != nil {
+		t.Fatalf("read answered approval: %v", err)
+	}
+	if answered.AskID != "" || answered.WaitingOn != "" {
+		t.Fatalf("answered approval = %#v, want no open request named", answered)
+	}
+}
+
+// The list and the detail carry the issue's claim, which the daemon keeps as `<kind>:<id>`; null
+// reads as nobody. A claim naming no actor is unread, as the decoder takes it on an issue event:
+// not nobody, but a claim the daemon cannot name.
+func TestReadsCarryTheClaimHolder(t *testing.T) {
+	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
+	actorless := map[string]any{"actor": map[string]any{"kind": "user"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/issues":
+			writeJSON(t, w, []map[string]any{
+				{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed},
+				{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil},
+				{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless},
+			})
+		case "/api/v1/issues/LEGION-1":
+			writeJSON(t, w, map[string]any{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed})
+		case "/api/v1/issues/LEGION-2":
+			writeJSON(t, w, map[string]any{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil})
+		case "/api/v1/issues/LEGION-3":
+			writeJSON(t, w, map[string]any{"key": "LEGION-3", "status": "todo", "rank": "c", "claim": actorless})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	listed, err := client.ListIssues(context.Background(), "LEGION", nil)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(listed) != 3 || listed[0].ClaimedBy != "user:alice" || listed[0].ClaimUnread || listed[1].ClaimedBy != "" || listed[1].ClaimUnread ||
+		listed[2].ClaimedBy != "" || !listed[2].ClaimUnread {
+		t.Fatalf("listed claims = %#v, want user:alice, then nobody, then an unread claim", listed)
+	}
+	detail, err := client.GetIssue(context.Background(), "LEGION-1")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got := detail.Claim.Holder(); got != "user:alice" || detail.ClaimUnread {
+		t.Fatalf("detail claim = %q (unread %t), want user:alice", got, detail.ClaimUnread)
+	}
+	unclaimed, err := client.GetIssue(context.Background(), "LEGION-2")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if unclaimed.Claim != nil || unclaimed.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want nobody", unclaimed.Claim, unclaimed.ClaimUnread)
+	}
+	unread, err := client.GetIssue(context.Background(), "LEGION-3")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if unread.Claim != nil || !unread.ClaimUnread {
+		t.Fatalf("detail claim = %#v (unread %t), want an unread claim", unread.Claim, unread.ClaimUnread)
+	}
+}
+
 // A changes request counts only on Dispatch's latest version: a newer version supersedes it.
 func TestChangesRequestedLatestNamesOnlyTheLatestVersion(t *testing.T) {
 	reason := "name the rollback path"

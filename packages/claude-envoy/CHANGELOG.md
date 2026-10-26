@@ -151,6 +151,17 @@
 
 ### Changed
 
+- The `legion/` plugin's skills fix a clear defect outside a role's issue in its own tree's pull
+  request when the tree touches or depends on that code, and send any other to the controller,
+  which hands it to the tree that owns the code and files it for Legion only when none does. A
+  `dispatch ask` stays for a finding that needs a decision.
+
+- The `legion/` plugin's `plan-reviewer` reviews a spec as well as a plan, checking each factual
+  claim, and it and `plan-gap-analyst` get `Bash` for read-only commands. Its
+  `legion-architect` runs both on a root spec before every approval request, and ends the
+  request's `--summary` with their results. The bundled `dispatch request-approval` help names
+  both reviewers.
+
 - The plugin ships `claude-envoy:dispatch-writing-specs` in place of
   `claude-envoy:dispatch-brainstorming`: `skills/dispatch-writing-specs` links the
   repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words

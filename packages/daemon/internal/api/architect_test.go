@@ -909,6 +909,36 @@ func TestGateRegistrationCarriesAChangesRequestDispatchAlreadyShows(t *testing.T
 	}
 }
 
+// A read that shows an approval request open names it on the registration, with whose turn it
+// waits on, so the registration mirrors it as the read found it; a request waiting on the person
+// is not the agent's.
+func TestGateRegistrationCarriesTheOpenRequestAndItsTurn(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	const withPerson, withAgent = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d"
+	statuses.documents = map[string]string{withPerson: "LEGION-208", withAgent: "LEGION-208"}
+	statuses.approvals = map[string]dispatch.Approval{
+		withPerson: {State: "awaiting", LatestVersion: 4, AskID: "ask-person", WaitingOn: "human"},
+		withAgent:  {State: "awaiting", LatestVersion: 4, AskID: "ask-agent", WaitingOn: "agent"},
+	}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, artifact := range []string{withPerson, withAgent} {
+		if recorder := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 4,
+		}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gate register %s = %d: %s", artifact, recorder.Code, recorder.Body)
+		}
+	}
+	since := record.EventMark{Seq: 7}
+	want := []intake.Fact{
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: withPerson, Version: 4, DispatchVersion: 4, Since: since, RequestAsk: "ask-person"},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: withAgent, Version: 4, DispatchVersion: 4, Since: since, RequestAsk: "ask-agent", RequestWaitsOnAgent: true},
+	}
+	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gate facts = %#v, want %#v", got, want)
+	}
+}
+
 // register_gate refuses a version Dispatch does not show for the document: the caller names the
 // version, and a gate recorded past the document's own latest version is one no person's review
 // can open.
