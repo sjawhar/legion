@@ -27,8 +27,8 @@ artifact ("adding X to an input puts X in the output") and for reading the resul
   package on the apt line) and nothing else; `jj revert -r <probe> --insert-after <probe>` undoes it
   in a new commit, never a rewrite of the pushed one. `jj diff --from <feature> --to <revert>` must
   print nothing, so the revert head is the content that merges. Each head gets its own
-  `sha-<12 hex>` image, as long as the revert is pushed only after the probe's image run has
-  completed (the last point below).
+  `sha-<12 hex>` image only if no later head is pushed before that head's image run completes
+  (the last point below).
 - **Compare the two images with `LC_ALL=C comm -3`.** Two cold builds can pull different Debian
   archive states; `comm -3` shows drift as extra lines instead of hiding it in a pass. Expect only
   the probed name.
@@ -44,11 +44,14 @@ artifact ("adding X to an input puts X in the output") and for reading the resul
   event keys `check_runs` by check name, and the `Docs` and `Worker Image` workflows both name their
   job `build`: a settlement's passed `build` can be the docs build, with the image's job not yet
   started. Read the image run itself (`gh run list --workflow worker-image.yaml --commit <sha>`).
-- **Push the revert only after the probe's image run has completed.** Since 2026-10-26
+- **Push the next commit only after the image run you need has completed.** Since 2026-10-26
   `worker-image.yaml`'s per-PR group has `cancel-in-progress` on `pull_request`. A new head's run
-  cancels the older head's build whether it is `pending`, `queued` or `in_progress`, so a revert
-  pushed early leaves the probe with no image to read. (Before that date the group serialized: a
-  push cancelled only a run still `pending`.)
+  cancels the older head's build whether it is `pending`, `queued` or `in_progress`. A revert pushed
+  early leaves the probe with no image to read. A later push (a simplify commit, say) made while the
+  revert's run is not finished leaves the revert with none. Re-running a cancelled older head's run
+  enters the group again and cancels the newest head's build, so re-run it only after the newest
+  head's image run has completed. (Before that date the group serialized: a push cancelled only a
+  run still `pending`. The evidence below is from then.)
 
 ## Evidence
 

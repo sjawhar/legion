@@ -43,7 +43,8 @@ on:
   # Pre-merge iteration: a pull request against main that touches an image input builds its head and
   # publishes :sha-<short> only. `pull_request` (not `push`) because GitHub evaluates these paths against
   # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
-  # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
+  # of a Dockerfile change still gets it, unless its head carries `skip-checks: true`, which starts no
+  # run at all. A `push` trigger filters on the pushed commits alone and left
   # a PR head with no image check (LEGION-23 tester round 1). The paths are every file worker.Dockerfile
   # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the plugin
   # stage's frozen install); the packages it copies whole — the Dockerfile (packages/daemon), the two
@@ -114,6 +115,10 @@ jobs:
     # main commit never drops another commit's. They never cancel: in a call from
     # release.yaml, `github.event_name` is the caller's (`push` or `workflow_dispatch`, never
     # `pull_request`), so no main commit is left without an image to pin.
+    # The run that reaches the group last wins, and GitHub does not guarantee arrival order: two
+    # pushes seconds apart, or a re-run of an older head's run, can cancel the newest head's build.
+    # `build` is not a required check, and `gh run rerun` of the newest head's run restores it, so
+    # re-run an older head's run only after the newest head's build has completed.
     concurrency:
       group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
