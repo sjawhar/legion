@@ -235,15 +235,17 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 
 // BenchmarkPeerUpdateWeighing measures what the peer update hook costs the browser whose keystroke
 // it weighs (Service.weighPeerUpdate), with an update of the size a keystroke sends against a 524
-// KiB room, the size BenchmarkKeystrokeBesideReads types into. It is weighed twice: against a room
-// whose published measurement is under the bound, which is the room budget's signal and the
-// rendering's bytes, two atomic loads, and the addition every keystroke pays, and against a room
-// whose measurement is at pmdoc.MaxDocumentBytes, where the hook decodes that one update and nets
-// what it inserts against the room's state vector (insertedBeyond). The apply the hook is handed
-// does nothing: what is timed is the weighing this change adds to the peer's read loop, where the
-// room's own apply runs with the hook or without it. The percentiles are reported in
-// milliseconds, as BenchmarkKeystrokeBesideReads reports a keystroke's, so the hook's cost can be
-// read against the keystroke it rides on, whose latency there is measured with the hook in it.
+// KiB room, the size BenchmarkKeystrokeBesideReads types into. Every update is walked
+// (walkUpdate), netted against the room's state vector and its apply's heap estimated from the same
+// walk (peerWeighing.applyHeap), and its addition weighed against the room's struct total
+// (structTotal) under the room's admission lock; it is weighed twice: against a room whose
+// published measurement is under the bound, where the walk's bytes admit it, and against a room
+// whose measurement is at pmdoc.MaxDocumentBytes, where what the walk found it inserts beyond the
+// room's state is weighed too. The apply the hook is handed does nothing: what
+// is timed is the weighing this change adds to the peer's read loop, where the room's own apply
+// runs with the hook or without it. The percentiles are reported in milliseconds, as
+// BenchmarkKeystrokeBesideReads reports a keystroke's, so the hook's cost can be read against the
+// keystroke it rides on, whose latency there is measured with the hook in it.
 //
 // The room is residentRoomDocument's, a document of a room's shape at the same size
 // (room_heap_test.go, residentRoomMarkdown). benchmarkLiveDocument, which

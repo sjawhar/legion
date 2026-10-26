@@ -35,9 +35,11 @@ import (
 // when its turn comes. A waiting rendering is held by the replica itself, so it goes with the
 // replica too. The measurer takes the rendering off the replica when the count starts and holds
 // that string, and the replica weakly, for the one count alone; it holds the replica strongly only
-// to take the rendering and to store the result, never across the parse. So the one thing of a
-// room it can keep past the room's retirement is the rendering of the count it is in, until that
-// count ends.
+// to take the rendering and the room's struct total and to store the result, never across the
+// parse. The struct total holds the room's live document weakly, and the walk of it holds the
+// document and its encoded state only while it runs. So what of a room it can keep past the room's
+// retirement is the rendering of the count it is in, and the document while that count's walk
+// runs, until that count ends.
 //
 // The one count at a time is a turn the counts take (turn), and the same turn runs the decode-cap
 // confirmations of the server's writes outside applyLive (Service.pastDecodeCap), for the same
@@ -50,9 +52,10 @@ import (
 // stop has nothing of it to drop, and one in flight holds nothing but its own copy, which goes when
 // it returns.
 type elementMeasurer struct {
-	// turn is held for each count's parse and each confirmation's decode, so that no two run at
-	// once. No one holding it waits on a room: a count parses a string it already holds, and a
-	// confirmation takes only the lock of the document it encodes, which its caller does not hold.
+	// turn is held for each count's parse and struct walk and each confirmation's decode, so that
+	// no two run at once. No one holding it waits on a room: a count parses a string it already
+	// holds, and a struct walk or a confirmation takes only the lock of the document it encodes,
+	// which its caller does not hold.
 	turn sync.Mutex
 
 	mu sync.Mutex
@@ -154,9 +157,11 @@ func (m *elementMeasurer) next() (weak.Pointer[renderedReplica], bool) {
 }
 
 // count counts the rendering replica has waiting, stores the count where the room budget reads it,
-// and re-bases the room's charge on it. A replica already collected, or one whose waiting rendering
-// a later publication withdrew (one the room could not read), has nothing to count. The parse runs
-// in the measurer's turn.
+// and re-bases the room's charge on it. In the same turn it counts the room's struct total afresh
+// (structTotal.recountLive), an encode of the live document's state and a walk of it, which
+// re-bases the total the peer update hook refuses past the decode cap on and nothing else. A
+// replica already collected, or one whose waiting rendering a later publication withdrew (one the
+// room could not read), has nothing to count. The parse and the walk run in the measurer's turn.
 func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	markdown, publication, updates := takeUncounted(replica)
 	if markdown == nil {
@@ -165,8 +170,13 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	if m.beforeCount != nil {
 		m.beforeCount(*markdown)
 	}
+	var structs *structTotal
+	if held := replica.Value(); held != nil {
+		structs = held.structs
+	}
 	m.turn.Lock()
 	elements := countElements(*markdown)
+	structs.recountLive()
 	m.turn.Unlock()
 	if held := replica.Value(); held != nil {
 		held.storeCounted(int64(len(*markdown)), elements, publication, updates)

@@ -201,12 +201,12 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 
 	// The room takes the browser's update through the service's own apply rather than over the
 	// socket. A socket weighs every update a browser sends (weighPeerUpdate) and refuses this one:
-	// it is about three megabytes against a seven-byte document, so it passes the byte bound
-	// before anything decodes it, and what it inserts is 150,000 items where an update at the
-	// bound may insert 8 KiB. No browser frame can both pass ygo's default pending queue of
-	// 100,000 items and stay under the bound, so what is under test here - the store's check of an
-	// update the room took - is driven on the path the hook does not weigh, and the case below
-	// appends the same update in a transaction.
+	// it is about three megabytes against a seven-byte document, so its own bytes put the room at
+	// the byte bound, and what it inserts is 150,000 items where an update at the bound may insert
+	// 8 KiB. No browser frame can both pass ygo's default pending queue of 100,000 items and stay
+	// under the bound, so what is under test here - the store's check of an update the room took -
+	// is driven on the path the hook does not weigh, and the case below appends the same update in
+	// a transaction.
 	t.Run("a room stores it and keeps it", func(t *testing.T) {
 		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 		t.Cleanup(httpServer.Close)

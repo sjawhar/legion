@@ -412,9 +412,10 @@ type decodeCapAnswer struct {
 // room's state beside the writes that logged it (roomState.decodeCap) with the clock sum it was
 // asked at, and is taken again only once the sum has grown decodeCapRecheck past that, or has
 // fallen below it, which only a document a rebuild replaced can do. So between confirmations a
-// document confirmed to decode can take up to an eighth of the cap of browser edits, which nothing
-// here bounds, before the writes ask again; what the three writes add themselves is an item an id,
-// a format item a mark edge, an attribute an answer.
+// document confirmed to decode can take up to an eighth of the cap of browser edits before the
+// writes ask again - edits this does not bound, the peer update hook's struct total does
+// (structTotal); what the three writes add themselves is an item an id, a format item a mark edge,
+// an attribute an answer.
 //
 // A confirmation holds a whole copy of the document while it runs, which is the heap the room
 // budget exists to bound, so the service runs one at a time, in the measurer's turn

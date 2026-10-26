@@ -216,6 +216,11 @@ type Service struct {
 	// budget charges every open room the heap it holds and refuses a browser one more room past
 	// roomBudgetBytes (roomBudget). New readies it; Shutdown joins its sweeps (evictWG).
 	budget roomBudget
+	// applyHeaps is the pod's bound on the estimated heap of browsers' applies, applyHeapBound of
+	// it, out of which an admitted update whose own share of its estimate passes
+	// unweighedApplyHeapBytes holds its estimate while it applies (weighPeerUpdate). Its zero value
+	// is ready.
+	applyHeaps applyHeaps
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to

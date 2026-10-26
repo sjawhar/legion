@@ -336,7 +336,7 @@ func TestTheMeasurerStopsWithTheService(t *testing.T) {
 // (renderDocumentForUpdate), on the live benchmarks' own document (benchmarkLiveDocument) and on
 // the shape a room holds up to a mebibyte of (residentRoomDocument). The count's cost is what the
 // measurer's interval is set against (roomCountInterval), and what keeps it out of the hook
-// (peer_update.go:29-38).
+// (peer_update.go:37-50).
 func BenchmarkElementCountAgainstRender(b *testing.B) {
 	for _, shape := range []struct {
 		name  string

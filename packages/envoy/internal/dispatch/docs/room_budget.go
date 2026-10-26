@@ -28,7 +28,7 @@ import (
 // thirty-nine of them and refuses the fortieth. No room has a ceiling: a mebibyte of the densest
 // markdown measured, which goldmark stops counting, is priced at more than the whole budget
 // (bytesOfHeapAByteAtTheDensest), and what answers a room that heavy is the hook's refusal of
-// every insert while nothing can be closed (peer_update.go:44-58), not a cap on its charge
+// every insert while nothing can be closed (peer_update.go:64-74), not a cap on its charge
 // (TestTheRoomBudgetsArithmetic).
 const roomBudgetBytes = 2 << 30
 

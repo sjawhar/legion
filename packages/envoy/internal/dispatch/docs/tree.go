@@ -339,6 +339,10 @@ type renderedReplica struct {
 	// charged (chargeLoadedRoom), a test's.
 	measurer *elementMeasurer
 	charge   *roomCharge
+	// structs is the room's struct total, which the peer update hook refuses an update past the
+	// decode cap on, and each of the measurer's counts re-bases (structTotal); nil for a replica no
+	// room's load made (keepReplica), a test's.
+	structs *structTotal
 	// sizeMu orders the measurer's count of a rendering against the publications that follow it
 	// (storeCounted). It is held for a few field writes alone, never across a render or a parse,
 	// so neither the update observer nor the measurer waits on the other's work.
@@ -465,7 +469,7 @@ func (r *renderedReplica) publishCounted(markdown *string, elements int64) {
 // count lands, which the budget does not re-base on (storeCounted). A caller reading across a
 // publication sees one rendering's bytes beside the elements of the rendering before it too, which
 // is within that same staleness. Neither half makes the document bound a ceiling
-// (peer_update.go:40-42).
+// (peer_update.go:52-54).
 func (r *renderedReplica) size() (bytes, elements int64, measured bool) {
 	bytes, elements = r.bytes.Load(), r.elements.Load()
 	return bytes, elements, bytes != sizeUnmeasured
@@ -493,13 +497,17 @@ func (r *renderedReplica) observe(room string, live *crdt.Doc, onChanged func(tr
 }
 
 // keepReplica makes the replica live's update observer keeps, starting from markdown, live's
-// rendering at its load, and lists it for live's reads (readLive) while live is resident
-// (listResident). The listing holds the replica weakly too, and the observer, which live holds,
-// holds the replica, so the replica, a whole copy of live, is collected with live and in the same
-// cycle. A reader holding an evicted instance of the room reaches that instance's replica or none,
-// never its successor's.
+// rendering at its load, and lists it for live's reads (readLive) and the peer update hook
+// (weighPeerUpdate) while live is resident (listResident). The listing holds the replica weakly too,
+// and the observer, which live holds, holds the replica, so the replica, a whole copy of live, is
+// collected with live and in the same cycle. A reader holding an evicted instance of the room
+// reaches that instance's replica or none, never its successor's.
+//
+// It also counts live's struct total (newStructTotal), an encode of live's state and a walk of it,
+// here beside the load's rendering, which has already walked the whole document; the load is not a
+// keystroke.
 func (s *Service) keepReplica(live *crdt.Doc, markdown *string) *renderedReplica {
-	replica := &renderedReplica{markdown: markdown, measurer: &s.measurer}
+	replica := &renderedReplica{markdown: markdown, measurer: &s.measurer, structs: newStructTotal(live)}
 	replica.publishLoadedSize(markdown)
 	listResident(&s.replicas, live, weak.Make(replica))
 	return replica

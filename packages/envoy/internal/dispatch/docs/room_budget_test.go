@@ -185,7 +185,7 @@ func TestARoomsUpdateBytesAreClearedOnlyUpToTheRenderingACountMeasured(t *testin
 // keystrokes would then take with nothing able to refuse them. There is no ceiling on one room: a
 // mebibyte of the densest rendering, which goldmark stops counting and which is priced from its
 // bytes (bytesOfHeapAByteAtTheDensest), is more than the whole budget at both copies, so the budget
-// admits none, and the pressure rule is what answers a room grown that heavy (peer_update.go:44-58).
+// admits none, and the pressure rule is what answers a room grown that heavy (peer_update.go:64-74).
 func TestTheRoomBudgetsArithmetic(t *testing.T) {
 	for _, shape := range []struct {
 		name           string

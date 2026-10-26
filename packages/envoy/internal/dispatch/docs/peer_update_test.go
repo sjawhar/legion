@@ -1,12 +1,18 @@
 package docs
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
@@ -35,11 +41,11 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 		// update is the one update the room is handed, built against the room's own document.
 		update func(t *testing.T, room *crdt.Doc) []byte
 		// refused is the code of the close the hook answers, zero for none; applied is whether the
-		// room took the update; failed is whether the hook returned the apply's own error instead;
-		// changes is whether the room's document is any different for it, which a whole-state
-		// message of what the room already holds is not.
-		refused                  int
-		applied, failed, changes bool
+		// room took the update; unapplied is whether the hook answered an error that is no close
+		// without calling the apply at all; changes is whether the room's document is any
+		// different for it, which a whole-state message of what the room already holds is not.
+		refused                     int
+		applied, unapplied, changes bool
 	}{
 		{
 			name:     "a keystroke under the bound applies",
@@ -92,11 +98,17 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 			applied: true,
 		},
 		{
-			name:       "an update that does not decode is answered without a close",
+			name:       "an update that does not decode is answered without a close and never applied",
 			markdown:   atTheBound,
 			leastBytes: pmdoc.MaxDocumentBytes,
 			update:     func(*testing.T, *crdt.Doc) []byte { return []byte{0x01, 0xff, 0xff, 0xff} },
-			failed:     true,
+			unapplied:  true,
+		},
+		{
+			name:      "an update that does not decode under the bound is never applied either",
+			markdown:  ordinary,
+			update:    func(*testing.T, *crdt.Doc) []byte { return []byte{0x01, 0xff, 0xff, 0xff} },
+			unapplied: true,
 		},
 		{
 			name:     "a keystroke while the room budget is full is refused as transient",
@@ -164,10 +176,11 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 			service.budget.full.Store(row.busy)
 			update := row.update(t, room)
 			before := crdt.EncodeStateAsUpdateV1(room, nil)
-			applied := false
+			applied, called := false, false
 			err := service.weighPeerUpdate(
 				websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: update},
 				func() error {
+					called = true
 					if err := crdt.ApplyUpdateV1(room, update, nil); err != nil {
 						return err
 					}
@@ -192,9 +205,12 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 				if refusal.Code != row.refused || refusal.Reason != reason {
 					t.Fatalf("the hook closed with %d %q, want %d %q", refusal.Code, refusal.Reason, row.refused, reason)
 				}
-			case row.failed:
+			case row.unapplied:
 				if err == nil || errors.As(err, &refusal) {
-					t.Fatalf("the hook answered %v, want the apply's own error and no close", err)
+					t.Fatalf("the hook answered %v, want an error and no close", err)
+				}
+				if called {
+					t.Fatal("the hook called the apply for an update its walk refused")
 				}
 			default:
 				if err != nil {
@@ -363,13 +379,13 @@ func proseAtLeast(bytes int) string {
 // maxAnchorBytes - whose whole state is far more than its markdown: growth.go:14-18 records
 // thirty-two suggestions of 900 KB that left the markdown as it was. What this does not weigh is
 // the items a long edit history tombstones, which no rendering shows and which the decode cap
-// bounds instead (maxUpdateItems, refuseUndecodable).
+// bounds instead (maxUpdateItems: refuseUndecodable, and the peer update hook's structTotal).
 func TestTheHeaviestWholeStateFrameFitsTheMessageFloor(t *testing.T) {
 	frame := len(crdt.EncodeStateAsUpdateV1(heaviestDocument(t), nil))
 	t.Logf("the heaviest whole-state frame is %d bytes; the message floor is %d", frame, maxMessageBytes)
 	if frame*4 > maxMessageBytes {
 		t.Fatalf("the heaviest whole-state frame is %d bytes, past a quarter of the %d-byte message floor: "+
-			"measure it again and set the floor at four times it, or take a frame past 16 MiB back to the design",
+			"measure it again and set the floor at four times it, or take it back to the design if four times it passes the 64 MiB ygo allowed before",
 			frame, maxMessageBytes)
 	}
 }
@@ -453,13 +469,13 @@ func heaviestDocument(t *testing.T) *crdt.Doc {
 	return doc
 }
 
-// BenchmarkPeerUpdateInsertMeasures weighs the two ways to ask what an update carries that the room
-// does not already hold, on the update a keystroke sends against a document at pmdoc.MaxDocumentBytes,
-// which is where the hook decodes at all: one decode and arithmetic over the clock runs the update
-// inserts (insertedBeyond, through crdt.ContentIDsFromUpdateV1), against re-encoding the update
-// against the room's state vector (crdt.DiffUpdateV1). The hook takes the first, which is both
-// cheaper and zero for an update that only deletes, where the second's length carries the update's
-// delete set too.
+// BenchmarkPeerUpdateInsertMeasures weighs the ways to ask what an update carries that the room
+// does not already hold, on the update a keystroke sends against a document at
+// pmdoc.MaxDocumentBytes: the walk the hook takes (walkUpdate with peerWeighing), against the
+// decode it replaced, crdt.ContentIDsFromUpdateV1 with the same arithmetic over the clock runs it
+// returns, and against re-encoding the update against the room's state vector
+// (crdt.DiffUpdateV1), whose length carries the update's delete set too, so a pure delete would not
+// weigh zero.
 func BenchmarkPeerUpdateInsertMeasures(b *testing.B) {
 	tree, err := pmdoc.Parse(proseAtLeast(pmdoc.MaxDocumentBytes))
 	if err != nil {
@@ -483,13 +499,33 @@ func BenchmarkPeerUpdateInsertMeasures(b *testing.B) {
 	}
 	browser.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "y", nil) })
 	update := crdt.EncodeStateAsUpdateV1(browser, room.StateVector())
-	// The state vector is taken once, as the hook takes it once: what is weighed here is the two
-	// ways of measuring the update against it.
+	// The state vector is taken once, as the hook takes it once: what is weighed here is the ways
+	// of measuring the update against it.
 	held := room.StateVector()
+	b.Run("walkUpdate", func(b *testing.B) {
+		for b.Loop() {
+			weighed := peerWeighing{held: held}
+			if _, err := walkUpdate(update, fromPeer, &weighed); err != nil || weighed.inserted != 1 {
+				b.Fatalf("the walk weighed %d inserted (%v), want 1", weighed.inserted, err)
+			}
+		}
+	})
 	b.Run("ContentIDsFromUpdateV1", func(b *testing.B) {
 		for b.Loop() {
-			if _, err := insertedBeyond(update, held); err != nil {
+			ids, err := crdt.ContentIDsFromUpdateV1(update)
+			if err != nil {
 				b.Fatal(err)
+			}
+			inserted := uint64(0)
+			for _, client := range ids.Inserts.Clients() {
+				for _, run := range ids.Inserts.Ranges(client) {
+					if end := run.Clock + run.Len; end > held[client] {
+						inserted += end - max(run.Clock, held[client])
+					}
+				}
+			}
+			if inserted != 1 {
+				b.Fatalf("the decode weighed %d inserted, want 1", inserted)
 			}
 		}
 	})
@@ -500,4 +536,774 @@ func BenchmarkPeerUpdateInsertMeasures(b *testing.B) {
 			}
 		}
 	})
+}
+
+// weighInto hands update to the hook for room, with an apply that applies it to room as ygo's own
+// does (provider/websocket/peer_update.go:84-94), and reports what the hook answered and whether it
+// called the apply.
+func weighInto(service *Service, room *crdt.Doc, update []byte) (err error, called bool) {
+	err = service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: update}, func() error {
+		called = true
+		return crdt.ApplyUpdateV1(room, update, nil)
+	})
+	return err, called
+}
+
+// requireRefusedTooLarge requires err to be the document's own refusal, 4413, made without the
+// apply, and room to hold before, byte for byte.
+func requireRefusedTooLarge(t *testing.T, err error, called bool, room *crdt.Doc, before []byte) {
+	t.Helper()
+	var refusal *websocket.PeerClose
+	if !errors.As(err, &refusal) || refusal.Code != contracts.DocumentTooLargeCloseCode || refusal.Reason != contracts.DocumentTooLargeCloseReason {
+		t.Fatalf("the hook answered %v, want %d %q", err, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason)
+	}
+	if called {
+		t.Fatal("the hook called the apply for an update it refused")
+	}
+	if !bytes.Equal(crdt.EncodeStateAsUpdateV1(room, nil), before) {
+		t.Fatal("the room's document changed for an update the hook refused")
+	}
+}
+
+// countedStructTotal is replica's struct total with its counts counted: the count of the room's
+// state the hook or the measurer takes calls it once each.
+func countedStructTotal(t *testing.T, replica *renderedReplica) (*structTotal, *atomic.Int64) {
+	t.Helper()
+	total := replica.structs
+	if total == nil {
+		t.Fatal("the room's load made no struct total")
+	}
+	counts := new(atomic.Int64)
+	total.count = func(doc *crdt.Doc) uint64 {
+		counts.Add(1)
+		return countRoomStructs(doc)
+	}
+	return total, counts
+}
+
+// gcFrameFrom is one client's frame of n GC structs of one clock each, from clock 0.
+func gcFrameFrom(client uint64, n int) []byte {
+	f := newV1Frame(1).group(n, client, 0)
+	for range n {
+		f.gc(1)
+	}
+	return f.noDeletes()
+}
+
+// deleteRangesFrom is a frame of no structs whose delete set holds n ranges of one clock each of
+// client's, none adjacent to the next.
+func deleteRangesFrom(client uint64, n int) []byte {
+	f := newV1Frame(0).uint(1).uint(client).uint(uint64(n))
+	for i := range n {
+		f.uint(uint64(2 * i)).uint(1)
+	}
+	return f.done()
+}
+
+// An update the walk refuses is never applied: the hook answers the walk's error, which ygo answers
+// with SyncStatus(0) and no close, and the room is as it was. Applied, a frame of valid structs
+// ending in one bad byte would have left those structs in the room, since ygo integrates each
+// struct as it decodes it and never rolls the transaction back (sjawhar/ygo v1.51.3-sami.2,
+// crdt/update.go:50-56).
+func TestAPeerUpdateTheWalkRefusesIsNeverApplied(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		update []byte
+		rule   error
+		// halfApplies is whether ygo's own apply leaves part of the update in a room before it
+		// fails, which is what the walk's refusal keeps out.
+		halfApplies bool
+	}{
+		{
+			name:        "valid GC structs and then one bad byte",
+			update:      newV1Frame(1).group(4, 7, 0).gc(2).gc(2).gc(2).raw(0xff).done(),
+			rule:        errUpdateUndecodable,
+			halfApplies: true,
+		},
+		{
+			name:   "a subdocument",
+			update: newV1Frame(1).group(1, 7, 0).rooted(9, marksMapName, "sub").str("guid").any(map[string]any{"autoLoad": false}).noDeletes(),
+			rule:   errUpdateNotFromEditor,
+		},
+		{
+			name:   "an unknown root",
+			update: newV1Frame(1).group(1, 7, 0).rooted(4, "t", "").str("hi").noDeletes(),
+			rule:   errUpdateNotFromEditor,
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+			if row.halfApplies {
+				copied, err := snapshotDocument(room)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := crdt.ApplyUpdateV1(copied, row.update, nil); err == nil || copied.StateVector()[7] == 0 {
+					t.Fatalf("ygo's own apply answered %v and left client 7 at clock %d, want it to fail having integrated structs", err, copied.StateVector()[7])
+				}
+			}
+			held := room.StateVector()
+			before := crdt.EncodeStateAsUpdateV1(room, nil)
+			err, called := weighInto(service, room, row.update)
+			runtime.KeepAlive(replica)
+			var refusal *websocket.PeerClose
+			if !errors.Is(err, row.rule) || errors.As(err, &refusal) {
+				t.Fatalf("the hook answered %v, want the walk's refusal (%v) and no close", err, row.rule)
+			}
+			if called {
+				t.Fatal("the hook called the apply for an update its walk refused")
+			}
+			if !maps.Equal(room.StateVector(), held) || !bytes.Equal(crdt.EncodeStateAsUpdateV1(room, nil), before) {
+				t.Fatalf("the room's state vector is %v, want %v as it was", room.StateVector(), held)
+			}
+		})
+	}
+}
+
+// An update that would take the room's struct total past the decode cap is refused with the
+// document's own close, whatever it inserts or deletes, and the room is left as it was; one that
+// takes it to the cap exactly is admitted. The refusal is confirmed by an exact count of the room
+// before it is made: the running total says the update passes the cap, and the count agrees.
+func TestAnUpdatePastTheRoomsStructTotalIsRefused(t *testing.T) {
+	ordinary := "# Title\n\nOne paragraph of ordinary prose.\n"
+	for _, row := range []struct {
+		name string
+		// update is built against the room's exact count, held.
+		update  func(held uint64) []byte
+		refused bool
+	}{
+		{
+			name: "GC structs one past the cap",
+			update: func(held uint64) []byte {
+				return gcFrameFrom(7, int((maxUpdateItems-held)/(1+splitsAStructCanCause))+1)
+			},
+			refused: true,
+		},
+		{
+			name: "GC structs to the cap",
+			update: func(held uint64) []byte {
+				return gcFrameFrom(7, int((maxUpdateItems-held)/(1+splitsAStructCanCause)))
+			},
+		},
+		{
+			name: "delete ranges one past the cap",
+			update: func(held uint64) []byte {
+				return deleteRangesFrom(7, int((maxUpdateItems-held)/splitsAStructCanCause)+1)
+			},
+			refused: true,
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, room, replica := peerUpdateRoom(t, ordinary, 0)
+			total, counts := countedStructTotal(t, replica)
+			held, stale := total.running()
+			if stale || held != countRoomStructs(room) {
+				t.Fatalf("the room's total is %d (stale %t), want its exact count %d", held, stale, countRoomStructs(room))
+			}
+			update := row.update(held)
+			before := crdt.EncodeStateAsUpdateV1(room, nil)
+			err, called := weighInto(service, room, update)
+			runtime.KeepAlive(replica)
+			if row.refused {
+				requireRefusedTooLarge(t, err, called, room, before)
+				total.mu.Lock()
+				confirmed := total.confirmed
+				total.mu.Unlock()
+				if counts.Load() != 1 || !confirmed {
+					t.Fatalf("the hook counted the room %d times (confirmed %t) before refusing, want one confirmation", counts.Load(), confirmed)
+				}
+				return
+			}
+			if err != nil || !called {
+				t.Fatalf("the hook answered %v (applied %t), want the update admitted", err, called)
+			}
+			if after, _ := total.running(); after > maxUpdateItems || countRoomStructs(room) > after {
+				t.Fatalf("the room's total is %d after the update, want within %d and no less than its exact count %d", after, maxUpdateItems, countRoomStructs(room))
+			}
+		})
+	}
+}
+
+// A running total past the cap overstates the room, since it counts every split an update could
+// cause: the hook confirms it by an exact count before it refuses, admits the update the count
+// leaves room for, and re-bases the total on the count.
+func TestARunningStructTotalPastTheCapIsConfirmedBeforeItRefuses(t *testing.T) {
+	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	total, counts := countedStructTotal(t, replica)
+	total.took(maxUpdateItems)
+	update := peerTyping(t, room, "y")
+	weighed := peerWeighing{held: room.StateVector()}
+	if _, err := walkUpdate(update, fromPeer, &weighed); err != nil {
+		t.Fatal(err)
+	}
+	exact := countRoomStructs(room)
+	err, called := weighInto(service, room, update)
+	runtime.KeepAlive(replica)
+	if err != nil || !called {
+		t.Fatalf("the hook answered %v (applied %t), want the keystroke admitted once the count confirmed room for it", err, called)
+	}
+	if counts.Load() != 1 {
+		t.Fatalf("the hook counted the room %d times, want one confirmation", counts.Load())
+	}
+	if after, _ := total.running(); after != exact+weighed.added() {
+		t.Fatalf("the room's total is %d after the confirmation, want the count's %d and the keystroke's %d", after, exact, weighed.added())
+	}
+}
+
+// A total a server write has made stale is confirmed by an exact count before the hook admits on
+// it once it is within an eighth of the cap; further from the cap, or fresh, it answers alone.
+func TestAStaleStructTotalNearTheCapIsConfirmedBeforeItAdmits(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		// short is how far short of the cap the running total stands.
+		short     uint64
+		stale     bool
+		confirmed bool
+	}{
+		{name: "a stale total near the cap is confirmed", short: structTotalStaleMargin / 2, stale: true, confirmed: true},
+		{name: "a stale total far from the cap is not", short: 2 * structTotalStaleMargin, stale: true},
+		{name: "a fresh total near the cap is not", short: structTotalStaleMargin / 2},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+			total, counts := countedStructTotal(t, replica)
+			held, _ := total.running()
+			total.took(maxUpdateItems - row.short - held)
+			if row.stale {
+				// A server write: a transaction on the room of an origin that is not a hook's
+				// apply, as Server.Apply's are.
+				text := firstText(room.GetXmlFragment(fragmentName))
+				room.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "s", nil) }, "server")
+			}
+			if _, stale := total.running(); stale != row.stale {
+				t.Fatalf("the total reads stale %t, want %t", stale, row.stale)
+			}
+			err, called := weighInto(service, room, peerTyping(t, room, "y"))
+			runtime.KeepAlive(replica)
+			if err != nil || !called {
+				t.Fatalf("the hook answered %v (applied %t), want the keystroke admitted", err, called)
+			}
+			if confirmed := counts.Load() == 1; confirmed != row.confirmed || counts.Load() > 1 {
+				t.Fatalf("the hook counted the room %d times, want a confirmation: %t", counts.Load(), row.confirmed)
+			}
+			if _, stale := total.running(); stale != (row.stale && !row.confirmed) {
+				t.Fatalf("the total reads stale %t after the keystroke, want %t", stale, row.stale && !row.confirmed)
+			}
+		})
+	}
+}
+
+// A confirmation that the room is at the cap answers for it until the hook has admitted another
+// 1/64 of the cap, so a room at the cap is not counted again for every update it refuses; past
+// that the hook counts it again.
+func TestTheStructTotalsConfirmationIsReusedWithinASixtyFourthOfTheCap(t *testing.T) {
+	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	total, counts := countedStructTotal(t, replica)
+	held, _ := total.running()
+	// What the room cannot take is the same frame each time, since nothing refused moves the room.
+	pastTheCap := gcFrameFrom(7, int((maxUpdateItems-held)/(1+splitsAStructCanCause))+1)
+	refuse := func(wantCounts int64) {
+		t.Helper()
+		before := crdt.EncodeStateAsUpdateV1(room, nil)
+		err, called := weighInto(service, room, pastTheCap)
+		requireRefusedTooLarge(t, err, called, room, before)
+		if counts.Load() != wantCounts {
+			t.Fatalf("the hook has counted the room %d times, want %d", counts.Load(), wantCounts)
+		}
+	}
+	admit := func(update []byte) {
+		t.Helper()
+		if err, called := weighInto(service, room, update); err != nil || !called {
+			t.Fatalf("the hook answered %v (applied %t), want the update admitted", err, called)
+		}
+	}
+	refuse(1)
+	refuse(1)
+	// A keystroke's few structs are well within the sixtieth-fourth.
+	admit(peerTyping(t, room, "y"))
+	refuse(1)
+	// GC structs of another client, just enough that what the hook admitted since the
+	// confirmation reaches structTotalRecheck.
+	admit(gcFrameFrom(8, structTotalRecheck/(1+splitsAStructCanCause)+1))
+	refuse(2)
+	refuse(2)
+	runtime.KeepAlive(replica)
+}
+
+// A room's load counts its struct total from the room's encoded state, parked structs and parked
+// delete ranges included, each parked one with the splits it can still cause.
+func TestTheStructTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing.T) {
+	tree, err := pmdoc.Parse("# Title\n\nOne paragraph of ordinary prose.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := encodeDocumentTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	room := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(room, seed, nil); err != nil {
+		t.Fatal(err)
+	}
+	integrated, err := walkUpdate(crdt.EncodeStateAsUpdateV1(room, nil), fromRoom, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Structs of client 9 from clock 10, whose clocks before 10 the room has never seen, and a
+	// delete range of client 11's, which the room has never seen at all: both park.
+	parked := newV1Frame(1).group(3, 9, 10).gc(1).gc(1).gc(1).noDeletes()
+	if err := crdt.ApplyUpdateV1(room, parked, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := crdt.ApplyUpdateV1(room, deleteRangesFrom(11, 2), nil); err != nil {
+		t.Fatal(err)
+	}
+	pending := room.PendingStats()
+	if pending.Items == 0 || pending.DeleteRanges == 0 {
+		t.Fatalf("the room parked %+v, want parked structs and parked delete ranges", pending)
+	}
+	walked, err := walkUpdate(crdt.EncodeStateAsUpdateV1(room, nil), fromRoom, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walked.structs < integrated.structs+uint64(pending.Items) {
+		t.Fatalf("the room's encoded state walks %d structs, want its %d integrated and its %d parked", walked.structs, integrated.structs, pending.Items)
+	}
+	service := &Service{}
+	rendering := "# Title\n\nOne paragraph of ordinary prose.\n"
+	replica := service.keepReplica(room, &rendering)
+	want := walked.structs + splitsAStructCanCause*uint64(pending.Items+pending.DeleteRanges)
+	if total, stale := replica.structs.running(); total != want || stale {
+		t.Fatalf("the load counted a total of %d (stale %t), want the walk's %d structs and the splits of %d parked structs and %d parked ranges, %d",
+			total, stale, walked.structs, pending.Items, pending.DeleteRanges, want)
+	}
+}
+
+// Each count the measurer makes of a room's rendering counts the room's struct total afresh, in
+// the measurer's turn, re-basing it on what the room holds.
+func TestTheMeasurersCountReBasesTheStructTotal(t *testing.T) {
+	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	service.measurer.interval = noInterval
+	total, counts := countedStructTotal(t, replica)
+	total.took(maxUpdateItems / 2)
+	rendering := headings(1)
+	replica.publishSize(&rendering)
+	service.measurer.waitIdle()
+	runtime.KeepAlive(room)
+	if got, stale := total.running(); counts.Load() != 1 || got != countRoomStructs(room) || stale {
+		t.Fatalf("after the measurer's count the total is %d (stale %t, %d counts), want the room's exact count %d", got, stale, counts.Load(), countRoomStructs(room))
+	}
+}
+
+// applyHeapEstimate is the estimate the hook computes for update arriving at room, a room no load
+// listed (peerWeighing.applyHeap, structTotal.roomStructs), and the update's own share of it
+// (peerWeighing.ownApplyHeap).
+func applyHeapEstimate(t *testing.T, room *crdt.Doc, update []byte) (estimate, own uint64) {
+	t.Helper()
+	weighed := peerWeighing{held: room.StateVector()}
+	if _, err := walkUpdate(update, fromPeer, &weighed); err != nil {
+		t.Fatal(err)
+	}
+	var unlisted *structTotal
+	return weighed.applyHeap(len(update), unlisted.roomStructs(room)), weighed.ownApplyHeap(len(update))
+}
+
+// marginValues is client 7's frame of one item under the margin's key "k" holding n copies of the
+// lib0 Any value v.
+func marginValues(n int, v any) []byte {
+	f := newV1Frame(1).group(1, 7, 0).rooted(byte(structAny), marksMapName, "k").uint(uint64(n))
+	for range n {
+		f.any(v)
+	}
+	return f.noDeletes()
+}
+
+// marginEntries is client 7's frame of n items under the margin, each the entry of a key of its
+// own holding the one lib0 Any value v.
+func marginEntries(n int, v any) []byte {
+	f := newV1Frame(1).group(n, 7, 0)
+	for i := range n {
+		f.rooted(byte(structAny), marksMapName, fmt.Sprintf("k%d", i)).uint(1).any(v)
+	}
+	return f.noDeletes()
+}
+
+// marginJSON is client 7's frame of one ContentJSON item under the margin's key "k" holding n
+// copies of the JSON text js.
+func marginJSON(n int, js string) []byte {
+	f := newV1Frame(1).group(1, 7, 0).rooted(byte(structJSON), marksMapName, "k").uint(uint64(n))
+	for range n {
+		f.str(js)
+	}
+	return f.noDeletes()
+}
+
+// fragmentItems is client 7's frame of n items of content reference kind directly under the
+// fragment, content writing each one's content.
+func fragmentItems(n int, kind structKind, content func(v1Frame) v1Frame) []byte {
+	f := newV1Frame(1).group(n, 7, 0)
+	for range n {
+		f = content(f.rooted(byte(kind), fragmentName, ""))
+	}
+	return f.noDeletes()
+}
+
+// chainedCharacters is client 7's frame of n one-character strings under the fragment, each after
+// the last, and each but the first naming both its origins, the heaviest header an item carries.
+func chainedCharacters(n int) []byte {
+	f := newV1Frame(1).group(n, 7, 0).rooted(byte(structString), fragmentName, "").str("a")
+	for i := 1; i < n; i++ {
+		f.raw(byte(structString) | infoHasOrigin | infoHasRightOrigin).uint(7).uint(uint64(i - 1)).uint(7).uint(0).str("a")
+	}
+	return f.noDeletes()
+}
+
+// holdingClocks is a fresh room that already holds client's first length clocks, as one GC run.
+func holdingClocks(t *testing.T, client, length uint64) func() *crdt.Doc {
+	return func() *crdt.Doc {
+		doc := newDocumentCopy()
+		if err := crdt.ApplyUpdateV1(doc, newV1Frame(1).group(1, client, 0).gc(length).noDeletes(), nil); err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+}
+
+// applyAllocation is what ygo's apply of update into a document into makes allocates, the least of
+// three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
+// its peak, since no byte it holds can be one it did not allocate. The document has an update
+// observer, as every room does (ygo's own, and the room's, websocket.go:496), so the apply
+// encodes the update its transaction made for the observers (sjawhar/ygo v1.51.3-sami.2,
+// crdt/doc.go:463-465) as a room's does. Two collections before each run empty the pool ygo's
+// encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,
+// so the encode grows its buffer from nothing, as it does in a pod whose pool a collection emptied.
+func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte) uint64 {
+	t.Helper()
+	least := uint64(math.MaxUint64)
+	for range 3 {
+		doc := into()
+		doc.OnUpdate(func([]byte, any) {})
+		runtime.GC()
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		err := crdt.ApplyUpdateV1(doc, update, nil)
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatal(err)
+		}
+		least = min(least, after.TotalAlloc-before.TotalAlloc)
+		runtime.KeepAlive(doc)
+	}
+	return least
+}
+
+// ygo's apply of each update, of every kind of content a browser can send and at scale, allocates
+// no more than the hook's estimate of it (peerWeighing.applyHeap), so the bound the estimates are
+// held to (applyHeapBound) bounds what the applies hold. Each row is measured as ygo's apply into
+// a room allocates it (applyAllocation), into a fresh room, or into one that already holds every
+// clock the update carries, where ygo still decodes every struct and value before it drops them,
+// or into one whose items the update splits or whose deleted items the observers' encode walks.
+// The estimate does not overstate what the editor itself sends past three times, so that the bound
+// does not turn away or hold up a real editor: the whole-state handoffs of the heaviest document
+// and of a mebibyte of prose, into the room holding them and into a fresh one, by the whole
+// estimate; and a 64 KiB paste, a keystroke and a deletion, by the update's own share, which is
+// what decides whether they wait (unweighedApplyHeapBytes). The figures the comments of
+// applyHeapBound and unweighedApplyHeapBytes quote are held here too.
+func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
+	fresh := func() *crdt.Doc { return newDocumentCopy() }
+	documentHolding := func(updates ...[]byte) func() *crdt.Doc {
+		return func() *crdt.Doc {
+			doc := newDocumentCopy()
+			for _, update := range updates {
+				if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return doc
+		}
+	}
+	heaviest := heaviestDocument(t)
+	heaviestState := crdt.EncodeStateAsUpdateV1(heaviest, nil)
+	prose := crdt.EncodeStateAsUpdateV1(residentRoomDocument(t, 1<<20), nil)
+	paste := peerTyping(t, heaviest, strings.Repeat("pasted words ", (64<<10)/13))
+	keystroke := peerTyping(t, heaviest, "y")
+	deletion := peerDeleting(t, heaviest, 1)
+	manyClients := func(clients int) func() *crdt.Doc {
+		f := newV1Frame(clients)
+		for c := range clients {
+			f = f.group(1, uint64(100+c), 0).gc(1)
+		}
+		return documentHolding(f.noDeletes())
+	}
+	record := map[string]any{"kind": "comment", "by": "user:alice", "text": strings.Repeat("m", 200), "at": 1.5e12, "replies": []any{"r", int64(3)}}
+	bigMap := map[string]any{}
+	for i := range 100_000 {
+		bigMap[fmt.Sprint(i)] = nil
+	}
+	var bigObject strings.Builder
+	bigObject.WriteString("{")
+	for i := range 100_000 {
+		if i > 0 {
+			bigObject.WriteString(",")
+		}
+		fmt.Fprintf(&bigObject, `"%d":0`, i)
+	}
+	bigObject.WriteString("}")
+	bigArray := "[" + strings.TrimSuffix(strings.Repeat("0,", 100_000), ",") + "]"
+	legacyJSON := func(n int) []byte {
+		f := newV1Frame(1).group(1, 7, 0).rooted(byte(structJSON), marksMapName, "k").uint(uint64(n))
+		for range n {
+			f.any(map[string]any{"": nil})
+		}
+		return f.noDeletes()
+	}
+	const n = 200_000
+	skips := newV1Frame(1).group(n, 7, 0)
+	for range n {
+		skips.skip(1)
+	}
+	// A room holding client 7's string of n characters, and the same with every other character
+	// deleted, n/2 deleted items; client 8's characters each inserted between two of client 7's,
+	// splitting the string at both origins; and client 8's keystroke at the string's end.
+	text := fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", n)) })
+	everyOther := deleteRangesFrom(7, n/2)
+	between := newV1Frame(1).group(n/2, 8, 0)
+	for i := range n / 2 {
+		between.raw(byte(structString) | infoHasOrigin | infoHasRightOrigin).uint(7).uint(uint64(2 * i)).uint(7).uint(uint64(2*i + 1)).str("b")
+	}
+	atTheEnd := newV1Frame(1).group(1, 8, 0).raw(byte(structString) | infoHasOrigin).uint(7).uint(n - 1).str("y").noDeletes()
+	tombstoned := crdt.EncodeStateAsUpdateV1(documentHolding(text, everyOther)(), nil)
+	// editor is whether the update is one the editor sends, which the estimate may not overstate
+	// past three times: by the whole estimate, or by the update's own share.
+	const (
+		notTheEditors = iota
+		editorsWhole
+		editorsOwn
+	)
+	for _, row := range []struct {
+		name   string
+		into   func() *crdt.Doc
+		update []byte
+		editor int
+	}{
+		{"a million null Any values in one struct", fresh, marginValues(1_000_000, nil), notTheEditors},
+		{"a million null Any values in one struct, into a room holding them", holdingClocks(t, 7, 1_000_000), marginValues(1_000_000, nil), notTheEditors},
+		{"maps of one entry, the densest Any, in one struct", fresh, marginValues(n, map[string]any{"": nil}), notTheEditors},
+		{"maps of one empty map in one struct", fresh, marginValues(n, map[string]any{"": map[string]any{}}), notTheEditors},
+		{"arrays of one map in one struct", fresh, marginValues(n, []any{map[string]any{"": nil}}), notTheEditors},
+		{"strings of nine bytes in one struct", fresh, marginValues(n, "123456789"), notTheEditors},
+		{"maps of 100,000 entries", fresh, marginValues(10, bigMap), notTheEditors},
+		{"margin entries of one null each", fresh, marginEntries(n, nil), notTheEditors},
+		{"margin entries of one null each, into a room holding them", holdingClocks(t, 7, n), marginEntries(n, nil), notTheEditors},
+		{"margin entries of one record each", fresh, marginEntries(n/10, record), notTheEditors},
+		{"null JSON texts in one struct", fresh, marginJSON(n, "null"), notTheEditors},
+		{"number JSON texts in one struct", fresh, marginJSON(n, "0"), notTheEditors},
+		{"JSON objects of one entry in one struct", fresh, marginJSON(n, `{"":0}`), notTheEditors},
+		{"JSON objects of one empty object in one struct", fresh, marginJSON(n, `{"":{}}`), notTheEditors},
+		{"JSON arrays of 100,000 numbers", fresh, marginJSON(20, bigArray), notTheEditors},
+		{"JSON objects of 100,000 entries", fresh, marginJSON(20, bigObject.String()), notTheEditors},
+		{"JSON strings of 1,000 escapes", fresh, marginJSON(2000, `"`+strings.Repeat(`\n`, 500)+`"`), notTheEditors},
+		{"legacy Any JSON values in one struct", fresh, legacyJSON(n), notTheEditors},
+		{"a string of 4 MiB", fresh, fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", 4<<20)) }), notTheEditors},
+		{"one-character strings each naming both origins", fresh, chainedCharacters(n), notTheEditors},
+		{"one-character strings each splitting the room's string", documentHolding(text), between.noDeletes(), notTheEditors},
+		{"strings of seventeen bytes", fresh, fragmentItems(n, structString, func(f v1Frame) v1Frame { return f.str("12345678901234567") }), notTheEditors},
+		{"binary of 4 MiB", fresh, fragmentItems(1, structBinary, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", 4<<20)) }), notTheEditors},
+		{"empty binaries", fresh, fragmentItems(n, structBinary, func(f v1Frame) v1Frame { return f.str("") }), notTheEditors},
+		{"embeds of an empty object", fresh, fragmentItems(n, structEmbed, func(f v1Frame) v1Frame { return f.str("{}") }), notTheEditors},
+		{"formats of an empty object", fresh, fragmentItems(n, structFormat, func(f v1Frame) v1Frame { return f.str("bold").str("{}") }), notTheEditors},
+		{"XML elements", fresh, fragmentItems(n, structType, func(f v1Frame) v1Frame { return f.raw(3).str("paragraph") }), notTheEditors},
+		{"XML texts", fresh, fragmentItems(n, structType, func(f v1Frame) v1Frame { return f.raw(6) }), notTheEditors},
+		{"deleted items", fresh, fragmentItems(n, structDeleted, func(f v1Frame) v1Frame { return f.uint(1) }), notTheEditors},
+		{"maxUpdateItems GC structs", fresh, gcFrameFrom(7, maxUpdateItems), notTheEditors},
+		{"maxUpdateItems GC structs, into a room holding them", holdingClocks(t, 7, maxUpdateItems), gcFrameFrom(7, maxUpdateItems), notTheEditors},
+		{"skips", fresh, skips.noDeletes(), notTheEditors},
+		{"delete ranges of a client the room has not seen", fresh, deleteRangesFrom(7, n), notTheEditors},
+		{"delete ranges each splitting the room's string", documentHolding(text), everyOther, notTheEditors},
+		{"one character into a room of 200,000 clients", manyClients(n), fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str("a") }), notTheEditors},
+		{"one character into a room of 57,345 clients", manyClients(57_345), fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str("a") }), notTheEditors},
+		{"one character into a string of 100,000 deleted items", documentHolding(text, everyOther), atTheEnd, notTheEditors},
+		{"the whole state of a string of 100,000 deleted items into the room holding it", documentHolding(text, everyOther), tombstoned, notTheEditors},
+		{"the heaviest handoff into the room holding it", documentHolding(heaviestState), heaviestState, editorsWhole},
+		{"the heaviest handoff into a fresh room", fresh, heaviestState, editorsWhole},
+		{"a mebibyte of prose handed off into the room holding it", documentHolding(prose), prose, editorsWhole},
+		{"a mebibyte of prose handed off into a fresh room", fresh, prose, editorsWhole},
+		{"a 64 KiB paste into the heaviest document", documentHolding(heaviestState), paste, editorsOwn},
+		{"a keystroke into the heaviest document", documentHolding(heaviestState), keystroke, editorsOwn},
+		{"a deletion of one character from the heaviest document", documentHolding(heaviestState), deletion, editorsOwn},
+	} {
+		estimate, own := applyHeapEstimate(t, row.into(), row.update)
+		allocated := applyAllocation(t, row.into, row.update)
+		t.Logf("%s: a %d-byte update allocates %d bytes, estimated at %d (%.2f times), its own share %d (%.2f times)",
+			row.name, len(row.update), allocated, estimate, float64(estimate)/float64(allocated), own, float64(own)/float64(allocated))
+		if allocated > estimate {
+			t.Errorf("%s: the apply allocates %d bytes, past its estimate of %d", row.name, allocated, estimate)
+		}
+		if row.editor == editorsWhole && estimate > 3*allocated {
+			t.Errorf("%s: the estimate of %d bytes is more than three times the %d the editor's update allocates", row.name, estimate, allocated)
+		}
+		if row.editor == editorsOwn && own > 3*allocated {
+			t.Errorf("%s: the update's own share of %d bytes is more than three times the %d it allocates", row.name, own, allocated)
+		}
+	}
+	held, _ := applyHeapEstimate(t, documentHolding(heaviestState)(), heaviestState)
+	handedOver, _ := applyHeapEstimate(t, fresh(), heaviestState)
+	_, pasted := applyHeapEstimate(t, documentHolding(heaviestState)(), paste)
+	_, typed := applyHeapEstimate(t, documentHolding(heaviestState)(), keystroke)
+	t.Logf("the heaviest handoff is estimated at %d bytes into the room holding it, %d into a fresh one; a 64 KiB paste's own share is %d, a keystroke's %d",
+		held, handedOver, pasted, typed)
+	if 10*held > applyHeapBound || 3*handedOver > applyHeapBound {
+		t.Errorf("the heaviest handoff is estimated at %d bytes into the room holding it and %d into a fresh one, past a tenth and a third of the %d-byte bound",
+			held, handedOver, applyHeapBound)
+	}
+	if 3*pasted > unweighedApplyHeapBytes || 400*typed > unweighedApplyHeapBytes {
+		t.Errorf("a 64 KiB paste's own share is %d bytes and a keystroke's %d, past a third and a four-hundredth of the %d unweighed",
+			pasted, typed, unweighedApplyHeapBytes)
+	}
+}
+
+// Admitted updates whose own share of their estimate passes unweighedApplyHeapBytes apply only
+// while their estimates together stay within applyHeapBound, for the whole service and in rooms of
+// their own: with as many applying as the bound has room for, the next waits until one ends. A
+// keystroke, under the threshold, applies at once, even in the room whose heavy update is waiting,
+// since a waiter holds nothing of its room.
+func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
+	service := &Service{}
+	heavy := marginValues(4_000_000, nil)
+	estimate, own := applyHeapEstimate(t, newDocumentCopy(), heavy)
+	fits := int(applyHeapBound / estimate)
+	if own <= unweighedApplyHeapBytes || fits < 1 || fits > 8 {
+		t.Fatalf("the heavy update is estimated at %d bytes, its own share %d, %d to the bound, want its share past %d and a few to the bound",
+			estimate, own, fits, unweighedApplyHeapBytes)
+	}
+	tree, err := pmdoc.Parse("# Title\n\nOne paragraph of ordinary prose.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := encodeDocumentTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedInto := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(typedInto, seed, nil); err != nil {
+		t.Fatal(err)
+	}
+	keystroke := peerTyping(t, typedInto, "y")
+	if _, typed := applyHeapEstimate(t, typedInto, keystroke); typed > unweighedApplyHeapBytes {
+		t.Fatalf("the keystroke's own share is %d bytes, past the %d unweighed", typed, unweighedApplyHeapBytes)
+	}
+	waiting, _ := applyHeapEstimate(t, typedInto, heavy)
+	var holding, most atomic.Uint64
+	var running atomic.Int32
+	release := make(chan struct{})
+	started := make(chan int, fits+1)
+	var applies sync.WaitGroup
+	weigh := func(i int, room *crdt.Doc, weight uint64) {
+		applies.Go(func() {
+			err := service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: heavy}, func() error {
+				now := holding.Add(weight)
+				for seen := most.Load(); now > seen && !most.CompareAndSwap(seen, now); seen = most.Load() {
+				}
+				running.Add(1)
+				started <- i
+				<-release
+				running.Add(-1)
+				holding.Add(-weight)
+				return nil
+			})
+			if err != nil {
+				t.Errorf("the hook refused heavy update %d: %v", i, err)
+			}
+		})
+	}
+	for i := range fits {
+		weigh(i, newDocumentCopy(), estimate)
+	}
+	for range fits {
+		<-started
+	}
+	// The bound has no room for another: the heavy update left over waits, in the room the
+	// keystroke goes to, and the keystroke does not wait.
+	weigh(fits, typedInto, waiting)
+	select {
+	case i := <-started:
+		t.Fatalf("heavy update %d applied with %d holding the bound", i, fits)
+	case <-time.After(200 * time.Millisecond):
+	}
+	typed := make(chan error, 1)
+	go func() {
+		typed <- service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: typedInto, Update: keystroke}, func() error { return nil })
+	}()
+	select {
+	case err := <-typed:
+		if err != nil {
+			t.Fatalf("the hook refused the keystroke: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the keystroke waited behind the heavy update waiting on the apply heap bound")
+	}
+	if got := running.Load(); got != int32(fits) {
+		t.Fatalf("%d heavy updates are applying, want the %d the bound has room for", got, fits)
+	}
+	close(release)
+	applies.Wait()
+	if got := most.Load(); got > applyHeapBound || got < uint64(fits)*estimate {
+		t.Fatalf("the heavy applies held %d bytes of estimate at most, want at least the %d of %d at once and never past the %d-byte bound",
+			got, uint64(fits)*estimate, fits, applyHeapBound)
+	}
+}
+
+// An update whose estimate alone passes the whole bound could never apply within it, so the hook
+// answers it with an error and no close, as it answers a walk's refusal, and never applies it: the
+// update measured to allocate 805,307,736 bytes in one apply, a frame at the message floor of null
+// values for a client whose every clock the room already holds, which inserts nothing and adds no
+// struct, so that every other rule admits it.
+func TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied(t *testing.T) {
+	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	if err := crdt.ApplyUpdateV1(room, newV1Frame(1).group(1, 7, 0).gc(32<<20).noDeletes(), nil); err != nil {
+		t.Fatal(err)
+	}
+	update := marginValues(maxMessageBytes-64, nil)
+	weighed := peerWeighing{held: room.StateVector()}
+	if _, err := walkUpdate(update, fromPeer, &weighed); err != nil {
+		t.Fatal(err)
+	}
+	if weighed.inserted != 0 || weighed.added() != 0 || len(update) > maxMessageBytes {
+		t.Fatalf("the %d-byte update inserts %d and adds %d structs, want a frame within the floor that inserts and adds nothing", len(update), weighed.inserted, weighed.added())
+	}
+	estimate := weighed.applyHeap(len(update), replica.structs.roomStructs(room))
+	if estimate <= applyHeapBound {
+		t.Fatalf("the %d-byte update is estimated at %d bytes, within the %d-byte bound", len(update), estimate, applyHeapBound)
+	}
+	t.Logf("a %d-byte update of null values is estimated at %d bytes, against the %d-byte bound", len(update), estimate, applyHeapBound)
+	held := room.StateVector()
+	before := crdt.EncodeStateAsUpdateV1(room, nil)
+	err, called := weighInto(service, room, update)
+	runtime.KeepAlive(replica)
+	var refusal *websocket.PeerClose
+	if !errors.Is(err, errApplyTooHeavy) || errors.As(err, &refusal) {
+		t.Fatalf("the hook answered %v, want the apply heap's refusal and no close", err)
+	}
+	if called {
+		t.Fatal("the hook called the apply for an update heavier than the bound")
+	}
+	if !maps.Equal(room.StateVector(), held) || !bytes.Equal(crdt.EncodeStateAsUpdateV1(room, nil), before) {
+		t.Fatal("the room changed for an update the hook refused")
+	}
+}
+
+// BenchmarkStructTotalConfirmation measures what the hook's confirmation of a room's struct total
+// costs the browser whose update it weighs (structTotal.confirm): an encode of the room's whole
+// state and a walk of it (countRoomStructs), on a mebibyte of a room's shape. It reports the
+// encoded state's bytes beside the time and the allocation.
+func BenchmarkStructTotalConfirmation(b *testing.B) {
+	live := residentRoomDocument(b, 1<<20)
+	b.ReportAllocs()
+	for b.Loop() {
+		if countRoomStructs(live) == 0 {
+			b.Fatal("the room counted no structs")
+		}
+	}
+	b.ReportMetric(float64(len(crdt.EncodeStateAsUpdateV1(live, nil))), "state-bytes")
 }
