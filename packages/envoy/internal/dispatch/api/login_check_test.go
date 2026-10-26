@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -103,5 +104,77 @@ func TestAWriteRunsOnlyAsThePersonWhoPressedIt(t *testing.T) {
 	}
 	if read := pressedAs(t, handler, http.MethodGet, comments, nil, "alice", &bob, ""); read.Code != http.StatusOK {
 		t.Errorf("a read naming another login: status=%d, want it answered as ever", read.Code)
+	}
+}
+
+// INFRA-258 (ProofRun3 D1). The Conversation's read mark is a PUT, and runs only as the person who
+// pressed it, as every write does: a mark pressed by bob that goes out on alice's session - another
+// tab signed her in in place - is refused 409 LOGIN_CHANGED and writes nothing into her state, so an
+// issue never reads as read for someone who never opened it. Pressed by alice, it is written.
+func TestAReadMarkRunsOnlyAsThePersonWhoPressedIt(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	issue := createTestIssue(t, handler, "MARK", "Read by whom")
+	state := "/api/v1/me/issues/" + issue + "/state"
+	alice, bob := "alice", "bob"
+	lastRead := func() *int {
+		var seq *int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select max(last_read_seq) from user_issue_state where login = 'alice' and issue_key = $1
+		`, issue).Scan(&seq); err != nil {
+			t.Fatal(err)
+		}
+		return seq
+	}
+	refused := pressedAs(t, handler, http.MethodPut, state, map[string]any{"last_read_seq": 3}, "alice", &bob, "")
+	if code, _ := refusalOf(t, refused); refused.Code != http.StatusConflict || code != contracts.DispatchLoginChanged {
+		t.Fatalf("a read mark pressed by bob on alice's session: status=%d body=%s, want 409 %s",
+			refused.Code, refused.Body.String(), contracts.DispatchLoginChanged)
+	}
+	if seq := lastRead(); seq != nil {
+		t.Fatalf("the refused mark left alice's last read at %d, want her state untouched", *seq)
+	}
+	if marked := pressedAs(t, handler, http.MethodPut, state, map[string]any{"last_read_seq": 3}, "alice", &alice, ""); marked.Code != http.StatusOK {
+		t.Fatalf("alice's own read mark: status=%d body=%s, want 200", marked.Code, marked.Body.String())
+	}
+	if seq := lastRead(); seq == nil || *seq != 3 {
+		t.Fatalf("alice's own mark left her last read at %v, want 3", seq)
+	}
+}
+
+// Every write route of the table - each POST, PATCH, PUT and DELETE - checks Dispatch-Login before
+// its handler runs: register wraps every route but a read in the check, so no write route can be
+// added that a retry on another person's session runs.
+func TestEveryWriteRouteChecksWhoPressedIt(t *testing.T) {
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	bob := "bob"
+	writes := 0
+	for _, route := range served.routes() {
+		if route.Method == http.MethodGet {
+			continue
+		}
+		writes++
+		var path []string
+		for segment := range strings.SplitSeq(route.Pattern, "/") {
+			switch {
+			case segment == "{$}":
+				segment = ""
+			case strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}"):
+				segment = "x"
+			}
+			path = append(path, segment)
+		}
+		refused := pressedAs(t, handler, route.Method, strings.Join(path, "/"), map[string]any{}, "alice", &bob, "")
+		// A route the check let through answers whatever its handler does, which need not be JSON.
+		var refusal struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(refused.Body.Bytes(), &refusal)
+		if refused.Code != http.StatusConflict || refusal.Code != contracts.DispatchLoginChanged {
+			t.Errorf("%s %s pressed by bob on alice's session: status=%d body=%.200s, want 409 %s",
+				route.Method, route.Pattern, refused.Code, refused.Body.String(), contracts.DispatchLoginChanged)
+		}
+	}
+	if writes == 0 {
+		t.Fatal("the routes table holds no write route")
 	}
 }
