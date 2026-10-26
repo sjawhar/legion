@@ -2,20 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-248",
-  "completed": "2026-10-26T19:07:41Z",
-  "round": 3,
-  "scope": "Narrowed by the architect (review_round_cap): the delta 4209950d..efde11ad that fixes round-2 findings 1-5, plus the spec's acceptance lines; outside it only a correctness defect.",
-  "reviewedCodeHead": "efde11adb5a8dae6b837df51cc8f22e3139c496b",
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head efde11ad: Tests 40368294287 (lint, typecheck, test success), PR Title 40368294291 success, Docs 40368294263 and Worker Image 40368294581 success; Legion Envoy and Contracts 40368294303 still running (not required), its pi-legion job success with the new hide test passing on the pinned Oh My Pi. Compare efde11ad...head touches only .legion/.",
-  "thermonuclear": "Narrow pair on the delta at efde11ad: deep-review APPROVE (nothing found), code-quality 2 Minor (duplication and a doc line), adjudicated as Fast-follow cleanup; provider not verified (the subagent transcripts show no provider or model per turn).",
-  "roundTwoFindings": "All 5 fixed in efde11ad and the PR body: hide: true in all three skills (Oh My Pi hides them, Claude Code loads them: tester round 6 with negative controls; new real-omp test passes in CI), dogfood.md rule said once, ce-setup dropped, history removed, claude-envoy CHANGELOG sections and dispatch-brainstorming entry, Size line refreshed.",
-  "acceptance": "A1 probe-image OK and the skills guard green at efde11ad; A2 agent-browser 0.39.2 opens example.com in a gVisor uid-1000 Job on image sha256:eee8fadf (tester round 6); A3-A6 settled experiment records unchanged (INFRA-441 report, INFRA-245 comments).",
-  "decision": "approved",
+  "completed": "2026-10-26T20:04:39Z",
+  "round": 4,
+  "scope": "Narrowed by the architect to the delta efde11ad..3264771a: the Fast-follow 9d01535e (unhiddenSkills in pi-shared's skills guard, named in pi-legion's AGENTS.md), the try-the-options step moved into dispatch-writing-specs with 91 words of repetition cut in the three Dispatch skills (decision A, INFRA-140's 2,000-word acceptance line), and the merge 3264771a keeping both sides.",
+  "reviewedCodeHead": "3264771a17196319d1b6d66ebb9928aa075e25aa",
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head 3264771a: Tests 40389772616 queued (lint, typecheck, test queued), PR Title 40389992325 queued. A request for changes does not wait on CI. Compare 3264771a...head touches only .legion/.",
+  "thermonuclear": "Narrow pair at 3264771a: deep-review APPROVE with 2 Minor; code-quality CHANGES. Adjudicated: 3 findings stand (below); placement of the step and its recommend-only-if-settled rule are the approved spec wording, not reopened; withScratchOmpHome vs ompRoot is not a defect (different harnesses: ompRoot also builds an agent dir, a workspace and a sessions dir for session cases, on a Cleanup list). Provider not verified (the subagent transcripts show no provider or model per turn).",
+  "checked": "The merge keeps both sides (main's gcc and dpkg-notices lines beside agent-browser; outside the PR's 43 files the tree equals main d1f4b8a6). 12 of the 13 cuts restate a rule still stated where the PR body says. The step keeps every element of spec v4 change 1 except the explicit condition (finding 3) and names no person. No cut edits the three lines #2160 changes; #2160 will meet a textual conflict in skills/dispatch/SKILL.md:28-29 (resolution: this PR's :28 plus #2160's :29).",
+  "decision": "changes_requested",
   "critical": 0,
   "important": 0,
-  "minor": 2,
+  "minor": 3,
   "keyFindings": [
-    {"severity": "minor", "file": "packages/pi-legion/src/skills-guard.test.ts", "description": "The real-omp hide probe repeats bundledAgents' scratch-HOME harness (packages/pi-shared/test/skills-guard.ts:230) instead of living beside it as a shared rule. Duplication cleanup: Fast-follow."},
-    {"severity": "minor", "file": "packages/pi-legion/AGENTS.md", "description": "Lines 452 and 469 do not name the new real-binary check in src/skills-guard.test.ts. Doc cleanup: Fast-follow."}
+    {"severity": "minor", "file": "packages/pi-shared/AGENTS.md", "description": "The 'Skills guard rules' row (:109) enumerates every rule test/skills-guard.ts exports, bundledAgents included, but not the new unhiddenSkills (skills-guard.ts:315)."},
+    {"severity": "minor", "file": "skills/dispatch-writing-specs/SKILL.md", "description": "Cut 12 ('; resolve the ask it answers', :51) is not fully restated: dispatch/SKILL.md:52 covers only an ask you opened, so an ask another session opened (an earlier architect generation) and a person answers in a comment thread now stays open."},
+    {"severity": "minor", "file": "skills/dispatch-writing-specs/SKILL.md", "description": "The step (:47) says 'Then fresh agents build each', which reads as the next step rather than the approved 'If so'; the person asked that agents not be pushed to build by default."}
   ]
 }
