@@ -17351,7 +17351,7 @@ function routeText(issue2, titles) {
   const reach = {
     live: routeHeldBySession(issue2) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
     no_holder: issue2.route.startsWith("role:") ? " (nobody holds it right now)" : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
+    unknown: issue2.route_status_reason === "refilling" ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)" : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
   };
   return issue2.route + (issue2.route_status == null ? "" : reach[issue2.route_status]);
 }
@@ -18257,6 +18257,7 @@ async function executeDispatchTool(input) {
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress
       }));

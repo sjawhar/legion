@@ -2390,6 +2390,7 @@ describe("executeDispatchTool", () => {
           route: "role:sre",
           route_status: "no_holder",
           route_holder: null,
+          route_status_reason: null,
           updated_at: "2026-09-13T00:00:00Z",
           progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
         },
@@ -2397,6 +2398,59 @@ describe("executeDispatchTool", () => {
       total: 1,
       offset: 0,
       limit: 50,
+    });
+  });
+
+  test("dispatch_issues tells a route whose listener is refilling from one whose listener did not answer", async () => {
+    const row = (key: string, reason: string | null) => ({
+      key,
+      title: key,
+      status: "todo",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+      progress: { tasks: null, children: null },
+      claim: null,
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: reason,
+    });
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      response({
+        issues: [row("ACME-1", "refilling"), row("ACME-2", "unreachable"), row("ACME-3", null)],
+        total: 3,
+        limit: 50,
+        offset: 0,
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(1)).toEqual([
+      "ACME-1 [todo] ACME-1 · route role:sre (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)",
+      "ACME-2 [todo] ACME-2 · route role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+      "ACME-3 [todo] ACME-3 · route role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+    ]);
+    expect(result.details).toMatchObject({
+      issues: [
+        { key: "ACME-1", route_status_reason: "refilling" },
+        { key: "ACME-2", route_status_reason: "unreachable" },
+        { key: "ACME-3", route_status_reason: null },
+      ],
     });
   });
 
@@ -2463,9 +2517,33 @@ describe("executeDispatchTool", () => {
     expect(gone.text).toContain(
       "Route: session:ses-gone (that session is not running right now)\n"
     );
-    const blind = await read({ route: "role:sre", route_status: "unknown", route_holder: null });
+    const blind = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: "unreachable",
+    });
     expect(blind.text).toContain(
       "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A server that gives no reason reads as one whose listener did not answer.
+    const unexplained = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+    });
+    expect(unexplained.text).toContain(
+      "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A listener whose agent list is refilling did answer: the route is unknown only for now.
+    const refilling = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: "refilling",
+    });
+    expect(refilling.text).toContain(
+      "Route: role:sre (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)\n"
     );
     // A held role names its holder the way a claim does: by the live registry's title.
     const held = await read({ route: "role:sre", route_status: "live", route_holder: "ses-sre" });
