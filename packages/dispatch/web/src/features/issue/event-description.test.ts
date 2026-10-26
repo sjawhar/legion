@@ -214,8 +214,8 @@ test("eventDescription and the activity line name a person's spec edit by its ve
     type: "artifact.human_edited",
   };
 
-  expect(eventDescription(event)).toBe("Edited spec.md v4 to v7");
-  expect(activityDescription(event)).toBe("edited spec.md v4 to v7");
+  expect(eventDescription(event)).toEqual(["Edited spec.md v4 to v7"]);
+  expect(activityDescription(event)).toEqual(["edited spec.md v4 to v7"]);
 });
 
 test("eventDescription names the child a reparent adds or removes", () => {
