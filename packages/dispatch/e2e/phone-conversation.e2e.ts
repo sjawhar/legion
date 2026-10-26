@@ -1,6 +1,7 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, type Route, test } from "@playwright/test";
 
 import {
+  createAsk,
   createComment,
   createIssue,
   createMessage,
@@ -8,7 +9,7 @@ import {
   patchIssue,
   resolveComment,
 } from "./api";
-import { expectUncovered } from "./layout";
+import { type Box, boxesApart, expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
 import { answeredPost, holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -16,6 +17,10 @@ import { asUser } from "./users";
 // The phone layout on every project: on a phone a comment's thread opens full-screen over the
 // Conversation, and that is where each of these rows goes and comes back.
 const phone = { height: 844, width: 390 };
+// The iPhone 13 viewport INFRA-95 measured the landing fault at. At `phone` (390x844) the
+// composer's top sits near y603, below a newest turn left at y≈515 at the top of the page, so a
+// landing row could not fail there.
+const iphone = { height: 664, width: 390 };
 const session = {
   actor: { kind: "session" as const, id: "e2e-phone-conversation" },
   as: "agent" as const,
@@ -44,6 +49,68 @@ async function leaveThread(page: Page): Promise<void> {
 /** Scrolls the page to its foot, past the latest turn, as a reader browsing older turns does. */
 async function scrollToOldest(page: Page): Promise<void> {
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+}
+
+/** Waits until `card` has finished rendering: visible, then its box unchanged across 30
+ *  consecutive samples 50 ms apart, all within 20 s. It only samples: nothing here scrolls,
+ *  focuses, taps or hovers, so where the page put the card is where it is measured. */
+async function settle(card: Locator, label: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  await expect(card, `${label}: the newest card`).toBeVisible({ timeout: 20_000 });
+  let last: Box | null = null;
+  let unchanged = 0;
+  while (unchanged < 30) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `${label}: the newest card's box never held still for 30 samples within 20 s (last ${JSON.stringify(last)})`
+      );
+    }
+    const tick = Promise.withResolvers<void>();
+    setTimeout(tick.resolve, 50);
+    await tick.promise;
+    const box = await card.boundingBox();
+    const same =
+      box !== null &&
+      last !== null &&
+      box.x === last.x &&
+      box.y === last.y &&
+      box.width === last.width &&
+      box.height === last.height;
+    unchanged = same ? unchanged + 1 : 0;
+    last = box;
+  }
+}
+
+/** Where the page has the newest card now, measured once: whether it is wholly on screen, and
+ *  whether it shares no point with the docked composer. */
+async function landing(
+  page: Page,
+  card: Locator
+): Promise<{ apart: boolean; inView: boolean; where: string }> {
+  const box = await card.boundingBox();
+  const composer = await page.getByRole("form", { name: "Comment composer" }).boundingBox();
+  const view = await page.evaluate(() => ({
+    height: window.innerHeight,
+    scrollY: window.scrollY,
+    width: window.innerWidth,
+  }));
+  if (box === null) throw new Error("expected the newest card to have a box");
+  if (composer === null) throw new Error("expected the docked composer to have a box");
+  const inView =
+    box.x >= 0 &&
+    box.y >= 0 &&
+    box.x + box.width <= view.width &&
+    box.y + box.height <= view.height;
+  const apart = boxesApart(box, composer);
+  const where = `the newest card at ${JSON.stringify(box)}, the composer at ${JSON.stringify(composer)}, the ${view.width}x${view.height} viewport at window.scrollY ${view.scrollY}`;
+  return { apart, inView, where };
+}
+
+/** One-shot: the newest card is wholly on screen and clear of the docked composer. */
+async function expectNewestInView(page: Page, card: Locator, label: string): Promise<void> {
+  const { apart, inView, where } = await landing(page, card);
+  expect(inView, `${label}: the newest card is not wholly in the viewport: ${where}`).toBe(true);
+  expect(apart, `${label}: the newest card shares a point with the composer: ${where}`).toBe(true);
 }
 
 test.beforeEach(async () => {
@@ -870,6 +937,108 @@ test("on a phone, Jump to latest covers none of the issue's tabs or the controls
       for (const tap of await tapsLostAboveTurns(page)) lost.push(`scrolled to ${top}: ${tap}`);
     }
     expect(lost).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// INFRA-303: the Conversation's list is built from three reads, asks, comments and messages, and
+// shows nothing until all three answer. The first placement on the newest turn must not be spent
+// while one of them is still pending: a newest message known from the messages read before the
+// asks read answers otherwise lands the reader at the top of the page, the newest message under
+// the docked composer, and the asks answering later changes nothing that brings them back.
+test("on a phone, the Conversation opens with its newest message in view whichever read answers last", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Landing on the newest message" });
+  await createAsk(issue.key, { question: "Which landing should the reader get?" }, session);
+  await createComment(issue.key, { body: "A root comment under the ask" });
+  for (let index = 0; index < 8; index += 1) {
+    await createMessage(issue.key, { body: `Older message ${index}` }, session);
+  }
+  // Created last, so it is newer than every ask and comment: the held asks read cannot change
+  // which conversation is newest, only whether the list is on the page yet.
+  const newest = await createMessage(issue.key, { body: "The newest message lands here" }, session);
+  const conversation = `/issues/${issue.key}/conversation`;
+  const newestCard = (page: Page) =>
+    page.locator(`ol[aria-label="Conversation turns"] [data-turn="message:${newest.id}"]`);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    // Forced: the messages and comments reads answer while the asks read is held, then it answers.
+    const forced = await alice.newPage();
+    await forced.setViewportSize(iphone);
+    const heldAsks: Route[] = [];
+    await forced.route(
+      (url) =>
+        url.pathname === `/api/v1/issues/${issue.key}/asks` &&
+        url.searchParams.get("thread") === "1",
+      (route) => {
+        heldAsks.push(route);
+      }
+    );
+    const reads = ["messages", "comments"].map((read) =>
+      forced.waitForEvent("requestfinished", {
+        predicate: (request) =>
+          new URL(request.url()).pathname === `/api/v1/issues/${issue.key}/${read}`,
+      })
+    );
+    await forced.goto(conversation);
+    await Promise.all(reads);
+    await expect.poll(() => heldAsks.length).toBe(1);
+    // No in-page signal says the page has seen the partial data, so this fixed margin - two
+    // macrotasks, two frames and 300 ms - is the defended choice; the repeat-each red against
+    // the unfixed page is its proof.
+    await forced.evaluate(async () => {
+      for (let i = 0; i < 2; i++) {
+        const turn = Promise.withResolvers<void>();
+        setTimeout(turn.resolve, 0);
+        await turn.promise;
+      }
+      for (let i = 0; i < 2; i++) {
+        const frame = Promise.withResolvers<void>();
+        requestAnimationFrame(() => frame.resolve());
+        await frame.promise;
+      }
+      const margin = Promise.withResolvers<void>();
+      setTimeout(margin.resolve, 300);
+      await margin.promise;
+    });
+    expect(heldAsks, "the tab made exactly one asks read while it was held").toHaveLength(1);
+    await heldAsks[0]?.continue();
+    await settle(newestCard(forced), "forced open");
+    await expectNewestInView(forced, newestCard(forced), "forced open");
+    await forced.close();
+
+    // Unforced: each open a fresh page, the reads answering in whatever order they do.
+    let page: Page | undefined;
+    for (let open = 1; open <= 20; open += 1) {
+      const label = `unforced open ${open}`;
+      page = await alice.newPage();
+      await page.setViewportSize(iphone);
+      // A new page has no history entry to restore a scroll position from: it starts at the top.
+      expect(
+        await page.evaluate(() => ({ history: history.length, scrollY: window.scrollY })),
+        `${label}: the new page before it navigates`
+      ).toEqual({ history: 1, scrollY: 0 });
+      await page.goto(conversation);
+      await settle(newestCard(page), label);
+      await expectNewestInView(page, newestCard(page), label);
+      if (open < 20) await page.close();
+    }
+
+    // The fixture still hides the newest message at the top of the page, which is where the
+    // fault leaves the reader; otherwise every assertion above would pass whether or not it did.
+    if (page === undefined) throw new Error("expected the last unforced open's page");
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await settle(newestCard(page), "at the top of the page");
+    const top = await landing(page, newestCard(page));
+    expect(
+      top.inView && top.apart,
+      `the fixture no longer hides the newest message at the top of the page, so this row cannot catch the landing fault: ${top.where}`
+    ).toBe(false);
   } finally {
     await alice.close();
   }
