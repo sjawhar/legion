@@ -84,6 +84,9 @@ interface ConversationTabProps {
   focusItemId?: string;
   isClosed: boolean;
   issueKey: string;
+  /** Called once, when the tab first places the reader at the newest card (`useFollowLatest`'s
+   *  `onFirstPlacement`), before the parent's layout effects of that commit run. */
+  onFirstPlacement?: () => void;
   state: UserState | undefined;
   visible: boolean;
 }
@@ -782,6 +785,7 @@ export function ConversationTab({
   focusItemId,
   isClosed,
   issueKey,
+  onFirstPlacement,
   state,
   visible,
 }: ConversationTabProps): ReactNode {
@@ -951,7 +955,12 @@ export function ConversationTab({
   const failed = asks.isError || comments.isError || messages.isError;
   const newestShown = loading || failed ? undefined : shown.at(0);
   const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
-  const follow = useFollowLatest({ enabled: visible, latestItemSeq, ownSendCount });
+  const follow = useFollowLatest({
+    enabled: visible,
+    latestItemSeq,
+    onFirstPlacement,
+    ownSendCount,
+  });
   const { agents, titles } = useAgents(visible);
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
