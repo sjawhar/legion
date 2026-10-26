@@ -117,3 +117,51 @@ func TestHTTPPublisherTellsANoHolderRefusalFromAnyOther(t *testing.T) {
 		})
 	}
 }
+
+// A message in an agent's name goes through the listener's direct-message route with the fields
+// its sendHandler reads (packages/envoy/cmd/listener/api.go messageBody plus target_session): the
+// agent as source_session, the envelope it answers as in_reply_to, and the idempotency key the
+// listener scopes its dedupe key by; a refusal names the listener's error.
+func TestSendPostsADirectMessageInTheAgentsName(t *testing.T) {
+	refuse := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer envoy-bearer" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages/send" {
+			t.Fatalf("request = %s %s, want POST /v1/messages/send", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{
+			"target_session": "ses_asker", "source": "agent", "source_session": "ses_tester", "message": "Plum.",
+			"in_reply_to": "evt-1", "idempotency_key": "0123456789abcdef0123456789abcdef",
+		}
+		for key, value := range want {
+			if body[key] != value {
+				t.Fatalf("send body %s = %q, want %q (body %v)", key, body[key], value, body)
+			}
+		}
+		if len(body) != len(want) {
+			t.Fatalf("send body = %v, want exactly %v", body, want)
+		}
+		if refuse {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"no live session ses_asker"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	message := Message{Target: "ses_asker", SourceSession: "ses_tester", Text: "Plum.", InReplyTo: "evt-1", IdempotencyKey: "0123456789abcdef0123456789abcdef"}
+	if err := New(server.URL, "envoy-bearer").Send(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	refuse = true
+	if err := New(server.URL, "envoy-bearer").Send(context.Background(), message); err == nil || !strings.Contains(err.Error(), "no live session ses_asker") || !errors.Is(err, ErrRefused) {
+		t.Fatalf("refused send = %v, want the listener's refusal, ErrRefused", err)
+	}
+}

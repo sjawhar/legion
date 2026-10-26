@@ -271,6 +271,10 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
 		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
+		if cfg.Answers != nil {
+			// The answer loop reads its hand-offs from the connection connect opens.
+			workflow.answers = &answering{project: plan.project}
+		}
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -378,6 +382,13 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		}
 		log.Info("legion workflow boot stage", "stage", "admission")
 		workflow.attach(s)
+		if err := workflow.attachAnswers(cfg, plan, s, st); err != nil {
+			s.stop()
+			listener.Close()
+			workflow.stop()
+			st.Close()
+			return err
+		}
 		// Both waited out whatever they waited out on ctx, which the boot budget does not bound:
 		// what follows gets a budget of its own, as the App mint and the image probe's callers
 		// already do.
@@ -885,6 +896,9 @@ type supervision struct {
 	supervisor *supervisor
 	tokens     *api.BootTokens
 	claims     []supervise.Claim
+	// answerGate keeps the answer loop and a claim's start off one conversation (answergate.go);
+	// nil without `answers`.
+	answerGate *answerGate
 	// imageReport is what the worker image's passed probe reported: of the image, from its OK line,
 	// and of the pool, the attempts that waited on its capacity (bootprobe.ImageReport); under
 	// tmux, the model-fallback mark alone, read by plan.modelFallback. probed is whether the probe
@@ -986,10 +1000,23 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
+	// Every start passes the store's CheckLaunch; with `answers` set, the answer gate's first.
+	launches := gateLaunch(tokens.Recording(st), p.checkLaunch)
+	var gate *answerGate
+	if cfg.Answers != nil {
+		gate = newAnswerGate(launches, func(token claim.Token) (supervise.ClaimView, bool) {
+			machine, ok := sup.Machine(token)
+			if !ok {
+				return supervise.ClaimView{}, false
+			}
+			return machine.View(), true
+		}, log)
+		launches = gate
+	}
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
-		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
+		Store:   pruning(launches, runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, prompts: p.prompts,
 			identity: p.identity, repository: p.repository,
@@ -1024,7 +1051,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
-		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
+		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims, answerGate: gate,
 		reports: reportsOfClaims(reports, claims), reportStore: st,
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
 		stopping: stopping, beginStop: beginStop,

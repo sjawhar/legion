@@ -8,6 +8,7 @@ export * from "./dispatch-text-references";
 export * from "./dispatch-text-rules";
 export * from "./dispatch-tools";
 export * from "./envelope";
+export * from "./legion-handoff";
 export * from "./legion-roles";
 export * from "./repo";
 export * from "./slack";

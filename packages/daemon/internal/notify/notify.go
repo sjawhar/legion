@@ -1,4 +1,5 @@
-// Package notify publishes persisted workflow notices through the Envoy listener.
+// Package notify publishes persisted workflow notices through the Envoy listener, and sends the
+// answer loop's direct messages in a stopped agent's name (Send).
 package notify
 
 import (
@@ -125,3 +126,56 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	}
 	return nil
 }
+
+// Message is a direct message sent in an agent's name: to Target's session, from SourceSession,
+// in reply to the envelope InReplyTo names, with IdempotencyKey the listener scopes its dedupe key
+// by (`agent.<target>.<key>`), so a re-send of the same message is a repeat the stream keeps once.
+type Message struct {
+	Target         string
+	SourceSession  string
+	Text           string
+	InReplyTo      string
+	IdempotencyKey string
+}
+
+// Send posts m through the listener's direct-message route (POST /v1/messages/send, sendHandler in
+// packages/envoy/cmd/listener/api.go) as source `agent`. A 4xx answer, such as the listener's 404
+// for a target with no live session, is ErrRefused: sending it again is refused again.
+func (p *HTTPPublisher) Send(ctx context.Context, m Message) error {
+	body, err := json.Marshal(struct {
+		TargetSession  string `json:"target_session"`
+		Source         string `json:"source"`
+		SourceSession  string `json:"source_session"`
+		Message        string `json:"message"`
+		InReplyTo      string `json:"in_reply_to,omitempty"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}{TargetSession: m.Target, Source: "agent", SourceSession: m.SourceSession, Message: m.Text, InReplyTo: m.InReplyTo, IdempotencyKey: m.IdempotencyKey})
+	if err != nil {
+		return fmt.Errorf("encode the message to %s: %w", m.Target, err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/messages/send", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build the message to %s: %w", m.Target, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if p.token != "" {
+		request.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	response, err := p.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("send the message to %s: %w", m.Target, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		refusal, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
+		err := fmt.Errorf("send the message to %s: listener returned %s: %s", m.Target, response.Status, strings.TrimSpace(string(refusal)))
+		if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != http.StatusTooManyRequests {
+			return fmt.Errorf("%w: %w", err, ErrRefused)
+		}
+		return err
+	}
+	return nil
+}
+
+// ErrRefused is a message the listener refused for good (Send's 4xx).
+var ErrRefused = errors.New("the listener refused the message")

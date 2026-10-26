@@ -4,6 +4,11 @@
 
 ### Added
 
+- `LegionAgentHandoffSchema` and `legionAgentHandoffSubject(project, session)`: the message the
+  Envoy listener hands a stopped Legion agent's daemon in place of refusing or dropping it,
+  `{original_topic, target_session, role_token, project, envelope}` with the envelope as it would
+  have been delivered, on `notifications.legion.<project>.agents.<session>`. The Go daemon decodes
+  it as `intake.Handoff` (INFRA-204).
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared

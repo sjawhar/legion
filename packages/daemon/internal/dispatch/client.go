@@ -313,6 +313,12 @@ func daemonActor(key string) actor {
 	return actor{Kind: "session", ID: DaemonSession(key)}
 }
 
+// sessionActor is the actor a write made in an agent's name carries: the agent's own session, as
+// the answer loop posts a stopped agent's answer (replies.go), where daemonActor is the daemon's.
+func sessionActor(session string) actor {
+	return actor{Kind: "session", ID: session}
+}
+
 func dispatchError(status int, statusText string, payload []byte) *Error {
 	var response struct {
 		Code  string `json:"code"`

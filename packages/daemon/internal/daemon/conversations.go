@@ -54,20 +54,7 @@ func newConversationHistory(cfg config.Config, p plan, st *store.Store, environ 
 	})
 	h.recorder.Mirror = h.mirror
 	backfill := agenthistory.Backfill{Project: p.project, Store: st, Now: p.clock.Now, Log: log}
-	var open func(ctx context.Context) (*pgx.Conn, func(), error)
-	switch database := cfg.Answers.ConversationStore.Database; {
-	case p.answers.conversationDSN != "":
-		dsn := p.answers.conversationDSN
-		open = func(ctx context.Context) (*pgx.Conn, func(), error) {
-			conn, err := ompsessions.ConnectURL(ctx, dsn)
-			if err != nil {
-				return nil, nil, err
-			}
-			return conn, func() { _ = conn.Close(context.Background()) }, nil
-		}
-	case database != (ompsessions.Database{}):
-		open = func(ctx context.Context) (*pgx.Conn, func(), error) { return openCloudSQLConversations(ctx, database) }
-	}
+	open := conversationStore(*cfg.Answers, p.answers)
 	h.backfill = func(ctx context.Context) error {
 		if open != nil {
 			conn, closeConn, err := open(ctx)
@@ -96,6 +83,27 @@ func newConversationHistory(cfg config.Config, p plan, st *store.Store, environ 
 		return backfill.Claude(ctx, filepath.Join(cfg.StateDir, "claude"))
 	}
 	return h
+}
+
+// conversationStore opens the daemon's connection to the database Oh My Pi's conversations live in,
+// for the backfill and the answer loop alike: the URL boot read, or, under cloudsql-iam, a proxy of
+// the daemon's own; nil under a files store, whose conversations are files on the daemon's host.
+// The close it returns ends the connection.
+func conversationStore(answers config.Answers, reads answersReads) func(ctx context.Context) (*pgx.Conn, func(), error) {
+	switch database := answers.ConversationStore.Database; {
+	case reads.conversationDSN != "":
+		dsn := reads.conversationDSN
+		return func(ctx context.Context) (*pgx.Conn, func(), error) {
+			conn, err := ompsessions.ConnectURL(ctx, dsn)
+			if err != nil {
+				return nil, nil, err
+			}
+			return conn, func() { _ = conn.Close(context.Background()) }, nil
+		}
+	case database != (ompsessions.Database{}):
+		return func(ctx context.Context) (*pgx.Conn, func(), error) { return openCloudSQLConversations(ctx, database) }
+	}
+	return nil
 }
 
 // start runs the backfill, then the mirror, until the stop it returns, which waits for both to
