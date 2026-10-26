@@ -1404,18 +1404,26 @@ its uid and so its volume. In this order:
 
 1. **Stop this release's daemon** (scale its Deployment to zero, or `legion stop`), so nothing
    launches into a Sandbox while it is rewritten.
-2. **Restore the dump** taken before the upgrade (`pg_dump -Fc`, above). Under
-   `session_store: pvc`, or when Oh My Pi's session tables live in another database:
+2. **Restore the dump** taken before the upgrade (`pg_dump -Fc`, above). Which form depends on
+   whether Oh My Pi's two session tables (`omp_session_files`, `omp_session_files_parts`) are in the
+   daemon's own database, the one `postgres_dsn` names. Both database stores keep every session as
+   a row of those tables (`Store.InDatabase`, `internal/ompsessions/store.go`); the store says only
+   where the database is: under `session_store: postgres`, the database the URL in
+   `session_dsn_secret` names, and under `session_store: cloudsql-iam`, the database
+   `session_database.name` names in the instance `session_database.instance` names. Under
+   `session_store: pvc`, or when that database is another one than `postgres_dsn`'s, restore the
+   whole dump:
 
    ```sh
    pg_restore --clean --if-exists --single-transaction -d '<postgres_dsn>' <dump file>
    ```
 
-   Under `session_store: postgres` with Oh My Pi's two tables (`omp_session_files`,
-   `omp_session_files_parts`) in the daemon's own database, a whole restore rewinds them to the
-   dump as well, so every resumed conversation loses its turns since the upgrade. Restore
-   everything but those two tables instead: list the dump's contents, drop every entry naming
-   either table (its definition, its data and its primary key), and restore from the list:
+   When it is the same database, under either database store — under `cloudsql-iam`, when
+   `postgres_dsn` connects to that same Cloud SQL instance and names the database
+   `session_database.name` names — a whole restore rewinds the two tables to the dump as well, so
+   every resumed conversation loses its turns since the upgrade. Restore everything but those two
+   tables instead: list the dump's contents, drop every entry naming either table (its definition,
+   its data and its primary key), and restore from the list:
 
    ```sh
    pg_restore -l <dump file> | grep -vE ' omp_session_files(_parts)? ' > restore.list
