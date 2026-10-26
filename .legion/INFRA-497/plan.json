@@ -40,6 +40,15 @@
     "Test NATS via LEGION_TEST_NATS_URL (the daemon tests' variable); CI via a nats:2.10 service container (image envoy-client already uses); no new version pin.",
     "PR #2266 is superseded by the issue branch's PR carrying its commits, then closed with a comment; its branch is kept. The architect may overrule before implementation."
   ],
+  "architectAdditions": [
+    {
+      "addedBy": "INFRA-497 architect (Envoy message 5b47789e586cdf6f0cab5236cbd3d5bc, 2026-10-26T20:46:28Z), inside the approved spec",
+      "requirement": "A card that reaches pi-envoy while Oh My Pi is still starting (before the startup extension-send drain completes, modes/runtime-init.ts:548) must not start a turn inside that drain; after startup each such card is read by a turn on an idle session or the running turn on a busy one; never dropped, never only folded; no wait for a first real turn.",
+      "signal": "No host event or context state changes after the drain (extensibility/extensions/types.ts event list and ExtensionContext; nothing extension-visible between initializeExtensions returning, rpc-mode.ts:1646, and the stdin loop, rpc-mode.ts:2635). The card is its own witness: in a startup phase an idle card goes {deliverAs: followUp, triggerTurn: false}, display true, which on an idle host appends it with no turn and emits message_end (session/agent-session.ts:9360-9382); a held send starts only once the hold settles (extensibility/extensions/send-queue.ts:38-55), so its message_end is after the hold; the fold check it arms runs on the host's timer (a macrotask) while the drain loop and initializeExtensions' return are microtask-only, so a host idle at that check has no tracked send pending; the check sends the wake outside the drain and ends the phase.",
+      "proof": "card-delivery-omp.test.ts case 'a card that arrives while the session starts holds no RPC input': registration held inside session_start after the agent subject opens, two cards published, get_state must answer while the wake's model request is held; red against the previous envoy.ts (get_state unanswered within 5 s).",
+      "planDocument": "dispatch://INFRA-497/artifact/plan-md version 2, section 'Architect addition: no card's turn inside the host's startup drain'"
+    }
+  ],
   "requiredSkills": {
     "implement": [
       "legion-worker: phase rules, the push and skip-checks trailer, and its references pr-body.md (proof and E2E line, simplify pass), default-branch-check.md (App identity before push), conflicts-and-rewrites.md (rebasing #2266's commits onto main), tools.md (installing nats-server and the pinned omp under $TMPDIR)",
