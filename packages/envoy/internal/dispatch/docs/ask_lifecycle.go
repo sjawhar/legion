@@ -388,9 +388,11 @@ func markRepeatedAskBlocks(live *pmdoc.Node, artifactID string, repeats []repeat
 // with it, so the retries are few and short: a settlement that stopped short because the room's
 // updates had not landed yet, or because the room had to be reloaded at its durable head, settles
 // on the next attempt, and one that has not settled in three is not going to settle while a person
-// waits on the close. The budget is for the whole issue, not each document, so an issue with many
-// documents still closes within it. The pause is a few times the millisecond the room's own waits
-// poll at, long enough for a persistence worker to store the update an attempt met.
+// waits on the close. The budget is for the whole issue, not each document. It bounds the waits for
+// the rooms' durable appends and whether a retry starts, not a settlement already running, and
+// every document gets its first attempt whatever is left of it. The pause is a few times the
+// millisecond the room's own waits poll at, long enough for a persistence worker to store the
+// update an attempt met.
 const (
 	issueSettleAttempts   = 3
 	issueSettleBudget     = 3 * time.Second
@@ -460,14 +462,14 @@ func (s *Service) SettleIssueDocuments(ctx context.Context, issueKey string) err
 // settleOwedNow settles room, when its document owes a settlement, on the calling goroutine, and
 // reports why the document still owes one afterwards: the reason a settlement that stopped short
 // gives (settleOutcome), whatever stopped it, in place of the retry or re-arming a timer's
-// settlement would do (followUpSettlement); or, for one another write superseded or one the gate
-// refused on a room behind its durable head, which leave the debt to the pending-settlement row,
-// that the row still stands. Its caller decides whether to run it again (SettleIssueDocuments). It
-// waits for the room's durable appends to land first, but not past deadline, so no attempt hangs
-// past its caller's budget waiting for them. It takes the settleWG count of the timer it runs in
-// place of, or one of its own, so Shutdown joins it as it would the timer's settlement, and holds
-// the room's state across it, so the state the settlement looks up is the one whose generation it
-// runs at.
+// settlement would do (followUpSettlement); or, for one that ended with no reason - among them one
+// another write superseded and one the gate refused on a room behind its durable head, which leave
+// the debt to the pending-settlement row - that the row still stands. Its caller decides whether to
+// run it again (SettleIssueDocuments). It waits for the room's durable appends to land first, but
+// not past deadline, so no attempt hangs past its caller's budget waiting for them; the settlement
+// itself runs under ctx alone. It takes the settleWG count of the timer it runs in place of, or one
+// of its own, so Shutdown joins it as it would the timer's settlement, and holds the room's state
+// across it, so the state the settlement looks up is the one whose generation it runs at.
 func (s *Service) settleOwedNow(ctx context.Context, room string, deadline time.Time) error {
 	waitCtx, cancel := context.WithDeadline(ctx, deadline)
 	err := s.waitForDurableAppends(waitCtx, room)
@@ -492,7 +494,7 @@ func (s *Service) settleOwedNow(ctx context.Context, room string, deadline time.
 	state.settling--
 	s.unlockState(room, state)
 	s.settleWG.Done()
-	if outcome.next != settleEnded && outcome.next != settleReloaded {
+	if outcome.err != nil {
 		return outcome.err
 	}
 	if owes, err = settlementPending(ctx, s.store.Pool, room); err != nil {

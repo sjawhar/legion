@@ -102,7 +102,11 @@ func RepairIssueAsks(ctx context.Context, deps Deps, markedSince *time.Time) (Is
 // repair: each one whose repair failed and each one it did not reach before its time ran out. The
 // window moves with every pass that listed its candidates, so one issue that fails every pass
 // costs each pass that issue alone rather than a sweep of every closed issue owing a settlement;
-// a pass that could not list them moves nothing and carries what the pass before it carried.
+// a pass that could not list them moves nothing and carries what the pass before it carried. The
+// window and the carried issues live in this call, in the one process that runs it: when the lease
+// moves, another process's pass starts from its own window and carried issues (no window on its
+// first interval pass, so it sweeps every closed issue whose documents owe a settlement) and never
+// sees these.
 func RunIssueAskRepair(ctx context.Context, deps Deps, leases duty.Leases) {
 	s := &server{deps: deps}
 	var markedSince *time.Time

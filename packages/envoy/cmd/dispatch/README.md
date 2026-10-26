@@ -617,7 +617,11 @@ left as it is, as the close leaves it. Each record is dated when the pass writes
 `dispatch: repaired the asks of closed and reopened issues` with `withdrawn=<n> restored=<n>
 swept=<n>`; one that fails or runs out of time is logged, and the next pass repairs what it left:
 each interval pass that listed its candidates moves the bound to one interval before its own
-start, and carries every issue it did not repair, failed or not reached, into the next pass.
+start, and carries every issue it did not repair, failed or not reached, into the next pass. The
+bound and the carried issues live in the memory of the process that ran the pass, not in the
+database: when the lease moves to another process, that process's pass starts from its own bound
+and its own carried issues (on its first interval pass, no bound, so it sweeps every closed issue
+whose documents owe a settlement), and never sees the issues the other process carried.
 
 Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default
 (`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row,

@@ -40,10 +40,15 @@ import {
 } from "./useMarginItems";
 import { useMarginListeners } from "./useMarginListeners";
 
-/** A retracted ask was withdrawn by its asker: history, not a decision to read, so the margin
- *  folds it away with the resolved threads until a reader asks for them. */
-function isRetractedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
-  return ask.state === "resolved" && ask.resolution?.kind === "retracted";
+/** A retracted ask was taken back by its asker, and a withdrawn one by its issue's close: neither
+ *  is a live question or a decision to read, so the margin folds both away with the resolved
+ *  threads until a reader asks for them. Reopening the issue opens a withdrawn ask again, and an
+ *  open ask never folds. */
+export function isFoldedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
+  return (
+    ask.state === "resolved" &&
+    (ask.resolution?.kind === "retracted" || ask.resolution?.kind === "withdrawn")
+  );
 }
 
 /** The margin item a focus request names, once the request's mark has an item. */
@@ -236,7 +241,7 @@ export function useMarginSheet(): MarginSheetModel {
     [editComment]
   );
 
-  // A retracted ask is withdrawn history; it rides the same "show resolved" toggle as
+  // A retracted or withdrawn ask is history; it rides the same "show resolved" toggle as
   // resolved comment threads instead of sitting among the answered decisions.
   const askItems = useMemo(
     () =>
@@ -245,12 +250,12 @@ export function useMarginSheet(): MarginSheetModel {
         .map((item) => item.ask),
     [items]
   );
-  const retractedAskCount = useMemo(
-    () => askItems.filter((ask) => isRetractedAsk(ask)).length,
+  const foldedAskCount = useMemo(
+    () => askItems.filter((ask) => isFoldedAsk(ask)).length,
     [askItems]
   );
   const historicalAsks = useMemo(
-    () => askItems.filter((ask) => showResolved || !isRetractedAsk(ask)),
+    () => askItems.filter((ask) => showResolved || !isFoldedAsk(ask)),
     [askItems, showResolved]
   );
   const markItemIds = useMemo(() => {
@@ -631,7 +636,7 @@ export function useMarginSheet(): MarginSheetModel {
       pinnedConversations,
       pinnedIds,
       resolvedThreads,
-      retractedAskCount,
+      foldedAskCount,
       threads,
       viewerLogin: viewer.data?.login ?? "",
       visibleArtifact,

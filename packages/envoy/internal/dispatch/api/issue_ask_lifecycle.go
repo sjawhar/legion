@@ -36,8 +36,9 @@ func withdrawnReason(issueKey string) string {
 // already closed, or none, settles nothing: its close is refused.
 //
 // ctx must not be cancelled by the client (context.WithoutCancel): a settlement runs to its end
-// whether or not the client waits for the close, as the settlement it stands in for would, and
-// issueSettleBudget (docs.SettleIssueDocuments) bounds it all the same.
+// whether or not the client waits for the close, as the settlement it stands in for would.
+// issueSettleBudget (docs.SettleIssueDocuments) bounds only the waits for the rooms' durable
+// appends and whether a retry starts, not a settlement already running.
 func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return

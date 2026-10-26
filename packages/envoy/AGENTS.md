@@ -1940,7 +1940,9 @@ settlement marked since the last pass, gets the close's final sweep in the same 
 document, which writes block `state` attributes only. Each interval pass moves that bound to one
 interval before its own start whenever it listed its candidates, and carries every issue it did
 not repair - one that failed or one it ran out of time before - into the next pass, so one issue
-failing every pass does not make every pass sweep every closed issue. A pass logs its `withdrawn`,
+failing every pass does not make every pass sweep every closed issue. The bound and the carried
+issues live in the memory of the process that ran the pass: a pass on another process, once the
+lease moves, starts from that process's own and never sees them. A pass logs its `withdrawn`,
 `restored` and `swept` counts, `swept` counting every unindexed block it marked. Why it is not a
 read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy census").
 

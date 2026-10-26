@@ -1221,18 +1221,21 @@ const (
 	settleRoomFailed
 	// settleReloaded is a settlement the gate refused on a room behind the document's durable head
 	// (ErrRoomBehindHead). The room has been closed for a reload or the settlement armed again
-	// (reloadRoomBehindHead), and the pending-settlement row, which the refusal's rollback kept,
-	// still says the settlement is owed.
+	// (reloadRoomBehindHead), which logs the refusal, and the pending-settlement row, which the
+	// refusal's rollback kept, still says the settlement is owed.
 	settleReloaded
 )
 
 // settleOutcome is how a settlement ended (settleRoomWithin).
 type settleOutcome struct {
 	next settleNext
-	// err is why the settlement stopped short; it is nil for settleEnded.
+	// err is why the settlement stopped short; it is nil for settleEnded and settleReloaded, after
+	// which the pending-settlement row alone says whether the settlement is still owed.
 	err error
 	// generation is the room generation the settlement stood at when it stopped short, which a
-	// retry counts its failure against (retrySettle).
+	// retry counts its failure against (retrySettle). Past the room's waits for its updates to be
+	// stored and durable, it is the generation settleRoomWithin read again after them, which can be
+	// past the one its caller handed it, so it is no repeat of that argument.
 	generation uint64
 }
 
@@ -1432,7 +1435,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return stoppedShort(err)
 		}
 		s.reloadRoomBehindHead(parent, room, state, generation, doc, err)
-		return settleOutcome{next: settleReloaded, err: err}
+		return settleOutcome{next: settleReloaded}
 	}
 	// The pending authors as this settlement's lock holds them: no append or write changes them
 	// until its transaction ends. Its version lists them and deletes them; a settlement that
