@@ -3,7 +3,7 @@ import { createDecoder, readVarUint } from "lib0/decoding";
 import { messageYjsSyncStep2, messageYjsUpdate } from "y-protocols/sync";
 import * as Y from "yjs";
 
-import type { PendingEdits, PendingKey } from "./pending-edits";
+import type { PendingEdits, PendingKey, RestoredEdit } from "./pending-edits";
 import { readField } from "./sync-frame";
 
 export interface PendingState {
@@ -24,7 +24,10 @@ export interface PendingSync {
   frameWritten(frame: Uint8Array): void;
   /** Pairs an incoming SyncStatus frame with the next counted sent frame. */
   frameReceived(frame: Uint8Array): Promise<void>;
-  /** Restores prior-page rows after this admission's initial sync. */
+  /**
+   * Restores prior-page rows after this admission's initial sync. A read-only admission restores
+   * none, records no local update and drops the stored rows that change nothing.
+   */
   firstSync(readOnly: boolean): Promise<void>;
   destroy(): void;
 }
@@ -116,6 +119,55 @@ function addsParking(scratch: Y.Doc, update: Uint8Array): boolean {
     (client) => !beforeMissing.has(client)
   );
   return addsMissingClient || addsPendingDeletes(beforeDeletes, scratch.store.pendingDs);
+}
+
+/**
+ * What a reader sees of a shared type: an element's name, its live children and its live entries.
+ * Types are walked item by item rather than read through `toJSON`: a root type no code has asked
+ * for by its class yet - the editor's fragment before the editor exists - is a bare
+ * `AbstractType` whose `toJSON` shows nothing, and an element's `toString` prints an object
+ * attribute as `[object Object]`. Children are flattened, so how Yjs happens to split the same
+ * text into items does not count as a change.
+ */
+function readableType(type: Y.ContentType["type"]): unknown[] {
+  const children: unknown[] = [];
+  for (let item = type._start; item !== null; item = item.right) {
+    if (!item.deleted) {
+      children.push(...readableContent(item.content));
+    }
+  }
+  const entries = [...type._map]
+    .filter(([, item]) => !item.deleted)
+    .map(([key, item]) => [key, readableContent(item.content)]);
+  return type instanceof Y.XmlElement ? [type.nodeName, children, entries] : [children, entries];
+}
+
+/** What one item shows a reader: its values, a nested type walked, a format as its mark. */
+function readableContent(content: Y.Item["content"]): unknown[] {
+  if (content instanceof Y.ContentType) {
+    return [readableType(content.type)];
+  }
+  if (content instanceof Y.ContentFormat) {
+    return [{ format: content.key, value: content.value }];
+  }
+  return content.getContent();
+}
+
+/** Everything a reader of `doc` sees, as one string to compare. */
+function readable(doc: Y.Doc): string {
+  return JSON.stringify([...doc.share].map(([name, type]) => [name, readableType(type)]));
+}
+
+/**
+ * Whether one browser client's stored rows, applied in order to a copy of `doc`, park nothing and
+ * leave what the copy shows as it was. Rows the document already holds do; so do rows whose only
+ * change the editor of this load derived again. Rows that park never do, so a row typed against a
+ * rebuilt history stays named.
+ */
+function changesNothing(doc: Y.Doc, updates: readonly Uint8Array[]): boolean {
+  const scratch = scratchOf(doc);
+  const before = readable(scratch);
+  return updates.every((update) => !addsParking(scratch, update)) && readable(scratch) === before;
 }
 
 export function startPendingSync({
@@ -216,10 +268,72 @@ export function startPendingSync({
     return entry;
   };
 
-  const onUpdate = (update: Uint8Array, origin: unknown) => {
-    if (!destroyed && storageAvailable !== false && origin !== remoteOrigin) {
-      record(update);
+  // Judges the stored rows of a read-only admission again, one pass at a time: a pass queued while
+  // none has started yet covers every request made before it starts.
+  let pruning: Promise<void> = Promise.resolve();
+  let pruneQueued = false;
+  const dropRedundantRows = (): Promise<void> => {
+    if (pruneQueued) {
+      return pruning;
     }
+    pruneQueued = true;
+    pruning = pruning.then(async () => {
+      pruneQueued = false;
+      try {
+        const edits = await ready;
+        if (destroyed || edits === undefined) {
+          return;
+        }
+        const rows = await edits.restoreRows();
+        if (destroyed) {
+          return;
+        }
+        // A client's rows are judged and dropped together: each continues the clock of the row
+        // before it, so a later row cannot apply without the earlier ones. A writable load whose
+        // socket was down stores its editor's heading-id stamp first and what its reader typed
+        // after; a read-only load that derives the same stamp leaves that first row alone
+        // changing nothing, yet dropping it would lose the typing.
+        const byClient = new Map<number, RestoredEdit[]>();
+        for (const row of rows) {
+          const client = byClient.get(row.key[1]);
+          if (client === undefined) {
+            byClient.set(row.key[1], [row]);
+          } else {
+            client.push(row);
+          }
+        }
+        const redundant: PendingKey[] = [];
+        for (const clientRows of byClient.values()) {
+          const updates = clientRows.map((row) => row.update);
+          if (changesNothing(doc, updates)) {
+            redundant.push(...clientRows.map((row) => row.key));
+          }
+        }
+        if (redundant.length > 0) {
+          await edits.drop(redundant);
+        }
+      } catch (error) {
+        console.error("Could not drop the browser's redundant pending document edits", error);
+      }
+      await report();
+    });
+    return pruning;
+  };
+
+  const onUpdate = (update: Uint8Array, origin: unknown) => {
+    if (destroyed || storageAvailable === false || origin === remoteOrigin) {
+      return;
+    }
+    // A read-only admission's editor takes no typing, so a local update it makes is one the editor
+    // derives from the document as loaded - Milkdown stamps each heading's id from its text, for
+    // one - which the server refuses and the next load derives again: no edit of a person's to
+    // keep. What it derived can make a row an earlier load stored the same way change nothing, so
+    // the stored rows are judged again.
+    if (readOnly) {
+      void dropRedundantRows();
+      return;
+    }
+    record(update);
   };
   doc.on("update", onUpdate);
 
@@ -349,8 +463,14 @@ export function startPendingSync({
     async firstSync(nextReadOnly) {
       readOnly = nextReadOnly;
       const edits = await ready;
-      if (destroyed || edits === undefined || readOnly) {
+      if (destroyed || edits === undefined) {
         await report();
+        return;
+      }
+      if (readOnly) {
+        // A read-only admission applies no row: each stays for a writable one to send, except a
+        // row that changes nothing, which an earlier read-only load may have stored.
+        await dropRedundantRows();
         return;
       }
       try {

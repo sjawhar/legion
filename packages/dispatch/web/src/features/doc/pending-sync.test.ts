@@ -115,21 +115,73 @@ async function scripted(
   };
 }
 
-/** A browser of an earlier page load: it applied `server`, typed `text`, and kept the edit. */
-async function savedEdit(artifact: string, server: Y.Doc, text: string): Promise<Uint8Array> {
+/**
+ * A browser of an earlier page load: it applied `server`, made each of `changes` in turn, and kept
+ * each as a row of its own, as the edits of one page load are kept.
+ */
+async function savedChanges(
+  artifact: string,
+  server: Y.Doc,
+  ...changes: ((browser: Y.Doc) => void)[]
+): Promise<{ key: PendingKey; update: Uint8Array }[]> {
   const browser = new Y.Doc();
   Y.applyUpdate(browser, Y.encodeStateAsUpdate(server));
-  let update: Uint8Array | undefined;
-  browser.on("update", (emitted: Uint8Array) => {
-    update = emitted;
-  });
-  browser.getText("t").insert(browser.getText("t").length, text);
-  if (update === undefined) {
-    throw new Error("a local edit emits an update");
-  }
   const store = await storeFor(artifact, browser.clientID);
-  await store.record(update).written;
-  return update;
+  const saved: { key: PendingKey; update: Uint8Array }[] = [];
+  for (const change of changes) {
+    let update: Uint8Array | undefined;
+    const capture = (emitted: Uint8Array) => {
+      update = emitted;
+    };
+    browser.on("update", capture);
+    change(browser);
+    browser.off("update", capture);
+    if (update === undefined) {
+      throw new Error("a local edit emits an update");
+    }
+    const row = store.record(update);
+    await row.written;
+    saved.push({ key: [artifact, browser.clientID, row.seq], update });
+  }
+  return saved;
+}
+
+/** A browser of an earlier page load: it applied `server`, typed `text`, and kept the edit. */
+async function savedEdit(artifact: string, server: Y.Doc, text: string): Promise<Uint8Array> {
+  const [saved] = await savedChanges(artifact, server, (browser) => {
+    browser.getText("t").insert(browser.getText("t").length, text);
+  });
+  if (saved === undefined) {
+    throw new Error("one change saves one row");
+  }
+  return saved.update;
+}
+
+/** A server document holding one heading whose `id` is empty, as the server writes a heading. */
+function serverWithHeading(clientId: number): Y.Doc {
+  const server = new Y.Doc();
+  server.clientID = clientId;
+  const heading = new Y.XmlElement("heading");
+  heading.setAttribute("id", "");
+  heading.insert(0, [new Y.XmlText("Plan")]);
+  server.getXmlFragment("prosemirror").insert(0, [heading]);
+  return server;
+}
+
+/** Stamps the heading's id from its text, as the editor's heading-id plugin does on every load. */
+function stampHeadingId(doc: Y.Doc): void {
+  const heading = doc.getXmlFragment("prosemirror").get(0);
+  if (!(heading instanceof Y.XmlElement)) {
+    throw new Error("the document's first block is a heading");
+  }
+  heading.setAttribute("id", "plan");
+}
+
+/** Types a paragraph after the heading, as a person does in a writable document. */
+function typeParagraph(doc: Y.Doc): void {
+  const paragraph = new Y.XmlElement("paragraph");
+  paragraph.insert(0, [new Y.XmlText("Typed.")]);
+  doc.getXmlFragment("prosemirror").insert(1, [paragraph]);
 }
 
 function serverWith(text: string, clientId: number): Y.Doc {
@@ -246,6 +298,87 @@ test("a read-only first sync applies nothing and keeps the saved edits", async (
   expect(Y.encodeStateVector(doc)).toEqual(before);
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+});
+
+test("a read-only admission stores none of the editor's own updates", async () => {
+  const server = serverWithHeading(100);
+  const { artifact, doc, states, sync } = await scripted(
+    artifactId(),
+    Y.encodeStateAsUpdate(server)
+  );
+  await sync.firstSync(true);
+
+  // The editor of a read-only document takes no typing, yet stamps each heading's id on load.
+  stampHeadingId(doc);
+
+  expect(await rowsOf(artifact)).toEqual([]);
+  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
+});
+
+test("a read-only load drops the heading id an earlier read-only load stored once it derives the id again, and keeps a person's saved edit", async () => {
+  const artifact = artifactId();
+  const server = serverWithHeading(100);
+  // An earlier read-only load stored its editor's heading-id stamp as though it were an edit.
+  await savedChanges(artifact, server, stampHeadingId);
+  // A person typed a paragraph while the document was writable, and it never reached the server.
+  const [typed] = await savedChanges(artifact, server, typeParagraph);
+  const { doc, states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  // Before the editor exists, each row still changes what the document shows.
+  await sync.firstSync(true);
+  expect((await rowsOf(artifact)).length).toBe(2);
+  expect(states.at(-1)?.count).toBe(2);
+
+  stampHeadingId(doc);
+
+  await waitFor(async () => expect(await rowsOf(artifact)).toEqual([typed?.key]));
+  await waitFor(() =>
+    expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true })
+  );
+});
+
+test("a read-only load keeps an earlier row of a browser whose later rows build on it", async () => {
+  const artifact = artifactId();
+  const server = serverWithHeading(100);
+  // A writable load stamped the heading's id, then its reader typed a paragraph; the socket was
+  // down for both, so the paragraph's row continues the stamp's clock.
+  const saved = await savedChanges(artifact, server, stampHeadingId, typeParagraph);
+  let judged = 0;
+  const { doc, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server), (store) => ({
+    ...store,
+    async restoreRows() {
+      const rows = await store.restoreRows();
+      judged += 1;
+      return rows;
+    },
+  }));
+  await sync.firstSync(true);
+
+  // The read-only load's editor derives the same stamp, which leaves the stamp's row alone
+  // changing nothing; dropping it would leave the paragraph's row nothing to apply after.
+  stampHeadingId(doc);
+  await waitFor(() => expect(judged).toBe(2));
+  expect(await rowsOf(artifact)).toEqual(saved.map((row) => row.key));
+
+  // The issue reopens: the next, writable load restores the paragraph.
+  const reopened = await scripted(artifact, Y.encodeStateAsUpdate(server));
+  await reopened.sync.firstSync(false);
+  expect(reopened.doc.getXmlFragment("prosemirror").toString()).toContain("Typed.");
+  expect(reopened.states.at(-1)?.rebuiltAt).toBeUndefined();
+});
+
+test("a read-only first sync drops a saved row the server already holds", async () => {
+  const artifact = artifactId();
+  const server = serverWith("shared", 100);
+  const saved = await savedEdit(artifact, server, " saved");
+  // The server applied the edit before the issue closed; the acknowledgement never came.
+  Y.applyUpdate(server, saved);
+  const { states, sync } = await scripted(artifact, Y.encodeStateAsUpdate(server));
+
+  await sync.firstSync(true);
+
+  expect(await rowsOf(artifact)).toEqual([]);
+  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
 });
 
 test("a restore that parks on a scratch document is dropped, reported, and leaves the live document alone", async () => {
