@@ -1448,10 +1448,10 @@ export default function envoyExtension(pi: PiApi): void {
   ): boolean => !isRoleForward(envelope) && replay?.retries(topic) === true;
 
   // Replays a stored frame: a card and nothing else. A targeted frame (BTW, Aside, Steer, a
-  // person's Send) runs no side turn, asks Dispatch to accept no user turn and posts no reply:
-  // Dispatch already recorded that attempt as not delivered, and a person's stale input run late
-  // could act on an old instruction. A removal closes a topic only when it was stored after the
-  // session started following that topic, so an old one never closes a topic followed again since.
+  // person's Send) runs no side turn, asks Dispatch to accept no user turn and posts no reply: a
+  // person's input run late could act on an instruction they no longer mean, so the session is
+  // shown it and decides. A removal closes a topic only when it was stored after the session
+  // started following that topic, so an old one never closes a topic followed again since.
   const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
     const rendered = renderInbound(frame.data, sessionID, frame.subject);
     const cursors = replay?.state().subjects ?? {};

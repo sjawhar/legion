@@ -191,9 +191,9 @@ export interface ChannelDelivery {
 export interface ChannelDeliveryPath extends ChannelDelivery {
   /**
    * Shows a stored frame the session missed, rendered as a live one is, with when it was
-   * published, and runs nothing: a targeted delivery the renderer refuses is not answered on
-   * Dispatch, which recorded that attempt as not delivered already. `suppressed` for a frame the
-   * renderer does not show; a rejection is a failure.
+   * published, and runs nothing: a replay answers nothing on Dispatch, so a targeted delivery the
+   * renderer refuses gets no late reply. `suppressed` for a frame the renderer does not show; a
+   * rejection is a failure.
    */
   replay(frame: ReplayFrame): Promise<ReplayDeliveryOutcome>
   /** Shows a notice of Envoy's own; a rejection says it was not shown. */
