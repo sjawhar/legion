@@ -74,6 +74,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `COREPACK_DEFAULT_TO_LATEST=0`, so never npm's newest release), fetched on first use into the user's
   corepack cache. Node, Go and the AWS CLI keep their trees at `/opt/node`, `/opt/go` and
   `/opt/aws-cli`, outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it;
+- `agent-browser` at `/usr/local/bin/agent-browser`, the browser driver the tester's `ce-dogfood`
+  skill runs: the pinned release's own linux-x64 binary, checked against its pinned SHA-256 as the
+  toolchain's downloads are, which launches the image's `chromium` (below) and keeps its state under
+  `$HOME/.agent-browser`;
 - what the capability check (`packages/daemon/internal/capabilities`, which `legion probe-image` runs —
   [the probe subsection](#the-image-is-probed-before-it-publishes)) requires of the image, each outside
   `HOME` for the same reason: the language servers Oh My Pi's LSP tools start when a working directory
@@ -370,7 +374,7 @@ the image `PATH` — the language servers (`gopls version`, `typescript-language
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
 version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, `kubectl version --client`, and trixie's
 `python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
-`sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
+`sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version`, `agent-browser --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
 throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
 five clients are odd the same way: `nc` takes no `--version` either, so the step runs `nc -h`, which
@@ -380,7 +384,7 @@ prints its usage and exits 0, under the `nc` name the alternatives system instal
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && agent-browser --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
