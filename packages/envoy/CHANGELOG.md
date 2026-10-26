@@ -1273,11 +1273,15 @@
   that moment keeps its answer, and the sweep writes each such copy `state="answered"` with who
   answered and when but not the answer itself, which the reopen's settlement writes in.
   `withdrawn` is the server's alone: `POST /api/v1/asks/{id}/resolve` still takes only `retracted`
-  and `resolved`, and an ask on a closed issue is still `409 ISSUE_CLOSED`. A repair pass,
+  and `resolved`, and any other kind is `400 INVALID_RESOLUTION` saying so and naming the kind it
+  got; an ask on a closed issue is still `409 ISSUE_CLOSED`. A repair pass,
   `api.RepairIssueAsks`, runs at boot (bounded at 30 s) and then every 10 minutes under the lease
   `issue-ask-repair`: it withdraws the asks left open on issues closed before this release, each
   naming its issue's earlier closer, restores the withdrawn asks of an issue a process of the
   earlier release reopened during the roll, and logs `withdrawn`, `restored` and `swept` counts.
+  A pass that finds nothing to change writes nothing: it appends no update to any document and
+  leaves each document's owed settlement marked when it was, so an interval pass does not sweep
+  the closed issues' documents again.
   The dashboard, which ships in this server, shows a withdrawn decision block on a closed issue's
   current document with the badge `Withdrawn` and `Withdrawn when <closer> closed the issue`, as
   the activity feed's `ask.resolved` line reads; a saved version shows its own attributes, so a

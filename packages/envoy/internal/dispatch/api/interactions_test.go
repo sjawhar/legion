@@ -2524,15 +2524,19 @@ func TestResolveAskRejectsInvalidInputAndClosedIssues(t *testing.T) {
 	ask := decodeBody[struct {
 		ID string `json:"id"`
 	}](t, created)
-	for _, input := range []map[string]any{
-		{"kind": "closed", "reason": "No."},
-		{"kind": "resolved", "reason": "   "},
+	for _, invalid := range []struct {
+		input   map[string]any
+		message string
+	}{
+		{input: map[string]any{"kind": "closed", "reason": "No."}, message: `resolution kind must be \"retracted\" or \"resolved\", not \"closed\"`},
+		{input: map[string]any{"kind": "resolved", "reason": "   "}, message: "resolution requires a kind and reason"},
 		// Withdrawn is the record an issue's close writes, never a caller's.
-		{"kind": "withdrawn", "reason": "Withdrawn by the close of " + issue.Key + "."},
+		{input: map[string]any{"kind": "withdrawn", "reason": "Withdrawn by the close of " + issue.Key + "."}, message: `resolution kind must be \"retracted\" or \"resolved\", not \"withdrawn\"`},
 	} {
-		input["actor"] = sessionActor()
-		if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", input); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_RESOLUTION"`) {
-			t.Fatalf("invalid resolution %#v: status=%d body=%s", input, response.Code, response.Body.String())
+		invalid.input["actor"] = sessionActor()
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", invalid.input)
+		if body := response.Body.String(); response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_RESOLUTION"`) || !strings.Contains(body, invalid.message) {
+			t.Fatalf("invalid resolution %#v: status=%d body=%s, want 400 INVALID_RESOLUTION saying %s", invalid.input, response.Code, body, invalid.message)
 		}
 	}
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); response.Code != http.StatusOK {

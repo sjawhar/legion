@@ -266,7 +266,12 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := strings.TrimSpace(input.Kind)
 	reason := strings.TrimSpace(input.Reason)
-	if (kind != "retracted" && kind != "resolved") || reason == "" {
+	if kind != "retracted" && kind != "resolved" {
+		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest,
+			`resolution kind must be "retracted" or "resolved", not `+strconv.Quote(kind))
+		return
+	}
+	if reason == "" {
 		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest, "resolution requires a kind and reason")
 		return
 	}

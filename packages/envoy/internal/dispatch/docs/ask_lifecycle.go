@@ -153,11 +153,22 @@ func (s *Service) writeDocumentAskStates(
 		// The writes are made on the fork as it stands (rewriteLive), each on the block carrying its
 		// id, as settlement makes its repairs (repairLive), and each repeat on the block at its place
 		// (markRepeatedAskBlocks), all in one rewrite of the fork, whose tree is the one current read.
+		// Only a write that changes its block in current is made, and a document none changes gets no
+		// rewrite at all: the fork hands its observers an update for every transaction, one that
+		// changes nothing included, which applyLive would append as a document update, marking the
+		// document owing a settlement again (markUpdateOwed). A closed issue's document keeps owing
+		// the settlement its close left, so every repair pass sweeps it again (RepairIssueAsks), and
+		// such an append would move its mark into the next interval pass's sweep, for good.
 		var writes settlementReconciliation
+		write := func(block askBlock, set func(*pmdoc.Node) bool) {
+			if changesAskBlock(block.node, set) {
+				writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: set})
+			}
+		}
 		for _, block := range blocks {
 			if row, indexed := rows[block.id]; indexed {
 				if ask, wanted := asks[row.ID]; wanted && ask.State != "answered" {
-					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: askServerAttributes(ask, "", false)})
+					write(block, askServerAttributes(ask, "", false))
 				}
 				continue
 			}
@@ -167,11 +178,11 @@ func (s *Service) writeDocumentAskStates(
 					if ask.State == "answered" {
 						set = answeredCopyAttributes(ask, source.document)
 					}
-					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: set})
+					write(block, set)
 				}
 				continue
 			}
-			if markUnindexed {
+			if markUnindexed && block.node.Attrs["state"] != "resolved" {
 				ref := BlockRef{ArtifactID: artifactID, BlockID: block.id}
 				writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: func(node *pmdoc.Node) bool {
 					if node.Attrs["state"] == "resolved" {
@@ -208,14 +219,20 @@ func (s *Service) writeDocumentAskStates(
 // issue's document an answer its row still holds.
 func answeredCopyAttributes(ask model.Ask, copied string) func(*pmdoc.Node) bool {
 	return func(node *pmdoc.Node) bool {
-		clone := &pmdoc.Node{Type: node.Type, Attrs: make(pmdoc.Attrs, len(node.Attrs)+len(askServerAttributeNames))}
-		maps.Copy(clone.Attrs, node.Attrs)
-		if changed, _ := setAskServerAttributes(clone, ask, copied, false); !changed {
+		if !changesAskBlock(node, askServerAttributes(ask, copied, false)) {
 			return false
 		}
 		changed, _ := setAskServerAttributes(node, ask, copied, true)
 		return changed
 	}
+}
+
+// changesAskBlock reports whether set, a write to an ask block's attributes, would change node,
+// by running it on a copy of node's attributes, which leaves node as it is.
+func changesAskBlock(node *pmdoc.Node, set func(*pmdoc.Node) bool) bool {
+	clone := &pmdoc.Node{Type: node.Type, Attrs: make(pmdoc.Attrs, len(node.Attrs)+len(askServerAttributeNames))}
+	maps.Copy(clone.Attrs, node.Attrs)
+	return set(clone)
 }
 
 // readableAskBlocks is every ask block of tree settlement reads (parseAskBlock), each id's first

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -484,6 +485,69 @@ func TestAnIntervalRepairSweepsOnlyTheDocumentsMarkedSinceItsLastPass(t *testing
 	requireLiveText(t, f.handler, stale.PrimaryArtifactID, `#other-room urgency="low" multiple="false" state="resolved"`)
 }
 
+// A repair pass that finds nothing to change writes nothing, so the interval passes' bound keeps
+// what it swept out of the next sweep. One issue is closed by this release, its document owing
+// the settlement its close's own block-state write left and its decision block reading resolved;
+// another is closed by an older release, holding a plain ask and a decision block a browser wrote
+// that no settlement indexed, which the first pass withdraws and sweeps. A second full pass, and
+// then an interval pass bounded one interval back, each change nothing, append no update to
+// either document, and leave each document's owed settlement marked when it was.
+func TestARepairThatChangesNothingAppendsNoUpdateAndMarksNoDocument(t *testing.T) {
+	// An hour, so the only settlement is the one the close through PATCH runs.
+	f := newRepairFixtureSettlingAfter(t, time.Hour)
+	closed := createInteractionIssue(t, f.handler, "TEST", "Closed by this release", closeDecision)
+	older := createInteractionIssue(t, f.handler, "OTHER", "Closed by an older release", "Context\n")
+	if response := dispatchRequest(t, f.handler, http.MethodPatch, "/api/v1/issues/"+closed.Key, map[string]string{"status": "done"}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close %s: status=%d body=%s", closed.Key, response.Code, response.Body.String())
+	}
+	requireLiveText(t, f.handler, closed.PrimaryArtifactID, `#close-decision urgency="med" multiple="false" state="resolved"`)
+	plainAsk := createSessionAsk(t, f.handler, older.Key, "Which region?")
+	peer := connectBrowserPeer(t, f.documents, older.PrimaryArtifactID)
+	peer.appendParagraph(t, `:::ask{#browser-decision urgency="low" multiple="false"}`+"\nWritten in a browser?\n:::\n")
+	peer.barrier(t)
+	awaitLiveText(t, f.handler, older.PrimaryArtifactID, "#browser-decision")
+	if id := findBlockAsk(t, f.handler, older.Key, older.PrimaryArtifactID, "browser-decision"); id != "" {
+		t.Fatalf("the browser's block is ask %s, want it unindexed", id)
+	}
+	closer := repairActor("session-older-closer")
+	closeWithoutWithdrawing(t, f, older.Key, &closer, time.Now().Add(-time.Hour))
+
+	if first := repairNow(t, f); first.Withdrawn != 1 || first.Swept != 1 || first.Restored != 0 {
+		t.Fatalf("first repair = %+v, want the plain ask withdrawn and the unindexed block swept", first)
+	}
+	requireWithdrawn(t, f.handler, older.Key, plainAsk, closer)
+	requireLiveText(t, f.handler, older.PrimaryArtifactID, `#browser-decision urgency="low" multiple="false" state="resolved"`)
+	documents := []string{closed.PrimaryArtifactID, older.PrimaryArtifactID}
+	for _, document := range documents {
+		awaitOwedSettlement(t, f.database, document)
+	}
+
+	bound := time.Now().Add(-IssueAskRepairInterval)
+	for _, pass := range []struct {
+		name        string
+		markedSince *time.Time
+	}{
+		{name: "a second full pass", markedSince: nil},
+		{name: "an interval pass bounded one interval back", markedSince: &bound},
+	} {
+		writes := documentWrites(t, f.database, documents...)
+		events := eventCount(t, f.database, closed.Key) + eventCount(t, f.database, older.Key)
+		repair, err := RepairIssueAsks(context.Background(), f.deps, pass.markedSince)
+		if err != nil {
+			t.Fatalf("%s: %v", pass.name, err)
+		}
+		if repair != (IssueAskRepair{}) {
+			t.Fatalf("%s = %+v, want nothing changed", pass.name, repair)
+		}
+		if got := documentWrites(t, f.database, documents...); !reflect.DeepEqual(got, writes) {
+			t.Fatalf("%s wrote the documents:\n%v\nwant\n%v", pass.name, got, writes)
+		}
+		if got := eventCount(t, f.database, closed.Key) + eventCount(t, f.database, older.Key); got != events {
+			t.Fatalf("%s appended %d events", pass.name, got-events)
+		}
+	}
+}
+
 // awaitOwedSettlement waits until document owes a settlement.
 func awaitOwedSettlement(t *testing.T, database *store.Store, document string) {
 	t.Helper()
@@ -515,4 +579,24 @@ func awaitLiveText(t *testing.T, handler http.Handler, document, part string) {
 			t.Fatalf("document %s live text never held %q:\n%s", document, part, live)
 		}
 	}
+}
+
+// documentWrites is, for each of documents, how many updates it holds and when its owed
+// settlement was marked, or that it owes none.
+func documentWrites(t *testing.T, database *store.Store, documents ...string) map[string]string {
+	t.Helper()
+	writes := make(map[string]string, len(documents))
+	for _, document := range documents {
+		var updates int
+		var marked string
+		if err := database.Pool.QueryRow(context.Background(), `
+			select
+				(select count(*) from doc_updates where artifact_id = $1),
+				coalesce((select marked_at::text from doc_settlements_pending where artifact_id = $1), 'none')
+		`, document).Scan(&updates, &marked); err != nil {
+			t.Fatalf("read the writes of document %s: %v", document, err)
+		}
+		writes[document] = fmt.Sprintf("updates=%d marked_at=%s", updates, marked)
+	}
+	return writes
 }
