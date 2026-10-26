@@ -123,8 +123,8 @@
 - The `dispatch` command (`dist/dispatch.js`) waits for its stdout and stderr writes before it
   exits. Bun's `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the
   end of any output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
-- The `dispatch` command (`dist/dispatch.js`), given a bare issue key where `--issue` belongs,
-  names the fix in its refusal: `use --issue <KEY>`, with the corrected command.
+- The `dispatch` command (`dist/dispatch.js`) takes a bare issue key where `--issue` belongs as
+  that `--issue` (`dispatch read ACME-12`), once and only when `--issue` is not also given.
 - The `dispatch` command (`dist/dispatch.js`) refuses an ask, comment or message link as `--ref`
   to `comment`, `suggest`, `doc-edit` and `doc-read`, which used to act on the link's owner and
   drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
