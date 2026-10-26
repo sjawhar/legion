@@ -2,10 +2,26 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T17:43:00Z",
+  "completed": "2026-10-26T20:11:40Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "289c639762cb",
+  "head": "337c577d886069b322cefb3b9acc36304f47a89f",
   "proof": [
+    {
+      "criterion": "Round 4 (review plumbing items, no deferral): pending-sync reads what a document shows through Yjs's public API, and a person's unsent edit is still kept and restored across a read-only admission",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server, the production SPA bundle and real Postgres in the issue pod",
+      "command": "cd packages/dispatch && bun run e2e -- offline-edits.e2e.ts close-withdraws-asks.e2e.ts doc.e2e.ts live.e2e.ts --project chromium --project iphone (https://github.com/sjawhar/legion/pull/2233#issuecomment-6425738308)",
+      "observed": "87 passed, 3 skipped. grep for _start, _map, .right, Y.Item, ContentType, ContentFormat in pending-sync.ts finds nothing. pending-sync.test.ts 29 pass (5 new read-only cases); dispatch unit suite 2399 pass.",
+      "headSha": "fe28b6d8a451d8bb795bce19762217158a28dbd4",
+      "negativeControl": "readable() made to return a constant, SPA rebuilt: offline-edits.e2e.ts:164 'read-only admission preserves edits until a later read-write reload' fails on chromium (the unsent paragraph is not found)"
+    },
+    {
+      "criterion": "Round 4: settleRoomWithin returns a typed outcome in place of its failed callback, with no behaviour change",
+      "surface": "Go document service and API on real Postgres 17",
+      "command": "go test of ./internal/dispatch/... and ./cmd/dispatch at fe28b6d8 (git archive), and -tags multiprocess ./cmd/dispatch",
+      "observed": "api, docs, store, cmd/dispatch and every other dispatch package ok; multiprocess ok (323 s). TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves failed only on the rebuilt harness's C-collation cluster, which the test itself names as unable to judge, and passes on an ICU-collation cluster.",
+      "headSha": "fe28b6d8a451d8bb795bce19762217158a28dbd4",
+      "negativeControl": "The pre-close settlement still returns its stop-short reason: TestSettlingAnIssuesDocumentsGivesUpOnASettlementThatNeverLands and TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind pass in the docs and api runs"
+    },
     {
       "criterion": "Review F1: a close and a reopen are not refused when a document of the issue cannot load",
       "surface": "Go API on real Postgres 17 through PATCH /api/v1/issues/{key} (the close the daemon, CLI and dashboard all reach)",
@@ -104,6 +120,7 @@
     }
   ],
   "filesChanged": [
+    "round 4: docs/service.go and docs/ask_lifecycle.go (settleOutcome, followUpSettlement), dispatch web pending-sync.ts and pending-sync.test.ts (public Yjs reads); sixth and seventh forward merges (89be96d2, 337c577d; main deleted skills/dispatch/references/, the fact stays in the issue-update and resolve-ask --help text)",
     "round 3: docs/ask_lifecycle.go (unloadable document skipped), api/issue_ask_lifecycle.go, issue_ask_repair.go, issue_patch.go (window, retry set, WithoutCancel, one write per repair), docs/{ledger,livewrite,mutation,pending_authors,roomstate,service,websocket}.go (lifecycleAuthors deleted, lifecycle writes credit no author), dispatch web pending-sync.ts and connection.ts (admitted), tests; fifth forward merge 3fef5314",
     "round 2: packages/envoy/internal/dispatch/docs/mutation.go (applyLive drops a write whose fork did not move, via forkHeld), docs/ask_lifecycle.go (writer-specific guard removed), docs/mutation_test.go (new test)",
     "round 2: packages/dispatch/web/src/features/doc/pending-sync.ts (a read-only admission records no local update and drops stored rows that change nothing, per client) and pending-sync.test.ts",
@@ -126,6 +143,7 @@
     "A resolve or answer committing between the close's settlement and its transaction leaves the decision's copies owed a settlement that never runs on a closed issue; both sweeps write those copies from their rows (an answered copy without the answer's bytes, since WriteIssueAskStates is not weighed for size)."
   ],
   "deviations": [
+    "Round 4: PR body Fast-follow is 'none'; both deferred items are in this PR. The pod's harness was rebuilt after the pod replacement; its Postgres cluster was re-initialised with ICU collation for the rank test.",
     "Round 3: the review's plumbing items 'typed settleRoomWithin outcome' and 'readableType without Yjs private fields' are left as the PR body's one Fast-follow line (no behaviour change); the rest of that item is in this PR. plan.md decision 9 was amended by the architect (version 4) because this pane's dispatch CLI has no envoy.json since the pod restart.",
     "Round 2 local runs at da0dc24e (git archive): api ok (2093 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (401 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load, as at 39c12172), which passes 3/3 alone. packages/dispatch typecheck clean; pending-sync, connection and pending-edits unit tests pass; biome clean. -race not run locally (no C compiler).",
     "Round 2 unresolved residuals of the old-row cleanup, judged rare: a stamp row stored by an earlier read-only visit stays counted if the heading text changed on the server since; another client's rows that build on a dropped client's items could park.",
@@ -134,5 +152,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 3
+  "round": 4
 }
