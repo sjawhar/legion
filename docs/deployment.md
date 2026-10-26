@@ -253,6 +253,91 @@ pane is its recorded process only while its root process's command line, `sh -c`
 command, holds a configured harness's marker: `omp` for Oh My Pi, ` claude-bridge -- ` for Claude
 Code. A daemon with no `worker_backends` has Oh My Pi's launcher alone and checks for `omp` alone.
 
+## The `runtime.tmux` block
+
+`runtime: tmux` (or no `runtime` key) runs every pane with what the runtime tells it and the
+allow-listed part of the daemon's environment (`HOME`, `OMP_PROFILE`, `PATH`, locale, proxies). The
+mapping form adds the host's own needs:
+
+```yaml
+runtime:
+  tmux:
+    pane_env:                       # plain variables every pane gets, after the runtime's own
+      ELAN_HOME: /opt/elan
+      DISPATCH_PUBLIC_URL: https://dispatch.example.com
+      LEDGER_DSN_FILE: /etc/ledger/dsn   # a _FILE pointer names a file and is allowed
+    pi_config_files:                # Oh My Pi overlays, in order, in every pane's PI_CONFIG_FILES
+      - /etc/legion-operator/overlay.yml
+provider_keys:
+  ANTHROPIC_API_KEY: file:/etc/legion/providers/ANTHROPIC_API_KEY
+  OPENAI_API_KEY: OPENAI_API_KEY_PROD    # a secretsd key, as before
+```
+
+- **`pane_env`** refuses `PATH` (the runtime composes it), every name the runtime sets on a pane
+  (`LEGION_*`, the XDG directories, the gh variables, `PI_CONFIG_FILES`, `LEGION_CONTROLLER`,
+  `LEGION_SLACK_CHANNELS`), the git identity a launch sets (`JJ_USER`, `GIT_AUTHOR_NAME`, …), a
+  provider key or its `_FILE` pointer, and any credential-shaped name (`…_TOKEN`, `…_KEY`,
+  `…_SECRET`, `…_SEED`, `…_PASSWORD`, `…_PAT`, `…_GRANT`, `…_CREDENTIALS`, `PRIVATE_KEY`): a value on
+  tmux's command line is readable by every process of the host, so a secret reaches a pane as a
+  file. A launch whose own variable or secret pointer collides with a `pane_env` name is refused.
+- **`pi_config_files`** paths resolve against `legion.yaml`'s directory and may not hold `:`.
+  The runtime's turn-scope overlay stays last, so its two keys outrank the operator's overlays. The
+  boot plugin gate probes Oh My Pi under the same overlays and variables.
+- **`provider_keys`** values of the form `file:/abs/path` are read once at boot, as the daemon,
+  into the same daemon-held 0600 files a secretsd key lands in; an unreadable or empty file refuses
+  the boot, naming the variable and the file. Kubernetes refuses the form: a file on the daemon's
+  disk reaches no pod.
+- **`controller: daemon`** works under tmux too: the daemon launches the controller in a pane of
+  its own window, `controller`, working in `<state_dir>/controller`, told `LEGION_CONTROLLER=1` and
+  an empty `LEGION_SLACK_CHANNELS`, and supervises it like a root architect. It needs
+  `dispatch_url`. A project with no GitHub owner to mint for runs it with gh acting as nobody, its
+  gh directory empty.
+
+## How workspaces are provisioned on the host
+
+Each repository has one shared jj clone at `<state_dir>/repos/github.com/<owner>/<repo>`, and each
+issue a jj workspace of it at `<state_dir>/workspaces/<owner>/<repo>/<issue, lowercased>`, on the
+bookmark `legion/<ISSUE>`. The first provision of a repository clones it with the implement App's
+installation token, handed to git through a one-shot 0600 credential helper under the state
+directory. Every launch first makes sure its issue's workspace is there: a claim resumed,
+relaunched or recovered, as well as a new one, is provisioned when its directory is missing,
+checking out `legion/<ISSUE>` when GitHub has it.
+
+Provisions of different issues run side by side, up to 16 at once. Everything a provision does to
+the shared clone runs under the clone's one store lock: a fetch of the default branch and the
+issue's branch alone, the workspace's registration with no files (`jj workspace add
+--sparse-patterns empty`), its bookmark, and the clone's git configuration. The checkout of the
+working copy (`jj sparse reset` in the new workspace) writes only that workspace and runs with the
+lock released. A workspace whose checkout never finished is checked out by its next provision.
+Removals take the issue's turn and hold the store lock throughout.
+
+A store may be made before the daemon's first boot, with the same jj the daemon uses, as the
+daemon's user: a colocated `jj git clone https://github.com/<owner>/<repo>` into the clone path,
+then `jj -R <clone> --ignore-working-copy config set --repo git.abandon-unreachable-commits false`.
+A directory there without `.jj` is removed and cloned again; one without `.git` is not a store.
+Boot rewrites every store's credential helper to `legion git-credential`.
+
+## Moving a project onto tmux
+
+A tmux daemon can take over the store of a daemon that ran the project under `runtime: kubernetes`.
+Nothing stops two daemons from driving one store at once — the instance lock is a file on each
+machine, and claim records are written by whichever daemon wrote last — so the order matters:
+
+1. Stop the Kubernetes daemon, and wait until none of the project's Agent Sandboxes or pods is
+   left. A pod still running beside the tmux daemon is a second agent on the same claim and branch.
+2. Put the claims' session files in the tmux host's sessions directory, keeping their folders
+   (`<sessions>/<folder>/<timestamp>_<session id>.jsonl`). A tmux pane resumes a session from its
+   file alone: a session the Kubernetes runtime kept in its session database
+   (`runtime.kubernetes.session_store`) has no file on the host until one is written there from
+   its row, and without one the claim starts a fresh agent (step 3).
+3. Boot the tmux daemon with the same Postgres. Each claim whose recorded process is a pod is
+   reported gone, displaced, and relaunched in a pane on its recorded session, charged nothing.
+   The session is found at its recorded path, else in any folder of the same sessions directory by
+   its file name or session id; a session found nowhere starts a fresh agent, uncharged, which
+   registers a session of its own. Each workspace is provisioned before its first launch.
+4. Retry what failed to launch meanwhile, once the cause is gone: `legion claims retry --failed`
+   (an architect relaunches on its session; a phase worker whose issue is held retries its phase).
+
 ## Rotating the App keys
 
 When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless
