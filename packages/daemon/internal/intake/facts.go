@@ -696,6 +696,13 @@ type Refusal struct {
 	Message string
 }
 
+// ChildInOtherTree is the 409 CHILD_IN_OTHER_TREE refusal of key, a child recorded in the tree of
+// tree, when it is asked to join want: it is that tree's, not want's. A release of children and
+// the workflow's adoption both answer it.
+func ChildInOtherTree(key, tree, want string) *Refusal {
+	return &Refusal{Status: 409, Code: "CHILD_IN_OTHER_TREE", Message: fmt.Sprintf("%s runs in the tree of %s, not %s", key, tree, want)}
+}
+
 // ApplyFact is the only transaction path for facts, whether they arrived through JetStream, the
 // API, or supervision. It records the event before running handlers, skips duplicates before any
 // handler runs, remembers the first refusal while completing every handler, and rolls all writes

@@ -135,15 +135,6 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if err != nil {
 		return nil, nil, err
 	}
-	// settleReread is the release and promotion an observation that records nothing still owes the
-	// line when its Reread moved a root's recorded ancestor: the root it frees has no event of its own.
-	settleReread := func() ([]string, error) {
-		if !reread {
-			return nil, nil
-		}
-		return a.settle(ctx, tx)
-	}
-
 	stored, err := a.store.Issue(ctx, tx, observation.Key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
@@ -151,6 +142,9 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if observation, err = workflow.SettleRetainedRepository(observation, stored); err != nil {
 		return nil, nil, err
 	}
+	// records says whether the observation records anything, and todoWake whether it is an
+	// unlabelled todo issue's, which wakes the controller once the line is settled.
+	records, todoWake := true, false
 	if stored == nil {
 		handed := observation.HandedOver
 		// A root in triage handed to Legion is the controller's to triage, so each observation of it
@@ -172,59 +166,60 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// an event moving the key out of todo, or taking its label off, is real information about
 		// what Dispatch shows now, and leaving the held summary as Reconcile's stale boot listing
 		// found it would have release admit on that stale information instead.
-		if observation.Status != "todo" {
+		switch {
+		case observation.Status != "todo":
 			a.refreshHeldSummary(observation)
-			released, err := settleReread()
-			return released, nil, err
-		}
-		if !handed {
+			records = false
+		case !handed:
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
-			released, err := settleReread()
-			if err != nil {
+			records, todoWake = false, true
+		default:
+			a.mu.Lock()
+			summary, held := a.pending[observation.Key]
+			a.mu.Unlock()
+			if held && observation.Seq <= summary.LastSeq {
+				// Reconcile already holds this key on the listing's own summary because it found it
+				// behind the stream: an unrecorded key has no record to fence a live event against, so
+				// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
+				// own publish backoff — decides nothing. release applies that summary once the
+				// consumer catches up. A newer event, past the sequence the summary was taken at, is
+				// not a stale replay: it is recorded normally below, even while the key is still
+				// technically held — a release that has already committed but not yet run its
+				// commit hook (which clears pending) still shows this key as held, and dropping this
+				// event here would lose it once that hook clears pending out from under it, the
+				// event already acknowledged as processed. promote's own pending membership check —
+				// not this one — is what still holds the freshly recorded candidate back from a slot
+				// until pending is actually clear; a later pass once the hold clears promotes it.
+				records = false
+			} else if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
 				return nil, nil, err
 			}
-			// An issue in todo that nobody handed to Legion wakes the controller while a slot stands
-			// free; the controller takes nothing for it, since only a person hands Legion work
-			// (skill://legion-controller, "Free slots"). The notice waits todoWakeDelay, so the
-			// events of one edit burst find it pending and fold into it.
-			free, err := a.slotFree(ctx, tx)
-			if err != nil || !free {
-				return released, nil, err
-			}
-			return released, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
-		}
-		a.mu.Lock()
-		summary, held := a.pending[observation.Key]
-		a.mu.Unlock()
-		if held && observation.Seq <= summary.LastSeq {
-			// Reconcile already holds this key on the listing's own summary because it found it
-			// behind the stream: an unrecorded key has no record to fence a live event against, so
-			// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
-			// own publish backoff — decides nothing. release applies that summary once the
-			// consumer catches up. A newer event, past the sequence the summary was taken at, is
-			// not a stale replay: it is recorded normally below, even while the key is still
-			// technically held — a release that has already committed but not yet run its
-			// commit hook (which clears pending) still shows this key as held, and dropping this
-			// event here would lose it once that hook clears pending out from under it, the
-			// event already acknowledged as processed. promote's own pending membership check —
-			// not this one — is what still holds the freshly recorded candidate back from a slot
-			// until pending is actually clear; a later pass once the hold clears promotes it.
-			released, err := settleReread()
-			return released, nil, err
-		}
-		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
-			return nil, nil, err
 		}
 	} else if err := a.applyObservation(ctx, tx, *stored, observation); err != nil {
 		return nil, nil, err
 	}
 
-	released, err := a.settle(ctx, tx)
-	if err != nil {
-		return nil, nil, err
+	// An observation that records nothing still owes the line its release and promotion when its
+	// Reread moved a root's recorded ancestor: the root it frees has no event of its own.
+	var released []string
+	if records || reread {
+		if released, err = a.settle(ctx, tx); err != nil {
+			return nil, nil, err
+		}
 	}
-	return released, nil, nil
+	if !todoWake {
+		return released, nil, nil
+	}
+	// An issue in todo that nobody handed to Legion wakes the controller while a slot stands
+	// free; the controller takes nothing for it, since only a person hands Legion work
+	// (skill://legion-controller, "Free slots"). The notice waits todoWakeDelay, so the
+	// events of one edit burst find it pending and fold into it.
+	free, err := a.slotFree(ctx, tx)
+	if err != nil || !free {
+		return released, nil, err
+	}
+	return released, nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
 }
 
 // settle releases the slots of trees no longer in the workflow (releaseInactiveSlots) and promotes
@@ -949,80 +944,6 @@ func (a *Admission) held(key string) bool {
 	defer a.mu.Unlock()
 	_, held := a.pending[key]
 	return held
-}
-
-// adoptQueuedRoots moves every todo root of this project, waiting in admission's queue or not yet
-// handed to Legion, into the live tree its recorded parent runs in, when that root never ran as a
-// tree of its own (workflow's AdoptionRefusal, Engine.Adopt): a person made it a child of that tree,
-// so it takes no slot and no architect of its own, and runs in the tree as any of its todo children
-// does. A candidate is a recorded root of this project in todo whose parent is recorded in a tree
-// other than its own. One that ran as a tree of its own, or carries a run handed over to it, keeps
-// queueing as its own root: taking it out of the line would strand its run with nobody told. A
-// key Reconcile holds, the candidate's or its target's, is left for release to apply first, when
-// respectHolds is set.
-//
-// It loops until a pass adopts nothing, and returns the issues that pass read: it wrote nothing, so
-// they are the record as it stands. Each adoption makes a root a member, never a root again, so the
-// roots bound the passes. A candidate whose target root is itself a candidate waits for the next
-// pass, so nested queued roots join the live tree at the top once each, rather than passing through
-// the queued tree between; candidates whose parents form a cycle are each other's targets and stay
-// roots of their own.
-func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHolds bool) ([]record.Issue, error) {
-	type adoption struct{ issue, target record.Issue }
-	for {
-		issues, err := a.store.Issues(ctx, tx)
-		if err != nil {
-			return nil, fmt.Errorf("list admission issues: %w", err)
-		}
-		slots, err := a.store.Slots(ctx, tx)
-		if err != nil {
-			return nil, fmt.Errorf("list admission slots: %w", err)
-		}
-		// A target whose tree is not live refuses every candidate (AdoptionRefusal), so it is
-		// skipped here without the refusal's own reads.
-		live := record.LiveRoots(issues, slots)
-		recorded := make(map[string]record.Issue, len(issues))
-		for _, issue := range issues {
-			recorded[issue.Key] = issue
-		}
-		var candidates []adoption
-		for _, issue := range issues {
-			if issue.Project != a.project || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Status != "todo" || issue.Parent == nil {
-				continue
-			}
-			parent, ok := recorded[*issue.Parent]
-			if !ok {
-				continue
-			}
-			target, ok := recorded[parent.Tree]
-			if !ok || target.Key == issue.Key || respectHolds && (a.held(issue.Key) || a.held(target.Key)) {
-				continue
-			}
-			if _, ok := live[target.Key]; !ok {
-				continue
-			}
-			refusal, err := a.engine.AdoptionRefusal(ctx, tx, issue, target.Key)
-			if err != nil {
-				return nil, fmt.Errorf("read whether %s joins the tree of %s: %w", issue.Key, target.Key, err)
-			}
-			if refusal == nil {
-				candidates = append(candidates, adoption{issue: issue, target: target})
-			}
-		}
-		adopted := false
-		for _, candidate := range candidates {
-			if slices.ContainsFunc(candidates, func(other adoption) bool { return other.issue.Key == candidate.target.Key }) {
-				continue
-			}
-			if err := a.engine.Adopt(ctx, tx, candidate.issue, candidate.target, *candidate.issue.Parent); err != nil {
-				return nil, fmt.Errorf("adopt %s into the tree of %s: %w", candidate.issue.Key, candidate.target.Key, err)
-			}
-			adopted = true
-		}
-		if !adopted {
-			return issues, nil
-		}
-	}
 }
 
 // unslotted says whether issue is a root of this project left in the workflow (workflow's

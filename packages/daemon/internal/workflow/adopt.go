@@ -12,19 +12,21 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// AdoptionRefusal says why issue cannot join the live tree tree, nil when it can. A recorded root
+// AdoptionRefusal says why issue cannot join tree, nil when it can; live says whether tree is live
+// (record.TreeLive), as the caller read it once for every issue it asks about. A recorded root
 // that never ran as a tree of its own (RanAsRoot), whose tree's live root is tree's, is a member of
 // that tree. A child already recorded in tree needs nothing; one recorded in any other tree is that
-// tree's, not tree's to adopt. Every refusal is a 409 whose message names the issue and why.
+// tree's, not tree's to adopt (intake.ChildInOtherTree). Every refusal is a 409 whose message
+// names the issue and why.
 //
 // Admission's sweep of its queue (adoptQueuedRoots) leaves a refused root queueing as a root of
 // its own; a release of children answers the refusal. Callers check it before Adopt.
-func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Issue, tree string) (*intake.Refusal, error) {
+func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Issue, tree string, live bool) (*intake.Refusal, error) {
 	if issue.Tree == tree {
 		return nil, nil
 	}
 	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
-		return &intake.Refusal{Status: 409, Code: "CHILD_IN_OTHER_TREE", Message: fmt.Sprintf("%s runs in the tree of %s, not %s", issue.Key, issue.Tree, tree)}, nil
+		return intake.ChildInOtherTree(issue.Key, issue.Tree, tree), nil
 	}
 	notAdoptable := func(reason string) *intake.Refusal {
 		return &intake.Refusal{Status: 409, Code: "CHILD_NOT_ADOPTABLE", Message: fmt.Sprintf("%s cannot join the tree of %s: %s", issue.Key, tree, reason)}
@@ -35,16 +37,6 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 	}
 	if ran != "" {
 		return notAdoptable(ran), nil
-	}
-	root, err := e.store.Issue(ctx, tx, tree)
-	if err != nil {
-		return nil, err
-	}
-	live := false
-	if root != nil {
-		if live, err = record.TreeLive(ctx, e.store, tx, *root); err != nil {
-			return nil, err
-		}
 	}
 	if !live {
 		return notAdoptable(fmt.Sprintf("the tree of %s is not live", tree)), nil

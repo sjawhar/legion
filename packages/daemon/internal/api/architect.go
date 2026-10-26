@@ -323,7 +323,8 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 		return false
 	}
 	if recorded != nil && recorded.Tree != tree {
-		writeFailure(w, http.StatusConflict, "CHILD_IN_OTHER_TREE", fmt.Sprintf("%s runs in the tree of %s, not %s", child.Key, recorded.Tree, tree))
+		refusal := intake.ChildInOtherTree(child.Key, recorded.Tree, tree)
+		writeFailure(w, refusal.Status, refusal.Code, refusal.Message)
 		return false
 	}
 	if recorded != nil {
