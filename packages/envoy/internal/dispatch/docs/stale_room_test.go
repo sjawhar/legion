@@ -751,6 +751,8 @@ func TestARoomReservedForTheInstanceItReplacedIsTriedAgain(t *testing.T) {
 	pair := newProcessPair(t)
 	ctx := context.Background()
 	evictor := newStaleRoomEvictor(pair.taskA)
+	now := time.Now()
+	evictor.now = func() time.Time { return now }
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
 	first := pair.taskA.srv.GetDoc(pair.artifactID)
@@ -789,15 +791,17 @@ func TestARoomReservedForTheInstanceItReplacedIsTriedAgain(t *testing.T) {
 		t.Fatalf("the evictor reached a verdict (wakeIn = %s) on a replacement the reserving close does not answer for", wake)
 	}
 
-	// The reserving close returns, having closed nothing of its own, and the replacement is closed.
+	// The reserving close returns, having closed nothing of its own, and the window the evictor
+	// armed closes the replacement.
 	if closed, err := pair.taskA.closeReservedRoom(ctx, reservation); err != nil || closed {
 		t.Fatalf("the close reserved for the first instance = %v, %v, want false and no error", closed, err)
 	}
-	closed, err := pair.taskA.closeRoomBehindHead(ctx, pair.artifactID, replacement)
-	if err != nil || !closed {
-		t.Fatalf("close the replacement once the reservation is lifted = %v, %v, want true and no error", closed, err)
-	}
+	now = now.Add(evictor.wakeIn())
+	evictor.woke(ctx)()
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+	if wake := evictor.wakeIn(); wake != 0 {
+		t.Fatalf("the evictor left a window armed (wakeIn = %s) once it closed the replacement", wake)
+	}
 }
 
 // The close of a room behind the head holds the room it checked against ygo's idle sweep until it

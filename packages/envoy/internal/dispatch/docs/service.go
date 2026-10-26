@@ -1821,8 +1821,10 @@ var errRoomCloseHeldOff = errors.New("the close of the room is held off")
 //
 // It closes nothing, and answers false with no error, when the room is another close's or another
 // instance's: live is no longer the instance room holds, the room failed (its own eviction
-// reloads it, evictFailed), whether before the reservation or while the close runs, or another
-// close has reserved live itself (that close closes it, or arms the settlement it ended again).
+// reloads it, evictFailed) before the reservation or after it, before the close's Apply admitted
+// the close, or another close has reserved live itself (that close closes it, or arms the
+// settlement it ended again). A failed room answers so even when something else would hold the
+// close off: nothing but its own eviction will close it.
 // Otherwise the close reaches live alone (closeRoomInstance). The state is taken as lockState
 // takes it: a room that loaded onto a state an earlier release then forgot has none registered,
 // and one made for it here is the one the close settles. A settlement the reservation ended is
@@ -1832,6 +1834,10 @@ func (s *Service) closeRoomBehindHead(ctx context.Context, room string, live *cr
 		s.beforeCloseBehindHeadLock(room)
 	}
 	state := s.lockState(room)
+	if state.failed != nil {
+		s.unlockState(room, state)
+		return false, nil
+	}
 	if state.openLiveWriteLocked() || (state.reloading && state.reservedFor != live) {
 		s.unlockState(room, state)
 		return false, errRoomCloseHeldOff
@@ -1920,8 +1926,9 @@ func (s *Service) closeReservedRoom(ctx context.Context, reservation roomCloseRe
 	state.mu.Lock()
 	if !state.released {
 		state.reloading = false
-		state.reservedFor = nil
 	}
+	// Cleared on a released record too: it holds the instance, which nothing should keep alive.
+	state.reservedFor = nil
 	s.unlockState(reservation.room, state)
 	if reservation.owesSettlement {
 		s.scheduleSettle(reservation.room)

@@ -720,11 +720,10 @@ sweep or another close retired first is left to the room that holds the document
 reservation is lifted, and a settlement the reservation ended is armed again on it. A
 reservation outlasts its instance when the room is replaced before the close returns
 (`reservedFor`); the evictor tries the replacement again once that close has returned. That
-`Server.Apply` is the
-service's own injection and carries its mark (`withOwnerVerified`), which `allowInject` admits on
-a closed issue: a room loaded while the issue was open and left behind the head by the other
-process's write is closed whenever its issue closed, rather than kept resident with text the store
-no longer holds until its idle minute runs out. A named or snapshot version whose
+`Server.Apply` is the service's own injection and carries its mark (`withOwnerVerified`), which
+`allowInject` admits on a closed issue: a room loaded while the issue was open and left behind the
+head by the other process's write is closed whenever its issue closed, rather than kept resident
+with text the store no longer holds until its idle minute runs out. A named or snapshot version whose
 room is behind the head, read under the document's advisory lock, is rendered from the stored
 document instead (`storedTree`), and neither it nor a version over a cold fork lists the room's
 in-flight credits (`withoutInflight`): the store holds none of those changes, and an append the
