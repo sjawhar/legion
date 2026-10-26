@@ -1,5 +1,6 @@
 // The policy for an agent delivery this listener cannot place: its retry bounds, the deferral set
-// that caps how many such messages are held at once, and the defer-or-give-up decision itself.
+// that caps how many such messages are held at once and expires a slot whose message never comes
+// back, and the defer-or-give-up decision itself.
 
 package main
 
@@ -62,6 +63,24 @@ const defaultUnplaceableRetryWindow = 60 * time.Second
 // times. TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther pins it.
 const pushFailedDeferrals = 1
 
+// unplaceableDeferralExpiry is how long a slot in unplaceableDeferrals lasts after the deferral
+// that took it, the longest a deferred message can legitimately stay pending before a delivery of
+// it reaches this listener's handler again and gives the slot back. It is the sum of three waits:
+//   - unplaceableRetryDelay (5 s), the NAK delay the deferral asks for: the stream redelivers no
+//     sooner;
+//   - consumerAckWait (durable.go, 60 s): finalizeAfter's NAK is fire-and-forget, and one lost on
+//     the wire leaves the message pending until the AckWait of the delivery that was deferred
+//     runs out, which began before the slot was taken, so it ends inside this term;
+//   - a margin of one more consumerAckWait for the redelivery to wait in this listener's client
+//     buffer behind the deliveries ahead of it before its handler runs the release. A handler that
+//     is further behind than that has let the stream redeliver the message again in the meantime.
+//
+// 125 s in all. A slot older than that belongs to a message that is not coming back here - the
+// stream dropped or purged it, or its redelivery reached another subscriber - and take reclaims
+// it. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins that it exceeds the first two
+// terms, so a message that is still legitimately pending never has its slot reclaimed early.
+const unplaceableDeferralExpiry = unplaceableRetryDelay + consumerAckWait + consumerAckWait
+
 // unplaceableDeferrals is the set of agent deliveries this listener holds deferred right now,
 // keyed on each message's stream sequence (nats.MsgMetadata.Sequence.Stream), and the budget
 // unplaceableDeferralCap bounds. It is keyed rather than counted so that only a slot this
@@ -71,44 +90,58 @@ const pushFailedDeferrals = 1
 // direct-path deferrals at once) - so a count released on every redelivery could read zero while
 // the cap's worth of messages were still held.
 //
-// What the set guarantees: it never holds more than unplaceableDeferralCap entries, an entry is
-// added only by a deferral this listener made and removed only by that same message's next
-// delivery, so at any moment the messages this process is holding deferred number at most the
-// cap. What it cannot know, since it is this process's memory and not the stream's:
+// What the set guarantees: it never holds more than unplaceableDeferralCap live entries, and an
+// entry is added only by a deferral this listener made. It leaves by one of two routes: that same
+// message's next delivery releases it, or it expires unplaceableDeferralExpiry after the deferral
+// that took it, the longest that message can legitimately stay pending before a delivery of it
+// reaches this handler, and the next take or size sweeps it out. So at any moment the messages
+// this process is holding deferred, within that bound, number at most the cap. What it cannot
+// know, since it is this process's memory and not the stream's:
 //   - a listener restart forgets it. The previous process's deferrals stay pending in the durable
 //     until each one's NAK delay ends and it is redelivered, when the new process either takes a
 //     slot for it or gives it up; until then the durable can hold the old process's cap beside
 //     the new one's, which TestUnplaceableRetryWindowFitsTheBoundsItDependsOn keeps under
 //     consumerMaxAckPending (twice the cap is below it).
-//   - a message deferred and never delivered here again - one the stream drops first, or whose
-//     redelivery reaches some other subscriber - keeps its entry for the life of the process.
-//     Such an entry holds no slot of the durable's, and the set's own bound caps the cost: at
-//     worst every entry is one of these, and this listener gives each unplaceable message up on
-//     its first delivery, with its record, until it restarts.
+//   - a message deferred and never delivered here again - one the stream drops or purges first,
+//     or whose redelivery reaches some other subscriber - keeps its entry until it expires. Such
+//     an entry holds no slot of the durable's; until it expires it holds one of the set's, so a
+//     cap's worth of them gives each unplaceable message up on its first delivery, with its
+//     record, for at most unplaceableDeferralExpiry before the retry resumes.
+//   - a message still pending past unplaceableDeferralExpiry - a handler further behind its
+//     redeliveries than the expiry's margin allows - loses its slot while the durable still
+//     holds it, and the set undercounts by one such message until its delivery arrives, takes
+//     nothing back on release, and is placed, deferred again or given up like any other.
 type unplaceableDeferrals struct {
-	mu   sync.Mutex
-	held map[uint64]struct{}
+	mu sync.Mutex
+	// held maps each held message's stream sequence to the time its slot expires.
+	held map[uint64]time.Time
+	// now is the clock the expiries are read against: time.Now, which a test replaces to step
+	// past an expiry without waiting it out.
+	now func() time.Time
 }
 
 func newUnplaceableDeferrals() *unplaceableDeferrals {
-	return &unplaceableDeferrals{held: make(map[uint64]struct{}, unplaceableDeferralCap)}
+	return &unplaceableDeferrals{held: make(map[uint64]time.Time, unplaceableDeferralCap), now: time.Now}
 }
 
 // take records the message at stream sequence seq as deferred and reports whether it fits inside
-// unplaceableDeferralCap. Past the cap it records nothing and reports false, and the caller gives
-// the message up. A sequence already held reports true without a second slot: one message holds
-// one slot however many deliveries of it race. The check and the insert are one critical section,
-// so two deliveries racing for the last slot cannot both take it.
+// unplaceableDeferralCap. It first sweeps out every slot whose expiry has come
+// (unplaceableDeferralExpiry), so neither the cap check nor the held check below counts a message
+// that is not coming back; an expired entry for seq itself is swept like any other, and seq is
+// taken afresh. Past the cap it records nothing and reports false, and the caller gives the
+// message up. A sequence already held reports true without a second slot: one message holds one
+// slot however many deliveries of it race, and its expiry is counted again from this deferral,
+// whose NAK restarts the wait the expiry bounds. The sweep, the check and the insert are one
+// critical section, so two deliveries racing for the last slot cannot both take it.
 func (d *unplaceableDeferrals) take(seq uint64) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if _, ok := d.held[seq]; ok {
-		return true
-	}
-	if len(d.held) >= unplaceableDeferralCap {
+	now := d.now()
+	d.sweepLocked(now)
+	if _, ok := d.held[seq]; !ok && len(d.held) >= unplaceableDeferralCap {
 		return false
 	}
-	d.held[seq] = struct{}{}
+	d.held[seq] = now.Add(unplaceableDeferralExpiry)
 	return true
 }
 
@@ -120,11 +153,22 @@ func (d *unplaceableDeferrals) release(seq uint64) {
 	delete(d.held, seq)
 }
 
-// size reports how many slots are held, for a test to read the budget back.
+// size reports how many live slots are held, for a test to read the budget back. It sweeps the
+// expired ones out first, as take does, so it reports the count take's cap check would see.
 func (d *unplaceableDeferrals) size() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.sweepLocked(d.now())
 	return len(d.held)
+}
+
+// sweepLocked deletes every slot whose expiry is at or before now. The caller holds d.mu.
+func (d *unplaceableDeferrals) sweepLocked(now time.Time) {
+	for seq, expiry := range d.held {
+		if !now.Before(expiry) {
+			delete(d.held, seq)
+		}
+	}
 }
 
 // unplaceableAgentDelivery answers an agent delivery that nothing placed and nothing failed hard
@@ -196,7 +240,8 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	if metadata != nil && placementMayChange && metadata.NumDelivered <= windowDeferrals &&
 		metadata.NumDelivered < unplaceableMaxDeliveries {
 		// The slot is this message's own, keyed on its stream sequence, so only this
-		// message's next delivery gives it back. A full set takes nothing, and the delivery
+		// message's next delivery gives it back, or its expiry (unplaceableDeferralExpiry) when
+		// that delivery never reaches this listener. A full set takes nothing, and the delivery
 		// falls through to the ordinary give-up below.
 		deferred = cfg.deferredUnplaceable.take(metadata.Sequence.Stream)
 	}

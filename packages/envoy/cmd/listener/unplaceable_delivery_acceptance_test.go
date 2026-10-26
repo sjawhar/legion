@@ -651,9 +651,10 @@ const twoDeferralWindow = 2*unplaceableRetryDelay + unplaceableRetryDelay/2
 
 // A redelivery gives its deferral slot back. The set (unplaceableDeferrals) holds the messages
 // this listener is holding deferred right now, so a slot that is taken and never released is a
-// slot gone for the life of the process: after unplaceableDeferralCap deferrals the listener
-// would defer nothing ever again, give every unplaceable message up on its first delivery, and
-// say nothing about why - the whole retry quietly stopping, which is the shape of failure this
+// slot gone until its expiry (unplaceableDeferralExpiry, 125 s): after unplaceableDeferralCap
+// deferrals inside that time the listener would defer nothing more until the oldest expired, give
+// every unplaceable message up on its first delivery meanwhile, and say nothing about why - the
+// retry quietly stopping whenever traffic keeps the set full, which is the shape of failure this
 // issue exists to end. Nothing else pins it: the cap's own test preloads the set and reads it
 // back after one disposition, and every other unplaceable test runs with the set nearly empty,
 // far from the cap, so deleting the release leaves them all green.
