@@ -95,7 +95,7 @@ func newCloseAsksFixture(t *testing.T) closeAsksFixture {
 		t.Fatalf("retract: status=%d body=%s", retracted.Code, retracted.Body.String())
 	}
 	for ask, want := range map[string]string{f.personAsk: "human", f.agentAsk: "agent", f.blockAsk: "human", f.approvalAsk: "human"} {
-		if got := readAskRecord(t, handler, ask); got.State != "open" || got.WaitingOn != want {
+		if got := readBlockAsk(t, handler, ask); got.State != "open" || got.WaitingOn != want {
 			t.Fatalf("ask %s = %s waiting on %q, want open waiting on %s", ask, got.State, got.WaitingOn, want)
 		}
 	}
@@ -154,7 +154,7 @@ func TestClosingAnIssueWithdrawsItsOpenAsksAndReopeningRestoresThem(t *testing.T
 			recordsBefore := map[string]model.Ask{}
 			for _, ask := range f.open() {
 				openedBefore[ask] = askEventCount(t, f.database, ask, "ask.opened")
-				recordsBefore[ask] = readAskRecord(t, f.handler, ask)
+				recordsBefore[ask] = readBlockAsk(t, f.handler, ask)
 			}
 			if inbox := inboxAskIDs(t, f.handler); !containsAll(inbox, f.open()) {
 				t.Fatalf("inbox before the close = %v, want every open ask %v", inbox, f.open())
@@ -223,7 +223,7 @@ func TestClosingAnIssueWithdrawsItsOpenAsksAndReopeningRestoresThem(t *testing.T
 				t.Fatalf("reopen response last_seq = %d, a read of the issue answers %d", reopenResponse.LastSeq, detail.LastSeq)
 			}
 			for _, ask := range f.open() {
-				got := readAskRecord(t, f.handler, ask)
+				got := readBlockAsk(t, f.handler, ask)
 				before := recordsBefore[ask]
 				if got.State != "open" || got.Resolution != nil || got.Answer != nil || got.WaitingOn != before.WaitingOn {
 					t.Fatalf("restored ask %s = %s %#v waiting on %q, want open with no record waiting on %q",
@@ -318,7 +318,7 @@ func TestClosingAnIssueWithdrawsADecisionBlockNotYetSettled(t *testing.T) {
 				if id == "" {
 					t.Fatal("the close's settlement never indexed the decision block")
 				}
-				ask := readAskRecord(t, handler, id)
+				ask := readBlockAsk(t, handler, id)
 				if ask.Author.Kind != "session" || ask.Author.ID != sessionActor()["id"] {
 					t.Fatalf("withdrawn decision's author = %#v, want the session that wrote it", ask.Author)
 				}
@@ -338,7 +338,7 @@ func TestClosingAnIssueWithdrawsADecisionBlockNotYetSettled(t *testing.T) {
 			if id == "" {
 				t.Fatal("the reopen's settlement never indexed the decision block")
 			}
-			ask := readAskRecord(t, handler, id)
+			ask := readBlockAsk(t, handler, id)
 			if ask.State != "open" || ask.Author.Kind != "session" || ask.Author.ID != sessionActor()["id"] {
 				t.Fatalf("indexed decision = %s by %#v, want open by the session that wrote it", ask.State, ask.Author)
 			}
@@ -429,7 +429,7 @@ func TestClosingAnIssueWithdrawsADecisionBlockPastedUnderARepeatedID(t *testing.
 			if err := documentService.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
 				t.Fatalf("settle the reopened issue's documents: %v", err)
 			}
-			if restored := readAskRecord(t, handler, original); restored.State != "open" || restored.Resolution != nil {
+			if restored := readBlockAsk(t, handler, original); restored.State != "open" || restored.Resolution != nil {
 				t.Fatalf("the spec's ask after the reopen = %s %#v, want open", restored.State, restored.Resolution)
 			}
 			pastedAsk := pastedBlockAsk(t, handler, issue.Key, issue.PrimaryArtifactID)
@@ -544,7 +544,7 @@ func TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind(
 	if id == "" {
 		t.Fatal("the close's settlement never indexed the decision block")
 	}
-	ask := readAskRecord(t, handler, id)
+	ask := readBlockAsk(t, handler, id)
 	if ask.Author.Kind != "session" || ask.Author.ID != sessionActor()["id"] {
 		t.Fatalf("withdrawn decision's author = %#v, want the session that wrote it", ask.Author)
 	}
@@ -636,7 +636,7 @@ func TestEachCloseAndReopenWithdrawsAndRestoresOnce(t *testing.T) {
 			t.Fatalf("reopen %d: status=%d body=%s", cycle, reopened.Code, reopened.Body.String())
 		}
 		for _, ask := range asks {
-			if got := readAskRecord(t, handler, ask); got.State != "open" || got.Resolution != nil {
+			if got := readBlockAsk(t, handler, ask); got.State != "open" || got.Resolution != nil {
 				t.Fatalf("after reopen %d ask %s = %s %#v, want open", cycle, ask, got.State, got.Resolution)
 			}
 			if count := askEventCount(t, database, ask, "ask.opened"); count != opened[ask]+cycle {
@@ -650,7 +650,7 @@ func TestEachCloseAndReopenWithdrawsAndRestoresOnce(t *testing.T) {
 // requireWithdrawn fails t unless ask reads as withdrawn by the close of issue, made by closedBy.
 func requireWithdrawn(t *testing.T, handler http.Handler, issue, ask string, closedBy model.Actor) {
 	t.Helper()
-	got := readAskRecord(t, handler, ask)
+	got := readBlockAsk(t, handler, ask)
 	if got.State != "resolved" || got.Resolution == nil {
 		t.Fatalf("ask %s = %s %#v, want resolved", ask, got.State, got.Resolution)
 	}
@@ -663,18 +663,6 @@ func requireWithdrawn(t *testing.T, handler http.Handler, issue, ask string, clo
 	if got.Resolution.At.IsZero() {
 		t.Fatalf("ask %s resolution has no time", ask)
 	}
-}
-
-// readAskRecord reads the ask as GET /api/v1/asks/{id} answers it.
-func readAskRecord(t *testing.T, handler http.Handler, ask string) model.Ask {
-	t.Helper()
-	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask, nil, "alice")
-	if read.Code != http.StatusOK {
-		t.Fatalf("read ask %s: status=%d body=%s", ask, read.Code, read.Body.String())
-	}
-	return decodeBody[struct {
-		Ask model.Ask `json:"ask"`
-	}](t, read).Ask
 }
 
 func createSessionAsk(t *testing.T, handler http.Handler, issue, question string) string {

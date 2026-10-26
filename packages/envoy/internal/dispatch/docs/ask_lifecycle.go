@@ -26,6 +26,10 @@ type BlockRef struct {
 // transaction of its own and takes the issue's row, which a caller's open transaction can hold.
 var errSettleJoined = errors.New("docs: an issue's documents settle outside every transaction")
 
+// issueDocumentIDs lists the documents of the issue $1, in id order: the order WriteIssueAskStates
+// writes them and SettleIssueDocuments settles them.
+const issueDocumentIDs = `select id::text from artifacts where issue_key = $1 and kind = 'doc' order by id`
+
 type lifecycleWriteContextKey struct{}
 
 // withLifecycleWrite marks the live writes made with ctx as server lifecycle writes
@@ -94,7 +98,7 @@ func (s *Service) WriteIssueAskStates(ctx context.Context, issueKey string, asks
 	for _, ask := range asks {
 		given[ask.ID] = ask
 	}
-	rows, err := tx.Query(ctx, `select id::text from artifacts where issue_key = $1 and kind = 'doc' order by id`, issueKey)
+	rows, err := tx.Query(ctx, issueDocumentIDs, issueKey)
 	if err != nil {
 		return nil, fmt.Errorf("list the issue's documents: %w", err)
 	}
@@ -355,9 +359,7 @@ func (s *Service) SettleIssueDocuments(ctx context.Context, issueKey string) err
 	if ledgerFrom(ctx).inTransaction() {
 		return errSettleJoined
 	}
-	rooms, err := s.documentRooms(ctx, "the issue's documents", `
-		select id::text from artifacts where issue_key = $1 and kind = 'doc' order by id
-	`, issueKey)
+	rooms, err := s.documentRooms(ctx, "the issue's documents", issueDocumentIDs, issueKey)
 	if err != nil {
 		return err
 	}

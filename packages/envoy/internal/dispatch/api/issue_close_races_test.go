@@ -62,7 +62,7 @@ func TestClosingAnIssueAgainstAConcurrentResolveLeavesOneRecord(t *testing.T) {
 				t.Fatalf("close: status=%d body=%s", closed.Code, closed.Body.String())
 			}
 			closedBy := latestEventActor(t, f.database, f.issue, "issue.closed")
-			recorded := readAskRecord(t, f.handler, ask)
+			recorded := readBlockAsk(t, f.handler, ask)
 			switch {
 			case resolved.Code == http.StatusOK:
 				t.Log("the resolve committed first")
@@ -271,7 +271,7 @@ type answeredDecision struct {
 // decisionAnswer, and reads what the answer route left of it.
 func answerDecision(t *testing.T, handler http.Handler, database *store.Store, spec, decision string) answeredDecision {
 	t.Helper()
-	read := readAskRecord(t, handler, decision)
+	read := readBlockAsk(t, handler, decision)
 	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+decision+"/answer", map[string]any{
 		"selected": []string{"Yes"}, "text": decisionAnswer, "expected_edited_at": read.EditedAt,
 	}, "alice")
@@ -349,7 +349,7 @@ func resolveAsSession(t *testing.T, handler http.Handler, ask string) *httptest.
 // ask.resolved event, and its block on spec and its copy on copied both read resolved.
 func requireResolvedDecisionAndCopy(t *testing.T, handler http.Handler, database *store.Store, spec, decision, copied string) {
 	t.Helper()
-	if recorded := readAskRecord(t, handler, decision); recorded.State != "resolved" || recorded.Resolution == nil ||
+	if recorded := readBlockAsk(t, handler, decision); recorded.State != "resolved" || recorded.Resolution == nil ||
 		recorded.Resolution.Kind != "resolved" || recorded.Resolution.Reason != sessionResolution {
 		t.Fatalf("decision = %s %#v, want the resolver's record", recorded.State, recorded.Resolution)
 	}
@@ -420,7 +420,7 @@ func TestClosingAnIssueWaitsForTheSettlementOfItsDocumentInFlight(t *testing.T) 
 	}()
 	// The close's own settlement of the document waits on the issue's row, which the held
 	// settlement owns.
-	awaitLockWait(t, database)
+	awaitLockWaiters(t, database, 1)
 	select {
 	case <-closing:
 		t.Fatalf("the close answered %d while the settlement held the issue's row: body=%s", closed.Code, closed.Body.String())
@@ -468,25 +468,5 @@ func awaitRequests(t *testing.T, requests *sync.WaitGroup, start chan struct{}, 
 	case <-answered:
 	case <-time.After(raceDeadline):
 		t.Fatalf("%s did not both answer within %v", what, raceDeadline)
-	}
-}
-
-// awaitLockWait waits until a connection to the test's database waits on a lock another holds.
-func awaitLockWait(t *testing.T, database *store.Store) {
-	t.Helper()
-	for deadline := time.Now().Add(raceDeadline); ; time.Sleep(5 * time.Millisecond) {
-		var waiting int
-		if err := database.Pool.QueryRow(context.Background(), `
-			select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock'
-		`).Scan(&waiting); err != nil {
-			t.Fatalf("read the connections waiting on a lock: %v", err)
-		}
-		if waiting > 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no connection waited on a lock within %v", raceDeadline)
-		}
 	}
 }

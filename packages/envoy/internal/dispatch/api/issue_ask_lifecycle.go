@@ -16,6 +16,9 @@ import (
 // withdrawals by this kind alone.
 const withdrawnResolution = "withdrawn"
 
+// withdrawnAsk is the SQL predicate, on asks a, that holds for an ask a close withdrew.
+const withdrawnAsk = `a.state = 'resolved' and a.resolution->>'kind' = '` + withdrawnResolution + `'`
+
 // withdrawnReason is the reason recorded on an ask the close of issueKey withdrew.
 func withdrawnReason(issueKey string) string {
 	return fmt.Sprintf("Withdrawn by the close of %s.", issueKey)
@@ -35,8 +38,7 @@ func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
 	}
-	var open bool
-	if err := s.deps.Store.Pool.QueryRow(ctx, `select closed_at is null from issues where key = $1`, issueKey).Scan(&open); err != nil || !open {
+	if _, err := issueOpenStatus(ctx, s.deps.Store.Pool, issueKey, ""); err != nil {
 		return
 	}
 	if err := s.deps.Docs.SettleIssueDocuments(ctx, issueKey); err != nil {
@@ -112,18 +114,24 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 	withdrawn, err := s.readIssueAsks(ctx, tx, `
 		select `+askRowColumns+`
 		`+askRowFrom+`
-		where a.issue_key = $1 and a.state = 'resolved' and a.resolution->>'kind' = '`+withdrawnResolution+`'
+		where a.issue_key = $1 and `+withdrawnAsk+`
 		order by a.id
 		for no key update of a
 	`, issueKey)
 	if err != nil {
 		return nil, nil, err
 	}
-	restored := make([]model.Ask, 0, len(withdrawn))
-	for _, ask := range withdrawn {
-		if _, err := tx.Exec(ctx, `update asks set state = 'open', answer = null, resolution = null where id = $1`, ask.ID); err != nil {
+	ids := make([]string, len(withdrawn))
+	for index, ask := range withdrawn {
+		ids[index] = ask.ID
+	}
+	if len(ids) > 0 {
+		if _, err := tx.Exec(ctx, `update asks set state = 'open', answer = null, resolution = null where id = any($1::uuid[])`, ids); err != nil {
 			return nil, nil, fmt.Errorf("restore withdrawn ask: %w", err)
 		}
+	}
+	restored := make([]model.Ask, 0, len(withdrawn))
+	for _, ask := range withdrawn {
 		ask.State = "open"
 		ask.Answer = nil
 		ask.Resolution = nil
@@ -182,28 +190,42 @@ func (s *server) sweepClosedIssueAsksTx(ctx context.Context, issueKey string, wi
 	for index, ask := range withdrawn {
 		ids[index] = ask.ID
 	}
+	if _, err := s.sweepIssueAskBlocksTx(documentCtx, tx, issueKey, ids, actor); err != nil {
+		return err
+	}
+	return ledger.Commit(ctx)
+}
+
+// sweepIssueAskBlocksTx is the close's final sweep of issueKey's documents (sweepClosedIssueAsks)
+// in tx, which the caller holds the issue's row in and ctx is joined to: it writes the blocks of
+// the asks withdrawnIDs names, the asks the close withdrew (none when nil), and of every other
+// resolved or answered block ask of the issue, and their copies, from their rows as they stand
+// (docs.WriteIssueAskStates), marks resolved every readable ask block no settlement has indexed,
+// logs each one and answers them.
+func (s *server) sweepIssueAskBlocksTx(ctx context.Context, tx pgx.Tx, issueKey string, withdrawnIDs []string, actor model.Actor) ([]docs.BlockRef, error) {
 	// The rows as they stand under the issue's row: a reopen, an answer and a second close
 	// between the close's commit and this lock leave them other than the close wrote them. Every
 	// other resolved or answered block ask's blocks are written from its row too: an ask resolved
 	// or answered after the close's settlement ran and before its transaction took the issue's row
 	// marked its copies owed a settlement, and no settlement runs while the issue is closed, so the
 	// sweep writes those copies its state in that settlement's place. An answered ask's own block
-	// is the answer route's to write, and WriteIssueAskStates leaves it as it is.
-	current, err := s.readIssueAsks(documentCtx, tx, `
+	// is the answer route's to write, and WriteIssueAskStates leaves it as it is. A nil
+	// withdrawnIDs is a null array, which matches no id.
+	current, err := s.readIssueAsks(ctx, tx, `
 		select `+askRowColumns+`
 		`+askRowFrom+`
 		where a.issue_key = $1 and (a.id = any($2::uuid[]) or (a.state in ('resolved', 'answered') and a.block_id is not null))
 		order by a.id
-	`, issueKey, ids)
+	`, issueKey, withdrawnIDs)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	unindexed, err := s.deps.Docs.WriteIssueAskStates(documentCtx, issueKey, current, actor, true)
+	unindexed, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, current, actor, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logUnindexedAskBlocks(issueKey, unindexed)
-	return ledger.Commit(ctx)
+	return unindexed, nil
 }
 
 // readIssueAsks reads the asks query selects (askRowColumns from askRowFrom), taking whatever row

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -139,30 +138,13 @@ func repairNow(t *testing.T, f repairFixture) IssueAskRepair {
 }
 
 // captureLogs records what the default logger writes until the test ends.
-func captureLogs(t *testing.T) *lockedBuffer {
+func captureLogs(t *testing.T) *storetest.LockedLog {
 	t.Helper()
-	logs := &lockedBuffer{}
+	logs := &storetest.LockedLog{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	return logs
-}
-
-type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(data []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Write(data)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.String()
 }
 
 // A closed issue still holding a plain ask, a decision block and an approval request has each
@@ -187,7 +169,7 @@ func TestRepairWithdrawsTheOpenAsksOfAnIssueClosedWithoutWithdrawing(t *testing.
 	closedAt := time.Now().Add(-time.Hour).UTC()
 	closeWithoutWithdrawing(t, f, issue.Key, &closer, closedAt)
 	for _, ask := range asks {
-		if got := readAskRecord(t, f.handler, ask); got.State != "open" {
+		if got := readBlockAsk(t, f.handler, ask); got.State != "open" {
 			t.Fatalf("seeded ask %s = %s, want open on the closed issue", ask, got.State)
 		}
 	}
@@ -201,7 +183,7 @@ func TestRepairWithdrawsTheOpenAsksOfAnIssueClosedWithoutWithdrawing(t *testing.
 	}
 	for _, ask := range asks {
 		requireWithdrawn(t, f.handler, issue.Key, ask, closer)
-		at := readAskRecord(t, f.handler, ask).Resolution.At
+		at := readBlockAsk(t, f.handler, ask).Resolution.At
 		if at.Before(started.Add(-time.Second)) || at.After(finished.Add(time.Second)) || !at.After(closedAt) {
 			t.Fatalf("ask %s withdrawn at %s, want when the repair ran (%s - %s), not at the close %s", ask, at, started, finished, closedAt)
 		}
@@ -352,7 +334,7 @@ func TestRepairRestoresTheWithdrawnAsksOfAnIssueReopenedWithoutRestoring(t *test
 		t.Fatalf("repair = %+v, want %d restored and none withdrawn", repair, len(asks))
 	}
 	for _, ask := range asks {
-		if got := readAskRecord(t, f.handler, ask); got.State != "open" || got.Resolution != nil || got.Answer != nil {
+		if got := readBlockAsk(t, f.handler, ask); got.State != "open" || got.Resolution != nil || got.Answer != nil {
 			t.Fatalf("restored ask %s = %s %#v, want open with no record", ask, got.State, got.Resolution)
 		}
 		if count := askEventCount(t, f.database, ask, "ask.opened"); count != opened[ask]+1 {

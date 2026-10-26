@@ -301,10 +301,10 @@ func TestListOpenAsksForSession(t *testing.T) {
 	for _, id := range []string{issueAsk.ID, otherSessionAsk.ID} {
 		requireWithdrawn(t, handler, issue.Key, id, model.Actor{Kind: "user", ID: "alice"})
 	}
-	if got := readAskRecord(t, handler, answered.ID); got.State != "answered" {
+	if got := readBlockAsk(t, handler, answered.ID); got.State != "answered" {
 		t.Fatalf("answered ask after the close = %s, want answered", got.State)
 	}
-	if got := readAskRecord(t, handler, retracted.ID); got.State != "resolved" || got.Resolution == nil || got.Resolution.Kind != "retracted" {
+	if got := readBlockAsk(t, handler, retracted.ID); got.State != "resolved" || got.Resolution == nil || got.Resolution.Kind != "retracted" {
 		t.Fatalf("retracted ask after the close = %s %#v, want retracted", got.State, got.Resolution)
 	}
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{

@@ -14,7 +14,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -1215,29 +1214,10 @@ func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
 	return text
 }
 
-// defaultLog is what the default logger writes while a test runs, safe to read while the
-// document service's goroutines still write it.
-type defaultLog struct {
-	mu      sync.Mutex
-	written bytes.Buffer
-}
-
-func (l *defaultLog) Write(data []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.written.Write(data)
-}
-
-func (l *defaultLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.written.String()
-}
-
 // captureDefaultLog records what the default logger writes until the test ends.
-func captureDefaultLog(t *testing.T) *defaultLog {
+func captureDefaultLog(t *testing.T) *storetest.LockedLog {
 	t.Helper()
-	logs := &defaultLog{}
+	logs := &storetest.LockedLog{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })

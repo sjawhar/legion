@@ -149,7 +149,7 @@ const issueAskRepairCandidates = `
 			where i.closed_at is null
 				and exists (
 					select 1 from asks a
-					where a.issue_key = i.key and a.state = 'resolved' and a.resolution->>'kind' = '` + withdrawnResolution + `'
+					where a.issue_key = i.key and ` + withdrawnAsk + `
 				)
 			union all
 			select i.key, 1 from issues i
@@ -216,7 +216,7 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 	if err := tx.QueryRow(ctx, `
 		select
 			count(*) filter (where a.state = 'open'),
-			count(*) filter (where a.state = 'resolved' and a.resolution->>'kind' = '`+withdrawnResolution+`'),
+			count(*) filter (where `+withdrawnAsk+`),
 			exists (
 				select 1 from artifacts d join doc_settlements_pending p on p.artifact_id = d.id
 				where d.issue_key = $1 and d.kind = 'doc'
@@ -243,20 +243,10 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 			// The close's final sweep (sweepClosedIssueAsks), from the resolved and answered block
 			// asks' rows as they stand under the issue's row. Every document write comes before the
 			// first event.
-			current, err := s.readIssueAsks(documentCtx, tx, `
-				select `+askRowColumns+`
-				`+askRowFrom+`
-				where a.issue_key = $1 and a.state in ('resolved', 'answered') and a.block_id is not null
-				order by a.id
-			`, issueKey)
+			unindexed, err := s.sweepIssueAskBlocksTx(documentCtx, tx, issueKey, nil, closer)
 			if err != nil {
 				return repair, err
 			}
-			unindexed, err := s.deps.Docs.WriteIssueAskStates(documentCtx, issueKey, current, closer, true)
-			if err != nil {
-				return repair, err
-			}
-			logUnindexedAskBlocks(issueKey, unindexed)
 			repair.Swept = len(unindexed)
 		}
 		if open > 0 {

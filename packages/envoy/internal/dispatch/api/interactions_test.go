@@ -1968,7 +1968,7 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 	if reopened.Code != http.StatusOK || strings.Contains(reopened.Body.String(), `"closed_at":`) && !strings.Contains(reopened.Body.String(), `"closed_at":null`) {
 		t.Fatalf("reopen done issue: status=%d body=%s", reopened.Code, reopened.Body.String())
 	}
-	if restored := readAskRecord(t, handler, askID); restored.State != "open" || restored.Resolution != nil {
+	if restored := readBlockAsk(t, handler, askID); restored.State != "open" || restored.Resolution != nil {
 		t.Fatalf("withdrawn ask after reopen = %s %#v, want open again", restored.State, restored.Resolution)
 	}
 	if created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{

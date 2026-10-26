@@ -273,7 +273,7 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 	}
 	// The reopen restored it.
 	assertOpenAskCount(1)
-	if restored := readAskRecord(t, handler, ask.ID); restored.State != "open" || restored.Resolution != nil {
+	if restored := readBlockAsk(t, handler, ask.ID); restored.State != "open" || restored.Resolution != nil {
 		t.Fatalf("ask after the reopen = %s %#v, want open", restored.State, restored.Resolution)
 	}
 }
