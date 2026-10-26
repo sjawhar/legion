@@ -77,8 +77,8 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
 test("the injected dispatch-first context holds the blocker and accepted-request rules", () => {
   const context = readDispatchFirstContext(dispatchFirstSkillFile(staged));
   for (const rule of [
-    "The moment a person blocks your work, open an ask: an ask block for a design question its document records, else `dispatch ask`. A blocker that is not an open ask does not exist for them. A Legion phase worker sends it to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.",
-    "Record every request you accept in Dispatch before you start it: an issue, or a line in your issue's record. Before you end a turn, read that record. Each item is done, in progress, or an open ask. Never drop one.",
+    "The moment a person blocks your work, open an ask: an ask block for a design question its document records, else `dispatch ask`. A blocker that is not an open ask does not exist for them. A Legion phase worker sends decisions to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.",
+    "Record every request you accept in Dispatch before you start it: an issue, or a line in your issue's `open-items.md` artifact. Before you end a turn, read it. Each item is done, in progress, or an open ask. Never drop one.",
   ]) {
     expect(context).toContain(rule);
   }
