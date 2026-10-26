@@ -1320,7 +1320,10 @@
   completes, rather than waiting for the self-health monitor's next 30 s check.
   `listener-deploy-probe.sh` fails a target whose list refuses while its `/healthz` answers 200, by
   design. `scripts/e2e-refill.sh` proves the re-read, an interrupted read, a bucket recreated under
-  a running listener and the refusal on the real listener (INFRA-261).
+  a running listener and the refusal on the real listener. Every KV watch now goes through
+  nats.go's `jetstream` package watcher with kvwatch's own scan idle timer, because the legacy
+  watcher's init timer could panic the listener (`send on closed channel`) when a subscription
+  ended mid-scan, by a stop, a connection close or nats.go's own unsubscribe (INFRA-261).
 
 - Dispatch no longer reports an agent absent from an agent list it could not read. While the
   listener refuses its list as refilling, `GET /api/v1/agents`, both subscriber reads
