@@ -279,6 +279,68 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 	}
 }
 
+// A lookup whose role store does not answer inside its budget is a bus that did not answer, and
+// GET /v1/roles/<role> answers it as every other route does (writeBusUnavailable): 503, Retry-After:
+// 1, and a body that begins busUnansweredPrefix and names the call that did not answer. A 500 here
+// reads as a broken listener rather than an unreachable bus, the distinction the spec gives
+// bus-down its 503 for, so an operator's filter on that prefix finds this outage too; and the
+// publish route already answers the same stalled store this way, in the test above. The bus is
+// connected throughout, so nothing but the stalled role-bucket call can end the lookup.
+func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *testing.T) {
+	const (
+		role   = "reviewer"
+		holder = "ses_lookup_unanswered_holder"
+		within = 4 * time.Second
+	)
+	for _, tc := range []struct {
+		name                  string
+		stallGet, stallDelete bool
+		unanswered            string
+	}{
+		{name: "the claim read", stallGet: true, unanswered: "read role reviewer's claim: context deadline exceeded"},
+		{name: "the conditional release", stallDelete: true, unanswered: "release role reviewer's expired claim held by " + holder + ": context deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := setupPublishTestClient(t)
+			registry, sessions := setupSessionsTest(t, nil, nil)
+			if _, err := registry.SetRole(holder, "test-machine", role, false); err != nil {
+				t.Fatalf("seed the role claim: %v", err)
+			}
+			released := make(chan struct{})
+			t.Cleanup(func() { close(released) })
+			setRegistryRoleKV(t, registry, stalledRoleKV{
+				KeyValue:    registryRoleKV(t, registry),
+				stallGet:    tc.stallGet,
+				stallDelete: tc.stallDelete,
+				stall:       6 * time.Second,
+				released:    released,
+			})
+			state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+
+			started := time.Now()
+			recorder := httptest.NewRecorder()
+			roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
+			elapsed := time.Since(started)
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("lookup whose role store did not answer: status %d, body %s; want 503 - the bus did not answer, the listener did not fail", recorder.Code, recorder.Body.String())
+			}
+			if elapsed >= within {
+				t.Fatalf("answered after %s, want inside %s", elapsed, within)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != "1" {
+				t.Fatalf("Retry-After = %q, want 1", got)
+			}
+			var refusal apiError
+			if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+				t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+			}
+			if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) || !strings.Contains(refusal.Error, tc.unanswered) {
+				t.Fatalf("the refusal reads %q, want it to begin %q and name %q", refusal.Error, busUnansweredPrefix, tc.unanswered)
+			}
+		})
+	}
+}
+
 // A publish the server denies under this listener's own grant (bus.ErrPublishDenied) is answered
 // as the permanent refusal it is: 403, no Retry-After, and a body naming the denial and the
 // server's own violation text, so the client -- which retries every 5xx and no 4xx
