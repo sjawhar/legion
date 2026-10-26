@@ -323,6 +323,12 @@ func differs(base, head *string) bool {
 	return base == nil || head == nil || *base != *head
 }
 
+// allowListRewrite reports whether head differs from base only by line feeds base wrote as they
+// are and head as `&#10;`: an image title's line the allow-list does not admit raw.
+func allowListRewrite(base, head *string) bool {
+	return base != nil && head != nil && *base != *head && strings.ReplaceAll(*head, "&#10;", "\n") == *base
+}
+
 func TestDifferentialCompare(t *testing.T) {
 	if os.Getenv("PMDOC_DIFF_BASE") == "" {
 		t.Skip("PMDOC_DIFF_BASE unset; gen/differential.sh runs this")
@@ -434,7 +440,13 @@ func TestDifferentialCompare(t *testing.T) {
 		}
 		// A fixed point base kept of a document it read otherwise than the editor is a misread kept
 		// stable; it is counted apart, and only one of a document base read as the editor gates.
+		// Bytes head writes otherwise only by an image title's line feeds written `&#10;` where
+		// base wrote them as they are (allowListRewrite) are the allow-list's, which admits a raw
+		// title line by how it starts (rawTitleLinesHold), and are counted and named apart too,
+		// here and as churn below.
 		switch lost := base.dump.FixedPoint && !head.dump.FixedPoint; {
+		case lost && allowListRewrite(base.dump.Render, head.dump.Render):
+			flag("lost fixed point of a raw title line the allow-list writes `&#10;`", sides)
 		case lost && base.ReadsAsEngine:
 			flag("lost fixed point", sides)
 		case lost:
@@ -449,6 +461,8 @@ func TestDifferentialCompare(t *testing.T) {
 		// which head may write otherwise, are counted apart, ungated.
 		if differs(base.dump.Render, head.dump.Render) {
 			switch {
+			case base.correct && base.dump.WriteReadsBack && allowListRewrite(base.dump.Render, head.dump.Render):
+				flag("churn of a raw title line the allow-list writes `&#10;`", sides)
 			case base.correct && base.dump.WriteReadsBack:
 				flag("churn", sides)
 			case base.correct:
@@ -461,9 +475,12 @@ func TestDifferentialCompare(t *testing.T) {
 			flag("engine-tree regression", sides)
 		}
 		if base.renders && differs(base.dump.EngineRender, head.dump.EngineRender) {
-			if base.dump.EngineWriteReadsBack {
+			switch {
+			case base.dump.EngineWriteReadsBack && allowListRewrite(base.dump.EngineRender, head.dump.EngineRender):
+				flag("engine-tree churn of a raw title line the allow-list writes `&#10;`", sides)
+			case base.dump.EngineWriteReadsBack:
 				flag("engine-tree churn", sides)
-			} else {
+			default:
 				flag("engine-tree churn of base bytes a write reads otherwise", sides)
 			}
 		}
