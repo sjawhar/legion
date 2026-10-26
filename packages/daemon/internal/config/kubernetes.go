@@ -67,10 +67,11 @@ type Kubernetes struct {
 	// nil when the deployment enrolls none, in which case pods carry no token for it.
 	AgentSecrets *AgentSecretsConfig
 	// SessionStore is `runtime.kubernetes.session_store`, settled: where every pod's Oh My Pi keeps
-	// its sessions. Files on the issue's volume under `pvc`, the default; the database whose whole
-	// postgres:// URL the providers Secret key `session_dsn_secret` holds under `postgres`; the
-	// Cloud SQL database `session_database` names, which each pod signs in to as itself and no
-	// password reaches, under `cloudsql-iam`.
+	// its sessions. The database whose whole postgres:// URL the providers Secret key
+	// `session_dsn_secret` holds under `postgres`; the Cloud SQL database `session_database` names,
+	// which each pod signs in to as itself and no password reaches, under `cloudsql-iam`. The key is
+	// required under `runtime: kubernetes` and `pvc` is refused (readSessionStore), so the settled
+	// store always keeps sessions in a database (InDatabase): no issue disk holds a session.
 	SessionStore ompsessions.Store
 	// Plugins is `runtime.kubernetes.plugins`: the exact pi-legion/pi-envoy pair a stale-plugin
 	// relaunch installs into a kept pod, when the file names one. Nil when the file sets none and
@@ -1122,9 +1123,13 @@ const (
 // readSessionStore reads `session_store` with the one key its kind carries: `session_dsn_secret`,
 // the providers Secret's key holding the session database's whole URL, under `postgres`;
 // `session_database`, the Cloud SQL instance, database and IAM login each pod signs in as, under
-// `cloudsql-iam`; neither under `pvc`, the default, where each session is a file on the issue's
-// volume. Each kind names its own key and refuses the other's: an inert key is refused, never
-// ignored.
+// `cloudsql-iam`. Each kind names its own key and refuses the other's: an inert key is refused,
+// never ignored. The store is required, and must keep sessions in a database: `pvc`, which an
+// omitted `session_store` also settles to, is refused rather than taken as a silent default
+// (INFRA-80). It kept each session as a file on the issue's disk, and that disk is now the pod's
+// own generic ephemeral volume, deleted with it: the file would die with the pod, the next
+// launch's resume would fail on the missing file (internal/launcher's sessionWritten), and three
+// such failures retire the claim.
 func readSessionStore(store, dsnSecret, database *yaml.Node) (ompsessions.Store, error) {
 	name, err := readString(store, sessionStoreKey)
 	if err != nil {
@@ -1135,9 +1140,16 @@ func readSessionStore(store, dsnSecret, database *yaml.Node) (ompsessions.Store,
 		kind = ompsessions.StoreKind(*name)
 	}
 	switch kind {
-	case ompsessions.StoreVolume, ompsessions.StorePostgres, ompsessions.StoreCloudSQLIAM:
+	case ompsessions.StorePostgres, ompsessions.StoreCloudSQLIAM:
+	case ompsessions.StoreVolume:
+		return ompsessions.Store{}, errors.New(sessionStoreKey + " must name a store that keeps sessions in a database, and is required (INFRA-80):" +
+			" an issue pod's disk is the pod's own ephemeral volume, deleted with the pod, so a session kept as a file on it ('pvc', also what an omitted session_store means) dies with it," +
+			" the next launch's resume fails on the missing file (internal/launcher's sessionWritten), and three such failures retire the claim")
 	default:
-		return ompsessions.Store{}, errors.New(sessionStoreKey + " must be 'pvc', 'postgres' or 'cloudsql-iam'")
+		// A name this runtime does not take is told the two it does, and not `pvc`: the kind above
+		// refuses that one by name with its own reason, and a list of accepted values that holds a
+		// refused one sends an operator who mistyped to a value the next line would refuse again.
+		return ompsessions.Store{}, errors.New(sessionStoreKey + " must be 'postgres' or 'cloudsql-iam'")
 	}
 	if dsnSecret != nil && kind != ompsessions.StorePostgres {
 		return ompsessions.Store{}, inertSessionKey(sessionDSNKey, kind)

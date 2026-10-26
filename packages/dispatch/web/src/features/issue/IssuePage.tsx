@@ -179,6 +179,14 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     }
   }, []);
 
+  // The Conversation's first placement runs as a child layout effect, before the restore below
+  // in the same commit, so a position recorded while the tab showed only its loading text is
+  // forgotten here and the reader lands on the newest message. A return to a list the reader was
+  // already placed in never fires it, so that restore stands (INFRA-303).
+  const forgetConversationScroll = useCallback(() => {
+    delete panelScroll.current.conversation;
+  }, []);
+
   // The scope is the issue page itself, and every binding drives the header control or the tab
   // its label names - the same handler a click reaches, offered while that control is. The
   // digits go through `useIssuePriority` on the route's key, the query key this page reads, so
@@ -416,6 +424,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             focusItemId={conversationFocusItemId}
             isClosed={isClosed}
             issueKey={issueKey}
+            onFirstPlacement={forgetConversationScroll}
             state={state.data}
             visible={activeTab === "conversation"}
           />
