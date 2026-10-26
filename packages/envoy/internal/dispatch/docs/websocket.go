@@ -428,11 +428,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// returns (sjawhar/ygo v1.51.3-sami.1, provider/websocket/server.go:1749-1837: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	tree, err := treeOf(doc)
-	var markdown string
 	if err == nil {
-		markdown, err = documentMarkdown(tree)
+		_, err = documentMarkdown(tree)
 	}
-	var contentMarkdown *string
 	var askBlocks map[string]struct{}
 	switch {
 	case errors.Is(err, ErrDocOutsideSchema):
@@ -440,7 +438,6 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	case err != nil:
 		return err
 	default:
-		contentMarkdown = &markdown
 		askBlocks = askBlockIDs(tree)
 	}
 	// The room this load publishes holds the state it takes from here until ygo retires it
@@ -483,7 +480,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	s.unlockState(room, state)
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order.
-	replica := s.keepReplica(doc, contentMarkdown, doc.OpenUpdateLog())
+	replica := s.keepReplica(doc, doc.OpenUpdateLog())
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -511,8 +508,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		// is classified once, by whichever observer reaches it first, against the room as the
 		// commit before it left it (renderedReplica). This observer's own update is in the log -
 		// ygo appended it under the document's lock at its commit - so its class is recorded
-		// before ygo's persistence observer, which runs after this one, hands it on.
+		// before ygo's persistence observer, which runs after this one on this goroutine, hands it
+		// on. Another observer's update is recorded while the replica is held: that observer can
+		// be waiting for the replica, and runs its persistence observer as soon as it has it.
 		var classified, changed bool
+		var own *documentUpdateClass
 		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
 			if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 				// Its own observer records its class (above). The replica takes it all the same,
@@ -532,16 +532,31 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 				class.credit = s.creditContentChange(room, logged.Origin, hold)
 				changed = true
 			}
+			if sameUpdate(logged.Update, update) {
+				own = &class
+				return
+			}
 			s.recordUpdateClass(room, logged.Update, class)
 		})
 		if changed && s.afterCreditUpdate != nil {
 			s.afterCreditUpdate(room)
+		}
+		if own != nil {
+			s.recordUpdateClass(room, update, *own)
 		}
 		if classified {
 			s.scheduleSettle(room)
 		}
 	})
 	return nil
+}
+
+// sameUpdate reports whether logged, an update the room's update log handed over, is update, the
+// one an observer was called with: ygo hands both the very slice it encoded at the commit
+// (crdt.LoggedUpdate), so the same backing array is the same commit, where equal bytes need not be
+// - two commits that change nothing encode alike.
+func sameUpdate(logged, update []byte) bool {
+	return len(logged) > 0 && len(logged) == len(update) && &logged[0] == &update[0]
 }
 
 // soleConnectedActor is the one actor connected to a room, and whether more than one distinct

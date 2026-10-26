@@ -327,8 +327,8 @@ type renderedReplica struct {
 	waiting atomic.Int32
 	log     *crdt.UpdateLog
 	doc     *crdt.Doc
-	// markdown is the room's rendered markdown as the replica's latest update left it, or at the
-	// room's load before any update; nil while the document is outside the schema.
+	// markdown is the room's rendered markdown as the replica's latest update left it, or as the
+	// log's base rendered before any; nil while the document is outside the schema.
 	markdown *string
 }
 
@@ -411,13 +411,12 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, cla
 }
 
 // keepReplica makes the replica live's update observer keeps, moving through log, live's update
-// log, from markdown, live's rendering at its load, and lists it for live's reads (readLive) while
-// live is resident (listResident). The listing holds the replica weakly too, and the observer,
-// which live holds, holds the replica, so the replica, a whole copy of live, is collected with
-// live and in the same cycle. A reader holding an evicted instance of the room reaches that
-// instance's replica or none, never its successor's.
-func (s *Service) keepReplica(live *crdt.Doc, markdown *string, log *crdt.UpdateLog) *renderedReplica {
-	replica := &renderedReplica{log: log, markdown: markdown}
+// log, and lists it for live's reads (readLive) while live is resident (listResident). The listing
+// holds the replica weakly too, and the observer, which live holds, holds the replica, so the
+// replica, a whole copy of live, is collected with live and in the same cycle. A reader holding an
+// evicted instance of the room reaches that instance's replica or none, never its successor's.
+func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog) *renderedReplica {
+	replica := &renderedReplica{log: log}
 	listResident(&s.replicas, live, weak.Make(replica))
 	return replica
 }

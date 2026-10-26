@@ -973,6 +973,12 @@ func TestABrowserEditAnotherTransactionsObserverReachesFirstIsCreditedExactly(t 
 			if release == nil {
 				t.Fatal("bob's edit never reached the room, so nothing here is tested")
 			}
+			// Bob's own observer is still held, and so is the append his update's persistence
+			// makes after it: whatever credits him by now is the published write's observer,
+			// which reached the room's update log first.
+			if credited := slices.Contains(pendingAuthors(t, service, artifactID), bob); credited != (test.places == 1) {
+				t.Fatalf("with bob's own observer held, bob is credited = %t, want %t: the published write's observer classifies his edit", credited, test.places == 1)
+			}
 			release()
 			waitForLandedAppends(t, service, artifactID)
 
