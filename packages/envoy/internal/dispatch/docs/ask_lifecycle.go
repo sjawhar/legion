@@ -157,22 +157,12 @@ func (s *Service) writeDocumentAskStates(
 		// The writes are made on the fork as it stands (rewriteLive), each on the block carrying its
 		// id, as settlement makes its repairs (repairLive), and each repeat on the block at its place
 		// (markRepeatedAskBlocks), all in one rewrite of the fork, whose tree is the one current read.
-		// Only a write that changes its block in current is made, and a document none changes gets no
-		// rewrite at all: the fork hands its observers an update for every transaction, one that
-		// changes nothing included, which applyLive would append as a document update, marking the
-		// document owing a settlement again (markUpdateOwed). A closed issue's document keeps owing
-		// the settlement its close left, so every repair pass sweeps it again (RepairIssueAsks), and
-		// such an append would move its mark into the next interval pass's sweep, for good.
+		// A document none of them changes is left as it was, and applyLive writes nothing for it.
 		var writes settlementReconciliation
-		write := func(block askBlock, set func(*pmdoc.Node) bool) {
-			if changesAskBlock(block.node, set) {
-				writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: set})
-			}
-		}
 		for _, block := range blocks {
 			if row, indexed := rows[block.id]; indexed {
 				if ask, wanted := asks[row.ID]; wanted && ask.State != "answered" {
-					write(block, askServerAttributes(ask, "", false))
+					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: askServerAttributes(ask, "", false)})
 				}
 				continue
 			}
@@ -182,11 +172,11 @@ func (s *Service) writeDocumentAskStates(
 					if ask.State == "answered" {
 						set = answeredCopyAttributes(ask, source.document)
 					}
-					write(block, set)
+					writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: set})
 				}
 				continue
 			}
-			if markUnindexed && block.node.Attrs["state"] != "resolved" {
+			if markUnindexed {
 				ref := BlockRef{ArtifactID: artifactID, BlockID: block.id}
 				writes.repairs = append(writes.repairs, askRepair{blockID: block.id, set: func(node *pmdoc.Node) bool {
 					if node.Attrs["state"] == "resolved" {

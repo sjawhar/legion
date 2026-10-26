@@ -65,8 +65,10 @@ func recoverMutation(room string, err *error) {
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
 // does not commit never reaches the room, a browser or a version's authors. It returns
-// websocket.ErrNoChanges when mutate wrote nothing, as the room's Apply does, and
-// ErrServiceUnavailable when the room its slot is on failed before its append.
+// websocket.ErrNoChanges, as the room's Apply does for a write that wrote nothing, when mutate
+// left the fork as it was, even through a transaction: ygo hands the fork's observers an update
+// for every transaction, one that changes nothing included. It returns ErrServiceUnavailable when
+// the room its slot is on failed before its append.
 //
 // mutate is handed the fork and current, the fork's tree as the operation starts, which applyLive
 // reads anyway to weigh the write against: every mutate starts from it (startTree, editTree) rather
@@ -126,6 +128,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		}
 		return startErr
 	}
+	// What says the write changed the fork is the fork itself, read on either side of mutate: its
+	// state vector and its delete set, since a deletion advances no clock (forkHeld). The updates
+	// the fork emits cannot say it, for they include one for a transaction that changes nothing.
+	wasClocks, wasDeletes := fork.StateVector(), crdt.DeleteSetFromDoc(fork)
 	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
 		updates = append(updates, append([]byte(nil), update...))
 	})
@@ -138,6 +144,13 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	unsubscribe()
 	if mutateErr != nil {
 		return joinedSchemaError(mutateErr, start)
+	}
+	// A write whose transactions changed nothing writes nothing. Appended, its empty update would
+	// refresh the anchors and mark the document owing a settlement again (markUpdateOwed), which
+	// every repair pass over a closed issue would then sweep. Its updates are dropped, so the fork,
+	// which it left as it was, is kept.
+	if len(updates) > 0 && forkHeld(wasClocks, wasDeletes, fork) {
+		updates = nil
 	}
 	if len(updates) == 0 {
 		return websocket.ErrNoChanges

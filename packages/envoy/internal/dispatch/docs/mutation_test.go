@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -697,6 +698,95 @@ func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
 	if _, err := joinedReplaceText(service, artifactID, "", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace unchanged empty document: %v", err)
 	}
+}
+
+// A joined write whose transaction changes nothing writes nothing, though ygo hands the fork's
+// observers an update for that transaction too: it appends no update, writes no version, leaves
+// the document's owed settlement marked when it was and naming whom it named, and keeps the
+// transaction's fork for the transaction's next write. That holds for an ask-state write naming
+// the state the block already holds and for any rewrite whose edit changes nothing. The write
+// that first resolved the block changed the document, and appended its update and marked the
+// settlement owed.
+func TestAJoinedWriteWhoseTransactionChangesNothingAppendsNoUpdateAndKeepsItsSettlementMark(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
+	settleCurrentGeneration(t, service, artifactID)
+	closer := model.Actor{Kind: "user", ID: "carol"}
+	withdrawn := []model.Ask{withdrawnAsk(blockAskOn(t, service, artifactID, "region"), closer)}
+
+	settled := liveWritesOf(t, service, artifactID)
+	writeIssueAskStates(t, service, withdrawn, closer, false)
+	resolved := liveWritesOf(t, service, artifactID)
+	if resolved.updates != settled.updates+1 || resolved.markedAt == "none" {
+		t.Fatalf("the write resolving the block left %+v after %+v, want one more update and an owed settlement", resolved, settled)
+	}
+
+	for _, unchanged := range []struct {
+		name    string
+		write   func(ctx context.Context) error
+		answers error
+	}{
+		{name: "an ask-state write naming the state the block holds", write: func(ctx context.Context) error {
+			_, err := service.WriteIssueAskStates(ctx, "DOC-1", withdrawn, closer, true)
+			return err
+		}},
+		{name: "a rewrite whose edit changes nothing", answers: ygws.ErrNoChanges, write: func(ctx context.Context) error {
+			return service.applyLive(ctx, artifactID, closer, func(doc *crdt.Doc, _ *pmdoc.Node, _ func(func(*crdt.Transaction))) error {
+				_, _, err := rewriteLive(doc, nil, func(*pmdoc.Node) bool { return false })
+				return err
+			})
+		}},
+	} {
+		t.Run(unchanged.name, func(t *testing.T) {
+			before := liveWritesOf(t, service, artifactID)
+			var answered error
+			if err := joinedWrite(service, func(ctx context.Context) error {
+				tx, _ := txFromContext(ctx)
+				// The issue route holds the issue's row before it writes any document.
+				if _, err := tx.Exec(ctx, `select 1 from issues where key = 'DOC-1' for no key update`); err != nil {
+					return fmt.Errorf("lock the issue: %w", err)
+				}
+				if answered = unchanged.write(ctx); answered != nil && !errors.Is(answered, ygws.ErrNoChanges) {
+					return answered
+				}
+				if write := joinedLiveWrite(ctx, artifactID); write == nil || write.fork == nil {
+					return errors.New("the write let the transaction's fork go")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if after := liveWritesOf(t, service, artifactID); after != before {
+				t.Fatalf("the write left %+v, want %+v as before it", after, before)
+			}
+			if !errors.Is(answered, unchanged.answers) {
+				t.Fatalf("the write answered %v, want %v", answered, unchanged.answers)
+			}
+		})
+	}
+}
+
+// liveWrites is what a document's live writes have left in the store: its updates, its versions,
+// and its owed settlement's mark and latest edit source, "none" when it owes none.
+type liveWrites struct {
+	updates, versions   int
+	markedAt, lastActor string
+}
+
+func liveWritesOf(t *testing.T, service *Service, artifactID string) liveWrites {
+	t.Helper()
+	var writes liveWrites
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select
+			(select count(*) from doc_updates where artifact_id = $1),
+			(select count(*) from artifact_versions where artifact_id = $1),
+			coalesce((select marked_at::text from doc_settlements_pending where artifact_id = $1), 'none'),
+			coalesce((select coalesce(last_actor::text, 'null') from doc_settlements_pending where artifact_id = $1), 'none')
+	`, artifactID).Scan(&writes.updates, &writes.versions, &writes.markedAt, &writes.lastActor); err != nil {
+		t.Fatalf("read the document's live writes: %v", err)
+	}
+	return writes
 }
 
 func TestRefreshAnchorsClosesRowsBeforeUpdating(t *testing.T) {
