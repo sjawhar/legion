@@ -982,6 +982,13 @@ jobs:
       - name: Race-test the document service, its API, pmdoc, delivery, the store, and the bus
         run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
         working-directory: packages/envoy
+      # The listener is where the role claim watcher, the session and interest watchers and the
+      # request handlers meet, so its own tests are the ones that exercise their concurrency
+      # (INFRA-141). A step of its own, so its time and any race it finds are read apart from the
+      # packages above.
+      - name: Race-test the listener
+        run: go test -race -timeout 30m ./cmd/listener/
+        working-directory: packages/envoy
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
   # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its

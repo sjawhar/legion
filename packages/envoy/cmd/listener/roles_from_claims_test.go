@@ -194,19 +194,19 @@ func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *te
 }
 
 // timeOutRoleClaimScan puts registry's role claim view where a listener start leaves it when
-// nats.go's idle timer ends the view's first scan of raw before the scan delivers any claim: the
-// view is emptied, and the watcher feeding it is replaced by one whose first scan times out at
-// once and that applies nothing. Package store's own tests drive the registry's real watcher
-// through the same timeout; from here the registry's fields are reached the way api_test.go
-// reaches the session registry's watcher.
+// nats.go's idle timer ends the view's first scan of raw: the watcher feeding the view is replaced
+// by one whose first scan times out at once and that applies nothing. The holders the old watcher
+// delivered stay in the view, which is the hard case: an answer read from them would name the
+// holder's role, so only the view's completeness can refuse it. The holders are left alone because
+// the stopped watcher may still be applying under the registry's lock, which this goroutine does
+// not hold. Package store's own tests drive the registry's real watcher through the same timeout;
+// from here the watcher field is reached the way api_test.go reaches the session registry's.
 func timeOutRoleClaimScan(t *testing.T, registry *store.Registry, raw natsgo.KeyValue) {
 	t.Helper()
 	fields := reflect.ValueOf(registry).Elem()
 	field := fields.FieldByName("roleWatcher")
 	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
 	watcher.Interface().(*kvwatch.Watcher).Stop()
-	holders := fields.FieldByName("holders")
-	reflect.NewAt(holders.Type(), unsafe.Pointer(holders.UnsafeAddr())).Elem().Set(reflect.ValueOf(map[string]string{}))
 	timedOut := kvwatch.New("role claims", bus.KeyValue{KeyValue: kvwatchtest.TimingOut(raw, 0)}, func(natsgo.KeyValueEntry) {}, func() {})
 	watcher.Set(reflect.ValueOf(timedOut))
 	t.Cleanup(timedOut.Stop)
