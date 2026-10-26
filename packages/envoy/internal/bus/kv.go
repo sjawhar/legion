@@ -274,7 +274,7 @@ func (kv KeyValue) Purge(key string, opts ...nats.DeleteOpt) error {
 
 // Status reads the bucket's status through the legacy handle, which waits out that handle's
 // JetStream MaxWait: the open-time read of a bucket's TTL and a store's health probe, whose
-// openers chose that wait. A read the caller bounds itself is ReadStreamState.
+// openers chose that wait. A read held to RequestTimeout instead is ReadStreamState.
 func (kv KeyValue) Status() (nats.KeyValueStatus, error) {
 	return kv.legacy.Status()
 }
@@ -293,12 +293,16 @@ type StreamState struct {
 	MaxAge   time.Duration
 }
 
-// ReadStreamState reads the stream behind kv (one STREAM.INFO) through its jetstream context, within
-// ctx, fetching the stream afresh so no read shares state with another (KeyValue.streams). The
-// legacy handle's Status would wait out that handle's JetStream MaxWait, which its opener chose for
-// its own reads, so the caller bounds this one. A stream that is gone is nats.ErrStreamNotFound,
-// however the jetstream package names it.
-func (kv KeyValue) ReadStreamState(ctx context.Context) (StreamState, error) {
+// ReadStreamState reads the stream behind kv (one STREAM.INFO) through its jetstream context,
+// within RequestTimeout, fetching the stream afresh so no read shares state with another
+// (KeyValue.streams): the read before every watcher a kvwatch.Watcher installs, its stream probe,
+// gate, completion check and Check, and each read of the interest marker collector. The legacy
+// handle's Status would wait out that handle's JetStream MaxWait, which its opener chose for its
+// own reads, however short, so this read bounds itself. A stream that is gone is
+// nats.ErrStreamNotFound, however the jetstream package names it.
+func (kv KeyValue) ReadStreamState() (StreamState, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+	defer cancel()
 	stream, err := kv.streams.Stream(ctx, "KV_"+kv.Bucket())
 	if errors.Is(err, jetstream.ErrStreamNotFound) {
 		return StreamState{}, fmt.Errorf("read the stream of KV bucket %s: %w: %w", kv.Bucket(), nats.ErrStreamNotFound, err)
@@ -340,7 +344,7 @@ func (kv KeyValue) ReadHistory(ctx context.Context, key string) ([]jetstream.Key
 			continue
 		}
 		_ = watcher.Stop()
-		go drain(watcher)
+		go DrainWatcher(watcher)
 		if len(entries) == 0 {
 			return nil, fmt.Errorf("read the history of key %s: %w", key, nats.ErrKeyNotFound)
 		}
@@ -352,9 +356,12 @@ func (kv KeyValue) ReadHistory(ctx context.Context, key string) ([]jetstream.Key
 	return nil, fmt.Errorf("read the history of key %s of KV bucket %s: the watch ended after %d revisions, before it had delivered them all", key, kv.Bucket(), len(entries))
 }
 
-// drain reads watcher's updates until nats.go closes them, which it does once the subscription a
-// stop ended has delivered what it held.
-func drain(watcher jetstream.KeyWatcher) {
+// DrainWatcher reads watcher's updates until nats.go closes them, which it does once the
+// subscription a stop ended has delivered what it held: nats.go's delivery blocks holding the
+// watcher's lock on a full 256-entry buffer, so a watcher stopped and left unread parks its
+// subscription's goroutine for good. ReadHistory, kvwatch's scans and the watchers kvwatch stops
+// all read theirs through it.
+func DrainWatcher(watcher jetstream.KeyWatcher) {
 	for range watcher.Updates() {
 	}
 }

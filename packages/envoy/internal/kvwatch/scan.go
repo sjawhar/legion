@@ -73,7 +73,7 @@ func ScanExistingKeys(kv bus.KeyValue, keys, what string, idle time.Duration, lo
 		if err := watcher.Stop(); err != nil {
 			log.Warn("could not stop the "+what+" watch of the bucket", slog.String("error", err.Error()))
 		}
-		go drain(watcher)
+		go bus.DrainWatcher(watcher)
 	}
 	timer := time.NewTimer(idle)
 	defer timer.Stop()
@@ -108,10 +108,3 @@ func ScanExistingKeys(kv bus.KeyValue, keys, what string, idle time.Duration, lo
 // ErrScanTimedOut is the error a scan that delivered no entry within its idle bound carries
 // (ScanExistingKeys).
 var ErrScanTimedOut = errors.New("the scan timed out")
-
-// drain reads watcher's updates until nats.go closes them, which it does once the subscription a
-// stop ended has delivered what it held.
-func drain(watcher jetstream.KeyWatcher) {
-	for range watcher.Updates() {
-	}
-}

@@ -1352,13 +1352,21 @@
   rebuilds a copy left not following with no read under way. A watcher finds its bucket deleted and
   created again under it within about 2 s, by reading the bucket's stream every 2 s (one
   `STREAM.INFO` per watcher), and reads the new bucket at once, keeping its copy until that read
-  completes, rather than waiting for the self-health monitor's next 30 s check.
+  completes, rather than waiting for the self-health monitor's next 30 s check. The watcher's own
+  stream check shares a read already in flight and sends at most one of its own per probe
+  interval, so a slow or failing `STREAM.INFO` holds delivery back by one read at most, never one
+  per record, and reads that keep failing for longer than the stale bound stop the copy
+  following, which the lists answer as refilling. A session's `Refresh`, the read of the session
+  bucket the listener makes before it takes anything from a session that looks gone, answers the
+  bucket's read when the copy does not take it (a recreate under the read, or the revision
+  fence), so a live session is never reported gone.
   `listener-deploy-probe.sh` fails a target whose list refuses while its `/healthz` answers 200, by
   design. `scripts/e2e-refill.sh` proves the re-read, an interrupted read, a bucket recreated under
   a running listener and the refusal on the real listener. Every KV watch now goes through
   nats.go's `jetstream` package watcher with kvwatch's own scan idle timer, because the legacy
   watcher's init timer could panic the listener (`send on closed channel`) when a subscription
-  ended mid-scan, by a stop, a connection close or nats.go's own unsubscribe (INFRA-261).
+  ended mid-scan, by a stop, a connection close or nats.go's own unsubscribe, and `bus.KeyValue`
+  no longer exposes nats.go's legacy watcher at all (INFRA-261).
 
 - Dispatch no longer reports an agent absent from an agent list it could not read. While the
   listener refuses its list as refilling, `GET /api/v1/agents`, both subscriber reads
