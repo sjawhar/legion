@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-261",
+  "completed": "2026-10-26T09:10:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2238",
+  "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+  "proof": [
+    {
+      "criterion": "Acceptance 1: a re-read keeps every record of the copy and every delivered record until the read completes, then exactly the new read's records",
+      "surface": "real listener binary on its own natsd (file store), seeded through the listener's API and the buckets",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra-261/rig/merged (verdicts: https://github.com/sjawhar/legion/pull/2238#issuecomment-6412148786)",
+      "observed": "verdict reread PASS: session-bucket recreate, interest-bucket recreate and identical-records recreate each had polls inside the read (e.g. 5 of 629 inside the 1287 ms session read); every old and both row held until the read completed, exactly the bucket's after it; the other list held all 6000 rows throughout",
+      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+      "negativeControl": "same rig with --listener-bin built from merge base 81a3b5ef7b47: verdict reread FAIL, a 200 of 0 rows missing both x3000 old x3000 mid-read (https://github.com/sjawhar/legion/pull/2238#issuecomment-6411086859)"
+    },
+    {
+      "criterion": "Acceptance 2: a read that times out or ends early removes nothing, and the listener reads again itself until one completes",
+      "surface": "real listener binary on its own natsd, 41000 sessions",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario all (interrupt: SIGSTOP NATS on the recreate line, and SIGKILL+restart NATS)",
+      "observed": "verdict interrupt(stop) PASS: scan timed out at +10 s, 22 polls during the incomplete read held every old record, kvwatch's own re-read completed 41000 records at +15.7 s with no action by the rig, then exactly the bucket; verdict interrupt(restart) PASS: disconnect hook stopped following, reconnect hook re-read, every poll held the old copy, then exactly the bucket",
+      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+      "negativeControl": "merge-base listener build: interrupt(stop) FAIL and interrupt(restart) FAIL, 200s of 0 rows of 41000 right after the recreate"
+    },
+    {
+      "criterion": "Acceptances 3 and 4 on the listener: 503 + Retry-After before the first complete read and past the bound; envoy_active_sessions has no sample then, equals the list otherwise, 0 only for a complete empty copy",
+      "surface": "real listener binary on its own natsd; /v1/sessions, /v1/interests/, /metrics",
+      "command": "bash packages/envoy/scripts/e2e-refill.sh --scenario refuse (also inside --scenario all)",
+      "observed": "verdict refuse PASS: boot on 40000 rows answered only refilling 503s (Retry-After: 5, code refilling) then complete 200s, no gauge sample while 503; NATS down: copy served within the bound, refilling 503 from 2m0s, no gauge sample past the bound, whole again ~0.5 s after NATS returned with both gauges 303 = list length; empty buckets 200 [] and 0 samples",
+      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+      "negativeControl": "merge-base listener build: refuse FAIL, boot answered 503 'service starting' with no code/Retry-After, and 2m5s after NATS stopped a 200 of all 303 rows with gauges still 303"
+    },
+    {
+      "criterion": "Acceptance 3: envoy_sessions fails with the refilling message",
+      "surface": "claude-envoy MCP server (packages/claude-envoy/dist/envoy-channel.js) over stdio against the rig listener",
+      "command": "e2e-refill.sh --scenario refuse --during-refuse 'bun $TMPDIR/infra-261/p4-envoy-sessions.ts refilling' --after-refuse 'bun $TMPDIR/infra-261/p4-envoy-sessions.ts list:$REFILL_RIG_SESSIONS'",
+      "observed": "inside the outage window tools/call envoy_sessions -> JSON-RPC error 'envoy: the agent list is refilling; try again in a moment'; after recovery it listed 303 sessions",
+      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+      "negativeControl": "against the merge-base listener in the same window envoy_sessions returned the frozen list (CHECK FAIL)"
+    },
+    {
+      "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence; route status unknown with the issue page saying why",
+      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium) and the real Go Dispatch server against the rig listener",
+      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling --project chromium; and e2e-refill.sh --scenario refuse --during-refuse '$TMPDIR/infra-261/p5-dispatch.sh start && ... check'",
+      "observed": "4 passed: full list -> refilling -> recovery, empty list -> refilling, refilling from the first read, listener down reads unreachable not refilling, across Agents page, issue and document subscribers, ask card, mention suggestions, conversation page, route reason, list and board; real Dispatch during the outage: GET /api/v1/agents HTTP/1.1 503, Retry-After: 5, code ENVOY_REFILLING; routed issues route_status unknown, route_status_reason refilling (after recovery live, holder set, reason null)",
+      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+      "negativeControl": "the same spec on a build of the merge base 81a3b5ef7b47: 4 failed (no refilling notice in mention suggestions; ENVOY_UNAVAILABLE where ENVOY_REFILLING was expected)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/kvwatch/{kvwatch.go,marks.go,kvwatchtest/timingout.go} + tests: read protocol (Cache BeginRead/Apply/CompleteRead, Marks, Sweep), epoch, Servable/ErrRefilling, stale bound, own re-read of a timed-out scan, Disconnected/NeedsRead",
+    "packages/envoy/internal/bus/{connect.go,nats.go,recovery.go,kv.go} + tests: AddDisconnectHook, StreamState.MaxAge",
+    "packages/envoy/internal/session/registry.go, internal/store/kv.go, internal/cistore/cistore.go + read_test.go files: adapters implement kvwatch.Cache with marks, epoch guard, D7 retention, D15 TTL, Servable, interest List error and Cached, two-phase Reap",
+    "packages/envoy/cmd/listener/{api.go,main.go} + refilling_test.go: listedSessions, refilling 503, start gate, optional gauges, disconnect hook, NeedsRead in self-health, sessionMayBeLive",
+    "packages/envoy/internal/metrics/metrics.go: optional-sample gauge",
+    "packages/envoy/internal/dispatch/{envoy/client.go,api/agents.go,api/subscribers.go,api/issue_route_status.go,api/issue_queries.go,model/model.go}: ErrRefilling/RefillingError, ENVOY_REFILLING, route_status_reason",
+    "packages/contracts/src/dispatch-api.ts + CHANGELOG: IssueRouteReach.route_status_reason",
+    "packages/dispatch/web/src: useAgents current/refilling, QueryError refilling variant, every agent-list consumer, issue-cache reason reset, LiveDot unknown",
+    "packages/dispatch/e2e/{fake-envoy.ts,agents.ts,agent-list-refilling.e2e.ts}",
+    "packages/envoy/scripts/e2e-refill.sh, internal/testnats/cmd/refillrig/main.go, scripts/README.md",
+    "packages/claude-envoy/scripts/smoke-channel.sh, scripts/e2e/stage3-4b13b-acceptance.sh: a non-200 list is unreadable, not empty",
+    "docs: packages/envoy/{AGENTS.md,docs/architecture.md,CHANGELOG.md,cmd/dispatch/README.md,cmd/dispatch/AGENTS.md}, packages/dispatch/AGENTS.md, packages/contracts/AGENTS.md, docs/site dispatch/envoy.md, the INFRA-249 solution note"
+  ],
+  "trickyParts": [
+    "kvwatch completeRead takes applyMu, rechecks generation/stopped/Check error/disconnect count under mu, sweeps with mu released, then sets following only if still valid; a read a disconnect overlapped completes nothing (extension of D2 to disconnects).",
+    "Marks are collected only between Begin (BeginRead) and End (after CompleteRead's sweep), so a following cache keeps no growing key set.",
+    "The session copy prunes age-expired rows only while Following(); Get still answers not-found for an expired retained row.",
+    "Session and interest Delete read the revision fence only when the read under way began in the handle's epoch (readEpoch), so an old bucket's revision never carries into the new one.",
+    "The web's react-query retry policy retries 5xx, so a refilling notice appears after retries are exhausted; rows of the last successful read stay on screen but no absence claim is made unless the latest read succeeded."
+  ],
+  "deviations": [
+    "Race tests ran with zig as the C compiler and external linking (the pod image at this base has no gcc); all passed. CI is the canonical race lane.",
+    "Disconnect: a read overlapped by a disconnect completes nothing (plan named only Check for skipping the state write).",
+    "Reap's liveness is func(sessionID) (bool, error), shared by both reapers through sessionMayBeLive; roleHolderMayBeLive wraps it.",
+    "Added Disconnected/NeedsRead passthroughs on the three adapters and WithSessionClock on the session registry (test clock).",
+    "An unconfigured listener reads route_status_reason 'unreachable', so the reason is non-null exactly when route_status is unknown.",
+    "Unclaimed filter had no notice; one was added (data-testid unclaimed-unchecked). MentionComposer reads useAgents itself (ConversationTab never passed agents), so its states come from its own hook.",
+    "Simplify pass applied three changes (marks lifecycle, Marks.MarkCurrent, session Delete via applyEntryLocked); skipped findings are listed in the PR Thermo line.",
+    "Perf fix folded in under the standing rule: per-record pruneLastSeenLocked made a read cost entries x swept sessions (15.5 s vs 1.6 s at rig scale).",
+    "Forward-merged main once (GitHub CONFLICTING); fingerprint changed; all proofs re-run at b6d4733."
+  ],
+  "openQuestions": [
+    "Local env limits: internal/dispatch/api has two tests (events unicode escape, rank collation) that fail only against this pod's SQL_ASCII/C Postgres; untouched by this change, left to CI. One unidentified failure in the first full `bun run test` of packages/dispatch after the merge did not reproduce in three reruns (2342 pass each)."
+  ]
+}
