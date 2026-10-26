@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-304",
+  "completed": "2026-10-26T02:01:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2218",
+  "proof": [
+    {
+      "criterion": "Reasoning: the lower link's padded box does not overlap the upper line's text (live view /agents/<id>/live at 390px)",
+      "surface": "Dispatch browser suite, iphone project (iPhone 13 profile on Chromium), real Go server + Postgres 17/pgvector + production web/dist, in the issue pod, lane ports 18777/19021-19024, database dispatch_implementer",
+      "command": "cd packages/dispatch && (source /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=iphone -g \"reasoning link's padded box|an inline link keeps its line\" --repeat-each=3)",
+      "observed": "6 passed (40.3s); built CSS carries .prose a{padding-block:calc(.5lh - .6em)}. Earlier: 20 passed with --repeat-each=10 at aa05677e, 10 passed with --repeat-each=5 at be150e35.",
+      "headSha": "64e609b77d68a7949b0262cef2772c44f75648da",
+      "negativeControl": "Same rows at the tests-only commit 58abf81a (today's padding-block: 3px): reasoning row red at clearance >= 0, Received: -1; and at the head with the rule set back to 3px and rebuilt: red, Received: -1."
+    },
+    {
+      "criterion": "Message turn and Inbox ask card: the padded box does not overlap the line above (lowerClearance >= 2 with trial clicks and tap; Inbox clearance >= 0 at 15px/24.375px)",
+      "surface": "same harness, /issues/<key>/conversation and / at 390px, row 'an inline link keeps its line and grows its hit box without covering its neighbours'",
+      "command": "same command as above",
+      "observed": "green in every run above; the Inbox card measured fontSize 15, lineHeight 24.375 and clearance >= 0",
+      "headSha": "64e609b77d68a7949b0262cef2772c44f75648da",
+      "negativeControl": "With .prose a padding-block: 0 rebuilt at the head: the reasoning row green and this row red at phone.e2e.ts:587, the trial click one pixel below the upper link's text (locator.click: Timeout 5000ms exceeded), so the padding still carries the tap area."
+    },
+    {
+      "criterion": "Nothing else at 390px or desktop regressed",
+      "surface": "same harness, whole iphone and chromium projects",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium; --project=iphone; then --project=iphone e2e/phone.e2e.ts e2e/agent-view.e2e.ts",
+      "observed": "chromium at be150e35: 734 passed, 23 skipped, 0 failed (52.3m). iphone at be150e35: 618 passed, 132 skipped, 1 failed + 6 did not run, all phone.e2e.ts, from a SyntaxError (layout.ts export missing) because I edited e2e/layout.ts while that run was loading spec files; phone.e2e.ts + agent-view.e2e.ts re-run at be150e35: 19 passed, 7 skipped, 0 failed.",
+      "headSha": "be150e35e1afa329e6c74d700f1201bf8c984c3d",
+      "negativeControl": "The red runs above (3px restored, padding removed) show the suite rows move with the rule."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/web/src/styles.css",
+    "packages/dispatch/e2e/layout.ts",
+    "packages/dispatch/e2e/agent-view.e2e.ts",
+    "packages/dispatch/e2e/phone.e2e.ts"
+  ],
+  "trickyParts": [
+    "Harness: /legion/harness/setup.sh (idempotent: Debian postgres-17 + pgvector + libicu76 under /legion/harness/pgroot, Postgres on 127.0.0.1:55432 with one database per role, proof-sdk-upstream src/ copied in, Playwright Chromium and the Go caches on the volume, dispatch-e2e binary pre-built) and /legion/harness/env.sh (source it in a subshell for harness commands only; per-LEGION_ROLE lane: implementer 18777/19021-19024 db dispatch_implementer, tester 22777/23021-23024 db dispatch_tester, reviewer 26777/27021-27024 db dispatch_reviewer).",
+    "packages/contracts/dist must be built (bun run build in packages/contracts) or Playwright finds no tests.",
+    "Rebuild web/dist (bun run build:web) after any styles.css change: the server serves the last build. Do not edit e2e files while a run is going: the worker loads a spec file lazily and mixes versions (that is what failed phone.e2e.ts in my first full iphone run).",
+    "Lightning CSS rewrites calc((1lh - 1.2em) / 2) to calc(.5lh - .6em) in the bundle.",
+    "WebKit cannot launch in the pod (INFRA-317): the webkit-iphone leg of the new reasoning row is CI-only."
+  ],
+  "deviations": [
+    "Simplify pass applied one finding: the four repeated pitch/clearance assertions became expectConsecutiveLinksClear in e2e/layout.ts (the plan's consecutiveLinkClearance helper returned the metrics instead). Same checks and tolerances.",
+    "The stylesheet note states the measured text-box heights (19px at 16px, 18px at 15px, 14px at 12px) rather than a single em ratio, and states that a pitch tighter than 1.2em gets no padding because its lines leave no gap; I re-measured the plan's table in pod Chromium with DejaVu Sans and it matched."
+  ],
+  "openQuestions": []
+}
