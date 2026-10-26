@@ -2,53 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T20:47:24Z",
-  "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
-  "round": 11,
-  "standard": "The architect's decision after review round 6 (2026-10-26T19:23Z): a dispatch:// link whose text equals its target and that the bounded read names nothing for is plain text (no <a>, no href=\"\", no data-dispatch-href, no hover card), for <dispatch://…>, [X](X) and a #b- id over 256 bytes; tests fail at e3d09251 and pass at the head; https:// forms and author links unchanged. Driven at the head and at e3d09251 in a real browser.",
-  "provider": "390 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T20:47Z; no subagent was used.",
+  "completed": "2026-10-26T21:54:32Z",
+  "headSha": "7d164bef1e9cafec3a01e4281908c6edee614131",
+  "round": 12,
+  "standard": "The architect's decision after review round 7 (2026-10-26T21:00Z): basic checks on the merged head, plus the upper-case DISPATCH:// case (fix it where this pull request reads dispatch://, or leave it if the server does not accept upper case either).",
+  "provider": "409 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-26T21:54Z; no subagent was used.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's updated pictures.e2e.ts at the head (passes, chromium and iphone) and in a git archive of the round-6 head e3d09251 (fails 2/2), and drove every form's DOM, hover and click in my own throwaway browser test on both builds."
+    "how": "Drove the upper-case probe on the real surface (a comment on a server built from the head, its ?from= read, and the dashboard's rendering in a real browser at the head and on main 16e4bb0f), which confirms the implementer's ParseRef/Extract probe; re-ran the driver and the browser files at the head."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round-7 behaviour: <dispatch://…>, [dispatch://X](dispatch://X) and a #b- id over 256 bytes, past the bounds, render as their words with no <a>, no href=\"\", no data-dispatch-href, no hover card",
-      "surface": "Dispatch's browser harness (Playwright, chromium) with a real server built from the head and from a git archive of e3d09251",
-      "command": "bun run e2e -- e2e/tester-plain.e2e.ts --project chromium (throwaway, deleted): one comment on a document named with 2,680 characters (key 2,710 bytes) holding <dispatch://…>, [dispatch://…](dispatch://…), <dispatch://CORE-1/spec#b-<300 b's>>, [same](same), a bare URL, <URL>, [designurl](URL), [designref](dispatch://…); GET /api/v1/references?from=<comment>; per paragraph: count of a, a[href=\"\"], [data-dispatch-href], [data-dispatch-ref]; forced hover then tooltip count; forced click then URL",
-      "observed": "Server records 0 references. Head: the four dispatch:// forms each a=0, href=\"\"=0, data-dispatch-href=0, data-dispatch-ref=0, tooltip 0, click stays on the page; https:// forms a plain link (no data-dispatch-ref, no tooltip); author links data-dispatch-ref set, tooltip 1, open /issues/CORE-1/artifacts/<slug> showing 'The long-named design.'",
-      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
-      "negativeControl": "e3d09251: the four dispatch:// forms each render a=1 with href=\"\" and data-dispatch-href (the leftover review round 6 found); the updated pictures.e2e.ts fails 2/2 there"
-    },
-    {
-      "criterion": "The round's tests fail before and pass after",
-      "surface": "Dispatch's browser suite (chromium and iphone)",
-      "command": "bun run e2e -- e2e/pictures.e2e.ts -g 'long-named picture' at the head and in a git archive of e3d09251 with the head's pictures.e2e.ts copied in",
-      "observed": "Head: passes on both projects; e3d09251: 2 failed. The MarkdownBody.test.tsx change is CI's to judge (Tests run 40393605197, in progress at the time of writing)",
-      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
-      "negativeControl": "e3d09251's failure above"
-    },
-    {
-      "criterion": "Migrations renumbered after main's 0120 run on a database main b4bea385 wrote, and on a fresh one",
-      "surface": "Real Go servers built from main b4bea385 and from the head on one local Postgres database (infra366_t11_roll); the head on a fresh database (infra366_t11)",
-      "command": "On main: spec with callout ship_it and a 3,200-byte callout id, a 2,680-character-named document, a comment citing #b-ship%5Fit and the long document's #b-x, an ask block with a 3,200-byte id; stop it; start the head on the same database; reads, two doc-edits, ?to=<ship_it>; then block-graph.sh against the head on a fresh database",
-      "observed": "schema_migrations 120 → 128 (artifact_reviews seq column present); reads 200; both edits applied; ?to=<ship_it> lists main's comment; the ask opens under its 3,200-byte id; owed documents, items and settlements 0; no SQLSTATE 54000 or level=ERROR. Fresh: block-graph.sh exit 0, 37 PASS (its first attempt's first CLI call reported 'Unable to connect' while the server answered /healthz; the retry passed)",
-      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
+      "criterion": "Basic checks on the merged head: forward merge, migrations after main's highest, driver and browser files",
+      "surface": "Real Go server built from 7d164bef on a fresh database (infra366_t12, port 8801) and the real dispatch CLI; Dispatch's browser suite at the head (chromium and iphone)",
+      "command": "git log -1 --format=%P f586da9d; fingerprint per conflicts-and-rewrites.md at 6038fa1f and 7d164bef; DISPATCH_URL=http://127.0.0.1:8801 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh; bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/pictures.e2e.ts (with a throwaway file)",
+      "observed": "f586da9d's parents are 87a81d62 and main 16e4bb0f (a forward merge); fingerprint a9d40ca6… → 7a056551… (changed: the Minor batch and main's merge); main's highest migration 0120, this branch's 0121-0128; driver exit 0, 37 PASS; browser 42 passed",
+      "headSha": "7d164bef1e9cafec3a01e4281908c6edee614131",
       "negativeControl": "Unauthenticated GET /api/v1/block-links → 401 (round 10)"
     },
     {
-      "criterion": "Regression of the dashboard surfaces round 7 touched",
-      "surface": "Dispatch's browser suite at the head, chromium and iphone",
-      "command": "cd packages/dispatch && bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/pictures.e2e.ts",
-      "observed": "40 passed",
-      "headSha": "6038fa1f11c78cba172f0c15b21f163eddb55f48",
-      "negativeControl": "e3d09251's failure of the updated pictures test"
+      "criterion": "Upper-case DISPATCH://: the dashboard and the server agree, and the case is left only if the server does not read upper case",
+      "surface": "Server built from the head (port 8801) with the real CLI; Dispatch's browser harness (chromium) on the head and on a git archive of main 16e4bb0f",
+      "command": "dispatch comment with DISPATCH://K/spec, DISPATCH://K/spec#b-ship%5Fit, <DISPATCH://K/spec>, [DISPATCH://K/spec](DISPATCH://K/spec), Dispatch://K and a lower-case dispatch://K/spec#b-ship%5Fit; GET /api/v1/references?from=<comment>; throwaway Playwright tests (deleted) reading each paragraph's DOM, then forced hover and click",
+      "observed": "Server: one edge, the lower-case block reference. Head dashboard: the bare DISPATCH:// forms and Dispatch://K are text (no <a>); the lower-case form is a titled reference link; <DISPATCH://…> and [DISPATCH://X](DISPATCH://X) are <a href=\"\" data-dispatch-href> with no data-dispatch-ref; hover shows no card; the URL is unchanged after a click. Main 16e4bb0f renders <DISPATCH://…> identically (href=\"\", data-dispatch-href, no card, URL unchanged).",
+      "headSha": "7d164bef1e9cafec3a01e4281908c6edee614131",
+      "negativeControl": "The lower-case control is recorded by the server and drawn as a reference link, so the upper-case forms differ only by case"
     }
   ],
   "attempted": [
-    "A12 was not re-run: its throwaway driver was on the replaced volume, and round 11's server diff is main's merge, whose migrations the database run above covers."
+    "Noted for the architect, not a failure: after a click on the upper-case <DISPATCH://…> anchor, the next paragraph could not be found within the test's time on both the head and main, which is consistent with href=\"\" reloading the conversation. It is main's existing rendering, the server reads no upper-case reference, and the architect's round-8 instruction leaves the case when the server does not accept upper case."
   ],
-  "ci": "At 1d4f991e: Tests 40393605197 in progress; Legion Envoy and Contracts 40393605179 queued; Docs 40393605183, Worker Image 40393605135 and PR Title 40393816915 success."
+  "ci": "At f586da9d: Tests 40405729450, Legion Envoy and Contracts 40405729966, Docs 40405729415 and Worker Image 40405729412 queued."
 }
