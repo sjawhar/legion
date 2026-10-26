@@ -69,9 +69,10 @@ requires a bearer checks no `Host`.
 
 `POST /v1/messages/send` resolves its target from the session store, not from this listener's
 cache of it: the cache answers a hit, and a miss is read through to the `envoy_sessions` bucket
-within one second (`liveSessionEntry`, `cmd/listener/api.go`), the same direct get the role paths
-already make. That read and the publish share one 3.5 s budget taken from the caller's own request
-context, so a store or a bus this listener cannot reach is answered inside the caller's attempt:
+within one second (`liveSessionEntry`, `cmd/listener/role_holder.go`), the same direct get the role
+paths already make. That read and the publish share one 3.5 s budget taken from the caller's own
+request context, so a store or a bus this listener cannot reach is answered inside the caller's
+attempt:
 
 | Outcome of the attempt | Answer |
 | --- | --- |
@@ -83,9 +84,11 @@ context, so a store or a bus this listener cannot reach is answered inside the c
 | Any other publish failure | `503` with the same prefix and `Retry-After: 1`, carrying the bus's own reason |
 
 `POST /v1/messages/publish` answers a publish failure, and a role-holder read that did not answer,
-exactly the same way; its 413, its 400s and its role 404s (`unclaimed`, `holder_lapsed`) are
-unchanged. Two refusals are its own. A publish the server denies under this listener's own grant
-(`bus.ErrPublishDenied`) is
+exactly the same way; its role-holder resolution (the claim read, the holder's session read and the
+release of a lapsed claim) runs inside the same 3.5 s budget, and one the budget runs out on is that
+503 too, naming the call that did not answer. Its 413, its 400s and its role 404s (`unclaimed`,
+`holder_lapsed`) are unchanged. Two refusals are its own. A publish the server denies under this
+listener's own grant (`bus.ErrPublishDenied`) is
 `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}`
 with no `Retry-After`, recorded `publish_denied`. Only a topic the stream does not capture — a
 role lane or an ad-hoc topic, which go over core NATS — can be denied this way, since that error is
@@ -97,15 +100,21 @@ and the `Retry-After: 1`, since a fresh read wins that race as soon as the repla
 settles, but answers its own body,
 `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`,
 recorded `role_holder_changed`: every bus read answered, so no bus was unavailable.
+`GET /v1/roles/<role>` resolves its holder the same way, within the same budget, and answers that
+race with the same 503 and `Retry-After: 1`, worded
+`{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; its
+other failures, a read that did not answer among them, stay a 500.
 
 A publish whose caller's context has already ended puts nothing on the wire; on these two routes it
 is answered the 503 above. A core publish (a role lane or an ad-hoc topic) checks its deadline
 immediately before it publishes (`publishConfirmed`, `internal/bus/confirm.go`), and
 `publishCoreTo` (`internal/bus/nats.go`) refuses a context cancelled while its deadline is still
-ahead, which a deadline alone cannot show; the JetStream path has no check of its own and relies on
-nats.go's, whose request returns the context's error before it sends anything. It matters because
-the publish route's role-holder read runs before the publish and can spend the request's budget: a
-core subject has no duplicate window, and the client retries every 5xx
+ahead, which a deadline alone cannot show, reading it once more after a wait for a reconnect so a
+cancel during that wait sends nothing (a cancel after that last read cannot be undone); the
+JetStream path has no check of its own and relies on nats.go's, whose request returns the context's
+error before it sends anything. It matters because the publish route's role-holder resolution runs
+before the publish under the same budget, and one that answers just as the budget ends leaves the
+publish none: a core subject has no duplicate window, and the client retries every 5xx
 (`packages/envoy-client/src/transport.ts`), so a message emitted behind a failure answer would
 reach its subscriber twice.
 
@@ -192,7 +201,11 @@ budget for the whole listener: a single set, made once at start and shared by ev
 handler built from it, the one a self-health rebind builds after a NATS flap included, so a rebind
 opens no second budget beside the first. The set is keyed on each message's JetStream stream
 sequence, so only that message's next delivery gives its slot back; a redelivery this listener
-never deferred (another branch's NAK, an expired ack wait) frees nothing. Each deferral logs
+never deferred (another branch's NAK, an expired ack wait) frees nothing. A slot whose message
+never comes back here (the stream dropped or purged it, or its redelivery reached another
+subscriber) expires 125 s after the deferral that took it, the 5 s delay plus two 60 s ack waits,
+the longest a deferred message can legitimately stay pending, so such slots cannot hold the budget
+for longer than that. Each deferral logs
 `listener agent delivery deferred` with `reason`, `attempt` and `window_deferrals`, the deferrals
 that message's cause is allowed (1 for `push_failed`); only the give-up counts
 `unplaceable_no_record`, `unplaceable_no_push_target` or `unplaceable_push_failed`, logs WARN

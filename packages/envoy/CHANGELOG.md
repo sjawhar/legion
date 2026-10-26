@@ -622,10 +622,12 @@
 - The Envoy listener answers a message route the bus did not serve with
   `503 {"error":"envoy: the message bus did not answer: <reason>"}` and `Retry-After: 1`, in place
   of the 500 that often reached no caller: `POST /v1/messages/send` and `POST /v1/messages/publish`
-  each take a 3.5 s budget from the request's own context, which the send's session read and both
-  routes' publish run inside, and the publish route answers that same 503 for a role-holder read
-  that did not answer. A publish the NATS server denies under this listener's own grant is not an
-  outage and is not retryable: it is
+  each take a 3.5 s budget from the request's own context, which the send's session read, the
+  publish route's resolution of a role lane's holder (its claim read, its holder's session read
+  and the release of a lapsed claim) and both routes' publish run inside, and the publish route
+  answers that same 503 for a role-holder read that did not answer or that the budget ran out on,
+  so a role store that does not answer is reported inside the caller's attempt. A publish the
+  NATS server denies under this listener's own grant is not an outage and is not retryable: it is
   `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}`
   with no `Retry-After`, since the grant forbids the subject until an operator changes it. Only
   the publish route can be denied this way, and only for a topic the stream does not capture (a
@@ -633,14 +635,20 @@
   `notifications.agent.<id>`, which the stream captures, so it goes through JetStream. A
   publish that lost the race for a role's claim — every resolution attempt spent on a supersession
   — keeps the 503 and the `Retry-After: 1` but answers
-  `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`. The
+  `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`.
+  `GET /v1/roles/<role>` resolves its holder within the same 3.5 s budget, and answers that race,
+  which it answered 500, with the same 503 and `Retry-After: 1`, worded
+  `{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; its
+  other failures, a role store that did not answer within the budget among them, stay a 500. The
   413 for a message NATS cannot take whole and the 400 for a subject or key it refuses are
   unchanged. A publish on either route whose request context has already ended — its budget
-  spent, which the role-holder read ahead of the publish can do, or the request cancelled — puts
-  nothing on the wire and is answered that 503: a core subject has no duplicate window and the
-  client retries every 5xx, so a message emitted behind a failure answer would reach its
-  subscriber twice. A core publish checks its deadline immediately before it publishes and its
-  context's cancellation before that; a JetStream publish relies on nats.go, whose request sends
+  spent, which a role-holder resolution that answers just as the budget ends can leave it, or the
+  request cancelled — puts nothing on the wire and is answered that 503: a core subject has no
+  duplicate window and the client retries every 5xx, so a message emitted behind a failure answer
+  would reach its subscriber twice. A core publish checks its deadline immediately before it
+  publishes and its context's cancellation before that, once more after any wait for a reconnect,
+  so one cancelled while NATS reconnects sends nothing; a cancel after that last check cannot be
+  undone, and the publish goes ahead. A JetStream publish relies on nats.go, whose request sends
   nothing under an ended context. A send resolves its target from the session store itself rather
   than from this listener's cache of it — a cache miss is read through to the `envoy_sessions`
   bucket within a second, the same direct get the role paths already make — so
@@ -661,7 +669,11 @@
   for its whole window), in one budget shared by every delivery handler it builds — the one a
   rebind after a NATS flap builds included — and keyed on each message, so only a message this
   listener deferred gives a slot back when it is redelivered; one arriving past that cap is given
-  up at once. Each deferral logs `listener agent delivery deferred` at INFO with `reason`,
+  up at once. A slot whose message never comes back to this listener — the stream dropped or
+  purged it, or another subscriber took its redelivery — expires 125 s after the deferral that
+  took it (the five-second delay plus two of the durable's 60 s ack waits), so such messages hold
+  the budget no longer than that. Each deferral logs `listener agent delivery deferred` at INFO
+  with `reason`,
   `attempt` and `window_deferrals`, the deferrals that message's cause is allowed (1 for
   `push_failed`). The give-up counts its `delivery_status` and logs `listener agent delivery given
   up` at WARN first, and only then publishes the `no_holder` delivery exception, once. A notice
