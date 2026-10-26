@@ -38,8 +38,6 @@ export function ProjectsSection(): ReactNode {
   const queryClient = useQueryClient();
   const [projectKey, setProjectKey] = useState("");
   const [projectName, setProjectName] = useState("");
-  /** The project the last create made with no answer to show it by, until the next edit. */
-  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const projectSubmitGuard = useSubmitGuard();
   const projects = useQuery(projectsQuery());
   // The form shows a refused create beside the key it was refused over.
@@ -48,11 +46,12 @@ export function ProjectsSection(): ReactNode {
     label: (input: CreateProjectInput) => `New project ${input.key}`,
     write: (input, bounds) => api.createProject(input, bounds),
     onSettled: () => projectSubmitGuard.release(),
-    onSuccess: (project, input) => {
+    // Made either way, so the form empties; with no answer to give, it says what was made
+    // (`createProject.unanswered`).
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       setProjectKey("");
       setProjectName("");
-      setMadeUnanswered(project === null ? input.key : null);
     },
   });
   const submitProject = (event: FormEvent<HTMLFormElement>) => {
@@ -170,7 +169,7 @@ export function ProjectsSection(): ReactNode {
                 disabled={createProject.isPending}
                 id="project-key"
                 onChange={(event) => {
-                  setMadeUnanswered(null);
+                  createProject.forgetUnanswered();
                   setProjectKey(event.target.value.trim().toUpperCase());
                 }}
                 placeholder="CORE"
@@ -199,9 +198,9 @@ export function ProjectsSection(): ReactNode {
               New project
             </button>
           </form>
-          {madeUnanswered === null ? null : (
+          {createProject.unanswered === undefined ? null : (
             <div className="mt-4">
-              <LandedWithoutAnswer what={`Project ${madeUnanswered}`} />
+              <LandedWithoutAnswer what={`Project ${createProject.unanswered.variables.key}`} />
             </div>
           )}
           {createProject.isError ? (

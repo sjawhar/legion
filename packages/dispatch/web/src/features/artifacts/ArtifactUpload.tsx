@@ -138,7 +138,6 @@ export interface DraftUpload {
 export function useDraftUpload(insert: (text: string) => void): DraftUpload {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(0);
-  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const retryGuard = useSubmitGuard();
   // Each file is one write under a key of its own, its refusal shown here beside the draft, and
   // its file kept across a reload with it.
@@ -155,14 +154,11 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
     inline: true,
     label: ({ file }) => `Upload of ${file.name || "a file"}`,
     onMutate: () => setPending((count) => count + 1),
-    // Stored either way; with no answer to give, its reference cannot be added to the draft.
+    // Stored either way; with no answer to give, its reference cannot be added to the draft, and
+    // the field says so (`upload.unanswered`).
     onSuccess: (landed, { file, owner }) => {
       refreshOwnerArtifacts(queryClient, owner);
-      if (landed === null) {
-        setMadeUnanswered(file.name || "the file");
-        return;
-      }
-      insert(uploadedFileText(owner, file, landed.result));
+      if (landed !== null) insert(uploadedFileText(owner, file, landed.result));
     },
     onSettled: () => {
       setPending((count) => count - 1);
@@ -174,7 +170,7 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
       return;
     }
     event.preventDefault();
-    setMadeUnanswered(null);
+    upload.forgetUnanswered();
     for (const file of [...files]) upload.mutate({ file, owner });
   };
   return {
@@ -182,7 +178,8 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
     error: upload.error,
     isError: upload.isError,
     isPending: upload.isPending,
-    madeUnanswered,
+    madeUnanswered:
+      upload.unanswered === undefined ? null : upload.unanswered.variables.file.name || "the file",
     paste: (event, owner) => receive(event.clipboardData.files, owner, event),
     pending,
     retry: () => {
@@ -258,7 +255,6 @@ export function useArtifactUpload(
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [summary, setSummary] = useState("");
   const [isDragging, setIsDragging] = useState(false);
-  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const upload = useKeyedWrite<UploadResult, File>({
     write: (file, bounds) =>
       uploadFile(
@@ -270,24 +266,22 @@ export function useArtifactUpload(
     file: (file) => file,
     inline: true,
     label: (file) => `Upload of ${file.name || "a file"}`,
-    onSuccess: (result, file) => {
-      // Stored either way: the staged file and its summary go, so a second press sends nothing.
+    onSuccess: (result) => {
+      // Stored either way: the staged file and its summary go, so a second press sends nothing;
+      // with no answer to give, the row says so (`upload.unanswered`).
       setPendingFile(null);
       setSummary("");
       refreshOwnerArtifacts(queryClient, owner);
-      if (result === null) {
-        setMadeUnanswered(name ?? (file.name || "the file"));
-        return;
+      if (result !== null) {
+        void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
       }
-      setMadeUnanswered(null);
-      void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
     },
   });
   const receive = (file: File | undefined) => {
     if (file === undefined) {
       return;
     }
-    setMadeUnanswered(null);
+    upload.forgetUnanswered();
     if (immediate) {
       upload.mutate(file);
     } else {
@@ -322,7 +316,10 @@ export function useArtifactUpload(
     fileInputRef,
     isError: upload.isError,
     isPending: upload.isPending,
-    madeUnanswered,
+    madeUnanswered:
+      upload.unanswered === undefined
+        ? null
+        : (name ?? (upload.unanswered.variables.name || "the file")),
     openPicker: () => fileInputRef.current?.click(),
     pendingFile,
     selectFile: (event) => {

@@ -62,9 +62,8 @@ export function AgentTokensSection(): ReactNode {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
-  /** A mint whose value was lost with its answer, until it is replaced or the reader writes
-   *  another label. */
-  const [lost, setLost] = useState<LostMint | null>(null);
+  /** When the token list was last read again after a mint whose answer was lost. */
+  const [rereadAt, setRereadAt] = useState<number | undefined>(undefined);
   const { copy, reset: resetCopyStatus, status: copyStatus } = useCopyFeedback();
   const tokens = useQuery({ queryKey: agentTokensQueryKey, queryFn: () => api.listAgentTokens() });
   // The form shows a refused mint beside the name it was refused over.
@@ -72,19 +71,16 @@ export function AgentTokensSection(): ReactNode {
     inline: true,
     label: (input: { name: string; before: readonly string[] }) => `New agent token ${input.name}`,
     write: ({ name: label }, bounds) => api.createAgentToken({ name: label }, bounds),
-    onSuccess: (created, input) => {
+    onSuccess: (created) => {
       setName("");
       if (created === null) {
-        // Minted, and its value - shown once only - is gone with the answer: the token is
-        // listed once the list is read again, and the reader can replace it.
+        // Minted, and its value - shown once only - is gone with the answer
+        // (`createToken.unanswered`): the token is listed once the list is read again, and the
+        // reader can replace it.
         setShownToken(undefined);
-        const mint = { before: input.before, label: input.name, listed: false };
-        setLost(mint);
         void queryClient
           .invalidateQueries({ queryKey: agentTokensQueryKey })
-          .then(() =>
-            setLost((current) => (current === mint ? { ...mint, listed: true } : current))
-          );
+          .then(() => setRereadAt(Date.now()));
         return;
       }
       const { token, ...safeToken } = created;
@@ -92,7 +88,6 @@ export function AgentTokensSection(): ReactNode {
         safeToken,
         ...current,
       ]);
-      setLost(null);
       setShownToken(created);
       resetCopyStatus();
     },
@@ -116,6 +111,18 @@ export function AgentTokensSection(): ReactNode {
     if (name.trim() === "") return;
     createToken.mutate({ before: listedIds(), name });
   };
+  /** A mint whose value was lost with its answer, until the next mint or the reader writes
+   *  another label: the press's label and listed tokens, and whether the list has been read
+   *  again since it landed. */
+  const unanswered = createToken.unanswered;
+  const lost: LostMint | null =
+    unanswered === undefined
+      ? null
+      : {
+          before: unanswered.variables.before,
+          label: unanswered.variables.name,
+          listed: rereadAt !== undefined && rereadAt >= unanswered.at,
+        };
   const candidates = lost === null ? [] : lostTokens(tokens.data, lost);
   /** Revokes `token` - once the reader confirms it, by its label and when it was made - and then
    *  mints another under its label. */
@@ -252,7 +259,7 @@ export function AgentTokensSection(): ReactNode {
             className={`min-h-11 rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
             id="agent-token-name"
             onChange={(event) => {
-              setLost(null);
+              createToken.forgetUnanswered();
               setName(event.target.value);
             }}
             placeholder="Architect"

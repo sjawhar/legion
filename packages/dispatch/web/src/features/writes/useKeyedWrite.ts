@@ -4,7 +4,7 @@ import {
   type UseMutationResult,
   useMutation,
 } from "@tanstack/react-query";
-import { useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import type { WriteBounds } from "../../api/client";
 import { newSendKey } from "../../lib/send-key";
@@ -47,6 +47,25 @@ function sameVariables(a: unknown, b: unknown): boolean {
   }
 }
 
+/** A press Dispatch made and had no answer to give for: its variables, and when it landed. */
+export interface UnansweredLanding<TVariables> {
+  readonly variables: TVariables;
+  readonly at: number;
+}
+
+/** `useMutation`'s result, with the one "made, but Dispatch lost its answer" state every create
+ *  form shows (`LandedWithoutAnswer`): the last press that landed with `null`, until the next
+ *  press starts or the form lets it go (`forgetUnanswered`, on an edit). */
+export type KeyedWriteResult<TData, TVariables, TContext> = UseMutationResult<
+  TData | null,
+  DefaultError,
+  TVariables,
+  TContext
+> & {
+  readonly unanswered: UnansweredLanding<TVariables> | undefined;
+  readonly forgetUnanswered: () => void;
+};
+
 /**
  * The one way a surface that is not a composer writes to Dispatch: each `mutate` is one press,
  * made under a key of its own and tried under it until Dispatch decides it, shown by the shell's
@@ -59,7 +78,8 @@ function sameVariables(a: unknown, b: unknown): boolean {
  * press, since Dispatch would answer the old key with that refusal. It runs whether or not the
  * browser says it is online (`networkMode: "always"`): the write's own tries wait out a network
  * that is down, and a mutation TanStack paused offline would make none, never go late and never
- * offer Stop trying.
+ * offer Stop trying. A press that lands with no answer is kept as `unanswered` for the surface
+ * to say so, until the next press or `forgetUnanswered`.
  */
 export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
   file,
@@ -68,22 +88,22 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
   target,
   write,
   ...options
-}: KeyedWriteOptions<TData, TVariables, TContext>): UseMutationResult<
-  TData | null,
-  DefaultError,
-  TVariables,
-  TContext
-> {
+}: KeyedWriteOptions<TData, TVariables, TContext>): KeyedWriteResult<TData, TVariables, TContext> {
   const writes = useWrites();
   /** The last press the reader stopped, which a Retry of the same variables makes again. */
   const stopped = useRef<{ readonly key: string; readonly variables: TVariables } | undefined>(
     undefined
   );
-  return useMutation({
+  const [unanswered, setUnanswered] = useState<UnansweredLanding<TVariables> | undefined>(
+    undefined
+  );
+  const forgetUnanswered = useCallback(() => setUnanswered(undefined), []);
+  const mutation = useMutation({
     ...options,
     mutationFn: (variables: TVariables) => {
       const again = stopped.current;
       stopped.current = undefined;
+      setUnanswered(undefined);
       const key =
         again !== undefined && sameVariables(again.variables, variables) ? again.key : newSendKey();
       return writes
@@ -98,13 +118,20 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
           target: target?.(variables),
           write: (bounds) => write(variables, bounds),
         })
-        .catch((error: unknown) => {
-          if (retriesUnderItsKey(error instanceof Error ? error : undefined)) {
-            stopped.current = { key, variables };
+        .then(
+          (answer) => {
+            if (answer === null) setUnanswered({ at: Date.now(), variables });
+            return answer;
+          },
+          (error: unknown) => {
+            if (retriesUnderItsKey(error instanceof Error ? error : undefined)) {
+              stopped.current = { key, variables };
+            }
+            throw error;
           }
-          throw error;
-        });
+        );
     },
     networkMode: "always",
   });
+  return { ...mutation, forgetUnanswered, unanswered };
 }

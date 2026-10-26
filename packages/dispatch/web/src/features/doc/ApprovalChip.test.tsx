@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact, ArtifactApproval, ArtifactReview } from "../../api/types";
 import { ApprovalChip } from "./ApprovalChip";
 
@@ -158,6 +158,45 @@ test("Request changes requires a reason before it can submit, then posts it", as
       },
       keyedAttempt
     );
+  } finally {
+    createArtifactReview.mockRestore();
+    view.unmount();
+  }
+});
+
+// Dispatch made the review and lost its answer (`409 KEY_COMMITTED`): a landing, not a refusal.
+// The dialog closes with no refusal, the reviews are read again, and a second press is a fresh
+// open of the dialog rather than a second review of the reason already sent.
+test("a change request made with its answer lost closes the dialog, refuses nothing and reads again", async () => {
+  const createArtifactReview = spyOn(api, "createArtifactReview").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
+  queryClient.setQueryData(["artifact-reviews", "artifact-1"], []);
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <ApprovalChip
+        artifact={artifact({ latest_version: 3, state: "awaiting" })}
+        variant="header"
+      />
+    </QueryClientProvider>
+  );
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    const dialog = screen.getByRole("dialog", { name: "Request changes" });
+    fireEvent.change(within(dialog).getByLabelText("Reason"), {
+      target: { value: "Needs another pass" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Request changes" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Request changes" })).toBeNull()
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(queryClient.getQueryState(["artifact-reviews", "artifact-1"])?.isInvalidated).toBe(true);
+    expect(createArtifactReview).toHaveBeenCalledTimes(1);
   } finally {
     createArtifactReview.mockRestore();
     view.unmount();

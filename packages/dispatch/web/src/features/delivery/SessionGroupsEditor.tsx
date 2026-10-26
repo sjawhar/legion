@@ -17,12 +17,15 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { useDialog } from "../shell/useDialog";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 /** One change to the groups: what it is, in the reader's words, and one attempt of it. A delete
- *  is idempotent and goes without the key. */
+ *  is idempotent and goes without the key. A create names what it makes (`made`), which the
+ *  editor says was made when Dispatch lost its answer. */
 interface GroupChange {
   readonly label: string;
+  readonly made?: string;
   readonly run: (bounds: WriteBounds) => Promise<unknown>;
 }
 
@@ -191,11 +194,15 @@ export function SessionGroupsEditor({
     save.mutate(
       {
         label: `New group ${name.trim()}`,
+        made: `The group “${name.trim()}”`,
         run: (bounds) =>
           api.createDeliverySessionGroup({ name: name.trim(), sessions: selected }, bounds),
       },
+      // Made either way - with no answer to give too - so the name goes and a second press
+      // makes nothing.
       { onSuccess: () => setName("") }
     );
+  const madeUnanswered = save.unanswered?.variables.made;
 
   return (
     <aside
@@ -263,7 +270,10 @@ export function SessionGroupsEditor({
           <input
             className={fieldClass}
             id={`${id}-new-name`}
-            onChange={(event) => setName(event.target.value)}
+            onChange={(event) => {
+              save.forgetUnanswered();
+              setName(event.target.value);
+            }}
             placeholder="Group name"
             value={name}
           />
@@ -276,6 +286,7 @@ export function SessionGroupsEditor({
             Create group
           </button>
         </div>
+        {madeUnanswered === undefined ? null : <LandedWithoutAnswer what={madeUnanswered} />}
       </section>
 
       {save.isError ? (

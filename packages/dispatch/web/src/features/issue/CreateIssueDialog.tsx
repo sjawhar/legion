@@ -57,9 +57,6 @@ export function CreateIssueDialog({
   const [project, setProject] = useState<string | undefined>(undefined);
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");
-  /** The title of the issue the last create made with no answer to open it by, until the next
-   *  edit. */
-  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const submitGuard = useSubmitGuard();
   // The dialog shows a refusal itself, beside the draft it was refused over.
   const mutation = useKeyedWrite({
@@ -67,7 +64,7 @@ export function CreateIssueDialog({
     label: (input: CreateIssueInput) => `New issue “${input.title}”`,
     onSettled: () => submitGuard.release(),
     write: create,
-    onSuccess: (issue, input) => {
+    onSuccess: (issue) => {
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       if (issue !== null) {
@@ -75,10 +72,10 @@ export function CreateIssueDialog({
         navigate(buildIssuePath({ key: issue.key, kind: "issue" }));
         return;
       }
-      // Made, with no answer to open: the draft goes, so a second press makes nothing.
+      // Made, with no answer to open: the draft goes, so a second press makes nothing, and the
+      // dialog says what was made (`mutation.unanswered`).
       setTitle("");
       setSpec("");
-      setMadeUnanswered(input.title);
     },
   });
 
@@ -158,7 +155,7 @@ export function CreateIssueDialog({
               disabled={mutation.isPending}
               maxLength={ISSUE_TITLE_MAX}
               onChange={(event) => {
-                setMadeUnanswered(null);
+                mutation.forgetUnanswered();
                 setTitle(event.target.value);
               }}
               ref={titleRef}
@@ -177,8 +174,8 @@ export function CreateIssueDialog({
               value={spec}
             />
           </label>
-          {madeUnanswered === null ? null : (
-            <LandedWithoutAnswer what={`The issue “${madeUnanswered}”`} />
+          {mutation.unanswered === undefined ? null : (
+            <LandedWithoutAnswer what={`The issue “${mutation.unanswered.variables.title}”`} />
           )}
           {mutation.isError ? (
             duplicate === undefined ? (

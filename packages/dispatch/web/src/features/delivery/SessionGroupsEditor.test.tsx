@@ -193,3 +193,36 @@ test("a refusal shows as the server wrote it", async () => {
     create.mockRestore();
   }
 });
+
+// Dispatch made the group and lost its answer (`409 KEY_COMMITTED`): a landing, not a refusal. The
+// name and the selection go, so a second press makes nothing, and the editor says what was made
+// instead of showing a refusal.
+test("a group made with its answer lost clears the form and says so, and a second press makes nothing", async () => {
+  const create = spyOn(api, "createDeliverySessionGroup").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
+  );
+  const queryClient = renderEditor();
+  const reads = seedDeliveryReads(queryClient);
+  try {
+    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one (s1)" }));
+    fireEvent.change(screen.getByLabelText("New group name"), { target: { value: "Crew" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The group “Crew” was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByLabelText("New group name") as HTMLInputElement).value).toBe("");
+    expect(
+      (screen.getByRole("checkbox", { name: "Planner one (s1)" }) as HTMLInputElement).checked
+    ).toBe(false);
+    expect(
+      (screen.getByRole("button", { name: "Create group" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    await waitFor(() => expect(queryClient.getQueryState(reads.run)?.isInvalidated).toBe(true));
+    expect(create).toHaveBeenCalledTimes(1);
+  } finally {
+    cleanup();
+    create.mockRestore();
+  }
+});

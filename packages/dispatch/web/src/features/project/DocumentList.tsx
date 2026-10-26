@@ -107,8 +107,6 @@ export function DocumentList({ project }: { project: string }): ReactNode {
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [duplicateName, setDuplicateName] = useState<string | undefined>();
-  /** The name of a document the last create made with no answer to open it by. */
-  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const submitGuard = useSubmitGuard();
   const navigate = useNavigate();
@@ -125,16 +123,13 @@ export function DocumentList({ project }: { project: string }): ReactNode {
     write: (name: string, bounds) =>
       api.uploadArtifact({ project }, { content: `# ${name}\n`, name }, bounds),
     onSettled: () => submitGuard.release(),
-    onSuccess: (made, name) => {
+    onSuccess: (made) => {
       setCreating(false);
       setTitle("");
       void queryClient.invalidateQueries({ queryKey: ["project", project, "artifacts"] });
-      if (made === null) {
-        // Made, with no answer to open: the form closes, so a second press makes nothing.
-        setMadeUnanswered(name);
-        return;
-      }
-      setMadeUnanswered(null);
+      // Made, with no answer to open: the form closes, so a second press makes nothing, and the
+      // list says what was made (`create.unanswered`).
+      if (made === null) return;
       navigate(buildProjectPath({ kind: "document", project, slug: made.artifact.slug }));
     },
   });
@@ -167,14 +162,16 @@ export function DocumentList({ project }: { project: string }): ReactNode {
           onClick={() => {
             setCreating(true);
             setDuplicateName(undefined);
-            setMadeUnanswered(null);
+            create.forgetUnanswered();
           }}
           type="button"
         >
           New document
         </button>
       </div>
-      {madeUnanswered === null ? null : <LandedWithoutAnswer what={`Document ${madeUnanswered}`} />}
+      {create.unanswered === undefined ? null : (
+        <LandedWithoutAnswer what={`Document ${create.unanswered.variables}`} />
+      )}
       {creating ? (
         <form aria-label="New document" className="space-y-3" onSubmit={submit}>
           <label className={`block text-sm font-medium ${textSecondaryOnCanvas}`}>

@@ -44,6 +44,7 @@ import {
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
@@ -670,6 +671,9 @@ export function ProofDocument({
         open={isNameDialogOpen}
         saving={nameVersion.isPending}
       />
+      {nameVersion.unanswered === undefined ? null : (
+        <LandedWithoutAnswer what={`The version “${nameVersion.unanswered.variables}”`} />
+      )}
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {repairError === undefined ? null : (
         <div className="space-y-3" role="alert">

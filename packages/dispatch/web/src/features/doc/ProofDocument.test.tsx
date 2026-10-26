@@ -9,7 +9,7 @@ import {
   createQueryClient,
   renderProofDocument,
 } from "../../__tests__/proof-document";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
@@ -62,6 +62,34 @@ test("ProofDocument clears the parent's toolbar bag on unmount", () => {
   expect(toolbar.current).not.toBeUndefined();
   view.unmount();
   expect(toolbar.current).toBeUndefined();
+});
+
+// Dispatch named the version and lost its answer (`409 KEY_COMMITTED`): a landing, not a refusal.
+// The dialog closes with no refusal, so a second press names nothing twice, and the document says
+// what was made.
+test("a version named with its answer lost closes the dialog and says it was made", async () => {
+  const createArtifactVersion = spyOn(api, "createArtifactVersion").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
+  );
+  const { toolbar, view } = renderProofDocument();
+  try {
+    act(() => toolbar.current?.requestNamedVersion());
+    const dialog = await screen.findByRole("dialog", { name: "Name this version" });
+    fireEvent.change(within(dialog).getByLabelText("What changed?"), {
+      target: { value: "Settled the rollout" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The version “Settled the rollout” was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(screen.queryByRole("dialog", { name: "Name this version" })).toBeNull();
+    expect(screen.queryByText("Could not name this version. Try again.")).toBeNull();
+    expect(createArtifactVersion).toHaveBeenCalledTimes(1);
+  } finally {
+    createArtifactVersion.mockRestore();
+    view.unmount();
+  }
 });
 
 test("ProofDocument highlights a routed search term again after route and document changes", async () => {
