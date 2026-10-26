@@ -2,30 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-195",
-  "completed": "2026-10-26T02:40:00Z",
+  "completed": "2026-10-26T07:25:00Z",
   "generation": 2,
-  "reviewRound": 1,
-  "headTested": "2d6b97fc9a2fe590864359343fd3e7713fa92241",
-  "codeHead": "2451b5dcba7766ceea944be791e461b5162fecdb",
-  "fingerprint": "No rebase or forward merge: 2451b5dc is the one commit on top of the tester's a1b27d86 handoff and changes only check 13 of scripts/e2e/lib/dispatch-session-settings.ts, so this was a full round on that check and a clean rig run.",
-  "ci": "At code head 2451b5dcba77, read 2026-10-26T02:34Z: Tests run 40258016015 success; PR Title run 40258069476 success (an earlier PR Title run, 40258015979, was cancelled); Docs run 40258015990 success; Worker Image run 40258016013 success. Legion Envoy and Contracts run 40258016033 was in progress: in its `dispatch` job 121364414957, the lint, typecheck, unit and build steps passed, `Install Playwright Chromium, WebKit and Firefox` was running, and `Browser-test dispatch dashboard` (the WebKit and Firefox rows of keyboard-session-pickers.e2e.ts) was pending. The same job at 87ea738e (run 40253764103) and at e9d5f5ac (run 40249460482) ended `cancelled` when a newer push superseded it, so no CI run has reported those rows yet. Not waited for, and no lane re-run by the tester.",
+  "reviewRound": 2,
+  "headTested": "bf75ad76690add5da779da52772d4d006ad1d8a3",
+  "codeHead": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
+  "scope": "The architect narrowed this round (Envoy 2026-10-26T06:47Z) to: A2 in Firefox (rows 11a and 11d, the `: open` first byte and its Go test, the CI `dispatch` job at the code head); the rig driver split, proven on two Anthropic models with checks 1-17 and 19-20 passing and check 18 allowed to fail only as dispatch://INFRA-309's no-fallback; and Send still held during a pending header switch after the merge of main for #2227. Earlier proven lines need only the rig and browser reruns.",
+  "fingerprint": "A forward merge of main (ea067bb9, for #2227's conflict) with resolution edits, so the fingerprint changed: a full round at the merge head.",
+  "ci": "At code head ea067bb9830f, read 2026-10-26T07:21Z: Tests run 40280482750 success (lint, typecheck, test); PR Title run 40280482818 success; Docs run 40280482755 success; Worker Image run 40280482720 success. Legion Envoy and Contracts run 40280482811 was in progress: its `dispatch` job 121436803081 (the Firefox and WebKit rows) and its `envoy-go` job 121436803061 (TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte) were both in progress, and every finished job (changes, pi-envoy, envoy-plugin, pi-shared, broker-multiprocess, envoy-e2e-local, dispatch-multiprocess) was success. Not waited for, per the tester's rule. The reviewer reads both jobs' conclusions before approving, and a required red sends the issue back. No lane was re-run by the tester.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at 2451b5dc. A scratch 2 s sleep in packages/envoy/internal/dispatch/api/messages.go, just before `s.deliverMessage`, holds every thread read in the window with the message and no attempt (never committed, reverted, `jj diff` empty afterwards). The head driver against that Dispatch: `all 20 checks passed in 397s`; check 13 reads `attempt 1 sent` and the no-answer line after 32268 ms. The driver of 87ea738e, restored as a scratch change against the same Dispatch: `FAIL no-answer: Dispatch's send failed: null` after checks 1-12 ok, which is the round-3 failure, now deterministic. Then a clean run at head with no scratch change: `all 20 checks passed in 276s`."
+    "how": "Re-ran each of the implementer's surfaces at ea067bb9 in this pod (Playwright browsers at /legion/scratch/cache/ms-playwright, rootless Postgres 17 at 127.0.0.1:5433). (1) Firefox: `cd packages/dispatch && bun run e2e -- --project=firefox e2e/keyboard-session-pickers.e2e.ts --repeat-each=4` → 20 passed (2.3m). Negative control: the same command against a server with the `: open` write removed (scratch, reverted) → 7 failed (11a ×3, 11d ×4), 13 passed, the same counts as the implementer's. (2) Browser: `npx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agent-view.e2e.ts e2e/agent-view-settings.e2e.ts e2e/keyboard-session-pickers.e2e.ts e2e/live.e2e.ts` → 90 passed, 12 skipped, the same counts as the implementer's. (3) Rig: `env -u OPENAI_API_KEY SESSION_SETTINGS_MODELS='anthropic/claude-haiku-5-5 anthropic/claude-haiku-4-5' … bash scripts/e2e/dispatch-session-settings.sh` with `fallback` moved last (scratch, reverted) → checks 1-17 and 19-20 ok, then `FAIL fallback: timed out after 240s waiting for a model_change with role fallback`, as the implementer recorded. The whole Firefox project and the old-driver run were not repeated."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A4 proof surface (round 3 failures[0]): rig check 13 `no-answer` judges the switch's delivery attempt only once Dispatch has recorded it, so it passes on correct code however the timing falls; and the whole rig (A1-A4, check 14 across --resume, check 17 on pinned pi-envoy 10.24.0) passes at head",
-      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod: /opt/omp/bin/omp 18.8.9 --mode rpc with this checkout's packed pi-envoy and the released @sjawhar/pi-envoy 10.24.0, nats-server v2.10.22, the real Envoy listener, Dispatch built from this checkout, rootless Postgres 17, Chromium",
-      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' SESSION_SETTINGS_EVIDENCE_DIR=$TMPDIR/infra195-test4/rig-clean bash scripts/e2e/dispatch-session-settings.sh; the same with a scratch 2 s sleep before deliverMessage (rig-delay-head)",
-      "observed": "Clean: exit 0, `all 20 checks passed in 276s`, `released pi-envoy 10.24.0`, `ok no-answer (66s)` (attempt 1 sent; the no-answer line after 30166 ms), `ok resume-keeps-switch (39s)`, `ok older-plugin-notice (7s)`. Delayed Dispatch: exit 0, `all 20 checks passed in 397s`, check 13 attempt 1 sent, the no-answer line after 32268 ms. Evidence: https://github.com/sjawhar/legion/pull/2205#issuecomment-6406949718",
-      "headSha": "2451b5dcba7766ceea944be791e461b5162fecdb",
-      "negativeControl": "The driver of 87ea738e6a51 (scratch `jj restore --from 87ea738e6a51 scripts/e2e/lib/dispatch-session-settings.ts`, reverted) against the same delayed Dispatch → `FAIL no-answer: Dispatch's send failed: null` after `ok other-session-unchanged`, exit 1 (rig-delay-old)"
+      "criterion": "A2 in Firefox: rows 11a and 11d of e2e/keyboard-session-pickers.e2e.ts pass, because the live event stream sends its first byte with its headers (`: open`)",
+      "surface": "Dispatch browser suite in this pod: the real Go Dispatch server built from this checkout, the production SPA bundle, rootless Postgres 17 + pgvector, Playwright Firefox 1543; plus the dispatch binary built from this checkout on Postgres and JetStream NATS, read with curl",
+      "command": "cd packages/dispatch && bun run e2e -- --project=firefox e2e/keyboard-session-pickers.e2e.ts --repeat-each=4 --reporter=list; curl -sN --max-time 3 -H 'X-Dispatch-User: alice' -w 'status=%{http_code} ttfb=%{time_starttransfer}s' http://127.0.0.1:18931/api/v1/events (and with an agent bearer, Last-Event-ID: 0, ?since=999999)",
+      "observed": "Firefox: 20 passed (2.3m), so 11a and 11d pass on all 4 repeats. curl: every stream answered 200 with first body bytes `: open\\n\\n` after 2.3 to 6.4 ms, and nothing else came in 3 s. The page's parser drops `:` comment lines (packages/dispatch/web/src/api/live.ts:100), and no other client in the tree reads /api/v1/events. Evidence: https://github.com/sjawhar/legion/pull/2205#issuecomment-6410499260",
+      "headSha": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
+      "negativeControl": "The `: open` write removed from packages/envoy/internal/dispatch/api/events.go (scratch, reverted, `jj diff` empty) → the same Firefox command: 7 failed (`:193` 11a ×3, `:339` 11d ×4), 13 passed. An unauthenticated GET /api/v1/events → 401 NO_IDENTITY, no stream."
+    },
+    {
+      "criterion": "The merge of main for #2227 keeps Send held while a header switch is pending, and keeps #2227's Send pressable mid-turn once the switch is answered",
+      "surface": "Dispatch browser suite (real Go server, production SPA bundle, rootless Postgres, Playwright Chromium at chromium 1280x800 and iphone 390 px) with a throwaway spec, deleted after the run",
+      "command": "npx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/zz-tester-held.e2e.ts (throwaway); npx playwright test … --project=chromium --project=iphone e2e/agent-view.e2e.ts e2e/agent-view-settings.e2e.ts e2e/keyboard-session-pickers.e2e.ts e2e/live.e2e.ts",
+      "observed": "Throwaway: 2 passed. While a turn streams, a model pick holds Send: it is disabled and reads `Send`, the placeholder and the hint read `Waiting for the session to answer the switch…`, and Enter plus a forced click send nothing beyond `/model anthropic/model-b`, while the box keeps `next step`. After the answer, with the turn still streaming, Send is enabled and its click sends `next step`. Suite: 90 passed, 12 skipped, including agent-view-settings' `holds Send until the session answers` row and agent-view's `Send stays pressable while the session is mid-turn` row.",
+      "headSha": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
+      "negativeControl": "Inside the same throwaway run: the Enter and the forced click on the held Send left the fake Envoy's sent list at exactly [`/model anthropic/model-b`]."
+    },
+    {
+      "criterion": "The rig driver split runs every check; on two Anthropic models checks 1-17 and 19-20 pass, and check 18 fails only as dispatch://INFRA-309's no-fallback",
+      "surface": "scripts/e2e/dispatch-session-settings.sh in this issue pod: /opt/omp/bin/omp 18.8.9 --mode rpc with this checkout's packed pi-envoy (10.25.1) and the released @sjawhar/pi-envoy 10.24.0, nats-server v2.10.22, the real Envoy listener, Dispatch, rootless Postgres 17, Chromium; OPENAI_API_KEY unset",
+      "command": "env -u OPENAI_API_KEY SESSION_SETTINGS_MODELS='anthropic/claude-haiku-5-5 anthropic/claude-haiku-4-5' LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' SESSION_SETTINGS_EVIDENCE_DIR=$TMPDIR/infra195-test5/rig-r bash scripts/e2e/dispatch-session-settings.sh, with the `fallback` row moved to the end of the check table (scratch, reverted)",
+      "observed": "ok for header-before-any-turn through new-session-defaults (checks 1-17), older-plugin-notice and attribution (19-20), including no-answer (71s) and resume-keeps-switch (37s); then `FAIL fallback: timed out after 240s waiting for a model_change with role fallback`. The session file after the pick of rig-broken/broken-model holds six assistant error turns (`ECONNREFUSED`) and the log six automatic-retry continues, with no model_change to the configured fallback anthropic/claude-haiku-5-5. The last assistant turn before the pick is anthropic/claude-haiku-4-5 with a signed `thinking` part, which is INFRA-309's condition.",
+      "headSha": "ea067bb9830f2c703d87f7bd334b9253dd77ee8a",
+      "negativeControl": "Check 18 is itself the negative control: a session that never falls back is reported as `FAIL fallback`, not passed, so the split driver still detects it."
     }
   ],
   "checkedAndHeld": [
-    "Round 3's verification of the review round's fixes at 87ea738e (pinned pi-envoy 10.24.0, a run with one provider key unset, provider keys reaching only the driver and Oh My Pi, 30 browser rows) stands. 2451b5dc changes only check 13's wait, and the clean run above passed check 17 on 10.24.0 again."
+    "The `: open` comment reaches no consumer that misreads it: packages/dispatch/web/src/api/live.ts:100 drops `:` lines, and grep finds no other reader of /api/v1/events in packages (the daemon's client reads /api/v1/issues/{key}/events as JSON).",
+    "Stopping a rig run with SIGTERM during the builds waits for the running build step to end before the trap's cleanup runs: about 80 s here, with no leftover processes afterwards."
   ]
 }
