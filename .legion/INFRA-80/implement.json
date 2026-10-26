@@ -2,34 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T04:21:37Z",
-  "round": "generation 4, conflict return: tenth forward merge of main@origin (af460a46bb16, INFRA-353 skill rewrite) at approved head 3b90e2498e8e; skill text only, no runtime code changed",
+  "completed": "2026-10-26T04:33:31Z",
+  "round": "generation 4, answer to the tester's fail at e4ebfb39daa4: the tenth merge's resolution of skills/legion-worker/SKILL.md to main's file kept main's instruction to read .legion/<issue>/workspace-recovered.json; skill text only",
   "proof": [
     {
-      "criterion": "The forward merge of main changes the branch's diff only in skill text, in hunks named exactly (architect's conflict-return instruction)",
-      "surface": "the reference fingerprint command (skill://legion-worker/references/conflicts-and-rewrites.md) over the real branch history in the issue workspace, base read from GitHub with gh pr view 2173",
-      "command": "base=$(gh pr view 2173 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj git fetch && jj diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '<fileset>' | sed -e '/^@@/d' -e '/^index /d' | sha256sum at <head> = 3b90e2498e8e07686c9c3a480f7af80233896950 and 8867bd5d67a1f937395fa4f8d990dd817aae3565, with fileset '~(.legion | docs/solutions)' and again with the six skill paths (skills/legion-architect/SKILL.md, skills/legion-worker/SKILL.md, skills/legion-architect/references/acceptance.md and their packages/claude-envoy/legion/ copies) also excluded",
-      "observed": "reference fingerprint fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9 -> c907e753d2df31e6b4cbe3c7f90effc7741ecc1466d3d9a434d791e7716d66c4 (changed); with the six skill paths excluded 032f4c8105bb60912e0542c4d61e0dba4e849e7866bfc5062901887d344c3b23 at both heads (rest of the diff unchanged). Changed file set: the branch no longer changes the two SKILL.md files (main deleted or moved the text) and now changes skills/legion-architect/references/acceptance.md's child-closed bullet. Recorded: https://github.com/sjawhar/legion/pull/2173#issuecomment-6408160931. GitHub reports MERGEABLE (was CONFLICTING/DIRTY).",
-      "headSha": "8867bd5d67a1f937395fa4f8d990dd817aae3565",
-      "negativeControl": "the reference command on the merge commit before resolution (5083e2934a943c2446b24a67140f4e01e5d6bfca, four 2-sided conflicts) printed aa9969b0722621c6d990459b754b0a18ff59cec1670ec95e3a5333aeed2ad6f5, neither value above"
-    },
-    {
-      "criterion": "Skills keep main's rewritten structure and say only what is true of this change's mechanism; the generated copies match and the guard passes",
-      "surface": "the merged tree at 8867bd5d67a1: the skill files the plugins ship, claude-envoy's build, pi-legion's skills guard",
-      "command": "jj restore --from main@origin of skills/legion-{architect,worker}/SKILL.md and their claude-envoy copies; edit of skills/legion-architect/references/acceptance.md 'The close' child-closed bullet; grep -rnEi 'workspace-recovered|with its volume|volume kept|Suspended|outlives|later pod' skills/; cd packages/claude-envoy && bun run build && bun run check-dist && bun run test; cd packages/pi-legion && bun test src/skills-guard.test.ts; bash .github/scripts/check-private-names.sh",
-      "observed": "after resolution the grep finds no statement of the retained disk in main's rewritten skills (the remaining hits are this change's own merge-gate.md and tools.md text and unrelated words); check-dist 'dist/ and legion/ match a fresh build'; claude-envoy tests green on rerun; skills guard 11 pass 0 fail; check-private-names passes over 5102 files",
-      "headSha": "8867bd5d67a1f937395fa4f8d990dd817aae3565",
-      "negativeControl": "main's own acceptance.md (af460a46bb16) carries 'suspends its implementer, session and volume kept', which the grep for 'volume kept' finds before the edit and not after"
+      "criterion": "Spec acceptance 5: the recovery marker workspace-init wrote is gone from the tree, so no skill or prompt sends a resumed agent to it (tester's red test, commit 585076d4e409, unmodified)",
+      "surface": "the skills the plugins ship: pi-legion's skills guard over the prepack-staged skills and the daemon's role prompts, and claude-envoy's regenerated legion/ copy",
+      "command": "cd packages/claude-envoy && bun run build && bun run check-dist && bun run test; cd packages/pi-legion && bun test src/skills-guard.test.ts; grep -l workspace-recovered over every tracked file; jj diff --from 585076d4e409 --to @ packages/pi-legion/src/skills-guard.test.ts",
+      "observed": "skills guard 12 pass 0 fail, the tester's test included; check-dist 'dist/ and legion/ match a fresh build'; claude-envoy 191 pass 2 skip 0 fail; the grep finds the marker only in .legion handoffs, packages/daemon/internal/api/version.go (the removal's record), the red test itself, scripts/e2e/README.md and stage4b-sandbox-tree.sh (which assert its absence); the red test's file shows 0 changes against the tester's commit; bunx biome check and check-private-names pass",
+      "headSha": "4bee7ec164de2dfea41c9a3bba7a757474b5859f",
+      "negativeControl": "with skills/legion-worker/SKILL.md put back as it was at e4ebfb39 (main's sentence 'read .legion/<issue>/workspace-recovered.json too, once') the guard fails, 11 pass 1 fail, naming skills/legion-worker/SKILL.md; restored afterwards"
     }
   ],
   "filesChanged": [
-    "skills/legion-architect/SKILL.md and packages/claude-envoy/legion/skills/legion-architect/SKILL.md (resolved to main's file; this change's child-close hunk moved to acceptance.md)",
-    "skills/legion-worker/SKILL.md and packages/claude-envoy/legion/skills/legion-worker/SKILL.md (resolved to main's file; main deleted the paragraph this change's hunk edited)",
-    "skills/legion-architect/references/acceptance.md and its claude-envoy copy (child-closed bullet carries this change's mechanism)"
+    "skills/legion-worker/SKILL.md (step 1 'Read first': the last sentence now says that after a 'Your workspace was recreated…' message anything unpushed is gone and no file in the workspace says so, which is this change's own wording at the approved head, carried into main's rewritten step)",
+    "packages/claude-envoy/legion/skills/legion-worker/SKILL.md (regenerated)"
   ],
-  "deviations": [
-    "pi-legion's full bun test has 8 judge-omp failures in scripts/skill-scenarios/rig.test.ts (main's INFRA-140 rig, which this change does not touch); the same 8 fail on an export of main af460a46bb16 in this pod. CI's Tests run 40268604931 is the record.",
-    "claude-envoy bun run test had one failure on the first run and none on the rerun (a role-restore log line 'Unrecognized token <' came before it); no file this round changes is in that package's source."
+  "trickyParts": [
+    "My earlier search for leftover disk text in main's rewritten skills cut every match line at 300 characters. That hid this match, which sits at the end of a long line. This round's grep lists files, not truncated lines."
   ],
+  "deviations": [],
   "openQuestions": []
 }
