@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T16:10:00Z",
+  "completed": "2026-10-26T18:30:00Z",
   "proof": [
     {
       "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening works",
@@ -59,6 +59,14 @@
       "observed": "138 passed, 8 skipped (the specs' own iPhone-only skips); proof-editor bun test 99 pass, an image-only or space-only selection offers no Comment",
       "headSha": "adb397f92a79201124cb3d69954e01bcdb4f47eb",
       "negativeControl": "a closed document's Comment on a selection holding only an image threw 'The selection holds no text to quote.' into a swallowed catch before the fix; now ProofDocument shows the status notice and opens no composer"
+    },
+    {
+      "criterion": "Test round 2: on a closed issue a margin comment posts on a spec whose issue closed while it was open and focused (phone too), and a page that reopens its issue takes edits to its document again",
+      "surface": "Dispatch browser suite, chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone e2e/closed-issue-posting.e2e.ts e2e/margin-composer-hold.e2e.ts e2e/margin.e2e.ts e2e/offline-edits.e2e.ts e2e/mention-composer.e2e.ts (at 659a3263); closed-issue-posting, margin-composer-hold, mention-composer, phone-conversation again at the merged head",
+      "observed": "94 passed, 6 skipped at 659a3263 with the tester's :278 and :321 green in both projects (test file unchanged from dac91dce); 95 passed, 5 skipped at 27a6de48",
+      "headSha": "27a6de48c023a925cc8297ea2c8212c13d0b28ec",
+      "negativeControl": "at adb397f9 the tester's :278 failed on iphone at :300 (selection bar empty) and :321 failed in both projects at :335 (contenteditable stayed false after the reopen)"
     }
   ],
   "filesChanged": [
@@ -88,7 +96,8 @@
     "Margin comments on a closed issue's document needed a packages/proof-editor change (a comment-only selection action in read-only mode); a read-only view on an open issue (schema mismatch) still offers nothing.",
     "Postgres-backed packages that cannot pass in this pod for environment reasons: internal/dispatch/files (needs Docker), the rank collation test (database initialised with C collation), pmdoc linearity timing; CI runs them.",
     "Second forward merge of main (bc307fb5, #2188) because GitHub reported the pull request CONFLICTING: rebase re-check 61a71207b9b3 \u2192 19e3dfb6ef31: fingerprint unchanged (39aaf690\u2026), bare gates only; the one conflict was a CHANGELOG entry (https://github.com/sjawhar/legion/pull/2234#issuecomment-6416064353). main touched no packages/envoy, packages/dispatch or packages/proof-editor file.",
-    "Review round 1 (review at 034ed9d8): all nine threads fixed in 3d1609ce71f6 and a5770f5d20f2 and resolved one by one; then a third forward merge of main because GitHub reported the pull request CONFLICTING: 3d1609ce \u2192 adb397f9, fingerprint unchanged d4b3f860\u2026 (https://github.com/sjawhar/legion/pull/2234#issuecomment-6419935961); the one conflict was an envoy CHANGELOG entry. The access-mode change also touched VersionView.tsx (readOnly \u2192 access: \"read\"). The stale LEGION-781 testing note was corrected; dated docs/superpowers plans keep requireOpenIssue as history."
+    "Review round 1 (review at 034ed9d8): all nine threads fixed in 3d1609ce71f6 and a5770f5d20f2 and resolved one by one; then a third forward merge of main because GitHub reported the pull request CONFLICTING: 3d1609ce \u2192 adb397f9, fingerprint unchanged d4b3f860\u2026 (https://github.com/sjawhar/legion/pull/2234#issuecomment-6419935961); the one conflict was an envoy CHANGELOG entry. The access-mode change also touched VersionView.tsx (readOnly \u2192 access: \"read\"). The stale LEGION-781 testing note was corrected; dated docs/superpowers plans keep requireOpenIssue as history.",
+    "Test round 2: fixed the tester's two red tests (unchanged) in 659a3263: proof-editor's touch focus loss hides the bar only on an editable view, and ProofDocument re-admits its document connection (connection.readmit closes the socket; the provider reconnects) when the issue reopens. Then a fourth forward merge of main because GitHub reported the pull request CONFLICTING: 659a3263 \u2192 27a6de48, fingerprint changed by one line (route-count pin 138 \u2192 139, main added a route) (https://github.com/sjawhar/legion/pull/2234#issuecomment-6422391370). The tester's observation that the Comment chord ($mod+Alt+m) runs only on an editable view stands: a read-only editor cannot hold keyboard focus, and the bar's Comment button is the closed document's path."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
