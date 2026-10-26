@@ -55,11 +55,27 @@ async function readEveryPage<T>(path: string, field: string): Promise<T[]> {
 }
 
 /**
+ * The events whose workflow runs' checks GitHub evaluates for a pull request ("Checks from some
+ * workflow jobs are not evaluated" in GitHub's troubleshooting-required-status-checks): a check
+ * from a run any other event started (an inline review comment's, a `workflow_dispatch`) is left
+ * out of the pull request's checks, so it neither blocks nor waits.
+ */
+const evaluatedEvents: Record<string, true> = {
+  deployment: true,
+  deployment_status: true,
+  pull_request: true,
+  pull_request_review: true,
+  pull_request_target: true,
+  push: true,
+};
+
+/**
  * The check runs GitHub's merge reads: for each check, only its newest run (the highest id). A
  * check is its name, workflow name and triggering event when its check suite is a workflow run's,
  * as `gh pr checks` keys it, so a run a newer run of the same event replaced no longer counts
- * while a failed run of one event still blocks beside a passing run of another; any other check
- * run (an external App's) is its name and App.
+ * while a failed run of one event still blocks beside a passing run of another; a workflow run's
+ * check of an event GitHub does not evaluate is dropped; any other check run (an external App's)
+ * is its name and App.
  */
 function newestCheckRuns(checkRuns: CheckRun[], workflowRuns: WorkflowRun[]): CheckRun[] {
   const workflowBySuite = new Map(workflowRuns.map((run) => [run.check_suite_id, run]));
@@ -68,6 +84,7 @@ function newestCheckRuns(checkRuns: CheckRun[], workflowRuns: WorkflowRun[]): Ch
     const workflow = checkRun.check_suite
       ? workflowBySuite.get(checkRun.check_suite.id)
       : undefined;
+    if (workflow !== undefined && evaluatedEvents[workflow.event] !== true) continue;
     const key = JSON.stringify(
       workflow === undefined
         ? ["app", checkRun.name, checkRun.app?.id ?? null]
