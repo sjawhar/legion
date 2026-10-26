@@ -323,12 +323,6 @@ func differs(base, head *string) bool {
 	return base == nil || head == nil || *base != *head
 }
 
-// allowListRewrite reports whether head differs from base only by line feeds base wrote as they
-// are and head as `&#10;`: an image title's line the allow-list does not admit raw.
-func allowListRewrite(base, head *string) bool {
-	return base != nil && head != nil && *base != *head && strings.ReplaceAll(*head, "&#10;", "\n") == *base
-}
-
 func TestDifferentialCompare(t *testing.T) {
 	if os.Getenv("PMDOC_DIFF_BASE") == "" {
 		t.Skip("PMDOC_DIFF_BASE unset; gen/differential.sh runs this")
@@ -391,13 +385,18 @@ func TestDifferentialCompare(t *testing.T) {
 		// A link around one whole image is stored as the image's link attributes, as the editor
 		// stores it; head keeps it when it stores the document as the engine reads it. A document
 		// both revisions refuse - its markdown is outside the Proof schema, so no write of it is
-		// taken at either - loses no link it ever had, and is counted apart, ungated.
+		// taken at either - loses no link it ever had, and one Go's reader reads otherwise than the
+		// engine at both revisions - a misread the base already makes elsewhere in the document,
+		// which head does not store correctly however it writes the image - is not head's loss;
+		// both are counted apart, ungated.
 		if links.whole {
 			switch {
 			case head.correct:
 				counts["linked image kept"]++
 			case !base.stores && !head.stores:
 				flag("linked image in a write both refuse", sides)
+			case !base.ReadsAsEngine && !head.ReadsAsEngine:
+				flag("linked image in a document Go reads otherwise than the engine at both revisions", sides)
 			default:
 				flag("lost whole-image link", sides)
 			}
@@ -440,13 +439,7 @@ func TestDifferentialCompare(t *testing.T) {
 		}
 		// A fixed point base kept of a document it read otherwise than the editor is a misread kept
 		// stable; it is counted apart, and only one of a document base read as the editor gates.
-		// Bytes head writes otherwise only by an image title's line feeds written `&#10;` where
-		// base wrote them as they are (allowListRewrite) are the allow-list's, which admits a raw
-		// title line by how it starts (rawTitleLinesHold), and are counted and named apart too,
-		// here and as churn below.
 		switch lost := base.dump.FixedPoint && !head.dump.FixedPoint; {
-		case lost && allowListRewrite(base.dump.Render, head.dump.Render):
-			flag("lost fixed point of a raw title line the allow-list writes `&#10;`", sides)
 		case lost && base.ReadsAsEngine:
 			flag("lost fixed point", sides)
 		case lost:
@@ -461,8 +454,6 @@ func TestDifferentialCompare(t *testing.T) {
 		// which head may write otherwise, are counted apart, ungated.
 		if differs(base.dump.Render, head.dump.Render) {
 			switch {
-			case base.correct && base.dump.WriteReadsBack && allowListRewrite(base.dump.Render, head.dump.Render):
-				flag("churn of a raw title line the allow-list writes `&#10;`", sides)
 			case base.correct && base.dump.WriteReadsBack:
 				flag("churn", sides)
 			case base.correct:
@@ -476,8 +467,6 @@ func TestDifferentialCompare(t *testing.T) {
 		}
 		if base.renders && differs(base.dump.EngineRender, head.dump.EngineRender) {
 			switch {
-			case base.dump.EngineWriteReadsBack && allowListRewrite(base.dump.EngineRender, head.dump.EngineRender):
-				flag("engine-tree churn of a raw title line the allow-list writes `&#10;`", sides)
 			case base.dump.EngineWriteReadsBack:
 				flag("engine-tree churn", sides)
 			default:
