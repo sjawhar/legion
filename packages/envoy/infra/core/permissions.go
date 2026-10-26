@@ -29,9 +29,9 @@ const (
 const inboxes = nats.InboxPrefix + ">"
 
 // listenerBuckets are the KV buckets a listener opens, in the order its grant lists them: the
-// interest and role-claim buckets, the session registry, and the CI state bucket, which only a
-// listener with the GitHub webhook route opens.
-var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket}
+// interest and role-claim buckets, the session registry, the Legion agent registry, and the CI
+// state bucket, which only a listener with the GitHub webhook route opens.
+var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.LegionAgentBucket, bus.CIStateBucket}
 
 // ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
 // names. Publish, in this order:

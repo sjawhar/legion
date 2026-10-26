@@ -689,8 +689,10 @@ func modelBlockPath(path pmdoc.BlockPath) model.BlockPath {
 }
 
 // SnapshotVersion returns the current immutable version, adding an unnamed
-// version only when the live text has diverged since the previous one.
+// version only when the live text has diverged since the previous one. The version a comment's
+// anchor is pinned to under WithCommentMarks is taken on a closed issue's document too.
 func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error) {
+	ctx = commentMarkOperation(ctx)
 	tx, joined := txFromContext(ctx)
 	if !joined {
 		return VersionResult{}, errUnjoined

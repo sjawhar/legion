@@ -1668,10 +1668,10 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its durable consumer
   `listener-<m>`'s `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
   `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`;
-- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
-  stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
-  consumer create and delete and their flow-control replies;
+- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions`, `legion_agents`
+  (the Legion agent registry) and `envoy_ci_state`, the calls nats.go's key-value store makes: the
+  info and create of the bucket's stream `KV_<bucket>`, its direct and stream message gets,
+  `$KV.<bucket>.>`, and its watchers' consumer create and delete and their flow-control replies;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

@@ -40,6 +40,7 @@ Agent messages  --/       |
 - Role lanes and delivery-exception lanes for role topics use core NATS; they have no durable consumer, retention, or replay. Stream reconciliation excludes role subjects and purges any role message captured while that configuration is updated.
 - JetStream KV bucket `envoy_interests` with 3 replicas for session subscriptions
 - JetStream KV bucket `envoy_sessions` with 5m TTL for session port/host data
+- JetStream KV bucket `legion_agents`, no TTL and never deleted, for the Legion agent registry: one entry per Legion session the daemon ran, under `session.<id>` and the same entry under `issue.<ISSUE>.<id>` and `role.<role_token>.<id>` (`project.*` is the daemon's own and no listener read reaches it)
 
 ## Listener API
 
@@ -61,6 +62,9 @@ requires a bearer checks no `Host`.
 | `/v1/interests/{session_id}` | GET/DELETE | Get or delete a session's persisted interests |
 | `/v1/roles/set` | POST | Claim a role for a live session and register its role topic |
 | `/v1/registry/{session_id}` | GET | The authoritative answer for one session — reads through the cache to the session bucket, so a session the cache has not refilled is still found, and returns the same body a `/v1/sessions` row carries. It refuses with 413 or 400 for an id NATS will not take as a key, `404 {"error":"no live session <id>"}` only for a key the bucket does not hold, and 503 with `Retry-After: 1` for a read that did not answer |
+| `/v1/legion/agents/sessions/{session_id}` | GET/PUT | One Legion session's registry entry. GET adds `live` (from the session registry) and `replaced_by`/`replaced_at` (the next session of its role token by `started_at`), both derived at the read, or answers `404 {"error":"unknown legion agent <id>"}`; PUT records the daemon's entry for the session, and a write moving a recorded session to another issue or role is a 409 |
+| `/v1/legion/agents/roles/{role_token}` | GET | `{"entries":[…]}`: a role token's sessions, newest first (the first is the current holder), `[]` when none |
+| `/v1/legion/agents` | GET/PUT | GET `?issue={KEY}`: an issue's sessions by role in workflow order, then newest first, `[]` when none. PUT: a batch of at most 256 entries and 1 MiB, every entry validated before the first write (400 naming the bad entry's index), 503 naming how many were written when a write fails partway. Every read comes from the bucket itself, never a cache |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message |
 | `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics and ad-hoc topics (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) use core NATS and reach the sessions subscribed at that moment; JetStream acknowledgement for every topic the stream captures is bounded to five seconds. |
 | `/healthz` | GET | Health check (always available, even during startup) |

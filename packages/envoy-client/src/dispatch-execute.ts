@@ -2940,8 +2940,17 @@ export async function executeDispatchTool(
       } catch (error) {
         throw refusalWithCode(error);
       }
-      // The schema admits reason only beside status done. A closed issue refuses messages,
-      // comments, and artifacts, so the reason is posted first and the close waits on it.
+      // The schema admits reason only beside status done. The reason is posted first, so the
+      // close carries its note and an issue that cannot take the note stays open. Dispatch takes
+      // messages on a closed issue (though not asks or artifacts) and answers a second close with
+      // ISSUE_CLOSED, so an issue already closed gets that refusal here, before its reason could
+      // land as a stray message.
+      if (status === "done" && typeof before.closed_at === "string") {
+        throw refusalWithCode(
+          new DispatchServiceError("ISSUE_CLOSED", 409, "issue is closed"),
+          `${issueKey} closed at ${before.closed_at}, so the reason was not posted and the close was not sent`
+        );
+      }
       let closingNote: { readonly id: string; readonly ref: string } | undefined;
       if (reason !== undefined) {
         try {

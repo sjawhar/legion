@@ -678,6 +678,8 @@ func TestTargetedMessageResolvesRolesAndEnforcesReplyBoundaries(t *testing.T) {
 		t.Fatalf("repeated reply appended an event: before=%s after=%s", before.Body.String(), after.Body.String())
 	}
 
+	// A closed issue still takes a delivery retry and the agent's reply to it.
+	roleLive = true
 	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key,
 		map[string]string{"status": "done"}, "alice")
 	if closed.Code != http.StatusOK {
@@ -685,14 +687,18 @@ func TestTargetedMessageResolvesRolesAndEnforcesReplyBoundaries(t *testing.T) {
 	}
 	closedRetry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries",
 		map[string]any{"delivery": "steer"}, "alice")
-	if closedRetry.Code != http.StatusConflict || !strings.Contains(closedRetry.Body.String(), `"code":"ISSUE_CLOSED"`) {
+	if closedRetry.Code != http.StatusCreated {
 		t.Fatalf("delivery to closed issue: status=%d body=%s", closedRetry.Code, closedRetry.Body.String())
+	}
+	closedAttempt := decodeBody[model.MessageDelivery](t, closedRetry)
+	if closedAttempt.Attempt != 3 || closedAttempt.State != "sent" || closedAttempt.SessionID != "s1" {
+		t.Fatalf("delivery to closed issue = %#v, want attempt 3 sent to s1", closedAttempt)
 	}
 
 	closedReply := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/reply", map[string]any{
-		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 2, "body": "Too late.",
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": closedAttempt.Attempt, "body": "Answered after the close.",
 	})
-	if closedReply.Code != http.StatusConflict || !strings.Contains(closedReply.Body.String(), `"code":"ISSUE_CLOSED"`) {
+	if closedReply.Code != http.StatusCreated {
 		t.Fatalf("reply to closed issue: status=%d body=%s", closedReply.Code, closedReply.Body.String())
 	}
 }

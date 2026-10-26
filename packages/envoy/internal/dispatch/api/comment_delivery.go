@@ -168,7 +168,7 @@ func (s *server) claimCommentDeliveryAttempt(
 		return claimedCommentDelivery{}, err
 	}
 	defer tx.Rollback(ctx)
-	stored, err := s.lockedComment(ctx, tx, comment.ID)
+	stored, err := s.lockedCommentForDelivery(ctx, tx, comment.ID)
 	if err != nil {
 		return claimedCommentDelivery{}, err
 	}
@@ -611,7 +611,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
+	comment, err := s.lockedCommentForDelivery(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, "COMMENT_NOT_FOUND", http.StatusNotFound, "comment not found")

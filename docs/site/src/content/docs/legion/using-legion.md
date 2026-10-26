@@ -136,7 +136,7 @@ off, and then it closes. The architect accepted the change before that, when the
 it, with a comment on the issue summarizing the evidence; Legion refuses that acceptance while any
 issue beneath it is still running, so a parent is accepted after its children. After the close the
 implementer checks the change in production, once your deploy carries it, and records what it saw
-on the pull request's `Production:` line; a closed issue takes no further write, so look there.
+on the pull request's `Production:` line, not on the closed issue, so look there.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
 resumes.
 
