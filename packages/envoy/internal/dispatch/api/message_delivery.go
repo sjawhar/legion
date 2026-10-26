@@ -44,7 +44,9 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message not found")
 		return
 	}
-	attempt, err := s.deliverMessage(r.Context(), message, input.Delivery, nil, actor, nil)
+	// On a context the client cannot cancel, as every delivery runs: a retry the page gives up on
+	// still settles its attempt, and one a process death strands the delivery sweep resumes.
+	attempt, err := s.deliverMessage(context.WithoutCancel(r.Context()), message, input.Delivery, nil, actor, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -334,18 +334,48 @@ func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.
 		t.Fatalf("the repeat answered broadcast %s, want the original %s", again.ID, written.ID)
 	}
 
-	settled := make([]string, 0, len(requested))
+	// The repeat answers as the send did, as soon as it has read the broadcast, with every
+	// recipient's attempt as it stands; the owed ones are sent behind the answer. The archivist is
+	// left to the sender that holds it.
+	answeredAs := map[string]string{}
 	for _, sent := range again.Recipients {
 		for _, attempt := range sent.Message.Deliveries {
-			settled = append(settled, fmt.Sprintf("%s %d %s", sent.SessionID, attempt.Attempt, attempt.State))
+			answeredAs[sent.SessionID] = fmt.Sprintf("%d %s", attempt.Attempt, attempt.State)
 		}
 	}
-	sort.Strings(settled)
-	// The archivist is left to the sender that holds it; every other recipient is settled by
-	// the time the repeat answers, since the page reads a pending recipient as a send it must
-	// ask about again.
-	if want := []string{"archivist 1 pending", "planner 1 sent", "reviewer 1 sent", "tester 1 sent"}; !equalStrings(settled, want) {
-		t.Fatalf("the repeat answered %v, want %v", settled, want)
+	if answeredAs["planner"] != "1 sent" || answeredAs["archivist"] != "1 pending" {
+		t.Fatalf("the repeat answered %v, want the planner's attempt sent and the archivist's pending", answeredAs)
+	}
+	settledStates := func() []string {
+		t.Helper()
+		rows, err := database.Pool.Query(context.Background(), `
+			select m.target, d.attempt, d.state from message_deliveries d join messages m on m.id = d.message_id
+		`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var states []string
+		for rows.Next() {
+			var target, state string
+			var attempt int
+			if err := rows.Scan(&target, &attempt, &state); err != nil {
+				t.Fatal(err)
+			}
+			states = append(states, fmt.Sprintf("%s %d %s", strings.TrimPrefix(target, "session:"), attempt, state))
+		}
+		sort.Strings(states)
+		return states
+	}
+	want := []string{"archivist 1 pending", "planner 1 sent", "reviewer 1 sent", "tester 1 sent"}
+	var settled []string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if settled = settledStates(); equalStrings(settled, want) {
+			break
+		}
+	}
+	if !equalStrings(settled, want) {
+		t.Fatalf("the recipients settled as %v, want %v", settled, want)
 	}
 	if got := sends.targets(); !equalStrings(got, []string{"planner", "reviewer", "tester"}) {
 		t.Fatalf("listener sends = %v, want the planner's first frame and one each for the two owed", got)

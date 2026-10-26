@@ -68,7 +68,7 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	firstDone := make(chan struct{})
 	go func() {
 		defer close(firstDone)
-		RunSuggestionOutcomeSweep(firstCtx, database.Pool, sweepLeaseTick, firstLeases)
+		RunSuggestionOutcomeSweep(firstCtx, database.Pool, sweepLeaseTick, firstLeases, nil)
 	}()
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 30*time.Second); waiting < 1 {
 		t.Fatal("the first runner's pass never reached the write_suggestions lock: it never took the lease")
@@ -79,7 +79,7 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		RunSuggestionOutcomeSweep(secondCtx, second.Pool, sweepLeaseTick, secondLeases)
+		RunSuggestionOutcomeSweep(secondCtx, second.Pool, sweepLeaseTick, secondLeases, nil)
 	}()
 	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease) == 0; {
 		if time.Now().After(deadline) {
@@ -136,7 +136,7 @@ func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
 	const tick = time.Second
 	const ticks = 10
 	done := make(chan struct{})
-	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, database.Pool, tick, leases) }()
+	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, database.Pool, tick, leases, nil) }()
 	time.Sleep(tick*ticks + tick/2)
 	stop()
 	<-done

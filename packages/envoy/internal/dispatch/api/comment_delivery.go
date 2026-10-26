@@ -568,7 +568,9 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resolved := ResolvedMention{Target: target, Delivery: input.Delivery}
-	attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, created, resolved, actor, false)
+	// On a context the client cannot cancel, as every delivery runs: a retry the page gives up on
+	// still settles its attempt, and one a process death strands the delivery sweep resumes.
+	attempt, err := s.deliverResolvedCommentMention(context.WithoutCancel(r.Context()), comment, created, resolved, actor, false)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

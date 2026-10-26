@@ -48,7 +48,7 @@ func secondProcessHandler(t *testing.T, database *store.Store) http.Handler {
 		t.Fatalf("new API dependencies for the second process: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, deps).Wait)
 	return mux
 }
 

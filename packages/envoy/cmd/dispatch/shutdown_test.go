@@ -443,7 +443,7 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
 	}
-	handler, waitBackground := routes.New(appCtx)
+	handler, background := routes.New(appCtx)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	conn, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws/live", http.Header{
@@ -476,7 +476,7 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 		shutdown(server.Config, documentService, database.Pool, func() {
 			close(entered)
 			<-release
-			waitBackground()
+			background.Wait()
 		})
 	}()
 	select {

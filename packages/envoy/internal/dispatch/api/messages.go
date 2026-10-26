@@ -160,18 +160,15 @@ func (s *server) replayIssueMessage(w http.ResponseWriter, r *http.Request, reco
 }
 
 // sendHeldMessageOn makes sure a keyed send's message is on its way before its repeat is answered,
-// in the mode it was sent in, as its author's send. A message with no attempt at all - its process
-// died between the commit and the attempt, or its own request is between them right now - gets its
-// first attempt; one whose only attempt is pending with a lapsed claim has it resumed under its
-// original number, as a same-mode retry from the agent card does. Either way the send is bound to
-// that attempt (deliverMessageResuming), so of two requests that both find it owed, one sends and
-// the other finds the attempt taken and sends nothing. A pending attempt whose claim is live is in
-// flight and left to its sender; an attempt that settled, and a message with more than one attempt,
-// which a person has already retried from the agent card, owe nothing. The send runs on past the
-// request, as the original's does, and a listener it cannot reach is recorded on the attempt, never
-// returned.
+// in the mode it was sent in, as its author's send: the attempt it owes (owedMessageAttempts) is
+// sent bound to its number (deliverMessageResuming), so of two senders that both find it owed, one
+// sends and the other finds the attempt taken and sends nothing. A pending attempt whose claim is
+// live is in flight and left to its sender, and an attempt that settled owes nothing. The send
+// runs on past the request, as the original's does, and a listener it cannot reach is recorded on
+// the attempt, never returned.
 func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, delivery string) error {
-	attempt, err := s.attemptOwed(ctx, message.ID)
+	owed, err := s.owedMessageAttempts(ctx, []string{message.ID})
+	attempt := owed[message.ID]
 	if err != nil || attempt == 0 {
 		return err
 	}
@@ -183,33 +180,45 @@ func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, d
 	return nil
 }
 
-// attemptOwed is the attempt sendHeldMessageOn sends, or 0 for none: the first of a message with no
-// attempt, or the only one when it is pending and its claim has lapsed, which Postgres judges
-// against the claimed_at it wrote (claimLapsed).
-func (s *server) attemptOwed(ctx context.Context, messageID string) (int, error) {
+// owedMessageAttempts is the attempt each of the targeted messages owes, keyed by message id, with
+// a message that owes nothing absent: the first attempt of a message with no attempt at all - its
+// process died between the commit and the send, or its own sender is between them right now - or
+// the message's latest attempt when it is pending and its claim has lapsed, which Postgres judges
+// against the claimed_at it wrote (claimLapsed). A pending attempt whose claim is live is in
+// flight and left to its sender, and a latest attempt that settled owes nothing: an earlier
+// pending one a later retry from the agent card overtook is that retry's to answer. A keyed send's
+// repeat (sendHeldMessageOn) and a broadcast's (sendOwedBroadcastRecipients) both ask it.
+func (s *server) owedMessageAttempts(ctx context.Context, messageIDs []string) (map[string]int, error) {
+	owed := make(map[string]int, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return owed, nil
+	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select attempt, state = 'pending' and `+claimLapsed+`
-		from message_deliveries where message_id = $1 order by attempt
-	`, messageID)
+		select m.id::text, coalesce(latest.attempt, 1), coalesce(latest.owed, true)
+		from unnest($1::uuid[]) as m(id)
+		left join lateral (
+			select attempt, state = 'pending' and `+claimLapsed+` as owed
+			from message_deliveries where message_id = m.id
+			order by attempt desc
+			limit 1
+		) latest on true
+	`, messageIDs)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	type attemptRow struct {
-		Attempt  int
-		Stranded bool
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var attempt int
+		var stranded bool
+		if err := rows.Scan(&messageID, &attempt, &stranded); err != nil {
+			return nil, err
+		}
+		if stranded {
+			owed[messageID] = attempt
+		}
 	}
-	attempts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[attemptRow])
-	if err != nil {
-		return 0, err
-	}
-	switch {
-	case len(attempts) == 0:
-		return 1, nil
-	case len(attempts) == 1 && attempts[0].Stranded:
-		return attempts[0].Attempt, nil
-	default:
-		return 0, nil
-	}
+	return owed, rows.Err()
 }
 
 // createStoredMessage writes one message in a single transaction, with it the keyed request's

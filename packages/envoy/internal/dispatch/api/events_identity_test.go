@@ -55,7 +55,7 @@ func TestTheEventFeedClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, deps).Wait)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -87,7 +87,7 @@ func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, deps).Wait)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 

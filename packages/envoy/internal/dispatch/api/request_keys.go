@@ -18,6 +18,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,9 +38,14 @@ import (
 //
 //   - The row is inserted in flight, in a statement of its own, before the handler runs. A repeat
 //     that finds it answers from it instead: a different request under the key is 422 KEY_REUSED,
-//     naming the request that used it; a first request still running (inside IdempotencyLease) is
-//     409 KEY_IN_FLIGHT with Retry-After: 1; a finished one is replayed, its stored status and body
-//     with Idempotency-Replayed: ?1, and the handler does not run again.
+//     naming the request that used it; a first request still running (its lease, IdempotencyLease,
+//     renewed every keyedLeaseRenewal while it runs) is 409 KEY_IN_FLIGHT with Retry-After: 1; a
+//     finished one is replayed, its stored status and body with Idempotency-Replayed: ?1, and the
+//     handler does not run again.
+//   - The handler finishes whatever its client does: it runs on the request's context with the
+//     client's cancellation taken off, bounded by keyedHandlerLimit and counted in the server's
+//     background wait, so a client that gives up and asks again waits on the first run rather than
+//     starting over.
 //   - The handler runs on a writer that keeps its answer (keyedAnswer). A 2xx or a 4xx is stored and
 //     the row finished in one statement; a 5xx, a 401 (a session that lapsed mid-write), a 408, a 429
 //     and a panic release the key, so the next attempt runs the handler again - unless the request
@@ -54,11 +60,12 @@ import (
 //   - A write that also delivers to sessions keeps its own recovery point (Brandur Leach,
 //     "Implementing Stripe-like Idempotency Keys in Postgres"): it commits what it made into the
 //     row in its own transaction (bindRequestKeyRecovery), and a repeat that finds that point is
-//     answered by its route's keyedReplay - whatever delivery is still owed resumed first, then what
-//     it made read again - rather than from the stored bytes or KEY_COMMITTED, however its first
-//     request ended: the single-session send, the broadcast, an issue message and a comment, whose
-//     mentions deliver it. Their first answer shows deliveries the repeat must report as they stand
-//     now, and a delivery a dead process owed must still be made, once.
+//     answered by its route's keyedReplay - whatever delivery is still owed put on its way, then
+//     what it made read again - rather than from the stored bytes or KEY_COMMITTED, however its
+//     first request ended: the single-session send, the broadcast, an issue message and a comment,
+//     whose mentions deliver it. Their first answer shows deliveries the repeat must report as they
+//     stand now. A delivery a dead process owed is made once whether anyone asks again or not: the
+//     delivery sweep resumes it (resumeOwedDeliveries), and a repeat only sooner.
 //   - Every answer to a keyed request the layer judged carries the key back in the Idempotency-Key
 //     response header, a 5xx included: an earlier Dispatch ignores the header and answers without
 //     it, so a client retries a 5xx under its key only where the echo says the key was judged.
@@ -74,9 +81,9 @@ const (
 	// judged; the rest of an upload's body waits in a temporary file, as the multipart parser's own
 	// spill does, so a keyed 25 MiB upload costs no more memory than an unkeyed one.
 	keyedBodyInMemory = 1 << 20
-	// keyedBodyMax is the largest body any route reads: an upload's file and a megabyte of fields
-	// (uploadArtifactFor). A body past it is refused by its handler whatever its key, so it runs
-	// unkeyed rather than spooled.
+	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
+	// fields (uploadArtifactFor). Every other route reads a JSON body of at most
+	// maxJSONRequestBytes (keyedBodyLimit).
 	keyedBodyMax = maxArtifactBlobSize + 1<<20
 	// keyedBookkeeping bounds each statement the layer makes after the handler: they run on past a
 	// client that went away, since its retry needs the answer recorded.
@@ -84,6 +91,15 @@ const (
 	// keyedClaimTries bounds how often one request goes round the claim's insert, read and takeover
 	// when another request moves the row between them; each pass is one such move.
 	keyedClaimTries = 4
+	// keyedHandlerLimit bounds a keyed handler's run once its client's cancellation no longer
+	// does (keyedWrites): past it the run's context ends, its work rolls back, and the key is
+	// released as for a 5xx. It is far past what any route takes - an architecture refresh's
+	// imports each end at two minutes - and only stops a run that would otherwise hold its key,
+	// its connections and the shutdown wait for ever.
+	keyedHandlerLimit = 10 * time.Minute
+	// keyedLeaseRenewal is how often a running keyed handler renews its key's lease, a third of
+	// IdempotencyLease, so two renewals can fail in a row before a repeat presumes the run dead.
+	keyedLeaseRenewal = 20 * time.Second
 )
 
 // requestKeyAgentToken is whom a key sent with the shared agent token belongs to: that token names
@@ -181,9 +197,25 @@ type resolvedCaller struct {
 
 // keyedWrites wraps the handler of a POST or PATCH route, method and pattern, in the keyed path
 // above. replay is the route's keyedReplay, nil for a route that commits no recovery point.
+//
+// A keyed request's handler finishes on the server whatever its client does: it runs on its
+// request's context with the client's cancellation taken off (context.WithoutCancel), bounded by
+// keyedHandlerLimit instead, and counted in the server's background wait, so a shutdown lets it
+// finish as it lets a delivery finish. A client that gives up - the page's attempt cut off by its
+// own silence bound, a closed tab, a proxy's timeout - asks again under its key and is answered
+// 409 KEY_IN_FLIGHT for as long as the first run lives, then that run's stored answer. While the
+// handler runs its key's lease is renewed every keyedLeaseRenewal, so only a run whose process
+// died is taken over, once its lease lapses. A handler cut off with its client would roll its
+// transactions back and leave the next attempt to start again from nothing, so a write that takes
+// the server longer than the client waits could never land.
 func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
 	wildcards := patternWildcards(pattern)
 	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
+	bodyLimit := keyedBodyLimit(method, pattern)
+	run := handler
+	if s.deps.TestHooksEnabled {
+		run = s.slowedByTestHook(handler)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, present, err := requestKeyHeader(r)
 		if !present {
@@ -202,24 +234,33 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			return
 		}
 		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
-		if r.ContentLength > keyedBodyMax {
+		if r.ContentLength > bodyLimit {
 			handler(w, r)
 			return
 		}
 		digest := sha256.New()
 		writeRequestFields(digest, r, method, pattern, wildcards)
-		body, err := readKeyedBody(r.Body, digest, r.Header.Get("Content-Type"))
+		body, err := readKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), bodyLimit)
 		defer body.close()
-		if err != nil {
+		var spill *keyedSpillError
+		switch {
+		case errors.As(err, &spill):
+			// Dispatch's own failure, not the request's: answered as a 5xx under the key, which
+			// nothing has claimed, so the client asks again under it.
+			w.Header().Set(contracts.IdempotencyKeyHeader, key)
+			s.writeHandlerError(w, err)
+			return
+		case err != nil:
 			writeError(w, "REQUEST_BODY_UNREADABLE", http.StatusBadRequest, "could not read the request body: "+err.Error())
 			return
 		}
 		replayable, err := body.reader()
 		if err != nil {
+			w.Header().Set(contracts.IdempotencyKeyHeader, key)
 			s.writeHandlerError(w, fmt.Errorf("reread a keyed request's body: %w", err))
 			return
 		}
-		if body.size > keyedBodyMax {
+		if body.size > bodyLimit {
 			r.Body = io.NopCloser(io.MultiReader(replayable, r.Body))
 			handler(w, r)
 			return
@@ -235,6 +276,11 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		if answered {
 			return
 		}
+		s.detached.start()
+		defer s.detached.done()
+		detached, stop := context.WithTimeout(context.WithoutCancel(r.Context()), keyedHandlerLimit)
+		defer stop()
+		stopRenewing := s.renewRequestKeyLease(claim)
 		answer := &keyedAnswer{w: w}
 		// running bounds the commit step to the handler: a delivery the handler detached (a
 		// broadcast's recipients) commits after the answer, and is not the request's write.
@@ -242,22 +288,102 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		running.Store(true)
 		settled := false
 		defer func() {
+			stopRenewing()
 			running.Store(false)
 			// A handler that panicked answered nothing worth keeping: the key is released, so the
 			// next attempt runs again unless the request had committed a write. The panic itself
 			// carries on to net/http with its own stack.
 			if !settled {
-				s.releaseRequestKey(r.Context(), claim)
+				s.releaseRequestKey(detached, claim)
 			}
 		}()
-		run := context.WithValue(r.Context(), requestKeyClaimKey{}, claim)
-		run = store.WithBeforeCommit(run, markRequestKeyCommitted(claim, &running))
-		handler(answer, r.WithContext(run))
+		runs := context.WithValue(detached, requestKeyClaimKey{}, claim)
+		runs = store.WithBeforeCommit(runs, markRequestKeyCommitted(claim, &running))
+		run(answer, r.WithContext(runs))
+		// The lease stops moving before the answer is kept, so a renewal never lands on a row the
+		// answer released and holds a repeat at KEY_IN_FLIGHT for a lease it no longer has.
+		stopRenewing()
 		running.Store(false)
-		s.settleRequestKey(r.Context(), claim, answer, keepsAnswer)
+		s.settleRequestKey(detached, claim, answer, keepsAnswer)
 		settled = true
 		answer.deliver()
 	}
+}
+
+// keyedBodyLimit is the largest body a keyed route reads, the most the layer spools before its
+// handler runs: an upload's file and a megabyte of fields (uploadArtifactFor) for an upload route,
+// and a JSON body (decodeJSON) for every other. A body past it is refused by the route's handler
+// whatever its key, so it runs unkeyed rather than spooled.
+func keyedBodyLimit(method, pattern string) int64 {
+	if keyedUploads[method+" "+pattern] {
+		return keyedBodyMax
+	}
+	return maxJSONRequestBytes
+}
+
+// keyedUploads is every keyed route whose body may hold a file (uploadArtifactFor).
+var keyedUploads = map[string]bool{
+	http.MethodPost + " /api/v1/issues/{key}/artifacts":        true,
+	http.MethodPost + " /api/v1/projects/{key}/artifacts":      true,
+	http.MethodPost + " /api/v1/agents/{session_id}/artifacts": true,
+}
+
+// keyLease is how long a keyed request holds its key without a renewal before a repeat presumes
+// its process died (IdempotencyLease; requestKeyLease in a test).
+func (s *server) keyLease() time.Duration {
+	if s.requestKeyLease > 0 {
+		return s.requestKeyLease
+	}
+	return contracts.IdempotencyLease
+}
+
+// renewRequestKeyLease renews claim's lease every keyedLeaseRenewal until the returned stop is
+// called, and stops by itself once a renewal finds the key no longer its own. stop waits for a
+// renewal under way and may be called more than once. Each renewal is its own statement on a
+// connection of its own, beside whatever transaction the handler holds.
+func (s *server) renewRequestKeyLease(claim requestKeyClaim) (stop func()) {
+	every := keyedLeaseRenewal
+	if s.requestKeyRenewal > 0 {
+		every = s.requestKeyRenewal
+	}
+	stopped, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopped:
+				return
+			case <-ticker.C:
+				if !s.renewRequestKey(claim) {
+					return
+				}
+			}
+		}
+	}()
+	return sync.OnceFunc(func() {
+		close(stopped)
+		<-finished
+	})
+}
+
+// renewRequestKey moves claim's lease to now and reports whether the key is still claim's: a row
+// another attempt took over, or one already answered or released, is left as it is. A renewal that
+// fails is logged and tried again at the next tick: the lease lapses only once renewals have
+// failed for all of it.
+func (s *server) renewRequestKey(claim requestKeyClaim) bool {
+	ctx, cancel := context.WithTimeout(store.WithTransactionTracking(context.Background()), keyedBookkeeping)
+	defer cancel()
+	tag, err := s.deps.Store.Pool.Exec(ctx, `
+		update request_keys set leased_at = now()
+		where login = $1 and idempotency_key = $2 and attempt = $3 and status is null and leased_at is not null
+	`, claim.login, claim.key, claim.attempt)
+	if err != nil {
+		slog.Warn("dispatch: renew a keyed request's lease", "error", err)
+		return true
+	}
+	return tag.RowsAffected() == 1
 }
 
 // requestKeyHeader reads a request's Idempotency-Key, bare or as a structured-field string (in
@@ -348,9 +474,33 @@ type keyedBody struct {
 	size  int64
 }
 
-// readKeyedBody reads body into a keyedBody, at most one byte past keyedBodyMax, writing it to
-// digest as it goes; for a multipart contentType, with its boundary masked (boundaryMask).
-func readKeyedBody(body io.Reader, digest io.Writer, contentType string) (*keyedBody, error) {
+// keyedSpillError is a keyed body's spill to its temporary file failing: Dispatch's own fault (a
+// full disk, a temporary directory it cannot write), answered as a 5xx, where a body the client
+// did not finish sending is the request's and answered 400.
+type keyedSpillError struct{ err error }
+
+func (e *keyedSpillError) Error() string {
+	return "spool a keyed request's body to a temporary file: " + e.err.Error()
+}
+
+func (e *keyedSpillError) Unwrap() error { return e.err }
+
+// spillWriter is a keyed body's temporary file, whose write failures are keyedSpillErrors.
+type spillWriter struct{ file *os.File }
+
+func (w spillWriter) Write(p []byte) (int, error) {
+	n, err := w.file.Write(p)
+	if err != nil {
+		return n, &keyedSpillError{err: err}
+	}
+	return n, nil
+}
+
+// readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
+// (keyedBodyLimit), writing it to digest as it goes; for a multipart contentType, with its boundary
+// masked (boundaryMask). A body that fits in keyedBodyInMemory never touches the disk: a route
+// whose limit is no more than that holds even its one byte past the limit in memory.
+func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
 	read := &keyedBody{}
 	target := digest
 	var mask *boundaryMask
@@ -359,23 +509,29 @@ func readKeyedBody(body io.Reader, digest io.Writer, contentType string) (*keyed
 		mask = &boundaryMask{w: digest, boundary: []byte(parameters["boundary"])}
 		target = mask
 	}
-	source := io.TeeReader(io.LimitReader(body, keyedBodyMax+1), target)
+	source := io.TeeReader(io.LimitReader(body, limit+1), target)
+	inMemory := int64(keyedBodyInMemory)
+	if limit <= inMemory {
+		inMemory = limit + 1
+	}
 	var head bytes.Buffer
-	n, err := io.CopyN(&head, source, keyedBodyInMemory)
+	n, err := io.CopyN(&head, source, inMemory)
 	read.head, read.size = head.Bytes(), n
-	if err == nil {
+	switch {
+	case err != nil && !errors.Is(err, io.EOF):
+		return read, err
+	case err == nil && n <= limit:
+		// The head is full and the limit not reached: the rest waits in a temporary file.
 		spill, err := os.CreateTemp("", "dispatch-keyed-body-*")
 		if err != nil {
-			return read, err
+			return read, &keyedSpillError{err: err}
 		}
 		read.spill = spill
-		rest, err := io.Copy(spill, source)
+		rest, err := io.Copy(spillWriter{file: spill}, source)
 		read.size += rest
 		if err != nil {
 			return read, err
 		}
-	} else if !errors.Is(err, io.EOF) {
-		return read, err
 	}
 	if mask != nil {
 		mask.flush()
@@ -467,7 +623,7 @@ func (s *server) claimRequestKey(
 	w http.ResponseWriter, r *http.Request, login, key, digest string, replay keyedReplay,
 ) (claim requestKeyClaim, answered bool) {
 	ctx, pool := r.Context(), s.deps.Store.Pool
-	lease, ttl := contracts.IdempotencyLease.Seconds(), contracts.IdempotencyKeyTTL.Seconds()
+	lease, ttl := s.keyLease().Seconds(), contracts.IdempotencyKeyTTL.Seconds()
 	for range keyedClaimTries {
 		claim = requestKeyClaim{login: login, key: key}
 		err := pool.QueryRow(ctx, `

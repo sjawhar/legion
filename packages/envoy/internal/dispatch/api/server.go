@@ -272,13 +272,23 @@ type server struct {
 	// eventRelay is the live feed every events subscription reads (INFRA-66), on every server
 	// register mounts: it starts its listening connection on the first subscription.
 	eventRelay *eventStreamRelay
-	// detachedSends is every delivery a handler started and did not wait for: a broadcast's
-	// recipients. Each runs on a context the request's end does not cancel, and shutdown waits
-	// for them (waitBackground) before the database pool closes, so a deploy finishes the sends
-	// in flight as http.Server.Shutdown finishes the requests in flight. A send bound to
-	// Deps.Lifetime instead was cut off by SIGTERM, which cancels that context before the HTTP
-	// drain even begins.
-	detachedSends sync.WaitGroup
+	// detached is everything a request started that runs on past its client: every keyed write's
+	// handler (keyedWrites, which runs it on a context the client's going away does not cancel) and
+	// every delivery a handler started and did not wait for (a broadcast's recipients, a sweep's
+	// resumed attempts). Each runs on a context the request's end does not cancel, and shutdown
+	// waits for them (waitBackground) before the database pool closes, so a deploy finishes them as
+	// http.Server.Shutdown finishes the requests in flight. A send bound to Deps.Lifetime instead
+	// was cut off by SIGTERM, which cancels that context before the HTTP drain even begins.
+	detached backgroundWork
+	// requestKeyLease and requestKeyRenewal replace a keyed request's lease (IdempotencyLease, a
+	// minute) and how often a running handler renews it (keyedLeaseRenewal); zero, which every
+	// server the deployment builds leaves them, keeps those. Only a test sets them, so a handler
+	// that outlives its lease is the test's choice rather than a minute of wall clock.
+	requestKeyLease, requestKeyRenewal time.Duration
+	// slowWrites is the slow-write test hook's delay for each keyed method and path it was armed
+	// for (POST /api/v1/writes/_test/slow), by "METHOD path"; it holds nothing on a server without
+	// TestHooksEnabled, which mounts no hook.
+	slowWrites sync.Map
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
 	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
@@ -323,32 +333,94 @@ type queryer interface {
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
 // nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
 // events subscription reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until every delivery a handler detached from its
-// request (a broadcast's recipients) has settled, and until the hub, every live socket (and every
-// subscription it ran) and the relay have ended. Call it only after Lifetime has been cancelled
-// and before the database pool closes.
+// also on Lifetime. The returned Background's Wait blocks until every keyed write's handler and
+// every delivery a handler detached from its request (a broadcast's recipients) has settled, and
+// until the hub, every live socket (and every subscription it ran) and the relay have ended. Call
+// it only after Lifetime has been cancelled and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
 // mounts no GET /ws/live, so no events subscription ever starts its relay, and the wait returns at
 // once.
-func Register(mux *http.ServeMux, deps Deps) func() {
+func Register(mux *http.ServeMux, deps Deps) Background {
 	s := register(mux, deps)
-	return s.waitBackground
+	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries}
 }
 
-// waitBackground waits for every delivery a request left running past its answer, then for every
-// live socket and the subscriptions it ran, then for the hub's goroutines and the relay's. The
-// deliveries come first because they are the only ones Lifetime does not stop: each is bounded by
-// the listener client's receipt timeout per recipient, and each reads and writes through the
-// database pool this wait is holding open for it.
+// Background is the work a registered server does beside answering its requests, for the process
+// that serves it to drive.
+type Background struct {
+	// Wait is the wait Register describes, for shutdown.
+	Wait func()
+	// ResumeDeliveries is one pass of the delivery sweep (resumeOwedDeliveries): every delivery a
+	// process that died left owed is sent, once, under its own attempt number. The maintenance loop
+	// runs it (RunSuggestionOutcomeSweep).
+	ResumeDeliveries func(context.Context) error
+}
+
+// waitBackground waits for every keyed handler and every delivery a request left running past
+// its client, then for every live socket and the subscriptions it ran, then for the hub's
+// goroutines and the relay's. The detached work comes first because it is the only work Lifetime
+// does not stop: a keyed handler is bounded by keyedHandlerLimit, a delivery by the listener
+// client's receipt timeout per recipient, and each reads and writes through the database pool this
+// wait is holding open for it.
 func (s *server) waitBackground() {
-	s.detachedSends.Wait()
+	s.detached.wait()
 	if s.deliveryHub != nil {
 		s.liveSockets.wait()
 		s.deliveryHub.wait()
 	}
 	s.eventRelay.wait()
+}
+
+// backgroundWork counts the work a server runs past its requests' clients, and waits for none to
+// be left. Unlike a sync.WaitGroup, work may start while wait is already waiting: a request still
+// in flight when shutdown stops waiting for the HTTP drain starts its keyed run then, and wait
+// returns only once it sees nothing running.
+type backgroundWork struct {
+	mu      sync.Mutex
+	running int
+	// idle is closed when running last fell to zero, and replaced when work starts again.
+	idle chan struct{}
+}
+
+func (b *backgroundWork) start() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.running == 0 {
+		b.idle = make(chan struct{})
+	}
+	b.running++
+}
+
+func (b *backgroundWork) done() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.running--
+	if b.running == 0 {
+		close(b.idle)
+	}
+}
+
+// goDetached runs work on a goroutine of its own, counted until it returns.
+func (b *backgroundWork) goDetached(work func()) {
+	b.start()
+	go func() {
+		defer b.done()
+		work()
+	}()
+}
+
+func (b *backgroundWork) wait() {
+	for {
+		b.mu.Lock()
+		running, idle := b.running, b.idle
+		b.mu.Unlock()
+		if running == 0 {
+			return
+		}
+		<-idle
+	}
 }
 
 // lifetime is Deps.Lifetime, the context the event stream relay runs on, or an unbounded one for a

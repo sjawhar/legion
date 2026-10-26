@@ -235,11 +235,12 @@ type pendingState struct {
 	expiresAt time.Time
 }
 
-// New returns an http.Handler that serves all dispatch routes, and a wait (waitBackground) that
-// returns once every delivery a request left running past its answer has settled, and the
-// delivery hub, every live socket and their subscriptions, and the event stream relay have ended
-// after the process lifetime is cancelled.
-func New(ctx *AppContext) (http.Handler, func()) {
+// New returns an http.Handler that serves all dispatch routes, and the API server's background
+// work (api.Background): its Wait returns once every keyed write's handler and every delivery a
+// request left running past its answer has settled, and the delivery hub, every live socket and
+// their subscriptions, and the event stream relay have ended after the process lifetime is
+// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs.
+func New(ctx *AppContext) (http.Handler, api.Background) {
 	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/start", r.authStart)
@@ -247,13 +248,13 @@ func New(ctx *AppContext) (http.Handler, func()) {
 	mux.HandleFunc("POST /auth/logout", r.authLogout)
 	mux.HandleFunc("GET /auth/whoami", r.authWhoami)
 	mux.HandleFunc(githubapi.Prefix, r.apiGithubRest)
-	waitBackground := api.Register(mux, r.ctx.apiDeps)
+	background := api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
-		return r.enforceCookieOrigin(mux), waitBackground
+		return r.enforceCookieOrigin(mux), background
 	}
 	mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
-	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), waitBackground
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), background
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────

@@ -199,12 +199,33 @@ func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Hand
 	if options.agentWatchInterval != 0 {
 		served.agentWatchInterval = options.agentWatchInterval
 	}
-	// waitBackground, as production's shutdown calls it: every delivery a handler detached from
-	// its request, then the sockets, the hub and the relay. A broadcast's deliveries outlive the
-	// request that started them, so a test that did not wait for them would close its database
-	// under a worker still writing.
-	t.Cleanup(served.waitBackground)
+	// waitBackground, as production's shutdown calls it: every keyed handler and every delivery a
+	// handler detached from its request, then the sockets, the hub and the relay. A broadcast's
+	// deliveries and a keyed handler outlive the client that started them, so a test that did not
+	// wait for them would close its database under a worker still writing.
+	t.Cleanup(func() { waitBackgroundOf(t, served) })
 	return mux, database, deps, served
+}
+
+// waitBackgroundOf waits out served's background work at a test's end. A test that has already
+// failed may have left a handler held on something only a later cleanup releases - one its own
+// heldUntilReleased registered before this server - so for it the wait is bounded and the cleanup
+// carries on, letting that release run, rather than hanging the package until its deadline.
+func waitBackgroundOf(t *testing.T, served *server) {
+	if !t.Failed() {
+		served.waitBackground()
+		return
+	}
+	waited := make(chan struct{})
+	go func() {
+		served.waitBackground()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Log("the failed test left background work running; its later cleanups release it")
+	}
 }
 
 // directServer is a server a test calls a handler or a delivery step on directly, without the
@@ -1771,7 +1792,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	handler := http.NewServeMux()
-	t.Cleanup(Register(handler, deps))
+	t.Cleanup(Register(handler, deps).Wait)
 	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)

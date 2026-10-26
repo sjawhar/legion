@@ -54,6 +54,7 @@ func keyedRequest(t *testing.T, handler http.Handler, method, target string, bod
 type keyedRig struct {
 	handler  http.Handler
 	database *store.Store
+	server   *server
 	runs     atomic.Int32
 }
 
@@ -61,11 +62,18 @@ const keyedRigPattern = "/test/{thing}/writes"
 
 func newKeyedRig(t *testing.T, answer func(run int32, w http.ResponseWriter, r *http.Request)) *keyedRig {
 	t.Helper()
+	return newKeyedRigAt(t, keyedRigPattern, answer)
+}
+
+// newKeyedRigAt is a keyedRig mounted at pattern, so a route the layer treats as its own - an
+// upload's larger body limit - can be driven too.
+func newKeyedRigAt(t *testing.T, pattern string, answer func(run int32, w http.ResponseWriter, r *http.Request)) *keyedRig {
+	t.Helper()
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
-	rig := &keyedRig{database: database}
+	rig := &keyedRig{database: database, server: served}
 	mux := http.NewServeMux()
-	mux.HandleFunc(http.MethodPost+" "+keyedRigPattern, trackTransactions(served.keyedWrites(
-		http.MethodPost, keyedRigPattern,
+	mux.HandleFunc(http.MethodPost+" "+pattern, trackTransactions(served.keyedWrites(
+		http.MethodPost, pattern,
 		func(w http.ResponseWriter, r *http.Request) { answer(rig.runs.Add(1), w, r) },
 		nil,
 	)))
@@ -838,9 +846,10 @@ func TestAnAnswerPastTheKeptSizeReplaysItsStatusAlone(t *testing.T) {
 
 // A client mints a multipart body's boundary afresh for every attempt, so a retry of one upload
 // under its key is a repeat whatever its boundary; a different file is another request. A body past
-// what the layer holds in memory reaches the handler whole.
+// what the layer holds in memory reaches the handler whole. It runs on an upload route, the only
+// kind whose body the layer reads past a JSON body's megabyte (keyedBodyLimit).
 func TestAMultipartRetryUnderANewBoundaryIsARepeat(t *testing.T) {
-	rig := newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
+	rig := newKeyedRigAt(t, "/api/v1/issues/{key}/artifacts", func(run int32, w http.ResponseWriter, r *http.Request) {
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read the body: %v", err)
@@ -865,7 +874,7 @@ func TestAMultipartRetryUnderANewBoundaryIsARepeat(t *testing.T) {
 		_, _ = part.Write(file)
 		_ = writer.Close()
 		size := body.Len()
-		request := httptest.NewRequest(http.MethodPost, "/test/a/writes", &body)
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/KEYS-1/artifacts", &body)
 		request.Header.Set("Content-Type", writer.FormDataContentType())
 		request.Header.Set("X-Dispatch-User", "alice")
 		request.Header.Set(contracts.IdempotencyKeyHeader, "upload-1")
@@ -970,7 +979,7 @@ func requestDigestOf(t *testing.T, request *http.Request, pattern string) string
 	t.Helper()
 	digest := sha256.New()
 	writeRequestFields(digest, request, request.Method, pattern, patternWildcards(pattern))
-	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"))
+	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), keyedBodyLimit(request.Method, pattern))
 	defer body.close()
 	if err != nil {
 		t.Fatalf("read the request's body: %v", err)

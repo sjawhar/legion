@@ -381,9 +381,6 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
-	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule; the
-	// same pass deletes the Idempotency-Keys past their 24 hours (INFRA-258).
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -438,7 +435,12 @@ func main() {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
 
-	routesHandler, waitBackground := routes.New(appCtx)
+	routesHandler, background := routes.New(appCtx)
+	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule; the
+	// same pass deletes the Idempotency-Keys past their 24 hours and sends every delivery a process
+	// that died left owed (INFRA-258), which is why it starts once the API server it resumes them
+	// through is built.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases, background.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
@@ -454,7 +456,7 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitBackground); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, background.Wait); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}

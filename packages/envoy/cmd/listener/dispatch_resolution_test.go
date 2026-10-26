@@ -204,7 +204,7 @@ func dispatchMux(t *testing.T, database *dispatchstore.Store, envoyURL string) h
 	// The wait returns once Lifetime is cancelled, which t.Context() is just before the
 	// cleanups run, and it must finish before the database pool closes — the cleanup registered
 	// first, so the one registered here runs first.
-	t.Cleanup(dispatchapi.Register(mux, deps))
+	t.Cleanup(dispatchapi.Register(mux, deps).Wait)
 	return mux
 }
 

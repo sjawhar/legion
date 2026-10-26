@@ -155,17 +155,22 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 // RunSuggestionOutcomeSweep resolves LEGION-550's write_suggestions on its own schedule, off the
 // write path entirely: whether the agent acted on a suggestion (cited it, or updated the
 // suggested issue directly) or overrode it (kept working on what it filed instead). The same pass
-// deletes every Idempotency-Key past its window (sweepRequestKeys, INFRA-258), which needs a pass
-// once a minute across the processes as much as the suggestions do and is no reason for a loop of
-// its own. It stops when ctx is done.
+// deletes every Idempotency-Key past its window (sweepRequestKeys, INFRA-258), and then sends every
+// delivery a process that died left owed (resumeDeliveries, the server's resumeOwedDeliveries;
+// INFRA-258), which need a pass once a minute across the processes as much as the suggestions do
+// and are no reason for a loop of their own. resumeDeliveries is nil where nothing delivers. It
+// stops when ctx is done.
 //
 // Each pass runs under suggestionOutcomeLease for one interval, so one process sweeps per
 // interval however many serve the database and a second process's tick, which falls between the
 // first's rather than on it, finds that interval swept; leases is required, as it is of every
 // leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened). The period is
 // interval itself and not SuggestionSweepInterval: this loop ticks on what its caller asked for.
-// The two sweeps fail apart: one's failure is logged and the other still runs.
-func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
+// The sweeps fail apart: one's failure is logged and the others still run.
+func RunSuggestionOutcomeSweep(
+	ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases,
+	resumeDeliveries func(context.Context) error,
+) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -179,6 +184,12 @@ func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval t
 				}
 				if err := sweepRequestKeys(ctx, pool); err != nil {
 					slog.Warn("dispatch: idempotency key sweep failed", "error", err)
+				}
+				if resumeDeliveries == nil {
+					return
+				}
+				if err := resumeDeliveries(ctx); err != nil {
+					slog.Warn("dispatch: delivery sweep failed", "error", err)
 				}
 			})
 		}

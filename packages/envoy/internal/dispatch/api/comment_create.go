@@ -753,8 +753,16 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 	s.publish(events...)
+	// Each mention is delivered before the comment is answered, as a send to one session is, on a
+	// context the client cannot cancel: a page that gives up on the comment, or retries it under
+	// its key, never cuts off a frame in flight or strands its attempt pending. A keyed request's
+	// handler runs detached already (keyedWrites); an unkeyed one's mentions are detached here, and
+	// http.Server.Shutdown waits for the handler. A process that dies mid-delivery leaves the
+	// attempt pending, and the delivery sweep resumes it once its claim lapses
+	// (resumeOwedDeliveries).
+	sending := context.WithoutCancel(r.Context())
 	for _, mention := range resolvedMentions {
-		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
+		attempt, err := s.deliverResolvedCommentMention(sending, comment, event, mention, actor, true)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

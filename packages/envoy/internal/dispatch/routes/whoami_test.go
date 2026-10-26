@@ -54,8 +54,8 @@ func storeRouter(t *testing.T, database *store.Store) http.Handler {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	handler, wait := New(ctx)
-	t.Cleanup(wait)
+	handler, background := New(ctx)
+	t.Cleanup(background.Wait)
 	return handler
 }
 

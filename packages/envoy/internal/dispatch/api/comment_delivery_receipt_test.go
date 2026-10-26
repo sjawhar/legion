@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -465,21 +464,14 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 		"body": "The retry's sender will not come back.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
 
-	abandoned, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-	defer cancel()
-	payload, err := json.Marshal(map[string]any{"delivery": "steer"})
-	if err != nil {
-		t.Fatalf("encode retry: %v", err)
-	}
-	request := httptest.NewRequest(
-		http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", bytes.NewReader(payload),
-	).WithContext(abandoned)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", "alice")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code == http.StatusCreated {
-		t.Fatalf("the 700ms client should not have seen the 1.5s send complete: body=%s", recorder.Body.String())
+	// The retry's sender claimed attempt 2, named the session, sent the frame and died before its
+	// settle. A client's giving up no longer strands a send (every delivery runs on a context its
+	// client cannot cancel), so the dead process's row is written as it leaves it.
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, claimed_at)
+		values ($1, 'session:s1', 2, 'steer', 's1', 'pending', now())
+	`, comment.ID); err != nil {
+		t.Fatalf("strand attempt 2: %v", err)
 	}
 	if stranded := commentAttemptRow(t, database, comment.ID, "session:s1", 2); stranded != "pending///s1" {
 		t.Fatalf("attempt 2 = %q, want it left pending by the sender that never returned", stranded)
