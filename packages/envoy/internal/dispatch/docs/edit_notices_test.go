@@ -971,3 +971,124 @@ func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
 		t.Fatalf("last editor = %+v, want adam, who edited last; zoe only sorts first", row.lastEditor)
 	}
 }
+
+// The re-read's finding 1 (dispatch://INFRA-140/artifact/review-2137-md): two people are
+// connected and only one of them edits. ygo does not say which connection sent an update, so the
+// room credits every connected peer and records no sender (creditContentChange). The notice must
+// then name nobody and open no window, rather than pick a person out of the credited names.
+func TestEditNoticeTwoConnectedOneEditsNamesNobody(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	// Adam only watches; zoe types. Adam's id sorts first, so a notice naming him is the defect.
+	service.addConnection(artifactID, 1, adam)
+	service.addConnection(artifactID, 2, zoe)
+	t.Cleanup(func() { service.removeConnection(artifactID, 1); service.removeConnection(artifactID, 2) })
+	editAsPeer(t, service, artifactID, replaceRun("First.", "First, typed by one of them."))
+	settleCurrentGeneration(t, service, artifactID)
+	if row, open := readEditNotice(t, service, artifactID); open {
+		t.Fatalf("an edit no connection can be pinned on opened a notice naming %+v, want none", row.lastEditor)
+	}
+	if !strings.Contains(logs.String(), "names no latest editor") {
+		t.Fatalf("the skipped notice was not logged:\n%s", logs.String())
+	}
+}
+
+// The same rule for a session peer editing while a person is merely connected: the person must
+// not be named as the editor.
+func TestEditNoticeASessionPeerEditingBesideAConnectedPersonNamesNobody(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	service.addConnection(artifactID, 1, adam)
+	service.addConnection(artifactID, 2, agent)
+	t.Cleanup(func() { service.removeConnection(artifactID, 1); service.removeConnection(artifactID, 2) })
+	editAsPeer(t, service, artifactID, replaceRun("First.", "First, by one of the two peers."))
+	settleCurrentGeneration(t, service, artifactID)
+	if row, open := readEditNotice(t, service, artifactID); open {
+		t.Fatalf("an edit beside a connected person opened a notice naming %+v, want none", row.lastEditor)
+	}
+}
+
+// The re-read's finding 2: a person's joined write edits the document, and another person types
+// in the browser before that write commits its named version. The browser edit is the later one,
+// so the notice names the person who made it, not the write's own actor.
+func TestEditNoticeABrowserEditAfterAJoinedWriteNamesTheBrowserEditor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	if err := joinedWrite(service, func(ctx context.Context) error {
+		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{
+			{Op: "replace", Find: "First.", With: "First, by adam's API write."},
+		}, adam, nil); err != nil {
+			return err
+		}
+		// Zoe types in the browser while adam's transaction is still open, so her edit is the
+		// later one; adam's named version then carries both people.
+		editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("Second.", "Second, typed by zoe."))
+		waitForLandedAppends(t, service, artifactID)
+		_, err := service.NamedVersion(ctx, artifactID, "adam checkpoint", adam)
+		return err
+	}); err != nil {
+		t.Fatalf("adam's joined write with zoe's browser edit inside it: %v", err)
+	}
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the version over adam's write and zoe's browser edit opened no edit notice")
+	}
+	if row.lastEditor != zoe {
+		t.Fatalf("last editor = %+v, want zoe, who typed after adam's write", row.lastEditor)
+	}
+}
+
+// The re-read's finding 3: a rebuild replaces the document's broken history with new markdown.
+// The person who rebuilt it wrote that content, so the notice names them, never an older editor
+// whose pending credit the rebuild did not clear.
+func TestEditNoticeARebuildNamesThePersonWhoRebuiltIt(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	service := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor, written_through)
+		values ($1, 'user', $2, $3, 1)
+	`, artifactID, zoe.ID, `{"kind":"user","id":"zoe@example.com"}`); err != nil {
+		t.Fatalf("leave zoe a pending credit the rebuild does not clear: %v", err)
+	}
+	if err := recordLatestEditSourceTx(t, service, artifactID, zoe); err != nil {
+		t.Fatalf("record zoe as the document's latest edit source: %v", err)
+	}
+	replacement := "replacement\n"
+	_, written, err := rebuildDocument(t, service, artifactID, &replacement)
+	if err != nil || !written.Wrote {
+		t.Fatalf("rebuild = %+v, %v; want a version written", written, err)
+	}
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("a person's rebuild opened no edit notice")
+	}
+	if row.lastEditor.ID != "alice" {
+		t.Fatalf("last editor = %+v, want alice, who rebuilt the document, not zoe", row.lastEditor)
+	}
+}
+
+// recordLatestEditSourceTx records actor as the document's latest edit source, as an update's own
+// append does (markUpdateOwedBy).
+func recordLatestEditSourceTx(t *testing.T, service *Service, artifactID string, actor model.Actor) error {
+	t.Helper()
+	return service.persistLastActor(context.Background(), artifactID, actor)
+}

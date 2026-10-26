@@ -138,9 +138,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	// A person's rebuild writes a version that lists them, under the owner lock taken above, so
-	// it opens the edit notice as any person's version does (recordEditNotice).
-	if err := s.recordEditNotice(ctx, tx, artifactID, written.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
+	// A rebuild replaces the document's content with markdown its own actor wrote, so that actor
+	// made the document's latest change, whatever edit the broken history still had pending. It is
+	// recorded as the latest edit source for the versions that follow, and names this version's
+	// edit notice (recordEditNotice), which goes when that actor is a person.
+	if err := recordLatestEditSource(ctx, tx, artifactID, &actor); err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
+	if err := s.recordEditNotice(ctx, tx, artifactID, written.version.Number, actorSlice(capture.authors), &actor); err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
 	report.SourceVersion = written.version.Number

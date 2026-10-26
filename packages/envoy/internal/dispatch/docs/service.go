@@ -1277,7 +1277,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// The pending authors as this settlement's lock holds them: no append or write changes them
 	// until its transaction ends. Its version lists them and deletes them; a settlement that
 	// writes no version leaves them for the next version.
-	owed, durableLatest, err := readPendingAuthors(ctx, tx, room)
+	owed, err := readPendingAuthors(ctx, tx, room)
+	if err != nil {
+		retry(err)
+		return
+	}
+	// The sender the document's last appended update recorded, which names who edited last for a
+	// process that never held this room (latestEditSource).
+	_, durableLatest, err := readOwedSettlement(ctx, tx, room)
 	if err != nil {
 		retry(err)
 		return

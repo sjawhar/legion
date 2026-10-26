@@ -110,9 +110,13 @@ type liveWrite struct {
 	// already-recorded call's on the same liveWrite; no production caller invokes ApplyOps or
 	// ReplaceText more than once per Join (every api/ call site joins once per request), so two
 	// calls never share one liveWrite today, and a future one that did would need its own guard.
-	credits            map[string]model.Actor
-	creditedBy         map[string]persistence.Version
-	actor              *model.Actor
+	credits    map[string]model.Actor
+	creditedBy map[string]persistence.Version
+	actor      *model.Actor
+	// creditSeq is the room's credit sequence this write's latest content operation took
+	// (roomState.creditSeq), 0 while it has made none: the one ordering that compares its own
+	// edits with the browser edits the room observed beside them (latestEditSource).
+	creditSeq          uint64
 	addedAskBlockIDs   map[string]struct{}
 	renamedAskBlockIDs map[string]struct{}
 	carriedAskAuthors  map[string]model.Actor
@@ -589,6 +593,10 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 // commits: its actor alone, as a service mutation that reaches the room directly is credited
 // (creditContentChange). A browser connected to the room made none of it, and no version the
 // transaction wrote before holds it.
+//
+// It also takes the room's next credit sequence, so this operation is ordered against the browser
+// edits the room observes while the transaction is open: a browser edit that lands after it is
+// the later one, and names the person the notice carries (latestEditSource).
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)
@@ -598,6 +606,11 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	write.credits[key] = actor
 	write.creditedBy[key] = write.versions[len(write.versions)-1]
 	write.actor = new(actor)
+	if write.state != nil {
+		// creditSeq is atomic, so taking this operation's number needs no room lock; the capture
+		// that compares it with the in-flight credits holds state.mu (captureAuthors).
+		write.creditSeq = write.state.creditSeq.Add(1)
+	}
 }
 
 // publishLiveWrite applies write's updates to the room one operation at a time, in the order

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -51,16 +52,15 @@ const openEditNotice = `
 // settlement then has nothing of it to version. An upload writes its version through no room and
 // lists its uploader alone; it opens no window, and the plan leaves it out on purpose.
 //
-// The notice's last editor is latest, the person the version's own capture names as the one who
-// edited last (authorCapture.latest): the newest person its transaction's write credits, else the
-// room's newest in-flight credit naming a person, else the newest person of the document's
-// durable pending authors, ordered by the doc_updates version that wrote each row. Every tier is
-// read from the write, the room or the database at the capture, so one process's memory of an
-// earlier edit never stands in for it. There is no fallback to the authors' own order: that order
-// is their ids' (actorSlice), which says nothing about who edited last, and naming the wrong
-// person is worse than naming none. A version that lists a person but names no latest cannot
-// happen - every person it lists reaches one of those tiers - so it is logged and opens no
-// window, which the next person's edit opens.
+// The notice's last editor is latest, the sender of the document's latest edit as that version's
+// own capture read it (authorCapture.latest, latestEditSource), never a name chosen out of the
+// set of people the version credits. That set is what a browser edit leaves when several peers
+// were connected: ygo does not say which of them sent the update, so the room credits them all
+// and records no sender. A version whose latest edit has no known sender, or whose sender is not
+// a person this version credits, names nobody: the notice is logged and skipped rather than
+// carrying a person who may not have typed anything. The next edit with a known sender opens the
+// window. This is reachable, not a theoretical branch: it is what the two-connected-peers case
+// and an agent-only snapshot over a person's pending edit both leave.
 func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID string, version int, authors []model.Actor, latest *model.Actor) error {
 	var editors []string
 	for index := range authors {
@@ -71,9 +71,9 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	if len(editors) == 0 {
 		return nil
 	}
-	if latest == nil || latest.Kind != "user" {
-		slog.Error("dispatch: a version lists a person but names no latest editor, so it opens no edit notice",
-			"artifact", artifactID, "version", version, "editors", editors)
+	if latest == nil || latest.Kind != "user" || !slices.Contains(editors, latest.ID) {
+		slog.Info("dispatch: a version names no latest editor among the people it lists, so it opens no edit notice",
+			"artifact", artifactID, "version", version, "editors", editors, "latest", latest)
 		return nil
 	}
 	last := *latest
