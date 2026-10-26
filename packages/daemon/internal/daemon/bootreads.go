@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -22,14 +23,15 @@ type bootReads struct {
 	instructions                          []byte         // nil when the configuration names none
 	tmux                                  tmuxReads      // runtime: tmux
 	sandbox                               sandboxReads   // runtime: kubernetes
+	answers                               answersReads   // with `answers` set, under either runtime
 }
 
 // readBoot is every refusal boot makes from the configuration, the daemon's environment (lookup,
 // and getenv for the OMP invocation) and the files they name, writing nothing: the project token,
 // the operator bearer's file, operator configuration colliding with Legion's own
 // (checkOperatorConfig), the launch secrets (readLaunchSecrets), the daemon's own NATS nkey seed
-// (natsauth.DaemonSeed), the instructions file, the Dispatch bearer's file, and the runtime's own
-// reads (readTmux, readSandbox).
+// (natsauth.DaemonSeed), the instructions file, the Dispatch bearer's file, the runtime's own
+// reads (readTmux, readSandbox), and, with `answers` set, the answer loop's (readAnswersBoot).
 // hostOMP is whether boot runs the host's Oh My Pi, false only for a test that replaced the
 // runtime. prepare runs it first; CheckStart is it for `legion start --check-config`, so the check
 // refuses whatever boot refuses before its first write. What boot does after it is not a check's to
@@ -86,6 +88,42 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 	}
 	if err != nil {
 		return bootReads{}, err
+	}
+	if cfg.Answers != nil {
+		if r.answers, err = readAnswersBoot(*cfg.Answers, r.tmux.tools, lookup); err != nil {
+			return bootReads{}, err
+		}
+	}
+	return r, nil
+}
+
+// answersReads is what the answer loop needs that readBoot reads: gh, the real gh on the daemon's
+// own host its gh tool runs, under either runtime (answersGH); and conversationDSN, under
+// runtime.kubernetes.session_store postgres, the URL of the database the conversations live in,
+// from answers.conversation_store.dsn_file ("" under any other store).
+type answersReads struct {
+	gh              string
+	conversationDSN string
+}
+
+// readAnswersBoot is the answer loop's share of readBoot, tools the tmux daemon's own (nil under
+// kubernetes, and under tmux with no repository). No provider's key is read: the loop reads it for
+// every model call (config.AnswerCredential), so neither boot nor `legion start --check-config` runs
+// an api_key_command.
+func readAnswersBoot(answers config.Answers, tools map[string]string, lookup func(string) (string, bool)) (answersReads, error) {
+	var r answersReads
+	var err error
+	if r.gh, err = answersGH(lookup, tools); err != nil {
+		return answersReads{}, err
+	}
+	if file := answers.ConversationStore.DSNFile; file != "" {
+		const key = "answers.conversation_store.dsn_file"
+		if r.conversationDSN, err = config.ReadSecretPointer(key, file); err != nil {
+			return answersReads{}, err
+		}
+		if parsed, err := url.Parse(r.conversationDSN); err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+			return answersReads{}, fmt.Errorf("%s names %s, which holds no postgres:// URL", key, file)
+		}
 	}
 	return r, nil
 }

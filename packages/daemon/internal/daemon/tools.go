@@ -21,6 +21,7 @@ import (
 // runs, which a pane is told as LEGION_GH_PATH. Boot resolves each once, so no Legion-owned child is
 // a PATH lookup that whatever wrapper heads the operator's PATH could answer. A pane's git and jj
 // are whatever its PATH, the daemon's, gives, and its gh is the launcher directory's `legion gh`.
+// The answer loop's gh tool runs the same real gh (answersGH).
 var daemonTools = []string{"git", "jj", "gh"}
 
 // toolEnv is the daemon's own override for a tool at boot, LEGION_<TOOL>_PATH. A pane is told
@@ -76,6 +77,25 @@ func resolveTool(lookupEnv func(string) (string, bool), tool string) (string, er
 		}
 	}
 	return "", nil
+}
+
+// answersGH is the real gh the answer loop's gh tool runs on the daemon's own host, which a daemon
+// with `answers` set resolves at boot under either runtime: the gh resolveTools already resolved for
+// a tmux daemon's own tools, else resolveTool's (LEGION_GH_PATH, or the first gh on PATH, never a
+// script). A Kubernetes daemon resolves none otherwise, since its pods run the image's gh. Boot is
+// refused, naming gh and its override, when neither gives one.
+func answersGH(lookupEnv func(string) (string, bool), resolved map[string]string) (string, error) {
+	if gh := resolved["gh"]; gh != "" {
+		return gh, nil
+	}
+	gh, err := resolveTool(lookupEnv, "gh")
+	if err != nil {
+		return "", err
+	}
+	if gh == "" {
+		return "", fmt.Errorf("answers needs gh on the daemon's host, which the answer loop's gh tool runs, and none was found: set %s to an absolute executable path, or put gh on PATH", toolEnv("gh"))
+	}
+	return gh, nil
 }
 
 // RefuseScriptGH refuses gh, the first gh on PATH, when it is a script, a file whose first two

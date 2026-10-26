@@ -135,6 +135,34 @@ runtime:
         # - {volume: team-share, mount_path: /mnt/team}                    # read-only by default
         # - {volume: nas, mount_path: /mnt/nas, read_only: false}          # writable
 
+# answers:                             # the model loop: a question to an agent that is not running is
+#                                      # answered by the daemon from that agent's own conversation, in its
+#                                      # name. Unset (as here), the daemon answers nothing, as before. It
+#                                      # reads conversations from a database, so it needs
+#                                      # runtime.kubernetes.session_store postgres or cloudsql-iam (this
+#                                      # file's pvc default refuses it), and the real gh on the daemon's own
+#                                      # host for the loop's gh tool (LEGION_GH_PATH, else the first gh on
+#                                      # PATH): boot refuses to start without one.
+#   providers:                         # anthropic and/or openai: the endpoint the loop calls, and exactly
+#     anthropic: { base_url: "https://<gateway>.internal.example/anthropic", api_key_file: ./anthropic-key }
+#     openai: { base_url: "https://<gateway>.internal.example/openai", api_key_command: "<a command that prints the key>" }
+#                                      # one of api_key_file and api_key_command, read again for every
+#                                      # model call (never at boot, nor by --check-config)
+#   prices:                            # USD per million tokens of each model the loop may answer on, by
+#     anthropic/claude-opus-5-5: { input: 5, output: 25, cache_write: 6.25, cache_read: 0.5 }
+#     openai/gpt-6.1: { input: 1.25, output: 10, cache_write: 0, cache_read: 0.125 }
+#                                      # the id the conversation names (<provider>/<model>), all four
+#                                      # required; a model with no price is never answered on
+#   conversation_store:                # the daemon's own way into the conversations: under session_store
+#     dsn_file: ./conversations-dsn    # postgres, a file holding the database's postgres:// URL; under
+#     # user: <daemon IAM login>       # cloudsql-iam, the IAM login the daemon signs in to
+#                                      # session_database's instance as
+#   bounds: { answer_seconds: 180, model_calls: 8, output_tokens: 4000, gh_seconds: 30, gh_output_chars: 60000, gh_calls: 20, concurrent: 4, daily_usd: 50 }
+#                                      # optional; these are the defaults: per answer, its time, model
+#                                      # calls and each call's output tokens; per gh call, its time and the
+#                                      # output the model reads; gh calls per answer; questions answered
+#                                      # at once; and USD the project spends a UTC day
+
 # The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
 # capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets
 # broker (runtime.kubernetes.agent_secrets), model fallback (retry.modelFallback in the operator's
