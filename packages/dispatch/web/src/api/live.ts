@@ -114,9 +114,21 @@ class ServerSentEventParser {
   }
 }
 
+/** The response header Dispatch's event stream answers `complete` when a resuming connection's
+ *  `since` is at or below the log's head: the stream replays every event the client missed, so
+ *  the client owes no refresh for the gap. */
+export const EVENT_REPLAY_HEADER = "X-Dispatch-Event-Replay";
+
+/** What the opened response says before any event: whether its replay covers the gap since the
+ *  `since` it was asked for (`EVENT_REPLAY_HEADER`). False for a cold connect, a log that was
+ *  reset, and a server older than the header. */
+export interface StreamOpened {
+  readonly replayComplete: boolean;
+}
+
 export interface StreamHandlers {
   signal: AbortSignal;
-  onOpen: () => void;
+  onOpen: (opened: StreamOpened) => void;
   /**
    * Called for every chunk received over the wire, including heartbeat-only comment
    * frames. This is the only client-visible signal that a quiet connection (no
@@ -139,7 +151,7 @@ export async function readEventStream(url: string, handlers: StreamHandlers): Pr
   if (!response.ok || response.body === null) {
     throw new EventStreamHttpError(response.status);
   }
-  handlers.onOpen();
+  handlers.onOpen({ replayComplete: response.headers.get(EVENT_REPLAY_HEADER) === "complete" });
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const parser = new ServerSentEventParser();

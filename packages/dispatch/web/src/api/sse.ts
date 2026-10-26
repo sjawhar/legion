@@ -4,26 +4,18 @@ import { useEffect } from "react";
 import { reaskHeldCredentialList } from "../features/credentials/pending";
 import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
 
+import { eventRefreshTargets } from "./event-refresh";
 import {
   EventStreamHttpError,
   readEventStream,
   reconnectDelayMs,
   type StreamEvent,
+  type StreamOpened,
   setConnectionState,
 } from "./live";
-import {
-  agentMessagesQuery,
-  architectureSourcesQuery,
-  inboxQuery,
-  myRepliesKey,
-  projectArchitectureSourcesQuery,
-  projectDefaultAssigneesQuery,
-  projectsQuery,
-  userAgentStateQuery,
-  userStateQuery,
-} from "./queries";
-import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
-import type { ChangedReference, Event, EventType } from "./types";
+import { inboxQuery } from "./queries";
+import { type RefreshTarget, refreshQueries, trackQueryFetches } from "./query-refresh";
+import type { Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
   "project.created": true,
@@ -85,253 +77,6 @@ const knownEventTypes: Record<EventType, true> = {
 const WATCHDOG_MS = 45_000;
 
 const inboxQueryKey = inboxQuery().queryKey;
-const [inboxKey] = inboxQueryKey;
-
-/** The one documented subtraction, named once so every call site shares it. */
-function withoutInbox(keys: (readonly unknown[])[]): (readonly unknown[])[] {
-  return keys.filter((key) => key[0] !== inboxKey);
-}
-
-function artifactId(event: Event): string | undefined {
-  return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
-}
-
-// The document an ask or comment event touches: a block ask names the document that holds its
-// block, an anchored ask or comment names the document its mark lives in, and an ask or comment
-// with neither touches no document at all.
-function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
-  let id: string | undefined;
-  switch (event.type) {
-    case "ask.opened":
-    case "ask.edited":
-    case "ask.handed_back":
-    case "ask.answered":
-    case "ask.resolved":
-    case "ask.anchor_refreshed":
-      id = event.payload.block_artifact?.id ?? event.payload.anchor?.artifact_id;
-      break;
-    case "comment.created":
-    case "comment.delivery":
-    case "comment.answered":
-    case "comment.resolved":
-    case "comment.reopened":
-    case "comment.edited":
-    case "comment.anchor_refreshed":
-    case "suggestion.accepted":
-    case "suggestion.rejected":
-      id = "anchor" in event.payload ? event.payload.anchor?.artifact_id : undefined;
-      break;
-    default:
-      throw new Error(`${event.type} events do not name a document`);
-  }
-  if (id !== undefined) {
-    keys.push(["artifact", id]);
-  }
-}
-
-function payloadString(event: Event, key: string): string | undefined {
-  const value = payloadValue(event, key);
-  return typeof value === "string" ? value : undefined;
-}
-
-// Follower events carry the ask under `ask_id`; every other ask event is the ask itself
-// and carries its `id`. Both refresh the ask and its thread (which lists followers).
-function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
-  const id =
-    event.type === "ask.follower_added" || event.type === "ask.follower_removed"
-      ? payloadString(event, "ask_id")
-      : payloadString(event, "id");
-  if (id !== undefined) {
-    keys.push(["ask", id], ["ask-thread", id]);
-  }
-}
-
-/** The signed-in person's answers page lists every answer and every reply on an ask, so the
- *  two events that write one refresh it. The query exists only while that page is open. */
-function appendAnswersPageKey(keys: (readonly unknown[])[], event: Event): void {
-  if (
-    event.type === "ask.answered" ||
-    (event.type === "comment.created" && payloadString(event, "ask_id") !== undefined)
-  ) {
-    keys.push(["me", "answers"]);
-  }
-}
-
-function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): void {
-  const id =
-    event.type === "comment.delivery" ? event.payload.comment_id : payloadString(event, "id");
-  if (id !== undefined) {
-    keys.push(["comment", id]);
-  }
-  const askID = payloadString(event, "ask_id");
-  if (askID !== undefined) {
-    keys.push(["ask", askID], ["ask-thread", askID]);
-  }
-}
-
-// The ask lifecycle events, listed rather than matched on the `ask.` prefix so a new one falls
-// to the default branch instead of silently routing here.
-function isAskEvent(event: Event): boolean {
-  return (
-    event.type === "ask.opened" ||
-    event.type === "ask.anchor_refreshed" ||
-    event.type === "ask.edited" ||
-    event.type === "ask.handed_back" ||
-    event.type === "ask.answered" ||
-    event.type === "ask.resolved" ||
-    event.type === "ask.follower_added" ||
-    event.type === "ask.follower_removed"
-  );
-}
-
-// The events that change a comment thread: creation, deliveries, lifecycle, suggestion
-// verdicts, and a cascaded anchor refresh (a document version orphaned or re-anchored it).
-function isCommentLikeEvent(event: Event): boolean {
-  return (
-    event.type === "comment.created" ||
-    event.type === "comment.delivery" ||
-    event.type === "comment.answered" ||
-    event.type === "comment.resolved" ||
-    event.type === "comment.reopened" ||
-    event.type === "comment.edited" ||
-    event.type === "comment.anchor_refreshed" ||
-    event.type === "suggestion.accepted" ||
-    event.type === "suggestion.rejected"
-  );
-}
-
-// The Agents page holds one conversation per session; `session:<id>` with an id after the prefix
-// is the only target shape that names one. Every other target (a role, a name that never
-// resolved) belongs to no conversation on that page.
-function agentConversationKey(target: string | undefined): readonly unknown[] | undefined {
-  if (target?.startsWith("session:") && target.length > "session:".length) {
-    return agentMessagesQuery(target.slice("session:".length)).queryKey;
-  }
-  return undefined;
-}
-
-function appendAgentConversationKey(
-  keys: (readonly unknown[])[],
-  target: string | undefined
-): void {
-  const key = agentConversationKey(target);
-  if (key !== undefined) {
-    keys.push(key);
-  }
-}
-
-function isMessageEvent(event: Event): boolean {
-  return (
-    event.type === "message.created" ||
-    event.type === "message.delivery" ||
-    event.type === "message.accepted" ||
-    event.type === "message.answered"
-  );
-}
-
-// The events that can move a row of the viewer's Replies page (`["me", "replies"]`, its count and
-// every owner's unread set): a write that fires a `user_threads` trigger - a comment, a session's
-// reply to a mention (`comment.answered`), an issue message or a reply to one, an answer - and an
-// ask opening (settlement restoring one) or being resolved, which decides whether the Inbox lists
-// its thread instead. An edit, a resolution of a comment, a delivery or a claim moves no row.
-const REPLIES_WRITES: Partial<Record<EventType, true>> = {
-  "comment.created": true,
-  "comment.answered": true,
-  "message.created": true,
-  "message.answered": true,
-  "ask.opened": true,
-  "ask.answered": true,
-  "ask.resolved": true,
-};
-
-// The Inbox lists an open ask only while its issue is open (`myRepliesUnread` in the server's
-// replies.go), so an issue closing (`issue.closed`) or reopening moves its open asks' threads
-// between the Inbox and the Replies page. A reopen is an `issue.updated` (a status write off
-// `done`), and that payload is the issue after the write with no changed field and no ask count, so
-// every `issue.updated` refreshes, beside the issue lists the same event already refetches.
-function movesReplies(event: Event): boolean {
-  return (
-    REPLIES_WRITES[event.type] === true ||
-    event.type === "issue.closed" ||
-    event.type === "issue.updated"
-  );
-}
-
-// Every event whose server path rewrites the reference index (`refs.ReplaceCounted`/`refs.Stamp`)
-// or moves a structural edge of `graph_edges`: document versions and uploads, ask creation and
-// edits (including a settled ask block), comment and message writes — an answer's reply body is
-// indexed exactly like any other — anchor refreshes, follower changes, and an issue's parent or
-// component attachment. A backlink panel reads the graph, so all of them must refresh it.
-function changesReferenceGraph(event: Event): boolean {
-  return (
-    event.type === "artifact.created" ||
-    event.type === "artifact.version" ||
-    event.type === "ask.anchor_refreshed" ||
-    event.type === "ask.edited" ||
-    event.type === "ask.follower_added" ||
-    event.type === "ask.follower_removed" ||
-    event.type === "ask.opened" ||
-    event.type === "child.added" ||
-    event.type === "child.removed" ||
-    event.type === "comment.answered" ||
-    event.type === "comment.anchor_refreshed" ||
-    event.type === "comment.created" ||
-    event.type === "comment.edited" ||
-    event.type === "issue.created" ||
-    event.type === "issue.updated" ||
-    event.type === "message.answered" ||
-    event.type === "message.created"
-  );
-}
-
-// What the server says one write moved in the reference graph: `refs.ReplaceCounted` reconciles
-// the edges in the same transaction that appends the event and names the targets whose readers
-// carry a batched backlink count — an issue (its detail) and an ask (its rows, and the Inbox).
-// A write that cited nothing counted names nothing, and an event recorded before the field
-// existed carries nothing; both leave the lists to refresh on their own schedule, as before.
-function changedReferences(event: Event): readonly ChangedReference[] {
-  const changed = payloadValue(event, "references_changed");
-  return Array.isArray(changed) ? (changed as ChangedReference[]) : [];
-}
-
-/** One untyped-payload read for the fields this file's newer readers take off an event. */
-function payloadValue(event: Event, key: string): unknown {
-  const payload = event.payload;
-  return typeof payload === "object" && payload !== null ? Reflect.get(payload, key) : undefined;
-}
-
-/** Past the server's cap an event names no targets, so every list that holds a count refreshes. */
-function changedReferencesTruncated(event: Event): boolean {
-  return payloadValue(event, "references_changed_truncated") === true;
-}
-
-// The rows that carry a changed target's count: an issue's detail, and for an ask the list its
-// row lives in (its issue's asks, or its document's) plus the Inbox, which lists every open ask
-// whoever owns it. Every event is read the same way, so a document version that cites an ask
-// refreshes the same rows a message citing it does.
-function changedReferenceKeys(event: Event): (readonly unknown[])[] {
-  if (changedReferencesTruncated(event)) {
-    return [["issue"], ["asks"], ["ask-thread"], ["artifact"], inboxQuery().queryKey];
-  }
-  const keys: (readonly unknown[])[] = [];
-  for (const target of changedReferences(event)) {
-    if (target.kind === "issue") {
-      keys.push(["issue", target.id]);
-      continue;
-    }
-    keys.push(["ask", target.id]);
-    // An answered card reads its ask from the thread, which is fetched once (staleTime
-    // Infinity): without this key a citation added after the answer never moves its control.
-    keys.push(["ask-thread", target.id]);
-    if (target.issue_key !== undefined && target.issue_key !== null) {
-      keys.push(["asks", target.issue_key]);
-    } else if (target.artifact_id !== undefined && target.artifact_id !== null) {
-      keys.push(["artifact", target.artifact_id, "asks"]);
-    }
-    keys.push(inboxQuery().queryKey);
-  }
-  return keys;
-}
 
 // 408 (timeout) and 429 (rate limit) are transient — worth retrying. Every other
 // 4xx (404, 409, 422, ...) means the request itself can never succeed unchanged, so
@@ -386,289 +131,10 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
   });
 }
 
-// The live stream reads this directly (`useEventStream`), so every invalidation the app
-// performs is a key this returns.
-export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
-  const keys = ownerQueryKeys(event, signedInLogin);
-  // A write cites nodes on other issues, whose rows carry those nodes' backlink counts; the
-  // event names them, so exactly their rows refresh — including the Inbox, which lists every
-  // open ask and is otherwise subtracted for a plain message or comment (#1248).
-  // Duplicates cost nothing: `useEventStream` keys its pending map on the serialised key and
-  // then coalesces prefixes, so the same row is never refreshed twice.
-  keys.push(...changedReferenceKeys(event));
-  if (changesReferenceGraph(event)) {
-    keys.push(["references"]);
-  }
-  return keys;
-}
-
-function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
-  if (
-    event.type === "project.created" ||
-    event.type === "project.updated" ||
-    event.type === "settings.repo_project.updated"
-  ) {
-    if (event.project === undefined) {
-      throw new Error("project event is missing its project");
-    }
-    return [
-      projectsQuery().queryKey,
-      ["project", event.project],
-      ["issues", "project", event.project],
-      ["repo-projects"],
-      // A mapping write can change the repository every issue of its project resolves to (a new
-      // default, one removed or moved away), which the issue header reads from the issue's
-      // detail. The detail's key names no project, so every loaded detail refreshes; mapping
-      // writes are rare settings changes.
-      ...(event.type === "settings.repo_project.updated" ? [["issue"]] : []),
-    ];
-  }
-  // The default decides who a later create lands on; no issue already listed moves, so only
-  // the Settings table's own read refreshes.
-  if (event.type === "settings.project_default_assignee.updated") {
-    return [projectDefaultAssigneesQuery().queryKey];
-  }
-  if (
-    event.type === "settings.architecture_source.updated" ||
-    event.type === "architecture.synced" ||
-    event.type === "architecture.sync_failed"
-  ) {
-    if (event.project === undefined) {
-      throw new Error("project event is missing its project");
-    }
-    return [
-      architectureSourcesQuery().queryKey,
-      projectArchitectureSourcesQuery(event.project).queryKey,
-      ["components", event.project],
-      // A re-import changes which components exist, so every count in the tree.
-      ["architecture", event.project],
-    ];
-  }
-  if (event.type === "user_state.updated") {
-    return payloadString(event, "login") === signedInLogin
-      ? [userStateQuery().queryKey, inboxQuery().queryKey]
-      : [];
-  }
-  if (event.type === "user_agent_state.updated") {
-    // Another tab or device of this viewer read or cleared a conversation: refresh the badge.
-    return payloadString(event, "login") === signedInLogin ? [userAgentStateQuery().queryKey] : [];
-  }
-  if (event.type === "user_thread_state.updated") {
-    // Another tab or device of this viewer read a thread: drop its row and its count here too.
-    return payloadString(event, "login") === signedInLogin ? [myRepliesKey] : [];
-  }
-  if (event.type === "subscription.remove_requested") {
-    return [];
-  }
-  if (event.issue_key === null && isMessageEvent(event)) {
-    const key = agentConversationKey(payloadString(event, "target"));
-    if (key === undefined) {
-      throw new Error("issue-less message event is missing its session target");
-    }
-    // Every recipient of a broadcast holds an issue-less targeted message, so every event
-    // that moves a broadcast's recipient table arrives here. The open broadcast views are
-    // refreshed by key prefix rather than by threading a broadcast id through the message,
-    // delivery and reply payloads; nothing else is keyed under ["broadcast"], and the
-    // queries only exist while a broadcast page is mounted. A reply in a direct conversation can
-    // be unread for its asker, and the count lives in the viewer's per-agent state; every reply
-    // row is written with a message.answered event, so only that event can move the count.
-    return event.type === "message.answered"
-      ? [key, ["broadcast"], userAgentStateQuery().queryKey]
-      : [key, ["broadcast"]];
-  }
-  if (event.issue_key === null) {
-    if (event.artifact_id === null || event.artifact_id === undefined) {
-      throw new Error("document event is missing its artifact id");
-    }
-    if (event.project === undefined) {
-      throw new Error("document event is missing its project");
-    }
-    const keys: (readonly unknown[])[] = [
-      ["artifact", event.artifact_id],
-      ["artifact-ref"],
-      ["project", event.project, "artifacts"],
-      projectsQuery().queryKey,
-    ];
-    if (isAskEvent(event)) {
-      appendAskDetailKeys(keys, event);
-      keys.push(inboxQuery().queryKey);
-    }
-    if (isCommentLikeEvent(event)) {
-      appendCommentDetailKeys(keys, event);
-    }
-    // A reply or an answer in a document's comment or ask thread can put a row on the viewer's
-    // Replies page.
-    if (movesReplies(event)) {
-      keys.push(myRepliesKey);
-    }
-    appendAnswersPageKey(keys, event);
-    if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
-      keys.push(inboxQuery().queryKey);
-    }
-    if (event.type === "subscription.removed") {
-      keys.push(["subscribers", event.artifact_id]);
-    }
-    return keys;
-  }
-
-  const keys: (readonly unknown[])[] = [
-    ["issue", event.issue_key],
-    ["events", event.issue_key],
-    ["issues"],
-    // Unread badges and group membership read last_read_seq from here; every inbound
-    // event can change what counts as unread, and answering an ask or reading the log
-    // updates this out from under any other open tab watching the same user.
-    userStateQuery().queryKey,
-    inboxQuery().queryKey,
-  ];
-  if (movesReplies(event)) {
-    keys.push(myRepliesKey);
-  }
-
-  if (
-    event.type === "issue.created" ||
-    event.type === "issue.updated" ||
-    event.type === "issue.closed"
-  ) {
-    if (event.project !== undefined) {
-      keys.push(
-        ["issues", "project", event.project],
-        // A status change or a new attachment moves a count in the component tree.
-        ["components", event.project],
-        ["architecture", event.project]
-      );
-    }
-    // Components, parents and subtree rollups are resolved on read up and down the parent
-    // chain, so an issue's own event alters ancestors and descendants that get no event of
-    // their own: refetch every open issue. The sidebar's per-project open-ask badge moves
-    // with a close, a reopen and an assignment, so it refetches here too.
-    keys.push(["issue"], projectsQuery().queryKey);
-    return keys;
-  }
-  if (
-    event.type === "issue.claimed" ||
-    event.type === "issue.released" ||
-    event.type === "issue.deployed"
-  ) {
-    // A claim changes only who holds the issue: its detail, its log, and the lists that render
-    // the claim — `["issues"]` above covers every project list by prefix. No rollup, ask count
-    // or component attachment moves with it. A deploy is a line in the issue's log and nothing
-    // the lists or rollups read.
-    return keys;
-  }
-  // The branches above name every `issue.*` type there is, so a type added later falls to the
-  // default branch below instead of returning the bare base keys.
-  if (event.type === "artifact.created" || event.type === "artifact.version") {
-    keys.push(["artifacts", event.issue_key]);
-    const id = artifactId(event);
-    if (id !== undefined) {
-      keys.push(["artifact", id]);
-    }
-    keys.push(["comments", event.issue_key]);
-    return keys;
-  }
-
-  if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
-    keys.push(
-      ["artifacts", event.issue_key],
-      ["artifact", event.payload.artifact_id],
-      ["asks", event.issue_key]
-    );
-    if (event.payload.ask_id !== null) {
-      keys.push(["ask-thread", event.payload.ask_id]);
-    }
-    return keys;
-  }
-
-  if (
-    event.type === "ask.opened" ||
-    event.type === "ask.answered" ||
-    event.type === "ask.resolved" ||
-    event.type === "ask.edited" ||
-    event.type === "ask.handed_back" ||
-    event.type === "ask.anchor_refreshed"
-  ) {
-    keys.push(["asks", event.issue_key]);
-    // The sidebar's per-project open-ask counts come from GET /projects; an edit, a hand-back or
-    // an anchor refresh changes neither whether the ask is open nor which issue owns it.
-    if (
-      event.type !== "ask.edited" &&
-      event.type !== "ask.handed_back" &&
-      event.type !== "ask.anchor_refreshed"
-    ) {
-      keys.push(projectsQuery().queryKey);
-    }
-    appendDocumentKey(keys, event);
-    appendAskDetailKeys(keys, event);
-    appendAnswersPageKey(keys, event);
-    return keys;
-  }
-  if (event.type === "ask.follower_added" || event.type === "ask.follower_removed") {
-    appendAskDetailKeys(keys, event);
-    return keys;
-  }
-  if (event.type === "block.repaired" || event.type === "block.invalid") {
-    keys.push(["asks", event.issue_key], projectsQuery().queryKey);
-    return keys;
-  }
-
-  if (isCommentLikeEvent(event)) {
-    const askID = payloadString(event, "ask_id");
-    keys.push(["comments", event.issue_key]);
-    // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
-    // block reads its turn from that list rather than from the Inbox. The Conversation's card
-    // for that ask carries the reply itself.
-    if (askID !== undefined) {
-      keys.push(["asks", event.issue_key]);
-    }
-    appendDocumentKey(keys, event);
-    appendCommentDetailKeys(keys, event);
-    appendAnswersPageKey(keys, event);
-    // The one subtraction from the conservative baseline. An Inbox row is an open ask plus its
-    // thread's `last_reply` and `waiting_on`, its issue's priority, assignee and status, and
-    // the ask's `referenced_by_count`. Every comment in an ask's thread carries that ask's
-    // `ask_id`: both write paths normalise a reply up to the ask at the head of its thread, a
-    // `comment.delivery` receipt names the ask its comment belongs to, and migration 0043 moved
-    // the reply rows written before that. So a payload with no `ask_id` is a comment outside
-    // every ask thread, and the row's remaining fields are all ask-scoped — except the backlink
-    // count, which a comment citing an ask does move: the event names that ask, and
-    // `eventQueryKeys` puts the Inbox back from the targets it names. A field a non-ask comment
-    // changes that no payload reports would have to be added to this condition the same way.
-    return askID === undefined ? withoutInbox(keys) : keys;
-  }
-
-  if (isMessageEvent(event)) {
-    const target = payloadString(event, "target");
-    appendAgentConversationKey(keys, target);
-    keys.push(["messages", event.issue_key], ["issue-messages", event.issue_key]);
-    // The Agents page groups a conversation under its thread root, so a reply belongs to that
-    // root's conversation and not to a target of its own: a session answering a message aimed
-    // at itself names no target at all, and the event carries the root's as `thread_target`.
-    const threadTarget = payloadString(event, "thread_target");
-    if (threadTarget !== target) {
-      appendAgentConversationKey(keys, threadTarget);
-    }
-    // Same subtraction: a message, a delivery attempt and a message reply change no ask, no
-    // ask thread and no issue field an Inbox row reads, whatever session they target. A body
-    // that cited an ask moves that ask's count, and `eventQueryKeys` restores the Inbox from
-    // the targets the event names.
-    return withoutInbox(keys);
-  }
-
-  if (event.type === "subscription.removed") {
-    keys.push(["subscribers", event.issue_key]);
-    return keys;
-  }
-
-  // A child's status or parentage changes the `N/M done` rollup in every loaded ancestor.
-  keys.push(["children", event.issue_key], ["issue"]);
-  return keys;
-}
-
-// Leading debounce for burst invalidation: a cold-start replay or a flurry of events
-// on one issue invalidates each affected key once, 100ms after the first event of the
-// burst — later events join the pending set but do not extend the window.
-const INVALIDATION_DEBOUNCE_MS = 100;
+// Leading window for a burst: a cold-start replay or a flurry of events on one issue is handed to
+// the refresh scheduler (`api/query-refresh.ts`) as one batch, 100ms after the first event of the
+// burst - later events join the pending batch but do not extend the window.
+const BATCH_WINDOW_MS = 100;
 
 // A whole-cache refresh reaches every query the app holds, the GitHub proxy queries included,
 // and two callers ask for one: an event this client cannot parse, and a reconnect. Neither is
@@ -678,8 +144,8 @@ const INVALIDATION_DEBOUNCE_MS = 100;
 // refresh: a request a window or more after the last one schedules it for now, and any inside
 // the window joins that same pending refresh, so a change no key can be derived from always
 // arrives within the window of the request that asked for it.
-// The backlink panels' own `["references"]` queries are part of "everything", so a reconnect
-// refreshes them too.
+// The backlink panels' own `["references", "to", …]` queries are part of "everything", so a
+// reconnect refreshes them too.
 // Exported for the one test that deliberately runs at the production window rather than an
 // injected one, so it reads the real number instead of keeping a copy that drifts.
 export const WHOLE_CACHE_REFRESH_MS = 5_000;
@@ -687,25 +153,25 @@ export const WHOLE_CACHE_REFRESH_MS = 5_000;
 /**
  * An ask event that arrives while the Inbox is fetching, for a thread the cache does not hold
  * yet, is invisible to the flush: its `["ask-thread", id]` key matches nothing, and a card that
- * mounts from the landing rows seeds that thread from a body composed before the event.
- * Cancelling a first load does not reach this - a body that lands inside the debounce window is
- * already committed - so the marker makes the card read the ask endpoint instead of trusting the
- * row it mounted from.
+ * mounts from the landing rows seeds that thread from a body composed before the event. The
+ * Inbox's own refetch once its load settles does not reach this - a card can mount from the
+ * landing rows first - so the marker makes the card read the ask endpoint instead of trusting
+ * the row it mounted from.
  */
 function markAskThreadsSeededByAnInFlightInbox(
   queryClient: QueryClient,
-  keys: readonly (readonly unknown[])[]
+  targets: readonly RefreshTarget[]
 ): void {
   if (queryClient.getQueryState(inboxQueryKey)?.fetchStatus !== "fetching") {
     return;
   }
-  for (const key of keys) {
+  for (const { queryKey } of targets) {
     if (
-      key[0] === "ask-thread" &&
-      typeof key[1] === "string" &&
-      queryClient.getQueryState(key) === undefined
+      queryKey[0] === "ask-thread" &&
+      typeof queryKey[1] === "string" &&
+      queryClient.getQueryState(queryKey) === undefined
     ) {
-      markPendingAskThreadInvalidation(queryClient, key[1]);
+      markPendingAskThreadInvalidation(queryClient, queryKey[1]);
     }
   }
 }
@@ -738,21 +204,24 @@ export function useEventStream({
     let watchdog: number | undefined;
     let reconnect: number | undefined;
     let flush: number | undefined;
-    // `pendingAll` is the whole-cache entry of the pending set: it means "something changed
-    // that no key can be derived from", and it subsumes every individual key already queued.
+    // `pendingAll` is the whole-cache entry of the pending batch: it means "something changed
+    // that no target can be derived from", and it subsumes every target already queued.
     let pendingAll = false;
     // `performance.now()`, not `Date.now()`: a monotonic clock, so a backwards system-clock
     // step cannot park the throttle for the length of the step.
     let lastWholeCacheRefresh = Number.NEGATIVE_INFINITY;
     let wholeCacheTrailing: number | undefined;
-    const pending = new Map<string, readonly unknown[]>();
+    let pending: RefreshTarget[] = [];
+    // Record when each query's fetches begin from now on, so the scheduler's one-a-second rule
+    // holds for the first batch after the page's own loads too.
+    trackQueryFetches(queryClient);
 
     const armWatchdog = () => {
       window.clearTimeout(watchdog);
       watchdog = window.setTimeout(() => controller?.abort(), watchdogMs);
     };
 
-    const onOpen = () => {
+    const onOpen = ({ replayComplete }: StreamOpened) => {
       if (stopped) {
         return;
       }
@@ -760,15 +229,21 @@ export function useEventStream({
       armWatchdog();
       if (anAttemptEnded) {
         // Events may have committed since the prior attempt ended - or, when the first attempt
-        // failed, since the page's own reads - so every query the app holds refreshes. TanStack
-        // matches all of them when no filter is given. Nothing is excluded:
-        // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
-        // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
-        // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
-        // leading edge; `visibilitychange` reopening the stream repeatedly does not.
-        refreshEverything();
-        // The one query that refresh skips: a credential list held at `null` (no broker), which
-        // a server restarted since with a broker configured would now answer with a list.
+        // failed, since the page's own reads - so every query the app holds refreshes, unless the
+        // server says this stream replays every event after the cursor (a resuming connection
+        // whose cursor the log still holds): those events refresh what they changed, as any
+        // other does. A cold connect, a reset log and a server older than the header say no such
+        // thing. Nothing is excluded from the refresh: the one query that looks expensive,
+        // `["block-schema"]` with an infinite `staleTime`, resolves from a module-level
+        // per-session cache (`features/doc/schema.ts`), so its refetch issues no request. A
+        // genuine reconnect after a gap refreshes on the leading edge; `visibilitychange`
+        // reopening the stream repeatedly does not.
+        if (!replayComplete) {
+          refreshEverything();
+        }
+        // The one query a refresh skips: a credential list held at `null` (no broker), which a
+        // server restarted since with a broker configured would now answer with a list. A
+        // restart replays nothing that says so.
         reaskHeldCredentialList(queryClient);
       }
       attempt = 0;
@@ -787,11 +262,11 @@ export function useEventStream({
       }
       flush = window.setTimeout(() => {
         flush = undefined;
-        const keys = pendingAll ? undefined : coalescePrefixKeys([...pending.values()]);
+        const targets = pendingAll ? undefined : pending;
         pendingAll = false;
-        pending.clear();
-        refreshQueries(queryClient, keys);
-      }, INVALIDATION_DEBOUNCE_MS);
+        pending = [];
+        refreshQueries(queryClient, targets);
+      }, BATCH_WINDOW_MS);
     };
 
     /**
@@ -819,12 +294,10 @@ export function useEventStream({
       }, remaining);
     };
 
-    const queueInvalidations = (keys: readonly (readonly unknown[])[]) => {
-      // A latched whole-cache refresh subsumes every key, so there is nothing to record.
+    const queueRefresh = (targets: readonly RefreshTarget[]) => {
+      // A latched whole-cache refresh subsumes every target, so there is nothing to record.
       if (!pendingAll) {
-        for (const key of keys) {
-          pending.set(JSON.stringify(key), key);
-        }
+        pending.push(...targets);
       }
       scheduleFlush();
     };
@@ -851,9 +324,9 @@ export function useEventStream({
       const event = JSON.parse(raw.data) as Event;
       prependEventToLog(queryClient, event);
       const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
-      const keys = eventQueryKeys(event, signedInLogin);
-      markAskThreadsSeededByAnInFlightInbox(queryClient, keys);
-      queueInvalidations(keys);
+      const targets = eventRefreshTargets(event, signedInLogin);
+      markAskThreadsSeededByAnInFlightInbox(queryClient, targets);
+      queueRefresh(targets);
     };
 
     const open = () => {
@@ -939,7 +412,7 @@ export function useEventStream({
       window.clearTimeout(reconnect);
       window.clearTimeout(flush);
       window.clearTimeout(wholeCacheTrailing);
-      pending.clear();
+      pending = [];
       controller?.abort();
       controller = null;
       setConnectionState("connected");

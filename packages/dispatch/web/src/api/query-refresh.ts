@@ -1,4 +1,4 @@
-import type { Query, QueryClient } from "@tanstack/react-query";
+import type { Query, QueryClient, QueryKey } from "@tanstack/react-query";
 
 /** Whether a query is owned by Dispatch's live delivery socket rather than refreshed by events. */
 export function isLiveQuery(query: Pick<Query, "meta">): boolean {
@@ -6,151 +6,229 @@ export function isLiveQuery(query: Pick<Query, "meta">): boolean {
 }
 
 /**
- * How a stream event refreshes the query cache: which of a batch's keys are worth invalidating,
- * and what to do about a query whose first response is still in flight when the event arrives.
- * `api/sse.ts` owns which keys an event names; this module owns what happens to them.
+ * The one refresh scheduler: what happens to the queries an event batch names (`api/sse.ts` asks,
+ * `api/event-refresh.ts` decides which). It never cancels a request, and it fetches one query at
+ * most once a second:
+ *
+ * - an inactive query is marked stale only, and fetches when something mounts it;
+ * - a query already fetching is fetched again once that fetch settles, so the answer composed
+ *   after the event is the one shown, and the response already on its way is never discarded;
+ * - a query whose last fetch began less than `MIN_REFETCH_INTERVAL_MS` ago is fetched at that
+ *   start plus the interval;
+ * - any other query is fetched now.
+ *
+ * When a fetch takes longer than the interval, the in-flight rule wins: the next fetch starts when
+ * it settles. A refresh is owed from the moment it is asked for, and any fetch that begins later -
+ * one this scheduler starts, a mount's, a mutation's - pays it. The live-owned queries
+ * (`meta.live`, `api/delivery-live.ts`) are never touched: their socket keeps them current.
  */
+
+/** The shortest gap between the starts of two fetches of one query that this scheduler starts. */
+export const MIN_REFETCH_INTERVAL_MS = 1_000;
 
 /**
- * React Query matches by prefix, so a queued key that another queued key is a prefix of is the
- * same refresh twice: `invalidateQueries` defaults to `cancelRefetch: true`, so the second call
- * cancels the first's in-flight fetch and starts another request for the same query. Keeps the
- * broadest queued key of each family and drops the rest. The relation is element-wise and
- * strict, so a sibling family (`["artifact-ref"]` beside `["artifact"]`) is never swallowed and
- * the shortest queued key is never dropped.
+ * Which queries a refresh reaches: every query `queryKey` matches (by prefix unless `exact`), and,
+ * with `when`, only those whose data it accepts. `when` runs against the query's data at the
+ * flush, and against `undefined` for a query that holds none and is not fetching (an error, a
+ * query never fetched). For a query still on its first load it runs on the response that lands,
+ * which is then fetched again if `when` accepts it; a body composed after the event is not.
  */
-export function coalescePrefixKeys(keys: readonly (readonly unknown[])[]): (readonly unknown[])[] {
-  return keys.filter(
-    (key) =>
-      !keys.some(
-        (other) =>
-          other.length < key.length && other.every((part, index) => Object.is(part, key[index]))
-      )
-  );
+export interface RefreshTarget {
+  readonly queryKey: QueryKey;
+  readonly exact?: boolean;
+  readonly when?: (data: unknown) => boolean;
 }
 
-// Per QueryClient: the query hashes whose current first load has already been cancelled once,
-// and those whose landing response owes a refresh. A hash leaves `cancelled` when its query
-// holds data or is removed, and leaves `refreshOnSettle` when that query settles or is removed.
-interface FirstLoadState {
-  cancelled: Set<string>;
-  refreshOnSettle: Set<string>;
+interface DeferredCheck {
+  readonly requestedAt: number;
+  readonly when: readonly ((data: unknown) => boolean)[];
 }
 
-const firstLoadState = new WeakMap<QueryClient, FirstLoadState>();
+// Per QueryClient, keyed by query hash: when each query's last fetch began (from the cache's
+// `fetch` action), the moment each owed refresh was asked for, the timer that will start a
+// refresh the interval holds back, and the checks waiting for a first load to land. Every entry
+// of a hash leaves when its query is removed.
+interface SchedulerState {
+  readonly started: Map<string, number>;
+  readonly owed: Map<string, number>;
+  readonly timers: Map<string, number>;
+  readonly deferred: Map<string, DeferredCheck>;
+}
 
-function stateFor(queryClient: QueryClient): FirstLoadState {
-  let state = firstLoadState.get(queryClient);
-  if (state === undefined) {
-    const tracked: FirstLoadState = { cancelled: new Set(), refreshOnSettle: new Set() };
-    state = tracked;
-    firstLoadState.set(queryClient, tracked);
-    // One subscription for the client, not one per hash, so nothing can be stranded. A removal
-    // clears `cancelled` because a query removed and recreated between two flushes (sign-out
-    // then sign-in, or garbage collection) would otherwise keep its hash and have the new
-    // query's genuine first load skip its cancel. It clears `refreshOnSettle` only to keep that
-    // set bounded: a stale entry there is harmless, since registering is an idempotent `add`
-    // and the added notification consumes it before any observer attaches, so the replacement
-    // query's first load costs no extra request.
-    queryClient.getQueryCache().subscribe((change) => {
-      const hash = change.query.queryHash;
-      if (change.type === "removed") {
-        tracked.cancelled.delete(hash);
-        tracked.refreshOnSettle.delete(hash);
-        return;
-      }
-      if (change.query.state.fetchStatus !== "idle" || !tracked.refreshOnSettle.delete(hash)) {
-        return;
-      }
-      queryClient.invalidateQueries({ exact: true, queryKey: change.query.queryKey });
-    });
+const schedulers = new WeakMap<QueryClient, SchedulerState>();
+
+function schedulerFor(queryClient: QueryClient): SchedulerState {
+  const existing = schedulers.get(queryClient);
+  if (existing !== undefined) {
+    return existing;
   }
+  const state: SchedulerState = {
+    deferred: new Map(),
+    owed: new Map(),
+    started: new Map(),
+    timers: new Map(),
+  };
+  schedulers.set(queryClient, state);
+  const cache = queryClient.getQueryCache();
+  // One subscription for the client, not one per query, so nothing can be stranded.
+  cache.subscribe((change) => {
+    const query = change.query;
+    const hash = query.queryHash;
+    if (change.type === "removed") {
+      window.clearTimeout(state.timers.get(hash));
+      state.timers.delete(hash);
+      state.started.delete(hash);
+      state.owed.delete(hash);
+      state.deferred.delete(hash);
+      return;
+    }
+    if (change.type !== "updated") {
+      return;
+    }
+    const action = change.action;
+    if (action.type === "fetch") {
+      state.started.set(hash, Date.now());
+      return;
+    }
+    if (action.type === "error") {
+      // A first load that failed has no body to judge: the query shows its error and retries on
+      // its own terms.
+      state.deferred.delete(hash);
+    }
+    if (action.type === "success" && action.manual !== true) {
+      const check = state.deferred.get(hash);
+      if (check !== undefined) {
+        state.deferred.delete(hash);
+        const started = state.started.get(hash);
+        const composedAfter = started !== undefined && started > check.requestedAt;
+        if (!composedAfter && check.when.some((when) => when(query.state.data))) {
+          owe(state, query, check.requestedAt);
+        }
+      }
+    }
+    // A query that owes a refresh settled: drive it, outside this notification, since the cache
+    // is still dispatching the action that settled it.
+    if (query.state.fetchStatus === "idle" && state.owed.has(hash) && !state.timers.has(hash)) {
+      state.timers.set(
+        hash,
+        window.setTimeout(() => {
+          state.timers.delete(hash);
+          drive(state, queryClient, hash);
+        }, 0)
+      );
+    }
+  });
   return state;
 }
 
 /**
- * Cancels the first load of every active query matching `queryKeys` (every query when they are
- * omitted), at most once per query until that query holds data.
- *
- * `invalidateQueries` refetches with `cancelRefetch`, whose whole job is to restart a request
- * that is already running, so the refetch cannot be satisfied by a body the server composed
- * before the event. TanStack applies it only to a query that already holds data
- * (`Query.fetch`): during a query's *first* load it joins the in-flight promise instead, and
- * that response's success clears `isInvalidated` and stamps `dataUpdatedAt`, leaving the
- * pre-event body fresh for the whole `staleTime`. That is the screen a list keeps showing when
- * an event arrives between its mount and its first response. Reverting that load puts the query
- * back into the pending state it is already rendering and leaves it idle, so the invalidation's
- * own refetch issues a new request.
- *
- * TanStack's gate is not arbitrary, though: it is what stops an invalidation from cancelling the
- * request that would have filled the screen. Cancelling on every flush starves a load slower
- * than the gap between events, so a query is cancelled at most once until it holds data; a
- * later flush lets the running request land and refreshes the query when it settles instead.
- * Progress is guaranteed and the post-event body still wins. Only active, non-static queries
- * are cancelled, which is a subset of the set `invalidateQueries` refetches. A live-owned query
- * (`meta.live`, the delivery reads `api/delivery-live.ts` keeps current) is never cancelled: its
- * first load is a subscription whose snapshot the live client writes itself, and no event of
- * this stream names it.
- *
- * The cancelled request is not aborted on the wire: TanStack aborts through the signal on the
- * query function's context, and no query function in this app reads it. So the window costs two
- * full round trips for each query it touches - the orphaned body the client discards, and the
- * post-event one it renders.
+ * Starts recording when each query's fetches begin, so the first refresh after a page's own loads
+ * already keeps the interval. `useEventStream` calls it once its stream starts; `refreshQueries`
+ * starts it too, for any caller that has not.
  */
-function cancelFirstLoads(
-  queryClient: QueryClient,
-  queryKeys?: readonly (readonly unknown[])[]
-): void {
-  const cache = queryClient.getQueryCache();
-  const { cancelled, refreshOnSettle } = stateFor(queryClient);
-  // A removed query left `cancelled` on the subscription above, so a hash still here names a
-  // live query; it is released once that query holds data.
-  for (const hash of cancelled) {
-    if (cache.get(hash)?.state.data !== undefined) {
-      cancelled.delete(hash);
-    }
-  }
-  // One `findAll` per key rather than one over the union of the batch's keys: the filters differ
-  // per key, and a query two keys both match is reached twice, which the sets below absorb.
-  for (const queryKey of queryKeys ?? [undefined]) {
-    const loads = cache.findAll({
-      fetchStatus: "fetching",
-      predicate: (query) =>
-        query.state.data === undefined && !query.isStatic() && !isLiveQuery(query),
-      queryKey,
-      type: "active",
-    });
-    for (const load of loads) {
-      const hash = load.queryHash;
-      if (!cancelled.has(hash)) {
-        cancelled.add(hash);
-        load.cancel({ revert: true });
-        continue;
-      }
-      // The running request is left to land, and the client's one subscriber refreshes this
-      // query when it settles.
-      refreshOnSettle.add(hash);
-    }
-  }
+export function trackQueryFetches(queryClient: QueryClient): void {
+  schedulerFor(queryClient);
 }
 
-/** Refreshes `queryKeys`, or every query the app holds but the live-owned ones when they are
- *  omitted: a live query is kept current by its own socket, so a whole-cache refresh (the stream's
- *  reconnect, an unknown event) would only re-subscribe it and have Dispatch send its snapshot
- *  again. */
-export function refreshQueries(
-  queryClient: QueryClient,
-  queryKeys?: readonly (readonly unknown[])[]
-): void {
-  // Every first load this batch touches is cancelled before any of it is refetched: two keys in
-  // one batch can match the same query, and interleaving would have the second key cancel the
-  // request the first one just started.
-  cancelFirstLoads(queryClient, queryKeys);
-  if (queryKeys === undefined) {
-    queryClient.invalidateQueries({ predicate: (query) => !isLiveQuery(query) });
+/** Marks a query stale and, while something renders it, records that it owes a fetch begun after
+ *  `requestedAt`. */
+function owe(state: SchedulerState, query: Query, requestedAt: number): void {
+  query.invalidate();
+  if (!query.isActive() || query.isStatic()) {
     return;
   }
-  for (const queryKey of queryKeys) {
-    queryClient.invalidateQueries({ queryKey });
+  const hash = query.queryHash;
+  state.owed.set(hash, Math.max(state.owed.get(hash) ?? requestedAt, requestedAt));
+}
+
+/** Starts the fetch a query owes, now or once the in-flight and interval rules allow it. */
+function drive(state: SchedulerState, queryClient: QueryClient, hash: string): void {
+  const requestedAt = state.owed.get(hash);
+  const query = queryClient.getQueryCache().get(hash);
+  if (requestedAt === undefined || query === undefined) {
+    return;
+  }
+  const started = state.started.get(hash);
+  if (started !== undefined && started > requestedAt) {
+    // A fetch begun after the request already answers it, whoever started it.
+    state.owed.delete(hash);
+    return;
+  }
+  if (query.state.fetchStatus !== "idle" || state.timers.has(hash)) {
+    // In flight: the cache subscription drives it again when it settles. Or already scheduled.
+    return;
+  }
+  // Clamped to the interval, so a wall clock stepped backwards never holds a refresh longer.
+  const wait =
+    started === undefined
+      ? 0
+      : Math.min(
+          MIN_REFETCH_INTERVAL_MS,
+          Math.max(0, started + MIN_REFETCH_INTERVAL_MS - Date.now())
+        );
+  if (wait > 0) {
+    state.timers.set(
+      hash,
+      window.setTimeout(() => {
+        state.timers.delete(hash);
+        drive(state, queryClient, hash);
+      }, wait)
+    );
+    return;
+  }
+  state.owed.delete(hash);
+  // Unmounted while it waited: it is already marked stale, and fetches when it mounts again.
+  if (!query.isActive() || query.isStatic()) {
+    return;
+  }
+  void query.fetch(undefined, { cancelRefetch: false }).catch(() => undefined);
+}
+
+/**
+ * Refreshes the queries `targets` reach, or, with no targets, every query the app holds but the
+ * live-owned ones (the whole-cache refresh after a gap in the stream, or an event this build cannot
+ * read), through the rules above.
+ */
+export function refreshQueries(queryClient: QueryClient, targets?: readonly RefreshTarget[]): void {
+  const state = schedulerFor(queryClient);
+  const cache = queryClient.getQueryCache();
+  const requestedAt = Date.now();
+  // One entry per query, however many targets reach it: `true` when one reaches it whatever its
+  // data, else every predicate that does.
+  const reached = new Map<Query, true | ((data: unknown) => boolean)[]>();
+  if (targets === undefined) {
+    for (const query of cache.getAll()) {
+      reached.set(query, true);
+    }
+  } else {
+    for (const target of targets) {
+      for (const query of cache.findAll({ exact: target.exact, queryKey: target.queryKey })) {
+        const current = reached.get(query);
+        if (current === true) {
+          continue;
+        }
+        reached.set(query, target.when === undefined ? true : [...(current ?? []), target.when]);
+      }
+    }
+  }
+  for (const [query, condition] of reached) {
+    if (isLiveQuery(query)) {
+      continue;
+    }
+    if (condition !== true) {
+      if (query.state.data === undefined && query.state.fetchStatus !== "idle") {
+        const pending = state.deferred.get(query.queryHash);
+        state.deferred.set(query.queryHash, {
+          requestedAt: Math.max(pending?.requestedAt ?? requestedAt, requestedAt),
+          when: [...(pending?.when ?? []), ...condition],
+        });
+        continue;
+      }
+      if (!condition.some((when) => when(query.state.data))) {
+        continue;
+      }
+    }
+    owe(state, query, requestedAt);
+    drive(state, queryClient, query.queryHash);
   }
 }

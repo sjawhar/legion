@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
-import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, type QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { openStreamResponse } from "../../__tests__/sse-test-harness";
 import { api, isRetryableQueryError } from "../../api/client";
+import { DispatchQueryClient } from "../../api/query-client";
 import { refreshQueries } from "../../api/query-refresh";
 import { useEventStream } from "../../api/sse";
 import type { CredentialPendingResponse } from "../../api/types";
@@ -37,7 +38,7 @@ afterEach(() => {
 });
 
 function productionQueryClient(): QueryClient {
-  return new QueryClient({
+  return new DispatchQueryClient({
     defaultOptions: {
       queries: {
         refetchOnWindowFocus: true,

@@ -1,9 +1,10 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
 import { isRetryableQueryError } from "./api/client";
+import { DispatchQueryClient } from "./api/query-client";
 import { App } from "./app";
 import {
   DeploymentResilience,
@@ -12,7 +13,9 @@ import {
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import "./styles.css";
 
-const queryClient = new QueryClient({
+// Never two requests in flight for one read: an invalidation during a fetch fetches again once it
+// settles (`api/query-client.ts`).
+const queryClient = new DispatchQueryClient({
   defaultOptions: {
     queries: {
       // An auth outcome (401) is definitive — everything else (a dropped connection,
