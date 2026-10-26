@@ -43,10 +43,11 @@ related_issues:
   CI: one run then covers both commits, and nothing is cancelled half-way.
 - `Worker Image` had no such group until 2026-10-26 (see the note below): it completed at both
   heads, so one logical code change had two digests (`sha-<code head>` and `sha-<handoff head>`,
-  the same build inputs but for the revision
-  label). The operator lane runs the code head's image; give the coordinator the code head, its
-  digest, and the handoff head's green run ids in one message, and the tip's digest beside them in
-  case its scripts hold the image's revision against the branch tip.
+  the same build inputs except for the image's two OCI labels, `revision` and `version`, and the
+  revision linked into its `legion version`). The operator lane runs the code head's image; give
+  the coordinator the code head, its digest, and the handoff head's green run ids in one message,
+  and the tip's digest beside them in case its scripts hold the image's revision against the
+  branch tip.
 
   **Superseded 2026-10-26:** `Worker Image` now has a per-PR group with `cancel-in-progress` on
   `pull_request`. A handoff push without the trailer cancels the code head's image build if that
