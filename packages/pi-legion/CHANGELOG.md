@@ -192,6 +192,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The daemon's role prompts for every architect, every phase worker and the controller it launches
+  say that, under Oh My Pi, the bash tool keeps one shell for the whole session, so a variable
+  changed or unset in one command stays so for every later one. They say never to change or unset
+  `DISPATCH_URL`, `DISPATCH_HOST`, `DISPATCH_SESSION_ID`, `DISPATCH_TOKEN_FILE` or
+  `ENVOY_CONFIG_FILE` there, give the command that exports a lost `DISPATCH_URL` again from the
+  session's start environment, and say that `Unable to connect` is the server, not these
+  variables: wait and run the same command again. An architect that unset `DISPATCH_URL` while
+  Dispatch restarted had Dispatch off for the rest of its session.
 - A finding outside a role's own issue takes the first of three steps that fits. A
   defect with a clear fix in code the role's own tree touches or depends on is fixed in that
   tree's own pull request, while the role is there. Any other clear defect goes to the controller
