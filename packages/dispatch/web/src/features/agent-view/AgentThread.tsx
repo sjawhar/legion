@@ -361,6 +361,7 @@ export function AgentThread({
   commands,
   contentIds,
   empty,
+  held,
   ownSendCount,
   placeholder,
   replayCount,
@@ -375,6 +376,9 @@ export function AgentThread({
    *  `data-message-id`: what the follow hook counts as new and finds the reader's place in. */
   contentIds: readonly string[];
   empty: string;
+  /** Whether a model or thinking switch is pending on this session: Send is disabled, still
+   *  reading "Send", until it ends, and `placeholder` is what says why. */
+  held: boolean;
   /** Bumped once per message this viewer sent that the session accepted. */
   ownSendCount: number;
   placeholder: string;
@@ -391,12 +395,12 @@ export function AgentThread({
   // listener and its observers to whichever node it is given.
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const follow = useLiveFollow({ contentIds, ownSendCount, replayCount, sessionId, viewport });
-  // An empty box is the one thing that refuses Send, and only while no send is out: a send in
-  // flight already disables Send and names why, so the line below says that instead. A turn
-  // still streaming does not refuse: the session decides what a message does mid-turn by its
-  // delivery mode, as at its terminal.
+  // An empty box is the one thing that refuses Send, and only while nothing holds it: a send in
+  // flight or a pending switch already disables Send and names why, so the line below says that
+  // instead. A turn still streaming does not refuse: the session decides what a message does
+  // mid-turn by its delivery mode, as at its terminal.
   const boxEmpty = useAuiState((state) => state.composer.isEmpty);
-  const refusal = boxEmpty && !sending ? "Type a message first." : null;
+  const refusal = boxEmpty && !sending && !held ? "Type a message first." : null;
   const hintId = useId();
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
@@ -478,9 +482,9 @@ export function AgentThread({
             {/* A submit button, so a click and Enter both reach the form's submit, which the
                 composer root turns into assistant-ui's own send: one way out for a message. */}
             <RefusableButton
-              busy={sending ? "Sending…" : undefined}
+              busy={sending ? "Sending…" : held ? "Send" : undefined}
               className="min-h-11"
-              describedBy={sending ? hintId : undefined}
+              describedBy={sending || held ? hintId : undefined}
               refusal={refusal}
               refusalShownBy={hintId}
               type="submit"
@@ -489,13 +493,16 @@ export function AgentThread({
             </RefusableButton>
           </div>
           {/* While a send is out, this line says Enter waits for it - Send is disabled and Enter
-              does nothing until Dispatch answers - and is the disabled button's description.
-              Otherwise, while Send refuses, it says why - on screen, for a reader with no pointer
-              to hover it - and else how to send. */}
+              does nothing until Dispatch answers - and is the disabled button's description;
+              while a switch is pending it says what the box's placeholder says, which the text
+              typed may hide. Otherwise, while Send refuses, it says why - on screen, for a
+              reader with no pointer to hover it - and else how to send. */}
           <p className={`text-xs ${textMutedOnCanvas}`} id={hintId}>
             {sending
               ? "Sending… Enter sends again once Dispatch answers."
-              : (refusal ?? "Enter to send · Shift+Enter for a new line")}
+              : held
+                ? placeholder
+                : (refusal ?? "Enter to send · Shift+Enter for a new line")}
           </p>
         </ComposerPrimitive.Root>
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>

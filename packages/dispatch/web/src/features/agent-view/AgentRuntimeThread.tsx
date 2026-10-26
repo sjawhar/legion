@@ -53,6 +53,7 @@ export function AgentRuntimeThread({
   placeholder,
   replayCount,
   resetKey,
+  sendDisabled,
   sessionId,
   stored,
   viewer,
@@ -72,6 +73,9 @@ export function AgentRuntimeThread({
    *  (`useAgentStream`'s `replays`). */
   replayCount: number;
   resetKey: string;
+  /** Holds the composer's Send while true (a switch waiting for the session's answer); what the
+   *  person types stays theirs to edit. */
+  sendDisabled: boolean;
   sessionId: string;
   stored: readonly MessageRead[];
   /** The signed-in human's login: their own messages read as theirs, every other one names its
@@ -169,9 +173,10 @@ export function AgentRuntimeThread({
     // keeps assistant-ui from planting an empty upcoming assistant turn after the viewer's
     // newest message.
     isRunning: false,
-    // While this session's send is out its composer cannot send again (Send reads "Sending…"),
-    // and the box still takes the next message.
-    isSendDisabled: sending,
+    // The composer cannot send while this session's own send is out (Send reads "Sending…") or
+    // while a model or thinking switch is pending on it, and the box still takes the next
+    // message.
+    isSendDisabled: sending || sendDisabled,
     messages,
     // assistant-ui's composer has already emptied the box when this runs. The session is the
     // one on screen now, taken before the await: the reader may have moved on by the answer.
@@ -229,6 +234,7 @@ export function AgentRuntimeThread({
         commands={commands}
         contentIds={contentIds}
         empty={empty}
+        held={sendDisabled}
         ownSendCount={ownSendCount}
         placeholder={placeholder}
         replayCount={replayCount}
