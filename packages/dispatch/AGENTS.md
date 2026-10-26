@@ -75,8 +75,11 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   entry too: `MentionComposer`'s `keepDraft` writes the draft through `HeldSends.keep` 300 ms
   after the last change (`KEEP_DRAFT_MS`), at `pagehide`, and as the composer unmounts, and
   ignores a send still out, so only a refusal's draft is written and a reload brings it back as it
-  was last left. A `MentionComposer` holds one send at a time under its name, its box disabled
-  while that send is out. The live view is the exception INFRA-442 makes: each press there is its
+  was last left. INFRA-442's rule (Send pressable whenever the box holds text, each press its own
+  write) is about sends to a session; every `MentionComposer` - the Conversation's docked
+  composer, a thread's reply, the margin's compose and reply, and the Agents row's own issue
+  comment - keeps one send at a time under its name, its box held while that send is out and its
+  refusal kept with Retry and Discard. The live view is where that rule holds: each press there is its
   own write under its own key on the session's line (`session:<id>`, `useSessionSends` in
   `features/conversation/useSessionSends.ts`), shown as its own `PendingSendTurn`
   (`[data-testid="agent-send-held"]`, `data-message-id="pending:<n>"`) at the end of the
