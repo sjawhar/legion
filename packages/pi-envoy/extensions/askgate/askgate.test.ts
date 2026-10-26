@@ -6335,6 +6335,70 @@ describe("rules check", () => {
       Array(3).fill(["verdict", "revise"])
     );
   });
+  test("after two charter refusals of an upload with no ask block, a different document with no ask block on the issue is reviewed", async () => {
+    // Neither document opens an ask: each is its own upload, never the call as a whole they would share.
+    const { g, upload } = charterRefusingDocuments();
+    const notes = "# Notes\n\nThe person said: ship it on Friday.\n";
+    await upload("a", "notes.md", notes);
+    expect((await upload("b", "notes.md", notes))?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const charters = g.calls.filter(isCharter).length;
+    const other = await upload(
+      "c",
+      "other.md",
+      "# Other\n\nThe person said: hold it until Monday.\n"
+    );
+    expect(other?.additionalContext ?? "").not.toContain('outcome="breaker"');
+    expect(other?.block).toBe(true);
+    expect(other?.reason).not.toContain(SECOND);
+    expect(g.calls.filter(isCharter)).toHaveLength(charters + 1);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual(
+      Array(3).fill(["verdict", "revise"])
+    );
+  });
+  test("after two charter refusals of an upload with no ask block, the same document name with other text is reviewed", async () => {
+    // The upload key carries the text's digest: a changed document is a new upload, not a resend.
+    const { g, upload } = charterRefusingDocuments();
+    const notes = "# Notes\n\nThe person said: ship it on Friday.\n";
+    await upload("a", "notes.md", notes);
+    expect((await upload("b", "notes.md", notes))?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const charters = g.calls.filter(isCharter).length;
+    const changed = await upload(
+      "c",
+      "notes.md",
+      "# Notes\n\nThe person said: hold it until Monday.\n"
+    );
+    expect(changed?.additionalContext ?? "").not.toContain('outcome="breaker"');
+    expect(changed?.block).toBe(true);
+    expect(changed?.reason).not.toContain(SECOND);
+    expect(g.calls.filter(isCharter)).toHaveLength(charters + 1);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual(
+      Array(3).fill(["verdict", "revise"])
+    );
+  });
+  test("after two charter refusals of a re-upload whose stored version holds every ask, the same document adding a new ask is reviewed", async () => {
+    // Each refusal counts the upload key alone, never `#window`, which the next upload still carries.
+    const { g, upload } = charterRefusingDocuments();
+    await upload("a", "brief.md", BRIEF);
+    expect((await upload("b", "brief.md", BRIEF))?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    expect(g.calls.filter(isRules)).toHaveLength(0);
+    const charters = g.calls.filter(isCharter).length;
+    const added = await upload(
+      "c",
+      "brief.md",
+      `${BRIEF}\n:::ask{#gamma}\nShould I change the gamma cache path?\n:::\n`
+    );
+    expect(added?.additionalContext ?? "").not.toContain('outcome="breaker"');
+    expect(added?.block).toBe(true);
+    expect(added?.reason).not.toContain(SECOND);
+    expect(g.calls.filter(isCharter)).toHaveLength(charters + 1);
+    const rules = g.calls.filter(isRules);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.user).toContain('id="gamma"');
+    expect(rules[0]?.user).not.toContain('id="window"');
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual(
+      Array(3).fill(["verdict", "revise"])
+    );
+  });
   test("an upload whose rules check judged only part of its asks counts its charter refusals on the judged ask, so sent unchanged a third time it goes out on the breaker as warned", async () => {
     // The read of the stored version fails: `#window` may be stored, so only the opener with no id
     // is judged, and the charter's refusals count on it.
