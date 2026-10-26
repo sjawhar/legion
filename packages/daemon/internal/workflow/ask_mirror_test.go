@@ -451,3 +451,29 @@ func TestTheGatesRequestIsNoPersonsActWhateverTheBindingOrder(t *testing.T) {
 		}
 	}
 }
+
+// A version of the gate's document can reach a bound request the mirror has no row of yet (a
+// registration whose read gave no sequence writes none). It records the turn alone, and says
+// nothing of whether the request is open: the row is a valid one, the fact applies, and a later
+// opening of the request, older than the version, still opens it and leaves the version's turn.
+func TestAVersionReachingARequestWithNoRowRecordsOnlyItsTurn(t *testing.T) {
+	version := intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 3, Mark: askSeq(12)}
+	opened := intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, AuthorSession: askArchitect.ID, Mark: askSeq(10)}
+	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-approval", Kind: record.AskApproval, Open: true, Seq: 10, WaitingOn: "agent", WaitingOnSeq: 12,
+		ByTree: true, GateRequest: true}
+	for name, facts := range map[string][]intake.Fact{"version-first": {version, opened}, "opened-first": {opened, version}} {
+		pool, apply := askRig(t)
+		seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, RequestAsk: "ask-approval",
+			RequestArtifact: "artifact-208"})
+		apply(fmt.Sprintf("%s-0", name), facts[0])
+		if name == "version-first" {
+			if got := mirroredAsk(t, pool, "ask-approval"); got == nil || got.Open || got.Seq != 0 || got.WaitingOn != "agent" || got.WithHuman() {
+				t.Fatalf("request row after the version alone = %#v, want only the agent's turn at 12", got)
+			}
+		}
+		apply(fmt.Sprintf("%s-1", name), facts[1])
+		if got := mirroredAsk(t, pool, "ask-approval"); got == nil || *got != want {
+			t.Fatalf("%s: request row = %#v, want %#v", name, got, want)
+		}
+	}
+}
