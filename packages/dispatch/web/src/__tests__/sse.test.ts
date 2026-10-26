@@ -603,6 +603,21 @@ const referenceWrites: ReadonlySet<EventType> = new Set([
   "message.created",
 ]);
 
+/**
+ * The events that can change a document's question map (`refs.QuestionMap`) or move a text to
+ * another document's map (`refs.ScopeOf`), each of which refreshes `["reference-questions"]`: a
+ * document's creation or version, an ask's creation or edit, and an ask's or comment's anchor
+ * refresh. Listed independently of `sse.ts`, as `referenceWrites` is.
+ */
+const questionMapWrites: ReadonlySet<EventType> = new Set([
+  "artifact.created",
+  "artifact.version",
+  "ask.anchor_refreshed",
+  "ask.edited",
+  "ask.opened",
+  "comment.anchor_refreshed",
+]);
+
 /** The rows a changed target's backlink count sits on, written independently of `sse.ts`. */
 function countedRowKeys(incoming: Event): unknown[][] {
   if (truncatedTargets(incoming)) {
@@ -774,11 +789,12 @@ test.each(
   ];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
+  const questionMaps = questionMapWrites.has(incoming.type) ? [["reference-questions"]] : [];
   const lists = conversationListAdditions([...base, ...counted]);
   // Which rows refresh is the contract; the order they are queued in and whether a key is
   // repeated are not, since the stream's pending map is keyed on the serialised key.
   expect(keySet(invalidatedKeys(incoming))).toEqual(
-    keySet([...base, ...counted, ...references, ...lists])
+    keySet([...base, ...counted, ...references, ...questionMaps, ...lists])
   );
 });
 
@@ -862,6 +878,18 @@ test("a write refreshes the rows of the nodes it cited, and a plain one refreshe
     expect(keys).not.toContainEqual(["inbox"]);
     expect(keys.some((key) => key[0] === "ask")).toBe(false);
   }
+});
+
+// A question map changes only with a document's question blocks, an ask made or edited for one,
+// or an anchor that moves a text to another document, so a new comment or message - the common
+// event - leaves the map of every mounted body that writes a `#id` alone.
+test("a document version refreshes the question maps, and a new comment does not", () => {
+  expect(
+    invalidatedKeys(event("comment.created", { id: "comment-1", anchor: null }))
+  ).not.toContainEqual(["reference-questions"]);
+  expect(invalidatedKeys(event("artifact.version", { artifact_id: "artifact-1" }))).toContainEqual([
+    "reference-questions",
+  ]);
 });
 
 // A mapping write can change which repository every issue of its project resolves to (a new

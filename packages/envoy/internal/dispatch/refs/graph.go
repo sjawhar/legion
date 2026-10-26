@@ -199,6 +199,24 @@ func Node(ctx context.Context, q Queryer, kind, id string, byRefKey bool) (model
 	return node.GraphNode, found, nil
 }
 
+// Nodes is Node for many ids of one kind, an artifact's by uuid, keyed by id and read in one load
+// rather than one per id. An id with no node is absent.
+func Nodes(ctx context.Context, q Queryer, kind string, ids []string) (map[string]model.GraphNode, error) {
+	rows := make([]edgeRow, len(ids))
+	for index, id := range ids {
+		rows[index] = edgeRow{otherKind: kind, otherID: id}
+	}
+	resolved, err := resolveNodes(ctx, q, false, rows)
+	if err != nil {
+		return nil, err
+	}
+	nodes := make(map[string]model.GraphNode, len(resolved))
+	for key, node := range resolved {
+		nodes[key[1]] = node.GraphNode
+	}
+	return nodes, nil
+}
+
 // resolvedNode is a graph node with the text an excerpt is cut from.
 type resolvedNode struct {
 	model.GraphNode

@@ -536,10 +536,11 @@ test("Unfurl shows no card, and asks GitHub nothing, for references with text be
   );
 
   try {
-    // The key's existence is asked, as the body's own MarkdownBody asks it; nothing else is.
-    await waitFor(() => expect(getIssue).toHaveBeenCalledWith("CORE-12"));
+    // Text beside the references means no card whatever the key names, so the card asks nothing:
+    // not the key's existence (the body's own MarkdownBody asks that), and not GitHub.
     await Bun.sleep(20);
     expect(view.container.querySelector("section")).toBeNull();
+    expect(getIssue).not.toHaveBeenCalled();
     expect(githubRest).not.toHaveBeenCalled();
   } finally {
     githubRest.mockRestore();

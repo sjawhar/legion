@@ -56,28 +56,38 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it, so no
-// producer can reconcile the graph without holding what moved: replace itself is unexported. It
-// ends by deleting the source's refs_owed row (migration 0118), which the write's own trigger made
-// in the same transaction, so a write this build indexes is not re-indexed by the drain
-// (docs.Service.RunReferenceReindex); a build before it never deletes one, so its writes stay
-// owed. A row the drain or a rebuild has claimed is skipped rather than waited for: the claimer
-// re-reads the source, and waiting here while holding this source's edges could close a cycle with
-// it.
+// that source appends has to name. Every write that indexes a body goes through it or
+// ReplaceCountedWith, so no producer can reconcile the graph without holding what moved: replace
+// itself is unexported. It ends by deleting the source's refs_owed row (migration 0118, ClaimOwed),
+// which the write's own trigger made in the same transaction, so a write this build indexes is not
+// re-indexed by the drain (docs.Service.RunReferenceReindex); a build before it never deletes one,
+// so its writes stay owed. A row the drain or a rebuild has claimed is skipped rather than waited
+// for: the claimer re-reads the source, and waiting here while holding this source's edges could
+// close a cycle with it.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	changed, err := replace(ctx, tx, fromKind, fromID, body, serverURL)
+	return ReplaceCountedWith(ctx, tx, fromKind, fromID, body, serverURL, NewResolver(ctx, tx, fromKind, fromID))
+}
+
+// ReplaceCountedWith is ReplaceCounted reading a bare key and a `#id` through resolver, the
+// source's NewResolver, for a write that reads the same text's mentions again in its transaction
+// (docs.Service.IndexDocumentReferences, which cuts the version's excerpts after it): a resolver
+// remembers what it read, so the second read asks the database nothing the first did.
+func ReplaceCountedWith(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, body, serverURL string,
+	resolver text.Resolver,
+) (model.ReferenceChanges, error) {
+	changed, err := replaceAt(ctx, tx, fromKind, fromID, body, serverURL, resolver, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	if _, err := tx.Exec(ctx, `
-		delete from refs_owed
-		where (kind, id) in (select kind, id from refs_owed where kind = $1 and id = $2 for update skip locked)
-	`, fromKind, fromID); err != nil {
-		return model.ReferenceChanges{}, fmt.Errorf("settle the owed re-index of %s %s: %w", fromKind, fromID, err)
+	if _, err := ClaimOwed(ctx, tx, fromKind, fromID); err != nil {
+		return model.ReferenceChanges{}, err
 	}
 	return CountedChanges(ctx, tx, changed)
 }

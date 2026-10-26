@@ -13,7 +13,7 @@ import {
 
 import { MarkdownPreview } from "./MarkdownPreview";
 import { type BareReferences, ReferenceTitleWords } from "./RefLink";
-import { useReferenceData, useReferenceTarget } from "./reference-target";
+import { useReferenceData, useReferenceTargetOf } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -71,8 +71,8 @@ function targetSource(
 
 function DispatchUnfurl({ card }: { card: DispatchCard }): ReactNode {
   const route = parseDispatchReference(card.reference);
-  const { title, titleKey, description } = useReferenceTarget(route);
-  const { artifact } = useReferenceData(route);
+  const data = useReferenceData(route);
+  const { title, titleKey, description } = useReferenceTargetOf(route, data);
 
   return (
     <a
@@ -87,7 +87,7 @@ function DispatchUnfurl({ card }: { card: DispatchCard }): ReactNode {
         )}
       </span>
       {description === undefined ? null : (
-        <Body markdown={description} source={targetSource(route, artifact)} />
+        <Body markdown={description} source={targetSource(route, data.artifact)} />
       )}
     </a>
   );
@@ -218,16 +218,36 @@ function referenceCards(
 }
 
 /**
+ * Whether body has the shape of a reference-only body (`referenceCards`) at all: trimmed, nothing
+ * but the references `textReferences` reads in it, each separated from the next by whitespace, by
+ * the same gap test `referenceCards` makes. A body without that shape shows no card whatever its
+ * keys and `#id`s name, since `referenceCards` covers no more of a reference than it spans, so
+ * `Unfurl` asks about none of them.
+ */
+function referenceOnlyShape(body: string): boolean {
+  let covered = 0;
+  for (const reference of textReferences(body)) {
+    if (reference.start < covered || !whitespaceOnly.test(body.slice(covered, reference.start))) {
+      return false;
+    }
+    covered = reference.end;
+  }
+  return covered !== 0 && whitespaceOnly.test(body.slice(covered));
+}
+
+/**
  * The cards of a reference-only body (`referenceCards`): trimmed, every whitespace-separated word
  * of it is one whole reference that names its target. Such a body shows a card per distinct
  * reference beside its rendered text, in the margin, the Inbox thread and the Conversation alike;
  * a body with anything else beside its references shows none, since `MarkdownBody` already draws
  * each reference inline with its title. The issue keys and `#id`s are read through the same
  * cached queries `MarkdownBody` reads them through (`useBareReferences`), the `#id`s against
- * `source`'s document, so a key or `#id` still loading shows no card until it resolves.
+ * `source`'s document, so a key or `#id` still loading shows no card until it resolves; a body
+ * without the shape of one (`referenceOnlyShape`), which is most prose, asks about none.
  */
 export function Unfurl({ body, source }: UnfurlProps): ReactNode {
-  const resolved = useBareReferences(body, source);
+  const shaped = useMemo(() => referenceOnlyShape(body), [body]);
+  const resolved = useBareReferences(shaped ? body : "", source);
   const cards = useMemo(
     () => referenceCards(body, resolved, window.location.origin),
     [body, resolved]

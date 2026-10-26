@@ -192,24 +192,21 @@ func (s *server) getReferenceQuestions(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// One ask can stand for several blocks (copies of one question), so each is read once.
-	asks := map[string]string{}
-	for _, blockID := range slices.Sorted(maps.Keys(questions)) {
-		askID := questions[blockID].ID
-		address, read := asks[askID]
-		if !read {
-			node, found, err := refs.Node(ctx, pool, "ask", askID, false)
-			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if found {
-				address = node.Ref
-			}
-			asks[askID] = address
-		}
-		if address != "" {
-			result.Questions = append(result.Questions, referenceQuestion{BlockID: blockID, Ask: address})
+	// One ask can stand for several blocks (copies of one question), so each is read once, and
+	// every ask in one load.
+	blockIDs := slices.Sorted(maps.Keys(questions))
+	askIDs := make([]string, 0, len(blockIDs))
+	for _, blockID := range blockIDs {
+		askIDs = append(askIDs, questions[blockID].ID)
+	}
+	asks, err := refs.Nodes(ctx, pool, "ask", askIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	for _, blockID := range blockIDs {
+		if ask, found := asks[questions[blockID].ID]; found && ask.Ref != "" {
+			result.Questions = append(result.Questions, referenceQuestion{BlockID: blockID, Ask: ask.Ref})
 		}
 	}
 	WriteJSON(w, http.StatusOK, result)

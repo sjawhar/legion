@@ -8,30 +8,35 @@
 -- The lines compared are every line holding a `:::ask{` opener (three or more colons), sorted, of
 -- this version and of the document's previous version holding markdown (none before the first):
 -- more than refs.questionBlocks reads, which also wants the line to be the directive and to name
--- an id, so any change it can see changes these lines. artifact_versions is insert-only; an image
--- or file version carries no markdown, is never indexed, and owes nothing. Its own migration, so
--- the transaction holds artifact_versions' lock alone (0074's precedent).
+-- an id, so any change it can see changes these lines. Each line matching `:{3,}ask\{` holds
+-- `:::ask{`, so a version without that text - most documents, which declare no question block - has
+-- none and is never split into lines. artifact_versions is insert-only; an image or file version
+-- carries no markdown, is never indexed, and owes nothing. Its own migration, so the transaction
+-- holds artifact_versions' lock alone (0074's precedent).
 create function refs_owed_version() returns trigger language plpgsql as $$
 declare
-  directives text[];
-  previous text[];
+  directives text[] := '{}';
+  previous text[] := '{}';
+  earlier text;
 begin
   perform refs_owed_enqueue('artifact', new.artifact_id::text);
-  directives := array(
-    select line from regexp_split_to_table(new.markdown, E'\n') as line
-    where line ~ ':{3,}ask\{'
-    order by line
-  );
-  previous := array(
-    select line
-    from (
-      select markdown from artifact_versions
-      where artifact_id = new.artifact_id and number < new.number and markdown is not null
-      order by number desc limit 1
-    ) earlier, regexp_split_to_table(earlier.markdown, E'\n') as line
-    where line ~ ':{3,}ask\{'
-    order by line
-  );
+  if strpos(new.markdown, ':::ask{') > 0 then
+    directives := array(
+      select line from regexp_split_to_table(new.markdown, E'\n') as line
+      where line ~ ':{3,}ask\{'
+      order by line
+    );
+  end if;
+  select markdown into earlier from artifact_versions
+  where artifact_id = new.artifact_id and number < new.number and markdown is not null
+  order by number desc limit 1;
+  if strpos(earlier, ':::ask{') > 0 then
+    previous := array(
+      select line from regexp_split_to_table(earlier, E'\n') as line
+      where line ~ ':{3,}ask\{'
+      order by line
+    );
+  end if;
   if directives is distinct from previous then
     perform refs_owed_enqueue('scope', new.artifact_id::text);
   end if;

@@ -1,4 +1,4 @@
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
 import type { DOMSerializer, Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, type RefObject, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -13,7 +13,7 @@ import {
   type ReferenceAnchor,
   RefLink,
 } from "./RefLink";
-import { issueQuery, referenceQuestionsQuery, referenceRetry } from "./reference-target";
+import { issueQuery, referenceRetry, useQuestionMap } from "./reference-target";
 import { textReferences } from "./routes";
 
 /** The anchor list of a body with no references: one shared value, so re-rendering such a body
@@ -89,18 +89,9 @@ export function useBareReferences(
     combine: (results) =>
       keys.filter((_key, index) => results[index]?.data !== undefined).join(" "),
   });
-  const readsQuestions = source !== undefined && writesQuestion;
-  const questionMap = useQuery({
-    ...referenceQuestionsQuery(source),
-    enabled: readsQuestions,
-    retry,
-  });
-  const questions = readsQuestions ? questionMap.data?.questions : undefined;
+  const questions = useQuestionMap(source, source !== undefined && writesQuestion);
   return useMemo(
-    () => ({
-      issues: new Set(existing === "" ? [] : existing.split(" ")),
-      questions: new Map(questions?.map((question) => [question.block_id, question.ask])),
-    }),
+    () => ({ issues: new Set(existing === "" ? [] : existing.split(" ")), questions }),
     [existing, questions]
   );
 }

@@ -284,6 +284,23 @@ function changesReferenceGraph(event: Event): boolean {
   );
 }
 
+// Every event that can change a document's question map (`refs.QuestionMap`, read by
+// `referenceQuestionsQuery`) or move a text to another document's map (`refs.ScopeOf`): a
+// document's creation (a new issue spec is its issue's messages' document) or version (its question
+// blocks), an ask's creation (settlement makes a block's ask) or edit, and an ask's or comment's
+// anchor refresh. Narrower than `changesReferenceGraph`, so a new message or comment does not
+// refetch the map of every mounted body that writes a `#id`.
+function changesQuestionMap(event: Event): boolean {
+  return (
+    event.type === "artifact.created" ||
+    event.type === "artifact.version" ||
+    event.type === "ask.anchor_refreshed" ||
+    event.type === "ask.edited" ||
+    event.type === "ask.opened" ||
+    event.type === "comment.anchor_refreshed"
+  );
+}
+
 // What the server says one write moved in the reference graph: `refs.ReplaceCounted` reconciles
 // the edges in the same transaction that appends the event and names the targets whose readers
 // carry a batched backlink count — an issue (its detail) and an ask (its rows, and the Inbox).
@@ -398,6 +415,9 @@ export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly 
   keys.push(...changedReferenceKeys(event));
   if (changesReferenceGraph(event)) {
     keys.push(["references"]);
+  }
+  if (changesQuestionMap(event)) {
+    keys.push(["reference-questions"]);
   }
   return keys;
 }
@@ -678,8 +698,8 @@ const INVALIDATION_DEBOUNCE_MS = 100;
 // refresh: a request a window or more after the last one schedules it for now, and any inside
 // the window joins that same pending refresh, so a change no key can be derived from always
 // arrives within the window of the request that asked for it.
-// The backlink panels' own `["references"]` queries are part of "everything", so a reconnect
-// refreshes them too.
+// The backlink panels' own `["references"]` queries and the question maps under
+// `["reference-questions"]` are part of "everything", so a reconnect refreshes them too.
 // Exported for the one test that deliberately runs at the production window rather than an
 // injected one, so it reads the real number instead of keeping a copy that drifts.
 export const WHOLE_CACHE_REFRESH_MS = 5_000;

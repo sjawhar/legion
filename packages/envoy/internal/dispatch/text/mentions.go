@@ -58,7 +58,7 @@ func Mentions(body, serverURL string, r Resolver) ([]Located, error) {
 			}
 			if c == '#' {
 				end := i + 1
-				for end < len(body) && blockIDByte(body[end]) {
+				for end < len(body) && IsBlockIDByte(body[end]) {
 					end++
 				}
 				if end > i+1 {
@@ -234,7 +234,8 @@ func isDigitByte(c byte) bool {
 	return c >= '0' && c <= '9'
 }
 
-// blockIDByte is a character of a question block's id, as the `:::ask{#id}` line declares it.
-func blockIDByte(c byte) bool {
+// IsBlockIDByte reports whether c is a character of a question block's id, as the `:::ask{#id}`
+// line declares it; refs reads a declaration's id and attribute names by the same set.
+func IsBlockIDByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || isDigitByte(c) || c == '_' || c == '-'
 }

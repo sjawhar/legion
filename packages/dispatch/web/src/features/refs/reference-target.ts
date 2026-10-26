@@ -1,4 +1,5 @@
 import { type QueryClient, queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 
 import { ApiError, api, artifactVersionPath, type ReferenceSource } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
@@ -139,14 +140,15 @@ export const commentQuery = (id: string | undefined) =>
 /**
  * The question map a `#id` in source's text resolves against: the document the text belongs to and
  * its question blocks, each to its ask (`GET /api/v1/references/questions`). Keyed under
- * `["references"]`, which the event stream refreshes on every write that rewrites the reference
- * index (`changesReferenceGraph` in `api/sse.ts`): a document version, which can add or retire a
- * block, and `ask.opened`, which settlement writes as it makes a block's ask - the same events
- * that refetch the document's asks.
+ * `["reference-questions"]`, which the event stream refreshes only on the writes that can change a
+ * document's question map or move a text to another document (`changesQuestionMap` in
+ * `api/sse.ts`): a document's creation or version, which can add or retire a block, `ask.opened`,
+ * which settlement writes as it makes a block's ask, an ask's edit, and an ask's or comment's anchor
+ * refresh. A new message or comment leaves every mounted map alone.
  */
 export const referenceQuestionsQuery = (source: ReferenceSource | undefined) =>
   queryOptions({
-    queryKey: ["references", "questions", source?.kind, source?.id],
+    queryKey: ["reference-questions", source?.kind, source?.id],
     queryFn: () => {
       if (source === undefined) {
         throw new Error("A question map needs the text it is read for.");
@@ -411,8 +413,33 @@ const NO_TARGET: ReferenceTarget = {
  * of the latest.
  */
 export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
-  const data = useReferenceData(route);
+  return useReferenceTargetOf(route, useReferenceData(route));
+}
+
+/** `useReferenceTarget` for a caller that already reads route's records (`useReferenceData`), so
+ *  it subscribes to them once. */
+export function useReferenceTargetOf(
+  route: DispatchReferenceRoute | undefined,
+  data: ReferenceData
+): ReferenceTarget {
   const authored = route === undefined ? undefined : authoredText(route, data);
   const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
   return route === undefined ? NO_TARGET : referenceTargetOf(route, data, headline);
+}
+
+/** The question map of source's document (`referenceQuestionsQuery`) as each block id to its ask's
+ *  `dispatch://` reference, asked only while enabled and empty until it answers; a 404 is final
+ *  (`referenceRetry`). One value until the answer or enabled changes, so a reader may memoise on
+ *  it. */
+export function useQuestionMap(
+  source: ReferenceSource | undefined,
+  enabled: boolean
+): ReadonlyMap<string, string> {
+  const retry = referenceRetry(useQueryClient());
+  const { data } = useQuery({ ...referenceQuestionsQuery(source), enabled, retry });
+  const questions = data?.questions;
+  return useMemo(
+    () => new Map(enabled ? questions?.map((question) => [question.block_id, question.ask]) : []),
+    [enabled, questions]
+  );
 }

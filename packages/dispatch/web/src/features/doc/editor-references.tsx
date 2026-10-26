@@ -1,12 +1,7 @@
 import type { EditorReferences, ReferenceCandidate, ReferenceTarget } from "@legion/proof-editor";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type MouseEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
-import {
-  referenceQuestionsQuery,
-  referenceRetry,
-  useReferenceTarget,
-} from "../refs/reference-target";
+import { useQuestionMap, useReferenceTarget } from "../refs/reference-target";
 import {
   buildReferencePath,
   type DispatchReferenceRoute,
@@ -120,16 +115,11 @@ export function EditorReferenceTargets({
   keys: readonly string[];
   onTargets(targets: ReadonlyMap<string, ReferenceTarget | null>): void;
 }): ReactNode {
-  const retry = referenceRetry(useQueryClient());
-  const readsQuestions = keys.some((key) => key.startsWith("#"));
-  const questionMap = useQuery({
-    ...referenceQuestionsQuery({ id: artifactId, kind: "artifact" }),
-    enabled: readsQuestions,
-    retry,
-  });
-  const questions = readsQuestions ? questionMap.data?.questions : undefined;
+  const blocks = useQuestionMap(
+    { id: artifactId, kind: "artifact" },
+    keys.some((key) => key.startsWith("#"))
+  );
   const named = useMemo(() => {
-    const blocks = new Map(questions?.map((question) => [question.block_id, question.ask]));
     const references = new Map<string, NamedReference>();
     for (const key of keys) {
       const href = key.startsWith("#")
@@ -143,7 +133,7 @@ export function EditorReferenceTargets({
       }
     }
     return references;
-  }, [keys, questions]);
+  }, [keys, blocks]);
 
   const [titles, setTitles] = useState<ReadonlyMap<string, ReferenceTarget | null>>(new Map());
   const onTarget = useCallback((name: string, target: ReferenceTarget | null) => {

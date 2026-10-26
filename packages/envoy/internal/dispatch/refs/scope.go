@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -173,22 +174,14 @@ func ScopeSources(ctx context.Context, q Queryer, doc string) ([]Target, error) 
 // into it as copied_from. A block with neither (not settled yet) is absent. It reads the latest
 // version's directive lines, never parsing the document, and takes no lock.
 func QuestionMap(ctx context.Context, q Queryer, doc string) (map[string]text.Ref, error) {
-	if !isUUID(doc) {
-		return nil, nil
-	}
-	var markdown string
-	err := q.QueryRow(ctx, `
-		select markdown from artifact_versions
-		where artifact_id = $1 and markdown is not null
-		order by number desc limit 1
-	`, doc).Scan(&markdown)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
+	source, err := LoadSource(ctx, q, "artifact", doc)
 	if err != nil {
 		return nil, fmt.Errorf("read the latest version of document %s: %w", doc, err)
 	}
-	blocks := questionBlocks(markdown)
+	if !source.Exists {
+		return nil, nil
+	}
+	blocks := questionBlocks(source.Body)
 	if len(blocks) == 0 {
 		return nil, nil
 	}
@@ -313,15 +306,15 @@ func askDirective(line string) (questionBlock, bool) {
 		case attrs[offset] == '#':
 			start := offset + 1
 			offset = start
-			for offset < len(attrs) && directiveNameByte(attrs[offset]) {
+			for offset < len(attrs) && text.IsBlockIDByte(attrs[offset]) {
 				offset++
 			}
 			if block.id == "" {
 				block.id = attrs[start:offset]
 			}
-		case directiveNameByte(attrs[offset]):
+		case text.IsBlockIDByte(attrs[offset]):
 			start := offset
-			for offset < len(attrs) && directiveNameByte(attrs[offset]) {
+			for offset < len(attrs) && text.IsBlockIDByte(attrs[offset]) {
 				offset++
 			}
 			name := attrs[start:offset]
@@ -370,10 +363,6 @@ func trimContainerMarkers(line string) string {
 	}
 }
 
-func directiveNameByte(char byte) bool {
-	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-'
-}
-
 func isUUID(id string) bool {
 	_, err := uuid.Parse(id)
 	return err == nil
@@ -384,6 +373,11 @@ func isUUID(id string) bool {
 // in the source's scope (ScopeOf, QuestionMap), which is read only when the text holds a `#id`.
 // A resolver made with the question map of a document (NewScopedResolver) answers that map, unread
 // again, while the source's scope is still that document.
+//
+// It remembers its answers: a write that reads the same text's mentions twice in its transaction -
+// its index, then a document's excerpts (ReplaceCountedWith, MentionExcerpts) - asks the database
+// once. Nothing between those reads writes an issue, an ask, a version or a source's scope, so the
+// second read's answer is the first's.
 type resolver struct {
 	ctx       context.Context
 	q         Queryer
@@ -391,12 +385,22 @@ type resolver struct {
 	fromID    string
 	scope     string
 	questions map[string]text.Ref
+
+	// issueKeys and issues are the last Issues call's keys and answer, while issuesRead says
+	// there was one.
+	issueKeys  []string
+	issues     map[string]bool
+	issuesRead bool
+	// ownQuestions is Questions' first answer, while questionsRead says there was one; it is kept
+	// apart from questions, the map a NewScopedResolver was made with.
+	ownQuestions  map[string]text.Ref
+	questionsRead bool
 }
 
 // NewResolver is the text.Resolver for the text the source (fromKind, fromID) writes, read through
 // q: the transaction that writes it, or the pool for a reader outside one.
 func NewResolver(ctx context.Context, q Queryer, fromKind, fromID string) text.Resolver {
-	return resolver{ctx: ctx, q: q, fromKind: fromKind, fromID: fromID}
+	return &resolver{ctx: ctx, q: q, fromKind: fromKind, fromID: fromID}
 }
 
 // NewScopedResolver is NewResolver for a source of the scope of the document doc whose question map,
@@ -406,14 +410,34 @@ func NewResolver(ctx context.Context, q Queryer, fromKind, fromID string) text.R
 // of doc's scope since its caller listed it (a comment anchored elsewhere) resolves against its
 // own scope's map, as NewResolver's does, and never against doc's.
 func NewScopedResolver(ctx context.Context, q Queryer, fromKind, fromID, doc string, questions map[string]text.Ref) text.Resolver {
-	return resolver{ctx: ctx, q: q, fromKind: fromKind, fromID: fromID, scope: doc, questions: questions}
+	return &resolver{ctx: ctx, q: q, fromKind: fromKind, fromID: fromID, scope: doc, questions: questions}
 }
 
-func (r resolver) Issues(keys []string) (map[string]bool, error) {
-	return existingIssues(r.ctx, r.q, keys)
+func (r *resolver) Issues(keys []string) (map[string]bool, error) {
+	if r.issuesRead && slices.Equal(r.issueKeys, keys) {
+		return r.issues, nil
+	}
+	issues, err := existingIssues(r.ctx, r.q, keys)
+	if err != nil {
+		return nil, err
+	}
+	r.issueKeys, r.issues, r.issuesRead = slices.Clone(keys), issues, true
+	return issues, nil
 }
 
-func (r resolver) Questions() (map[string]text.Ref, error) {
+func (r *resolver) Questions() (map[string]text.Ref, error) {
+	if r.questionsRead {
+		return r.ownQuestions, nil
+	}
+	questions, err := r.readQuestions()
+	if err != nil {
+		return nil, err
+	}
+	r.ownQuestions, r.questionsRead = questions, true
+	return questions, nil
+}
+
+func (r *resolver) readQuestions() (map[string]text.Ref, error) {
 	doc, err := ScopeOf(r.ctx, r.q, r.fromKind, r.fromID)
 	if err != nil || doc == "" {
 		return nil, err

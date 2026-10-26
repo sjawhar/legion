@@ -100,11 +100,7 @@ func OwedSources(ctx context.Context, q Queryer, limit int) ([]Owed, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list owed re-indexes: %w", err)
 	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Owed, error) {
-		var owed Owed
-		err := row.Scan(&owed.Kind, &owed.ID, &owed.EnqueuedAt)
-		return owed, err
-	})
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[Owed])
 }
 
 // ClaimOwed deletes the refs_owed row of the source (kind, id) in tx, the first statement of the
