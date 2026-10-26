@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-257",
+  "completed": "2026-10-26T03:32:37Z",
+  "headSha": "41122e065c6d6c5caeb5f1bb3e12c86523dd53b1",
+  "codeHeadSha": "1e49b22397faf9a0ef280f046560901e0b9b1d39",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface on my own: Kubernetes Job infra-257-tester-wf2hj on the same merged-head image sha256:505405525c32649158381ec297546cc65d1c3fe0981783eb776e6aaffc4d0f1b. With CGO_ENABLED=1 and no CC override, the same internal/bus race test passed (ok 197.379s, implementer's 197.536s). The same cgo-default checks read 0 (env, default build, env -i, the Python eval-kernel env). The image probe's toolchain row shows /usr/bin/gcc. The implementer's negative control (main's image fails with gcc not found) matches what the race-without-opt-in refusal and the hidden-gcc probe refusal show."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "In a worker pod, `CGO_ENABLED=1 go test -race` runs on a package of `packages/envoy` and reports its result.",
+      "surface": "Kubernetes Job infra-257-tester-wf2hj, namespace builds, image ghcr.io/sjawhar/legion-worker@sha256:505405525c32649158381ec297546cc65d1c3fe0981783eb776e6aaffc4d0f1b (the merged head 1e49b223's Worker Image run 40260507266): gVisor, uid/gid 1000, capabilities dropped, RuntimeDefault seccomp, image ENV and PATH, Postgres sidecar (CI's pgvector digest) for DISPATCH_TEST_DATABASE_URL, source checked out at the PR head. Log: https://github.com/sjawhar/legion/pull/2222#issuecomment-6407604755",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ (CI envoy-go-race's own command); CGO_ENABLED=1 go -C packages/daemon test -count=1 -race ./internal/sessionproxy/ ./internal/launcher/; from a python3 subprocess with only allowlisted env names (Oh My Pi's eval kernel): CGO_ENABLED=1 go build -race canary.go && ./canary",
+      "observed": "No CC/CXX/CGO_*/GOFLAGS/GOTOOLCHAIN set; /usr/bin/gcc is gcc (Debian 14.2.0-19) 14.2.0. docs ok 476.672s, api ok 508.119s, delivery ok, delivery/measures ok, store ok 68.482s, bus ok 197.379s, no WARNING: DATA RACE in the lane. pmdoc FAIL on two timing tests (TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount). Job infra-257-tester-pmdoc-b4nsm shows them failing the same way without -race and with cgo off: getrusage under gVisor moves in 10 ms steps (`took 10ms at 127 KiB, +Inf times the 0s`). The failure comes from the environment, not this change; the repository learning LEGION-752 records it, and the finding went to dispatch://INFRA-49/ask/0a0a34e5-fe7d-410c-aaae-ec279a3acaac, which the controller folded into dispatch://INFRA-436. Daemon sessionproxy ok, launcher ok under -race. The eval-kernel opt-in race build exits 0, and the canary exits 66 with WARNING: DATA RACE.",
+      "headSha": "41122e065c6d6c5caeb5f1bb3e12c86523dd53b1",
+      "negativeControl": "In the same image, `go build -race canary.go` without CGO_ENABLED=1 exits 2 with `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`. `legion probe-image --skip-agent-models` with gcc hidden from PATH (a symlink copy of /usr/bin without gcc) exits non-zero: `capability toolchain is missing: gcc is not on PATH`. Unchanged, it prints `toolchain: present (on PATH: /usr/local/bin/go, /usr/bin/gcc, …)` and `probe-image: OK`."
+    },
+    {
+      "criterion": "Default Go builds in the pod still use `CGO_ENABLED=0`.",
+      "surface": "Same Job infra-257-tester-wf2hj on image sha256:505405525c32649158381ec297546cc65d1c3fe0981783eb776e6aaffc4d0f1b. Also `legion start --check-config` from a `legion` built at the PR head in my worker pod, against deploy/kubernetes/daemon/legion.yaml.example with dummy token files and kubeconfig. Log: https://github.com/sjawhar/legion/pull/2222#issuecomment-6407604755",
+      "command": "go env -w CGO_ENABLED=1; go env CGO_ENABLED; env -i PATH HOME XDG_CONFIG_HOME GOCACHE go env CGO_ENABLED; go env -u CGO_ENABLED; env -i ... go env CGO_ENABLED; python3 subprocess with Oh My Pi's eval-kernel env allowlist: go env CGO_ENABLED, go build def.go && go version -m; env -i ... go -C packages/daemon test ./internal/supervise/ -run TestTheTableHasARowOrANamedIgnoreForEveryEventInEveryState; legion start --check-config --config <example plus runtime.kubernetes.pod.env CGO_ENABLED: \"1\" | \"0\">",
+      "observed": "Image env CGO_ENABLED=0. After `go env -w CGO_ENABLED=1`, `go env CGO_ENABLED` still prints 0 (Go warns that the OS environment wins); under env -i it prints 1, and after `go env -u` it prints 0 (go.env), as docs/kubernetes.md says. In the eval-kernel env (no CGO_ENABLED), go env prints 0 and a default build records CGO_ENABLED=0. The documented boundary, a go/build reader under env -i, gets cgo on and still passes (supervise ok 5.170s, gcc present). --check-config refuses pod.env CGO_ENABLED \"1\" and \"0\" with exit 1: `runtime.kubernetes.pod.env sets CGO_ENABLED, which the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)`. The unchanged example prints Config OK, and CGO_ENABLEDX passes.",
+      "headSha": "41122e065c6d6c5caeb5f1bb3e12c86523dd53b1",
+      "negativeControl": "A `legion` built from main 135d22e0 prints `Config OK: project=WIDGETS` (exit 0) for the same file with pod.env CGO_ENABLED that this head refuses. In the head image, `go env -w CGO_ENABLED=1` under env -i turns cgo on (1), so the 0 the scrubbed environment reads comes from the go.env default, not from cgo being unavailable."
+    }
+  ],
+  "observations": [
+    "Coverage: the image probe and the build's `gcc --version` step catch a dropped gcc (shown by the hidden-gcc probe run). TestImageEnvIsWhatTheWorkerImageSets catches a dropped ENV. Nothing but a live run catches a dropped /opt/go/go.env line, as the PR body's risk line already says. If that line is lost, only scrubbed environments (the eval kernel) get cgo on, and with gcc present those builds still succeed, linked dynamically. Not a defect at this head, so no red test.",
+    "Not reproduced: a real Sandbox issue pod and Oh My Pi's real eval kernel on the new image. A python3 subprocess with the kernel's allowlist (read from this tester's own live eval kernel, which carries no image ENV) stands in for the kernel; the production check covers the real pod.",
+    "The tester's issue pod mounts /legion over 9p under gVisor, and building and running a binary from $TMPDIR=/legion/scratch/tmp works there (exec-ok), so the emptyDir in the Job does not hide an exec restriction a role's TMPDIR would have."
+  ]
+}
