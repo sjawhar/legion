@@ -610,10 +610,10 @@ test("LOGIN_CHANGED drops every write of its login and reads whoami again", asyn
 test("dropping a line of writes starts none of the writes it drops", async () => {
   await onFakeClock(async () => {
     const loginChanged = new ApiError(409, { code: "LOGIN_CHANGED", error: "signed in as bob" });
-    const paths: Record<string, (writes: Writes, first: PromiseWithResolvers<never>) => void> = {
+    const paths: Record<string, (writes: Writes, refuse: (error: Error) => void) => void> = {
       clear: (writes) => writes.clear(),
       dropLogin: (writes) => writes.dropLogin("alice"),
-      loginChanged: (_writes, first) => first.reject(loginChanged),
+      loginChanged: (_writes, refuse) => refuse(loginChanged),
       signedIn: (writes) => writes.signedIn("bob"),
     };
     const started: string[] = [];
@@ -633,7 +633,7 @@ test("dropping a line of writes starts none of the writes it drops", async () =>
         await settle();
         expect(writes.rows().map((write) => write.status)).toEqual(["sending", "queued"]);
         if (held) writes.signedIn(undefined);
-        path(writes, first);
+        path(writes, first.reject);
         await tick(60_000);
         expect(await second).toBeInstanceOf(SendStoppedError);
         expect(writes.rows()).toEqual([]);
