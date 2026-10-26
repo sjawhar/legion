@@ -32,6 +32,15 @@ afterAll(() => {
   rmSync(path.dirname(staged), { recursive: true, force: true });
 });
 
+// A Legion architect reads leading-a-work-stream. Each edit of a root spec after approval is a new
+// version, which closes the design gate, so the record of accepted requests and waits lives in an
+// artifact of its own and never in the spec.
+test("leading-a-work-stream keeps open items in their own artifact, never the spec", () => {
+  const skill = readFileSync(path.join(staged, "leading-a-work-stream", "SKILL.md"), "utf8");
+  expect(skill).toContain("a line in that issue's `open-items.md` artifact, never its spec");
+  expect(skill).not.toContain("## Open items");
+});
+
 test("every staged file is under Oh My Pi's spill threshold, so a skill:// read arrives whole", () => {
   expect(oversizedFiles(staged)).toEqual([]);
 });
@@ -79,6 +88,26 @@ test("no skill or prompt says Legion never merges", () => {
     )
     .map((file) => path.relative(REPO_ROOT, file));
   expect(saying).toEqual([]);
+});
+
+// An issue's disk dies with its pod (INFRA-80), so nothing writes the recovery marker
+// `.legion/<issue>/workspace-recovered.json` any more: `workspace-init` lost it with the lost-disk
+// verdict. The `Your workspace was recreated…` notice now reaches every resume in a new pod, so a
+// skill or prompt that still sends an agent to the marker sends every resumed agent after a file
+// that never exists.
+test("no skill or prompt sends an agent to the workspace recovery marker, which nothing writes", () => {
+  const sending = [staged, promptsRoot]
+    .flatMap(files)
+    .filter(
+      (file) =>
+        file.endsWith(".md") && readFileSync(file, "utf8").includes("workspace-recovered.json")
+    )
+    .map((file) =>
+      file.startsWith(staged)
+        ? path.join("skills", path.relative(staged, file))
+        : path.relative(REPO_ROOT, file)
+    );
+  expect(sending).toEqual([]);
 });
 
 // The controller's `gh` acts as the review App (LEGION-668): the skill must say how it checks a

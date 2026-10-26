@@ -71,26 +71,34 @@ runtime:
     image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
     storage_class: standard            # the issue volumes' class; required, the cluster has no default
     issue_volume: 50Gi                 # each issue pod's own volume (and the daemon-launched controller's); 50Gi is the default
-    # resources:                       # each role's reservation: cpu and memory, the container's limits, each
-    #   tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # requested in full unless cpu_request or
-    #   reviewer: { memory: 6Gi }      # memory_request sets less (at most the limit): with none set every Legion
-    #   implementer: { memory: 32Gi, memory_request: 8Gi }   # pod is Guaranteed, and a lower request makes every
-    #   controller: { cpu: 2, memory: 8Gi }  # pod holding that role Burstable (docs/kubernetes.md, Issue sizing);
-    #                                  # and ephemeral_storage, the container's limit on the node's disk (its root
-    #                                  # filesystem: $HOME, with the image's own content under it; the scratch and
-    #                                  # the caches are on issue_volume) over ephemeral_storage_request,
-    #                                  # what the scheduler reserves of it (at most the limit). A field or role left
-    #                                  # out takes the daemon's default: implementer, tester 750m and 6Gi; reviewer
-    #                                  # 750m and 4Gi; architect, planner, merger 250m and 1Gi; controller 1 and 4Gi
-    #                                  # (controller: daemon only, else refused); ephemeral_storage 20Gi for
-    #                                  # implementer and tester, 10Gi for the rest, over a 1Gi ephemeral_storage_request
-    #                                  # for every role. A six-role issue pod sums to 3 CPU and 19Gi at the defaults,
-    #                                  # its disk limits to 80Gi over 6Gi of requests
+    session_store: postgres            # required: where every pod's Oh My Pi keeps its sessions, a store that
+                                       # keeps them in a database — postgres, or cloudsql-iam (each pod signs in
+                                       # to Cloud SQL as itself and holds no URL; it takes session_database in
+                                       # place of session_dsn_secret, docs/kubernetes.md "Selecting the store").
+                                       # pvc and an omitted key are refused: an issue pod's disk is deleted with
+                                       # the pod, so a session kept as a file on it would die with it and the
+                                       # next launch's resume would fail on the missing file
+    session_dsn_secret: SESSION_DSN    # required with postgres: the key of the providers Secret holding that
+                                       # database's postgres:// URL, which every pod mounts
+    # resources:                       # two keys, each a pod's reservation: issue, every issue pod's (its one
+    #   issue: { memory: 32Gi, memory_request: 19Gi }   # roles container and both init containers), and
+    #   controller: { cpu: 2, memory: 8Gi }  # controller, the daemon-launched controller's pod's (controller:
+    #                                  # daemon only, else refused). cpu and memory are the limits, each
+    #                                  # requested in full unless cpu_request or memory_request sets less (at most
+    #                                  # the limit): with none set every Legion pod is Guaranteed, and a lower
+    #                                  # request makes that pod Burstable (docs/kubernetes.md, Issue sizing);
+    #                                  # ephemeral_storage is the pod's limit on the node's disk (the image's
+    #                                  # content and each role's home and /tmp; the scratch and the caches are on
+    #                                  # issue_volume) over ephemeral_storage_request, what the scheduler reserves
+    #                                  # of it. A field left out takes the daemon's default: issue 3 CPU and 19Gi,
+    #                                  # 80Gi over 6Gi of disk; controller 1 and 4Gi, 10Gi over 1Gi. On GKE
+    #                                  # Autopilot, which caps a pod's ephemeral storage at 10Gi, set
+    #                                  # issue: { ephemeral_storage: 10Gi, ephemeral_storage_request: 10Gi }
     # repository_cache:                # each mapped repository's cache pod, which every issue pod's feed is
     #   volume: 20Gi                   # filled from before GitHub is asked for the rest: the cache's own volume,
     #   refresh_minutes: 10            # holding a bare clone; how often it fetches GitHub; how long it outlives
     #   retain_hours: 168              # its repository leaving the mapping; and its one container's reservation,
-    #   resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # as a role's.
+    #   resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # as a pod's.
     #                                  # These are the defaults. Issue pods reach the cache pods on port 8418.
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
@@ -105,7 +113,7 @@ runtime:
     #                                  # (every Stage 4a/4b run), or to pin a different published pair than
     #                                  # this binary links.
     # setup: [/bin/sh, -c, '{ omp plugin marketplace update acme-skills || omp plugin marketplace add acme/agent-skills; } && omp plugin install agent-skills@acme-skills --force']
-    #                                  # a command every role's container runs before each start of its
+    #                                  # a command every role runs before each start of its
     #                                  # Oh My Pi, in its working directory with the role's environment
     #                                  # (its git answers github.com with the role's App token); Oh My Pi
     #                                  # starts only once it exits 0, and a failure counts as a failed
@@ -142,8 +150,8 @@ runtime:
 # The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
 # capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets
 # broker (runtime.kubernetes.agent_secrets), model fallback (retry.modelFallback in the operator's
-# overlay, read by the image probe) and every role's reservation (resources above, which the
-# daemon's defaults fill for every role, so that row is present on every Kubernetes deployment). A
+# overlay, read by the image probe) and every pod's reservation (resources above, which the
+# daemon's defaults fill for every pod, so that row is present on every Kubernetes deployment). A
 # gap never stops the daemon; it is yours to close, or to decide here, by name and with the reason,
 # which the report then shows in the gap's place. This example configures no broker, so it decides
 # that one.

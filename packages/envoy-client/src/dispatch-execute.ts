@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Advised,
+  ArchitectureSource,
   Artifact,
   ArtifactBlock,
   ArtifactUploadResponse,
@@ -254,7 +255,7 @@ function renderAdvice(
         ? "1 typed-block opening in this document is text, not a block"
         : `${unparsed.count} typed-block openings in this document are text, not blocks`;
     lines.push(
-      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`
+      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch-writing-specs\` skill, "Questions".`
     );
   }
   if (
@@ -263,7 +264,7 @@ function renderAdvice(
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
     lines.push(
-      'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+      "This spec holds no ask blocks. A person does not watch your chat. They see that you need them only through an open ask or a spec that waits for their approval. If the design needs a person's choice, add an ask block. If it does not, request approval with `dispatch request-approval`."
     );
   }
 
@@ -540,13 +541,32 @@ async function architectureGuidance(
   if (components.mode === "none" || components.ids.length > 0) return undefined;
 
   try {
-    if ((await client.getArchitectureSource(project)) === null) {
-      return undefined;
-    }
+    if ((await client.listArchitectureSources(project)).length === 0) return undefined;
     return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
   } catch (error) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error)}. ${architectureComponentsAction}`;
   }
+}
+
+/** One source's answer to `dispatch architecture-sync`: its imported commit, or the recorded
+ *  failure and what of that source's model stays up. A source re-saved on another branch has no
+ *  recorded commit yet but keeps its earlier components until an import replaces them. */
+function architectureSyncLines(project: string, source: ArchitectureSource): string {
+  if (source.last_error === null) {
+    return `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${source.last_sync_at ?? "unknown time"}).`;
+  }
+  let kept: string;
+  if (source.last_commit !== null) {
+    kept = `The previous model of ${source.repo} stays up (commit ${source.last_commit}).`;
+  } else if (source.components > 0) {
+    kept = `The previous model of ${source.repo} stays up (${source.components} ${source.components === 1 ? "component" : "components"}).`;
+  } else {
+    kept = `No model has ever imported from ${source.repo}.`;
+  }
+  return [
+    `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
+    kept,
+  ].join("\n");
 }
 
 interface DuplicateCandidateShape {
@@ -1980,9 +2000,27 @@ function actorText(actor: Actor): string {
   return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
 
+/** The `dispatch://` reference of the message, comment or ask an issue event carries, so a log
+ *  line names what `dispatch read --ref` reads and a spec links: the log shows no other id. */
+function eventRef(event: Event): string | undefined {
+  const payload: unknown = event.payload;
+  const id =
+    typeof payload === "object" && payload !== null && "id" in payload ? payload.id : undefined;
+  if (typeof id !== "string" || id === "" || event.issue_key === null) return undefined;
+  const kind = event.type.startsWith("message.")
+    ? "message"
+    : event.type.startsWith("comment.") || event.type.startsWith("suggestion.")
+      ? "comment"
+      : event.type.startsWith("ask.")
+        ? "ask"
+        : undefined;
+  return kind === undefined ? undefined : `dispatch://${event.issue_key}/${kind}/${id}`;
+}
+
 function eventLine(event: Event): string {
   const head = eventHead(event);
-  return `- #${event.seq} ${event.type} · ${actorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
+  const ref = eventRef(event);
+  return `- #${event.seq} ${event.type}${ref === undefined ? "" : ` ${ref}`} · ${actorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
 }
 
 function childrenSummary(issue: IssueDetails): string {
@@ -3245,24 +3283,21 @@ export async function executeDispatchTool(
     }
     case "dispatch_architecture_sync": {
       const project = stringArg(args, "project");
-      const source = await client.syncArchitectureSource(project);
-      const at = source.last_sync_at ?? "unknown time";
+      const repo = optionalString(args, "repo");
+      const sources =
+        repo === undefined
+          ? await client.syncArchitectureSources(project)
+          : [await client.syncArchitectureSource(project, repo)];
       return {
-        text:
-          source.last_error === null
-            ? `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${at}).`
-            : [
-                `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
-                source.last_commit === null
-                  ? "No model has ever imported for this project."
-                  : `The previous model stays up (commit ${source.last_commit}).`,
-              ].join("\n"),
+        text: sources.map((source) => architectureSyncLines(project, source)).join("\n"),
         details: {
           project,
-          repo: source.repo,
-          branch: source.branch,
-          commit: source.last_commit,
-          error: source.last_error,
+          sources: sources.map((source) => ({
+            repo: source.repo,
+            branch: source.branch,
+            commit: source.last_commit,
+            error: source.last_error,
+          })),
         },
       };
     }

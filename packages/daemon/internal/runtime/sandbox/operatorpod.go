@@ -21,8 +21,9 @@ import (
 // environment, the image's gcc on PATH notwithstanding, so a role opts in per command
 // (`CGO_ENABLED=1 go test -race …`) rather than a deployment for every build;
 // COREPACK_DEFAULT_TO_LATEST=0 keeps the corepack shims on the pnpm and yarn their corepack ships;
-// HOME and OMP_PROFILE place Oh My Pi's profile, whose sessions directory a pod mounts from the tree
-// volume; LEGION_OMP_PATH is the Oh My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is
+// HOME and OMP_PROFILE place Oh My Pi's profile, whose models and settings the image carries and
+// whose sessions a pod never writes, every session being a row in the session database;
+// LEGION_OMP_PATH is the Oh My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is
 // CodeGraph's telemetry and update-check opt-out; and PATH, which the runtime sets as well.
 // TestImageEnvIsWhatTheWorkerImageSets holds the list to the Dockerfile.
 var imageEnv = []string{"CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
@@ -89,12 +90,12 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
 // runs from hides it or is hidden by it; and a mount at, under, or above xdgStateHome
 // (/home/legion/.local/state), the path Legion reserves in the image's home directory: no role's
-// agent keeps its Oh My Pi state there any more — every role's state home is its own, under the
+// agent keeps its Oh My Pi state there any more — each role has a separate state home, under the
 // issue's scratch on its volume (roleStateHome), which legionMountPaths() already fences through
 // TreeRoot — and the image makes nothing there either, but Legion names it to the issue pod's
 // workspace-init (xdgEnvironment), so an operator's mount over it is refused here, at
 // `--check-config`, rather than left to surprise someone in a pod. (An operator's
-// pod.VolumeMounts reaches the role containers and the image probe's and no init container, so
+// pod.VolumeMounts reaches the launcher containers and the image probe's and no init container, so
 // this row speaks for the name rather than for workspace-init.) A provider key must name a
 // variable nothing else in the pod sets, since the shim refuses one its own environment names
 // and would replace one Oh My
@@ -152,10 +153,22 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {
 			for _, owned := range owner.paths {
-				if overlaps(mount.MountPath, owned) {
-					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above %s",
-						i, mount.MountPath, owned, owner.owns, owner.forbidden)
+				if spelled, ok := throughImageLinks(mount.MountPath, owned, overlaps); ok {
+					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s%s, which %s: a mount may be neither at, under, nor above %s",
+						i, mount.MountPath, owned, spelled, owner.owns, owner.forbidden)
 				}
+			}
+		}
+		for _, covered := range roleNamespacePaths {
+			if spelled, ok := throughImageLinks(mount.MountPath, covered, atOrAbove); ok {
+				return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s is at or above %s%s, which every role's namespace in an issue pod covers with its own: mount under it instead",
+					i, mount.MountPath, covered, spelled)
+			}
+		}
+		for _, device := range roleReplacedPaths {
+			if spelled, ok := throughImageLinks(mount.MountPath, device, overlaps); ok {
+				return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s%s, which every role's namespace in an issue pod replaces with a filesystem of its own and carries no mount back onto: a mount may be neither at, under, nor above %s",
+					i, mount.MountPath, device, spelled, device)
 			}
 		}
 	}
@@ -172,7 +185,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		if key := providerKeys[name]; slices.Contains(providersSecrets, key) {
 			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which the pod mounts as the launch secret %s: the shim would export that secret into Oh My Pi's environment as %s", name, key, key, name)
 		}
-		if key := providerKeys[name]; sessionDSNKey != "" && key == sessionDSNKey {
+		if key := providerKeys[name]; key == sessionDSNKey {
 			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as %s", name, key, name)
 		}
 	}
@@ -181,23 +194,49 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 
 // overlaps reports whether one of two clean absolute paths is the other or lies under it.
 func overlaps(a, b string) bool {
-	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
-	return a == b || under(a, b) || under(b, a)
+	return a == b || atOrAbove(a, b) || atOrAbove(b, a)
 }
 
-// legionClaim reports whether claim is named as the volume claims Legion's Sandboxes make or made
-// are: an issue's or the controller's (IssueClaimName, `issue-legion-…`), a repository cache's
-// (cacheClaimName, `cache-legion-…`), or a tree's from the earlier layout legion-v10.0.0 kept
-// (`tree-legion-…`, every clone, workspace and session file of a tree). Every pod mounting such a
-// claim would read and write that workspace or that cache, so an operator volume naming one is
-// refused.
+// atOrAbove reports whether the clean absolute path above is below or lies under it.
+func atOrAbove(above, below string) bool {
+	return above == below || above == "/" || strings.HasPrefix(below, above+"/")
+}
+
+// throughImageLinks reports whether a mount at mount stands to guarded as related says, comparing
+// every spelling the worker image's directory links give each (pathSpellings): the kubelet
+// resolves a mount path in the image, so a mount at /run/legion/roles is one at
+// /var/run/legion/roles. spelled is "" when the paths as written are related, and otherwise the
+// note a refusal adds, naming the two spellings that are.
+func throughImageLinks(mount, guarded string, related func(mount, guarded string) bool) (spelled string, ok bool) {
+	if related(mount, guarded) {
+		return "", true
+	}
+	for _, m := range pathSpellings(mount) {
+		for _, g := range pathSpellings(guarded) {
+			if related(m, g) {
+				return fmt.Sprintf(" (spelled %s against %s, through the worker image's directory links)", m, g), true
+			}
+		}
+	}
+	return "", false
+}
+
+// legionClaim reports whether claim is named as the volume claims Legion's pods and Sandboxes make
+// or made are: an issue pod's own disk, the generic ephemeral volume the kubelet names for its pod
+// and its volume (`legion-…-issue`, issuePod.disk); the controller's, which its Sandbox still owns
+// (IssueClaimName, `issue-legion-…`); a repository cache's (cacheClaimName, `cache-legion-…`); or a
+// tree's from the earlier layout legion-v10.0.0 kept (`tree-legion-…`, every clone, workspace and
+// session file of a tree). Every pod mounting such a claim would read and write that workspace or
+// that cache, so an operator volume naming one is refused. The pod's own disk is named the other
+// way round from the Sandbox-owned claims — the volume's name is the suffix, not the prefix — so it
+// needs a rule of its own rather than a fourth prefix.
 func legionClaim(claim string) bool {
 	for _, prefix := range []string{issueVolume + "-legion-", cacheVolume + "-legion-", "tree-legion-"} {
 		if strings.HasPrefix(claim, prefix) {
 			return true
 		}
 	}
-	return false
+	return strings.HasPrefix(claim, "legion-") && strings.HasSuffix(claim, "-"+issueVolume)
 }
 
 // dashboardURL is whether value is a DISPATCH_PUBLIC_URL boot lets through: a rule narrower than

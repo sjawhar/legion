@@ -78,9 +78,12 @@ gcloud auth revoke '<your email>'
 ```console
 $ agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent
 Value for DEMO_DEPLOY_TOKEN:
-created DEMO_DEPLOY_TOKEN (owner=ada@example.com, tier=agent)
-broker: serving DEMO_DEPLOY_TOKEN
+created DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=agent)
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
+
+Every line names the store it wrote to or read, so a secret is never taken for one of the same
+name in another store.
 
 On GCP the same command writes as you on a dev box too: it uses your gcloud login where the
 machine's Application Default Credentials are its own identity, and so does every write below.
@@ -140,8 +143,8 @@ $ agent-secrets secret set DEMO_DEPLOY_TOKEN
 Value for DEMO_DEPLOY_TOKEN:
 agent-secrets secret set: a value of more than one line must be piped in: agent-secrets secret set DEMO_DEPLOY_TOKEN < FILE
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN < key.pem
-set a new value of DEMO_DEPLOY_TOKEN
-broker: serving DEMO_DEPLOY_TOKEN
+set a new value of DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 Ctrl-C, Ctrl-\\, SIGTERM or SIGHUP at the prompt restores the foreground terminal and writes
 nothing, then ends the CLI by that signal. A shell reports 130, 131, 143 or 129 respectively.
@@ -235,16 +238,19 @@ NAME               OWNER            TIER   KIND          MAX_GRANT  VALUE  DELET
 DEMO_DEPLOY_TOKEN  ada@example.com  agent  -             -          yes    -        -
 DEMO_GITHUB_APP    ada@example.com  agent  github-app    -          yes    -        -
 DEMO_LOGIN         ada@example.com  human  google-login  1h         yes    -        -
+Every row is a secret in AWS Secrets Manager account 111122223333 in us-east-1.
 ```
 
+The last line goes to standard error, so the table stays one row per secret for a script.
 `VALUE` says whether a version of the secret carries `AWSCURRENT`, the label Secrets Manager reads
 a value from. The broker serves a secret only while one does, so a secret another tool created
 without a value shows `no` until someone runs `secret set` on it. A missing tag shows as `-`.
-`show` prints one secret's tags, dates and versions:
+`show` prints one secret's store, tags, dates and versions:
 
 ```console
 $ agent-secrets secret show DEMO_DEPLOY_TOKEN
 name: DEMO_DEPLOY_TOKEN
+store: AWS Secrets Manager account 111122223333 in us-east-1
 secret_name: example/agent-secrets/demo-deploy-token
 owner: ada@example.com
 tier: agent
@@ -262,8 +268,8 @@ Neither ever prints a value, and both take `--json`.
 ```console
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN
 Value for DEMO_DEPLOY_TOKEN:
-set a new value of DEMO_DEPLOY_TOKEN
-broker: serving DEMO_DEPLOY_TOKEN
+set a new value of DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 `set` reads the value as `create` does: one line at a prompt with echo off, or all of standard
@@ -275,8 +281,8 @@ gets the new one.
 
 ```console
 $ agent-secrets secret retag DEMO_DEPLOY_TOKEN --tier human
-retagged DEMO_DEPLOY_TOKEN (owner=ada@example.com, tier=human)
-broker: serving DEMO_DEPLOY_TOKEN
+retagged DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=human)
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant` or a combination. A retag that
@@ -294,8 +300,8 @@ Run the removal and the other change as two retags:
 
 ```console
 $ agent-secrets secret retag DEMO_LOGIN --max-grant none
-retagged DEMO_LOGIN (removed max-grant)
-broker: serving DEMO_LOGIN
+retagged DEMO_LOGIN in AWS Secrets Manager account 111122223333 in us-east-1 (removed max-grant)
+broker: serving DEMO_LOGIN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 To make a stored secret a kind, retag it first, and only once the retag exits 0, showing
@@ -382,8 +388,8 @@ uses a retag to end every session's automatic access to a secret.
 
 ```console
 $ agent-secrets secret delete DEMO_DEPLOY_TOKEN
-deleted DEMO_DEPLOY_TOKEN
-broker: DEMO_DEPLOY_TOKEN is deleted (restorable until 2026-11-05T20:22:33Z)
+deleted DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: DEMO_DEPLOY_TOKEN is deleted in AWS Secrets Manager account 111122223333 in us-east-1 (restorable until 2026-11-05T20:22:33Z)
 ```
 
 `delete` schedules the deletion with a 30-day recovery window, the longest Secrets Manager allows,
@@ -422,33 +428,34 @@ standard error, so standard output stays one row per secret. `show` prints the s
 
 ```console
 $ agent-secrets secret restore DEMO_DEPLOY_TOKEN
-restored DEMO_DEPLOY_TOKEN
-broker: serving DEMO_DEPLOY_TOKEN
+restored DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
 ## What the broker answers after a write
 
 After each write, the CLI asks the broker to reread the secret (`POST /v1/secrets/{name}/reread`)
-and prints its answer on a line of its own:
+and prints its answer on a line of its own, naming the store the secret is in:
 
 | Line | What it means |
 | --- | --- |
-| `broker: serving NAME` | The broker serves the secret as just written, as a stored secret. |
-| `broker: serving NAME (kind <kind>)` | The broker serves the secret as that kind: it mints from the stored value and never returns it. |
-| `broker: NAME is deleted (restorable until <date>)` | After a delete: the broker no longer serves it. |
-| `broker: refusing NAME (reason=<reason>)` | The broker leaves the secret out: `absent` (it found no such secret, or one scheduled for deletion), or one of the refusals [Operating the broker](/legion/broker/operate/#health-and-logs) lists, such as `no-current-value`. |
+| `broker: serving NAME from <store>` | The broker serves the secret as just written, as a stored secret. |
+| `broker: serving NAME from <store> (kind <kind>)` | The broker serves the secret as that kind: it mints from the stored value and never returns it. |
+| `broker: NAME is deleted in <store> (restorable until <date>)` | After a delete: the broker no longer serves it. |
+| `broker: refusing NAME from <store> (reason=<reason>)` | The broker leaves the secret out: `absent` (it found no such secret, or one scheduled for deletion), or one of the refusals [Operating the broker](/legion/broker/operate/#health-and-logs) lists, such as `no-current-value`. |
 
-The command exits 0 when the answer is what the write meant. It exits 1 when the answer contradicts
-the write, and says so on standard error: `the broker refuses NAME after the write (reason=…)`
-after a create, set, retag or restore, or `the broker still serves NAME after its delete`. The
-write itself stands in Secrets Manager either way, so fix what the reason names rather than
-repeating the write:
+`<store>` is the store the broker's settings name: `AWS Secrets Manager account <id> in <region>`,
+or `GCP Secret Manager project <number>`. The command exits 0 when the answer is what the write
+meant. It exits 1 when the answer contradicts the write, and says so on standard error: `the
+broker at <host> refuses NAME after the write to <store> (reason=…)` after a create, set, retag or
+restore, or `the broker at <host> still serves NAME after its delete in <store>`. The write itself
+stands in the store either way, so fix what the reason names rather than repeating the write:
 
 ```console
 $ agent-secrets secret retag DEMO_EMPTY_KEY --tier human
-retagged DEMO_EMPTY_KEY (owner=ada@example.com, tier=human)
-broker: refusing DEMO_EMPTY_KEY (reason=no-current-value)
-agent-secrets secret retag: the broker refuses DEMO_EMPTY_KEY after the write (reason=no-current-value)
+retagged DEMO_EMPTY_KEY in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=human)
+broker: refusing DEMO_EMPTY_KEY from AWS Secrets Manager account 111122223333 in us-east-1 (reason=no-current-value)
+agent-secrets secret retag: the broker at secrets.internal.example refuses DEMO_EMPTY_KEY after the write to AWS Secrets Manager account 111122223333 in us-east-1 (reason=no-current-value)
 ```
 
 Here the secret has no value; `secret set DEMO_EMPTY_KEY` gives it one, and the broker serves it.

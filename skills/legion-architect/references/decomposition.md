@@ -19,7 +19,9 @@ Put every adopted child into the first wave and release it with
 `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. The daemon runs nothing on
 a child until it is released. Once it is released, the daemon moves it to `todo` and, while the
 root's design gate is open, starts its phases itself. It starts no sub-architect, and you start no
-worker.
+worker. A release is accepted whole whatever the `--blocked-by` links say: its answer names
+`started` and `held` (each held child with the issues it waits on) beside `released`, and a held
+child waits in your tree until Legion starts it.
 
 ## Creating children
 
@@ -56,22 +58,28 @@ creation, because the daemon fixes it when it records the child.
 Release a child that depends on another repository's change only after that change's pull request
 merges, because the child's work must build on the merged change. Name the merged commit in its
 task (`gh api repos/<owner>/<repo>/pulls/<n> --jq .merge_commit_sha`); for a repository that pins the
-other one by commit (a lock file or dependency pin), the pin is that commit. Read the other
-repositories with your gh's read-only access (`-R owner/repo`).
+other one by commit (a lock file or dependency pin), the pin is that commit. Do not hold such a
+child with `--blocked-by` instead, because Legion would start it at the blocker's close, before you
+name the merged commit. Read the other repositories with your gh's read-only access
+(`-R owner/repo`).
 
 ## Architecture components
 
-A project's architecture source is the repository whose `.dispatch/architecture/` files Dispatch
-imports as its components (`skill://dispatch`, "Architecture components").
+A project's architecture sources are the repositories whose `.dispatch/architecture/` files
+Dispatch imports as its components (`skill://dispatch`, "Architecture components").
 
 - **The components exist:** attach the root before you decompose, so every child inherits it:
   `dispatch issue-update --issue <root> --components-json '{"mode":"explicit","ids":[…]}'`.
 - **They do not exist yet (bootstrap):** in the root's first PR (the implement worker pushes it),
   write `.dispatch/architecture/<id>.md` files for the planned components — front matter `title`,
-  `parent`, `depends_on`, `external`; no `paths` yet. The importer reads the source branch's head,
-  so leave the root on `inherit` until that PR has merged: an attach before then answers
+  `parent`, `depends_on`, `external`; no `paths` yet. A project may have several sources, one per
+  repository, and its model is all of their components together: the file goes in the branch of
+  the source whose repository holds it, `parent` and `depends_on` name components of that same
+  source only, and its id must be one no other source of the project uses (a repeated id fails that
+  source's import, naming the repository that has it). The importer reads the source branch's
+  head, so leave the root on `inherit` until that PR has merged: an attach before then answers
   `400 COMPONENTS_INPUT`, since the component does not exist. After the merge, run
-  `dispatch architecture-sync --project <KEY>` and attach the root; children created before then
-  inherit it.
+  `dispatch architecture-sync --project <KEY>` (every source; `--repo <owner/name>` syncs that one
+  alone) and attach the root; children created before then inherit it.
 - Give a child its own `--components-json` only when it changes a narrower set, and
   `{"mode":"none","reason":"…"}` when it changes no code or file a component describes.

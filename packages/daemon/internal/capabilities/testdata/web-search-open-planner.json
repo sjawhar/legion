@@ -1,0 +1,5 @@
+{
+  "detail": "pod legion-omp-legsmoke-3/roles (planner, LEGSMOKE-3): web_search is not a registered tool",
+  "name": "web-search",
+  "status": "open"
+}

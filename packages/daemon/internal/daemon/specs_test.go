@@ -33,7 +33,7 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 	}
 	instructions := []string{
 		"the tree's work starts only once you register your spec with `register_gate`, under either design gate policy",
-		"With `root-issues`, once the spec's decision blocks are settled (the dispatch skill's \"Approval of a spec\"), request its approval with `dispatch request-approval` and a `--summary`",
+		"With `root-issues`, once the spec's decision blocks are settled (`skill://dispatch-writing-specs`, \"Approval\"), request its approval with `dispatch request-approval` and a `--summary`",
 		"With `off`, request no approval and wait for no `design-approved`",
 	}
 	for _, policy := range []config.DesignGate{config.DesignGateRootIssues, config.DesignGateOff} {
@@ -280,8 +280,8 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	if spec.Prompt.DeploymentInstructionsPath != s.instructions {
 		t.Errorf("instructions = %q, want %q", spec.Prompt.DeploymentInstructionsPath, s.instructions)
 	}
-	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
-		t.Errorf("repository %q, default branch %q, env %v, recovered from %q; want none of them", spec.Repository, spec.DefaultBranch, spec.Env, spec.WorkspaceRecoveredFrom)
+	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 {
+		t.Errorf("repository %q, default branch %q, env %v; want none of them", spec.Repository, spec.DefaultBranch, spec.Env)
 	}
 	if spec.Backend != runtime.BackendOmp {
 		t.Errorf("backend = %q, want omp, named", spec.Backend)

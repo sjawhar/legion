@@ -4,6 +4,152 @@
 
 ### Added
 
+- Dispatch writes one access-log line per served request, so the callers behind a load spike can
+  be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
+  pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
+  token's owner, a verified service-account subject, or the shared token with no owner to name),
+  the credential that named a session, the forwarded address and the user agent, the status, the
+  milliseconds it took and the response bytes. It covers every `/api/v1` route, the document and
+  delivery websockets, `/auth/*`, the GitHub proxy and the 404 of a path no route answers, still
+  writes its line when a handler panics, names the caller a websocket or stream was admitted as
+  however many heartbeats it lives, cuts every field a caller wrote to 256 bytes, and never
+  carries a token, a cookie, a query string, a request body or a response body. It is always on:
+  it costs about 2.6 µs and 12 allocations per request and makes no database call
+  (`internal/dispatch/api/access_log_bench_test.go`), and the question it answers is asked when a
+  deployment is already in trouble (`cmd/dispatch/README.md`, "Access log").
+- A release of a `github-app` secret can be narrowed: `POST /v1/grants/{id}/values` takes an
+  optional `github_app` body (`owner`, `repositories`, `read_only`) that mints the token of one
+  account `github-owners` lists alone, sent to GitHub as the `access_tokens` body, limited to
+  those repositories of the account (at most 100), to `contents: read` and `metadata: read`, or
+  to both; a token limited to repositories alone keeps every permission the App holds. It can
+  only narrow, applies to that release alone, and the answer names it as `github_app`, which the
+  broker releases only once GitHub's own answer shows the token holds no more, revoking at GitHub
+  a token whose answer holds more. A bad body, a `repositories` list present but empty among
+  them, is `400 INVALID_NARROWING`, a narrowing of a grant holding no `github-app` secret
+  `400 NARROWING_NOT_APPLICABLE`, one to an account its `github-owners` tag does not list
+  `403 NARROWING_OWNER_NOT_LISTED`, and one GitHub refuses (a repository the installation does not
+  reach) `422 NARROWING_REFUSED`; the last two are logged at WARN as `broker: narrowing refused`.
+  `agent-secrets`' exec form takes `--github-owner`, `--github-repo` and `--github-read-only`,
+  exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
+  and runs its command only once the broker names the narrowing it applied, so deploy the broker
+  before any caller passes `--github-owner`.
+- Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
+  Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
+  `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces
+  background embedding), `DISPATCH_AZURE_EMBED_DEPLOYMENT` (default `embed-v-4-0`) and one
+  credential: the deployment's key (`DISPATCH_AZURE_EMBED_KEY` or `_FILE`), or a keyless sign-in
+  that exchanges a projected token with Microsoft Entra (`DISPATCH_AZURE_TENANT_ID`,
+  `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`). Boot refuses, naming the
+  setting, an unknown place, an Azure setting under Bedrock, and an Azure configuration missing its
+  endpoint or quota or holding both credentials, neither or part of the keyless one; a model
+  service or Entra that is down refuses no boot. Background embedding sends Azure at most 320,000
+  bytes of text a call, so a call of dense text (CJK, hex) finishes well inside the 60-second
+  request timeout instead of timing out and being split; Bedrock's batches are unchanged. Pacing
+  estimates 4 characters a token, which under-counts such text, so a backlog of it can meet
+  Azure's 429s, which the queue retries as throttles (INFRA-393).
+- The Dispatch server keeps meaning search's coverage itself: a coverage pass at boot and every 10
+  minutes embeds items written before the embedding triggers existed or with them off, repairs a
+  row whose text changed with the triggers off, drops every vector another embedder made and
+  re-admits a row that died under another embedder, with no lease, so every process may run it.
+  It drops and re-admits only once the configured embedder has answered (an embedding by this
+  process has succeeded, or a short canary text it embeds does); until then it leaves those rows in
+  place and logs one WARN naming the identity, the canary's error and how many it left, so a
+  misnamed Azure deployment or a refused credential drops no vector.
+  `GET /api/v1/search/coverage` reports the configured embedder's identity, place and model, and
+  in total and per kind the searchable items with a current vector, lacking one or failed, and the
+  oldest lacking item's wait (INFRA-393).
+- `agent-secrets` names the store it answered from, so no answer of its own is read as another
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
+  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
+  settings cannot be read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
+  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
+  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
+  on standard error naming the store the table is from; `machine list` and `grant list` name
+  their broker the same way; and every refusal names where this CLI looked, from a denied request
+  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
+  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
+  broker's own body verbatim and make no settings call; `secret list --json` and
+  `secret show --json` gain a `store` field. No line names a secret's version: the broker
+  releases a grant's values as names and values alone, and a session holds no sign-in of its own
+  to the store to read one with (`agent-secrets secret show`, which reads the store directly
+  under the person's own sign-in, lists each version as before).
+- A broker call that did not complete says what failed, rather than leaving a bare transport error
+  to read as a broker refusal: the host does not resolve, name resolution failed, the connection
+  was refused, no connection could be made (network or host unreachable, or any other dial error),
+  nothing answered in time, or a peer answered and then broke the exchange (TLS, an HTTP answer to
+  https, EOF or a reset after the request); any other error says only that the request failed. It
+  names the method and URL it tried, and that `AGENT_SECRETS_URL` named that address, so a session
+  that inherited a stale address reads a stale address. Such a message carries no `asked the
+  broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
+  that socket instead, since no broker was asked.
+- The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
+  block it retracted carries `restored: true`: the ask returns to the state it had, and the event
+  records no new answer, so a reader that takes an `ask.answered` for a person's answer can tell
+  the two apart. A restore the release before this one writes carries no mark - every one already
+  in the event log, and one written during a rollout or an image rollback - so a missing mark does
+  not prove a new answer.
+- Dispatch's approval read (`approval` on every document read) names the latest review's event
+  sequence, `seq`, beside its `at`: each review keeps the sequence of the `artifact.approved` or
+  `artifact.changes_requested` event it appended on its document's owner
+  (`artifact_reviews.event_seq`, migration 0120, written in the same transaction). The owner's row
+  lock orders those events as they commit, so `seq` places a review among them where `at`, its
+  transaction's start, cannot. Every read that picks a document's newest review now orders by that
+  sequence (`docs.ReviewOrder`), so two reviews written at once read back in the order they
+  committed. A review recorded before the migration reads with its `at` and no `seq`, and so does
+  every read the release before it serves during a rollout or a rollback, so a missing `seq` does
+  not prove an older review. A review the release before it writes while a rollout or a rollback
+  runs both releases gets its sequence too, from the migration's trigger at its commit, so it reads
+  as the newest review it is rather than ranking below every sequenced one. 0120 is additive (a
+  nullable column, a `not valid` check, an index in the reads' order and a trigger), so rolling
+  back past 0120 alone, to a build that already carries 0117, is an image rollback: the release
+  before it keeps writing reviews, and the trigger sequences each one. 0117's own rule still
+  forbids starting a release older than 0117. The index (`artifact_reviews_by_artifact_event_seq`)
+  is built in the migration's own transaction under the table lock it already holds, reading every
+  review once.
+- Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
+  Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
+  and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
+  `/model` and `/effort` from Dispatch, each is a native picker in the header: the model picker
+  lists every model the session can use, grouped by provider, and the thinking picker the levels
+  `/effort` offers. On a focused picker the arrows and type-ahead only move its choice, `Enter`
+  switches to it, and leaving the picker without `Enter` puts it back on the reported value, as
+  the Agents issue picker's keyboard rule does. A pick is the person's own Send of
+  `/model <provider/id>` or `/effort <level>`, always as Send and stored under their name; while
+  it waits for the session's answer Send is disabled and the pickers are held, keeping focus, and
+  the line under the header quotes the session's reply, or says no answer came within 30 seconds
+  or that the message could not reach the session. The header
+  changes only when the session reports the new value. A session on an older pi-envoy shows the
+  last turn's model and asks to be restarted on a newer one; a session whose Oh My Pi cannot tell
+  its settings, or that runs neither built-in from Dispatch, says so. No route changes: an agent's
+  token is still refused on `POST /api/v1/agents/{id}/messages` (`403 HUMAN_ONLY`).
+- A Dispatch project imports its component model from any number of architecture sources, one
+  per repository, each on its own branch, and its model is every source's components together
+  (INFRA-391). `GET /api/v1/projects/{key}/architecture-sources` lists a project's sources (`[]`
+  with none); `PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` `{branch}` adds a
+  source, or changes the branch of the one it already is, after proving the GitHub App can read
+  the repository and that `branch` is the name of a branch it has (an exact
+  `git/ref/heads/{branch}` read): a missing branch, a commit SHA, a relative ref such as
+  `main~1`, `HEAD` or a `refs/` path is `409 SOURCE_ACCESS` naming the value and the repository,
+  as a credential problem is, and nothing is written;
+  `DELETE` on the same path removes that source and its components, and no other source's;
+  `POST …/architecture-sources/{owner}/{repo}/sync` imports one source and
+  `POST /api/v1/projects/{key}/architecture-sources/sync` every source, each attempted whatever
+  another's import did and each answering on its own row. A source row carries `components`, how
+  many components it projects; `GET /api/v1/projects/{key}/architecture` carries `sources` and
+  each component's `source` repository; `architecture.synced` and `architecture.sync_failed`
+  name the source's `repo` and `branch`. One source's failed import keeps that source's previous
+  components and touches no other source's. Component ids stay project-wide: an import whose
+  model holds an id another source of the project already has fails for that source alone,
+  naming the id and the repository that holds it, and an issue may name components of any
+  source of its project. Settings lists one row per source with its component count and its own
+  Refresh and Delete; the architecture page has a header line per source with its own Refresh,
+  and hatches only the components of a source that failed or is stale; a component's details
+  name its repository; an issue's component picker offers every source's components. Migration
+  `0117` adds `architecture_sources.id` and `components.source_id`: every existing source and
+  component reads `0`, so a project with one source keeps it, its components and every issue
+  attachment, and nothing re-imports.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -617,6 +763,21 @@
 
 ### Changed
 
+- A rate-limited answer to any minter call, a release with no narrowing and a Google login's
+  refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
+  its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
+  body naming a rate limit (GitHub's secondary limit, Google's `rateLimitExceeded`). A rate limit
+  is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
+- **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
+  its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
+  Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
+  since no server of any release reads it. Each vector now records its embedder's identity
+  (`us.cohere.embed-v4:0` on Bedrock, the value every stored vector already carries, and
+  `azure:<endpoint host>/<deployment>` on Azure), and search compares a query only with vectors of
+  its own identity: run one embedder configuration on every process of a deployment, since each
+  process's pass drops the others' vectors, and put a new model on Azure under a new deployment
+  name. A text with nothing to embed (empty or only white space) is settled with no vector rather
+  than retried until it dies, and a row that died that way is settled by the pass (INFRA-393).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
@@ -870,6 +1031,34 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
+- **Breaking:** migration `0117` is a stop-the-world migration. Deploy it with no server of the
+  earlier release running, and never start a release older than `0117` over it again: stop the
+  earlier release, or scale it to zero, before this release boots (a Recreate rollout, never a
+  rolling one), and recover a failed deploy forward rather than by rolling the image back. Over
+  the new schema an earlier release's architecture-source save answers `500`, since no unique
+  index covers `project_key` alone; its import deletes every component of the project before
+  inserting one source's, so a model with components fails on the new `source_id` column and one
+  with none deletes every source's components; and its delete removes every source of the
+  project. Its census counts components whose project has no architecture source, which only
+  direct SQL writes; repair them on the release still serving with
+  `delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`
+  and take the census again (`cmd/dispatch/README.md`, "Database migrations").
+- **Breaking:** the singular architecture source routes `PUT` and `DELETE
+  /api/v1/projects/{key}/architecture-source` are gone. A source is addressed by its repository
+  under `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}`, and a project's sources are
+  listed at `/api/v1/projects/{key}/architecture-sources`; the `dispatch` CLI of this release uses
+  the new routes. Two singular routes are kept for `dispatch` clients older than this release,
+  each call logged at warn naming the route and the project:
+  `GET /api/v1/projects/{key}/architecture-source`, which those clients read on every issue
+  create, answers `200 null` when the project has no source, otherwise its first source's row,
+  `404` for an unknown project, and the list route replaces it;
+  `POST /api/v1/projects/{key}/architecture-source/sync`, which their `dispatch architecture-sync`
+  calls, imports every source as `POST …/architecture-sources/sync` does and answers one row: the
+  first source in the order they were added whose `last_error` is set, or the first source when
+  none failed. A project with no source is still `404 SOURCE_NOT_FOUND`, and a failure that could
+  not be recorded `500`; a credential or branch problem, once a `409 SOURCE_ACCESS`, is recorded
+  on its row and answers `200` with that `last_error`, which those clients print as
+  `Sync failed for …`. `POST …/architecture-sources/sync` replaces it.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
   optional query of `sslmode`, `connect_timeout` and `application_name`.
@@ -1361,6 +1550,26 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
+  such as a session's answer to a model switch, without waiting for the stream's heartbeat.
+  Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
+  new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
+  "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
+  sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
+
+- A person who edits a document in the browser while an agent's write to it is published is now
+  credited for the edit. ygo runs each change's observers after it unlocks the document, so the two
+  changes' observers could run in either order, and when the agent's ran first it counted the
+  browser's change as part of its own, which is credited to no one because the agent's write was
+  credited when it committed; the browser's own observer then found nothing new and credited no one
+  either. The edit was stored, sometimes inside the agent's version, but its author was on no
+  version and owed none. The room's observer now takes the room's changes one at a time in the order
+  they committed, from an update log ygo fills under the document's lock, so each change is
+  measured against the room the change before it left, whichever observer gets there first; a
+  deleted paragraph is credited too, and a heading id the editor derives still credits no one. The
+  ygo pin moves from `v1.51.3-sami.3` to `v1.51.3-sami.4`, which adds that log
+  (reearth/ygo#332).
 
 - A browser that opens a document while Dispatch closes that document's room now keeps getting the
   document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed

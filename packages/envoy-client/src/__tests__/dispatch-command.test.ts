@@ -182,14 +182,109 @@ describe("the dispatch command surface", () => {
     expect(parseCommand(["isue"], noFiles)).toMatchObject({ kind: "refused" });
   });
 
-  test("a bare issue key is refused with the --issue form of the same command", () => {
+  test("a bare issue key first is the --issue of a command that takes --issue", () => {
+    expect(parseCommand(["read", "ACME-12"], noFiles)).toEqual(
+      parseCommand(["read", "--issue", "ACME-12"], noFiles)
+    );
     expect(parseCommand(["read", "ACME-12"], noFiles)).toEqual({
+      kind: "call",
+      tool: "dispatch_read",
+      args: { issue: "ACME-12" },
+      dryRun: false,
+    });
+    expect(parseCommand(["message", "ACME-12", "--body", "hi"], noFiles)).toMatchObject({
+      kind: "call",
+      args: { issue: "ACME-12", body: "hi" },
+    });
+  });
+
+  test("every command that takes --issue takes a bare key as its first argument", () => {
+    const commands = dispatchToolSpecs
+      .map((spec) => spec.name)
+      .filter((tool) => commandFlags(tool).includes("--issue"))
+      .map(commandName);
+    expect(commands.sort()).toEqual(
+      [
+        "artifact",
+        "ask",
+        "claim",
+        "comment",
+        "doc-edit",
+        "doc-read",
+        "issue-update",
+        "message",
+        "read",
+        "request-approval",
+        "suggest",
+      ].sort()
+    );
+    for (const command of commands) {
+      const bare = parseCommand([command, "ACME-12", "--dry-run"], noFiles);
+      expect(bare).toEqual(parseCommand([command, "--issue", "ACME-12", "--dry-run"], noFiles));
+      expect(JSON.stringify(bare)).not.toContain("unexpected argument");
+    }
+  });
+
+  test("a key-shaped word after the first argument is refused, not taken as --issue", () => {
+    expect(parseCommand(["message", "--body", "hi", "SHA-256"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_message",
+      problems: [
+        "unexpected argument SHA-256: a bare issue key is the --issue only as the first argument; otherwise write --issue SHA-256",
+      ],
+    });
+  });
+
+  test("a lowercase issue key is refused", () => {
+    expect(parseCommand(["read", "acme-12"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument acme-12: every value follows its flag"],
+    });
+  });
+
+  test("a bare issue key is refused by a command without --issue", () => {
+    expect(parseCommand(["search", "--query", "q", "ACME-12"], noFiles)).toMatchObject({
+      kind: "refused",
+      tool: "dispatch_search",
+    });
+  });
+
+  test("a bare issue key is refused when --issue is also given", () => {
+    expect(parseCommand(["read", "--issue", "ACME-1", "ACME-12"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument ACME-12: --issue is already ACME-1"],
+    });
+    const issueFile = {
+      readText: (path: string): string => {
+        if (path === "issue.txt") return "ACME-1";
+        throw new Error(`unexpected read ${path}`);
+      },
+    };
+    expect(parseCommand(["read", "--issue-file", "issue.txt", "ACME-12"], issueFile)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument ACME-12: --issue-file already set --issue to ACME-1"],
+    });
+    expect(parseCommand(["read", "ACME-12", "--issue", "ACME-1"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["the issue key ACME-12 and --issue both set issue"],
+    });
+  });
+
+  test("a second bare issue key is refused", () => {
+    expect(parseCommand(["read", "ACME-12", "ACME-13"], noFiles)).toEqual({
       kind: "refused",
       tool: "dispatch_read",
       problems: [
-        "unexpected argument ACME-12: use --issue <KEY>, as in: dispatch read --issue ACME-12",
+        "unexpected argument ACME-13: a bare issue key is the --issue only as the first argument; otherwise write --issue ACME-13",
       ],
     });
+  });
+
+  test("a bare value that is not an issue key is refused", () => {
     expect(parseCommand(["read", "hello"], noFiles)).toMatchObject({
       problems: ["unexpected argument hello: every value follows its flag"],
     });

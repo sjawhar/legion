@@ -357,12 +357,22 @@ export function parseCommand(
   for (let index = 0; index < rest.length; index++) {
     const token = rest[index] as string;
     if (!token.startsWith("--")) {
-      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
-        const corrected = [command, ...rest.slice(0, index), "--issue", token];
-        corrected.push(...rest.slice(index + 1));
-        problems.push(
-          `unexpected argument ${token}: use --issue <KEY>, as in: dispatch ${corrected.map(quoteWord).join(" ")}`
-        );
+      // `dispatch read ACME-12` names an issue as plainly as `--issue ACME-12` does, so a bare
+      // key is that command's --issue when it is the first argument. Later, a key-shaped word is
+      // more likely a flag's unquoted value spilling over (`--body hi SHA-256`), so it is refused.
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue")) {
+        if (index === 0) {
+          if (claim("issue", `the issue key ${token}`, false)) args["issue"] = token;
+        } else {
+          // Advising `--issue` when a flag already set it would only lead to a second refusal.
+          const earlier = setBy.get("issue");
+          const current = quoteWord(String(args["issue"]));
+          let reason = `a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`;
+          if (earlier === "--issue") reason = `--issue is already ${current}`;
+          else if (earlier?.startsWith("--"))
+            reason = `${earlier} already set --issue to ${current}`;
+          problems.push(`unexpected argument ${quoteWord(token)}: ${reason}`);
+        }
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);

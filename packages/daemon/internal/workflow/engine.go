@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -415,7 +416,17 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 
 // enterChild records a todo child under root's live tree, admitted at generation on the repository
 // at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
-// tree's gate is open. A re-entered child keeps the repository it was first recorded with.
+// tree's gate is open. A re-entered child keeps the repository it was first recorded with, but not
+// the mark of a run it had before (record.Issue.TakenBack): the run this opens is a new one, which
+// has stood in no phase yet, and a blocker it now waits on holds it like any other child's.
+//
+// It is the one door every child start funnels through — the architect's release_children, a
+// person's move of a child to todo, and a rerun or reopen through ReenterChild — so it is where a
+// child that waits on an unfinished Dispatch issue is withheld. Such a child is recorded and left
+// at phase.Admitted, exactly as a child whose tree's design gate is still closed is, and
+// StartUnblockedChildren starts it once the last issue it waits on is done. What it waits on is
+// read from the mirror, which the blockers.Mirror handler wrote this very event's row into, in
+// this same transaction, before the engine was asked anything.
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
@@ -423,6 +434,15 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
+	}
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	if err != nil {
+		return err
+	}
+	if waits := blockers.Holds(rows, child); len(waits) > 0 {
+		e.logOnCommit(ctx, "workflow: the child waits on unfinished work, so it is recorded admitted and not started",
+			"issue", child.Key, "tree", child.Tree, "blockers", waits)
+		return nil
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
@@ -774,6 +794,18 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	from := issue.Phase
 	issue.Phase, issue.Hold = row.To, nil
+	// This is the one write that moves an issue into a phase of its own, so it is where the issue's
+	// run earns record.Issue.TakenBack: it has stood in a phase. The mark is a fact about that run,
+	// not about the issue's history. It lasts as long as the run's record does — through the phase's
+	// end and its root's leave into a linger, and into the generation re-admission opens when Legion
+	// takes that same tree back, which is the work the mark was earned by and so starts again whatever
+	// its links say. Every other path that opens a run starts it clean: a child's re-entry into its
+	// tree (enterChild) and a child handed over as a root of its own without its run
+	// (admit.Admission.readmit). The invariant: no issue is exempt from the blocker check unless the
+	// run it is exempt for is the run it arrived with.
+	if issue.CarriesRun() {
+		issue.TakenBack = true
+	}
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
@@ -887,6 +919,16 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 	return Row{}, false
 }
 
+// advanceAdmittedTree starts every member of root's tree the opening of its design gate releases.
+// A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holds): the
+// gate it was held by is its tree's, the issues it waits on are its own, and only
+// StartUnblockedChildren, when the last of them closes, starts it.
+//
+// The tree's root is started whatever its links say. Its links are read once, when promotion
+// admits it into a slot, and a root at admitted here has passed that moment: it holds its slot and
+// its tree runs, and a blocker added to a tree already running never re-checks it. Held here, it
+// would hold its slot with nothing left to start it — StartUnblockedChildren starts children, and
+// the state's `blocked` names no slotted root — so it would be neither started nor reported.
 func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
 	if !classify.DesignGateOpen(gate) {
 		return nil
@@ -895,14 +937,97 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return err
 	}
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	if err != nil {
+		return err
+	}
 	for _, issue := range members {
-		if issue.Phase == phase.Admitted {
-			if err := e.gateOpened(ctx, tx, issue); err != nil {
-				return err
-			}
+		if issue.Phase != phase.Admitted {
+			continue
+		}
+		if waits := blockers.Holds(rows, issue); len(waits) > 0 {
+			e.logOnCommit(ctx, "workflow: the tree's gate opened, but this member waits on unfinished work",
+				"issue", issue.Key, "tree", root.Tree, "blockers", waits)
+			continue
+		}
+		if err := e.gateOpened(ctx, tx, issue); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// StartUnblockedChildren starts every child among issues that nothing holds any longer: one that is
+// no tree root of its own, stands where enterChild or the gate's opening left it (phase.Admitted),
+// has no unfinished blocker in the mirror rows, and whose tree would start it now — live
+// (record.TreeLive) with its design gate open. One whose tree is still closed is the gate's, whose
+// own opening starts it.
+//
+// Such a child either waited until the last issue it named closed, or had its links taken off while
+// it waited: an edit that changes no status, which the engine's own handling of the event does not
+// act on, and after which the state's `blocked` no longer names it. Left here, that child would
+// stand unstarted and unreported for good; it starts as a child whose tree's gate opened onto it
+// does. Either way its tree's architect is told it starts (ChildUnblockedNotice), with a reason
+// saying which of the two cleared its hold: a start nobody hears of is the very silence the hold's
+// report exists to remove.
+//
+// Its caller is admission's promoteHolds, which holds both the issues and the mirror rows already,
+// so every fact, tick, hold release and boot reconcile is a look at every held child. Each tree's
+// gate is read once, not once per child: a wide tree of held children is one read, not one each.
+func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
+	starts := make(map[string]bool)
+	for _, issue := range issues {
+		// Startable: holdable, with nothing it waits on unfinished. blockers.Holds cannot gate
+		// this, since it is nil for an issue that is not holdable too.
+		if !blockers.Holdable(issue) || len(blockers.Unfinished(rows, issue.Key)) > 0 {
+			continue
+		}
+		open, read := starts[issue.Tree]
+		if !read {
+			var err error
+			if open, err = e.treeStartsChildren(ctx, tx, issue.Tree); err != nil {
+				return err
+			}
+			starts[issue.Tree] = open
+		}
+		if !open {
+			continue
+		}
+		if err := e.gateOpened(ctx, tx, issue); err != nil {
+			return err
+		}
+		waited := rows[issue.Key].Blockers
+		if len(waited) == 0 {
+			e.logOnCommit(ctx, "workflow: this child names no issue it waits on any longer, so it starts",
+				"issue", issue.Key, "tree", issue.Tree)
+		} else {
+			e.logOnCommit(ctx, "workflow: every issue this child waited on is done, so it starts",
+				"issue", issue.Key, "tree", issue.Tree, "blockers", waited)
+		}
+		if err := e.notice(ctx, tx, issue.Key, ChildUnblockedNotice(issue.Key, issue.Tree, waited)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// treeStartsChildren says whether tree starts a child of its own now: its root is recorded, the
+// tree is live, and its design gate is open — the two conditions enterChild and
+// advanceAdmittedTree between them stand for.
+func (e *Engine) treeStartsChildren(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
+	root, err := e.store.Issue(ctx, tx, tree)
+	if err != nil || root == nil {
+		return false, err
+	}
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
+	if err != nil || !live {
+		return false, err
+	}
+	gate, err := e.store.Gate(ctx, tx, tree)
+	if err != nil || gate == nil {
+		return false, err
+	}
+	return classify.DesignGateOpen(*gate), nil
 }
 
 // gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row
@@ -948,14 +1073,16 @@ func (e *Engine) phaseRow(ctx context.Context, tx pgx.Tx, issue string, role cla
 	return record.PhaseRow{Issue: issue, Role: role}, nil
 }
 
-// issueForBranch is the issue whose branch legion/<KEY> is, when it is recorded on repo, as its
-// record keeps GitHub's spelling (record.Issue.GitHubRepo), compared case-insensitively as GitHub
-// compares names: a pull request on legion/<KEY> in another repository is never <KEY>'s.
+// issueForBranch is the issue whose branch (claim.IssueBranch) branch is, when it is recorded on
+// repo, as its record keeps GitHub's spelling (record.Issue.GitHubRepo), compared
+// case-insensitively as GitHub compares names: a pull request on legion/<KEY> in another repository
+// is never <KEY>'s.
 func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.Issue, error) {
-	if !strings.HasPrefix(branch, "legion/") {
+	key, ok := claim.BranchIssue(branch)
+	if !ok {
 		return nil, nil
 	}
-	issue, err := e.store.Issue(ctx, tx, strings.TrimPrefix(branch, "legion/"))
+	issue, err := e.store.Issue(ctx, tx, key)
 	if err != nil || issue == nil || !strings.EqualFold(issue.GitHubRepo, repo) {
 		return nil, err
 	}
