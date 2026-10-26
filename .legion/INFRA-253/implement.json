@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T19:08:15Z",
+  "completed": "2026-10-26T20:25:07Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2229",
-  "codeHead": "993bd7c18ac0683c3adde737e887313db37157aa",
+  "codeHead": "46502a8428905acd9ecaad7c402ee1050d71af16",
   "proof": [
     {
       "criterion": "Round 4 (review round 2): a misparsed --list (Playwright reads it as --grep's value, a real run) cannot get past the DISPATCH_E2E_REUSE_SERVERS refusal; a genuine listing still needs no harness",
@@ -136,7 +136,8 @@
     "Round 4: a fourth forward merge of main for a GitHub-reported conflict: #2188 gave the scratch-Dispatch start a NATS form, now carried on the held-socket start; the four scratch-Dispatch tests pass.",
     "Round 5: a fifth forward merge of main (0587774a) for a GitHub-reported conflict in packages/envoy/CHANGELOG.md and scripts/e2e/README.md, both sides kept; fingerprint unchanged (4faa5738); no other change. It brings main's #2246 claude-envoy typecheck fix.",
     "Round 6: a sixth forward merge of main (6f14a3671237) for a GitHub-reported conflict in packages/envoy/CHANGELOG.md alone, both sides kept; fingerprint unchanged (4faa5738); no other change. A merge commit the interrupted turn left unpushed (2919acba, no committer recorded) was superseded by this one.",
-    "Generation 3: forward merge of main 6cdb9995 for a GitHub-reported conflict in packages/envoy/CHANGELOG.md, scripts/e2e/stage2-tmux-supervision.sh and scripts/e2e/stage3-devbox-workflow.sh. Fingerprint 4faa5738 → 69bcdf6c: stage3's held-port start_daemon now carries #2242's `env -u LEGION_OMP_PATH` and its daemon_runs_the_pinned_omp check, with the log offset taken before start_kept; stage2 keeps the keeper stops beside #2242's box-login teardown and python3 in the tool list; no new server in main's changes starts on a released port."
+    "Generation 3: forward merge of main 6cdb9995 for a GitHub-reported conflict in packages/envoy/CHANGELOG.md, scripts/e2e/stage2-tmux-supervision.sh and scripts/e2e/stage3-devbox-workflow.sh. Fingerprint 4faa5738 → 69bcdf6c: stage3's held-port start_daemon now carries #2242's `env -u LEGION_OMP_PATH` and its daemon_runs_the_pinned_omp check, with the log offset taken before start_kept; stage2 keeps the keeper stops beside #2242's box-login teardown and python3 in the tool list; no new server in main's changes starts on a released port.",
+    "Forward merge of main fab8de3510 for a GitHub-reported conflict in scripts/e2e/claude-backend-tmux.sh (#2206's model route). Fingerprint 69bcdf6c → c5e74ae2: only the required-tool line pair moved, since #2206 dropped hawk-token from it (now required under the gateway route alone); the PR's ss → python3 change is unchanged and every held-port start is untouched."
   ],
   "openQuestions": [
     "envoy-smoke at the code head is the first run of SCM_RIGHTS into a host-network container (plan risk 6); if it fails the plan says report to the architect, no fallback.",
@@ -146,7 +147,7 @@
     "The Dispatch memory tests that reset peak memory need write access to /proc/<pid>/clear_refs, which gVisor pods refuse; CI's dispatch-memory job is their surface (the same failure on the base harness).",
     "WebKit and Firefox Playwright projects cannot launch in the pod (missing system libraries, no root); CI's dispatch job runs them."
   ],
-  "round": 7,
+  "round": 8,
   "notRunEndToEnd": [
     "stage3-devbox-workflow.sh, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, dispatch-user-turns.sh, and stage2-tmux-supervision.sh from model-turn-through-the-route on: the devbox has no working model route. Their changed functions ran against real processes: rig.sh start_held/keep_port/start_kept/report_port/held_only_by with the real envoy-listener, envoy-dispatch (env -i, DISPATCH_LISTEN_FD=3), run-server.sh, nats-server -p -1 and legion start on a keeper, in the pod; the keeper daemon path is Stage 1's (pod and CI PASS); the stage3/4b13b cleanup with keeper stops runs in smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts (pod, CI); stage2's gate checks, architect-registers-and-is-ready and envoy-role-held passed on the devbox with the two gate strings patched.",
     "lib/bridge-tunnel.sh (stage4a bridge mode): no cluster with pods/portforward and no devbox result; ran in the pod against a stub kubectl that binds :0 and stub chisel (port read from the Forwarding line, port-forward and chisel restarted on a new port, bridge_stop leaves nothing).",
