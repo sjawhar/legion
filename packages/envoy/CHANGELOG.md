@@ -722,7 +722,16 @@
   `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no
   `Retry-After`, and `GET /v1/sessions` lists that session with no topics and roles, as it did,
   rather than refusing the list, while the registry logs `registry read an interest record it
-  cannot decode` at WARN naming the session. The 413 for a message NATS cannot
+  cannot decode` at WARN naming the session. Such a record no longer locks out the routes that
+  write it, which failed on the read and every retry: `DELETE /v1/interests/<session_id>` deletes
+  it and releases the session's role claims (204, where it answered 500); `POST
+  /v1/interests/subscribe` and `POST /v1/roles/set` replace the claimant's with the one the request
+  names rather than merging (where they answered 503 and 500), and the registry logs `registry
+  replaced an interest record it cannot decode` at WARN naming the session; the session's role
+  claims, in the role bucket, are kept. `POST /v1/interests/unsubscribe` releases the role claims
+  its topics name and leaves the record, which routes none of its topics, answering 200 where it
+  answered 500, and a role claim taken from a holder whose record is unreadable no longer answers
+  500 after it lands. The 413 for a message NATS cannot
   take whole and the 400 for a subject or key it refuses are unchanged. A publish on either route
   whose request context has already
   ended — its budget spent, which a role-holder resolution that answers just as the budget ends

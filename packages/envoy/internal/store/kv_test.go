@@ -670,6 +670,155 @@ func TestGetReadsAnUndecodableInterestRecordAsErrMalformedInterest(t *testing.T)
 	}
 }
 
+const undecodableInterestRecord = "not a json interest record"
+
+// storeUndecodableInterest writes a record no build can decode as sessionID's interest record, and
+// a claim on role naming sessionID as its holder.
+func storeUndecodableInterest(t *testing.T, reg *Registry, kv natsgo.KeyValue, sessionID, role string) {
+	t.Helper()
+	if _, err := kv.Put(sessionID, []byte(undecodableInterestRecord)); err != nil {
+		t.Fatalf("store %s's interest record: %v", sessionID, err)
+	}
+	claim, err := json.Marshal(RoleClaim{HolderSessionID: sessionID, ClaimedAt: 1})
+	if err != nil {
+		t.Fatalf("encode the claim on %s: %v", role, err)
+	}
+	if _, err := reg.roleKV.Put(role, claim); err != nil {
+		t.Fatalf("store the claim on %s: %v", role, err)
+	}
+}
+
+// Removing every topic of a session whose interest record this build cannot decode deletes the
+// record and releases the session's role claims, as it does for a record that decodes: failing on
+// the read would leave nothing that can clear the record.
+func TestRemoveAllDeletesAnUndecodableInterestRecordAndReleasesItsRoles(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_undecodable_remove_all"
+	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
+	if err := reg.Remove(sessionID, nil); err != nil {
+		t.Fatalf("Remove(%s, nil) over an undecodable record: %v", sessionID, err)
+	}
+	if entry, err := kv.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("the bucket's %s key after Remove = %v, %v; want ErrKeyNotFound", sessionID, entry, err)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != "" {
+		t.Fatalf("reviewer's holder after Remove = %q, %v; want the claim released", holder, err)
+	}
+}
+
+// Removing some topics of a session whose interest record this build cannot decode releases the
+// role claims those topics name and leaves the record as it is, logged at WARN naming the session:
+// the record routes none of its topics here, so there is nothing to take out of it.
+func TestRemoveTopicsLeavesAnUndecodableInterestRecordAndReleasesTheirRoles(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_undecodable_remove_topics"
+	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
+	if err := reg.Remove(sessionID, []string{"notifications.role.reviewer"}); err != nil {
+		t.Fatalf("Remove(%s, its role topic) over an undecodable record: %v", sessionID, err)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != "" {
+		t.Fatalf("reviewer's holder after Remove = %q, %v; want the claim released", holder, err)
+	}
+	entry, err := kv.Get(sessionID)
+	if err != nil || string(entry.Value()) != undecodableInterestRecord {
+		t.Fatalf("the bucket's %s record after Remove = %v, %v; want it unchanged", sessionID, entry, err)
+	}
+	for _, want := range []string{"level=WARN", `msg="registry left an interest record it cannot decode unchanged"`, "session_id=" + sessionID} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("registry logs %q, want them to contain %q", logs.String(), want)
+		}
+	}
+}
+
+// A subscribe over an interest record this build cannot decode writes the record it asks for,
+// without the undecodable record's topics, and logs the replacement at WARN naming the session: the
+// session's own subscribe is the authority on its record. The session's role claims live in the
+// role bucket, so they are kept.
+func TestUpsertReplacesAnUndecodableInterestRecord(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const sessionID = "ses_undecodable_upsert"
+	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
+	item, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: "m1", Dir: "/workspace"},
+		[]string{"topic.fresh", "notifications.agent." + sessionID})
+	if err != nil {
+		t.Fatalf("Upsert over an undecodable record: %v", err)
+	}
+	entry, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read %s's record after Upsert: %v", sessionID, err)
+	}
+	var stored Interest
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+		t.Fatalf("the record Upsert wrote does not decode: %q: %v", entry.Value(), err)
+	}
+	want := "notifications.agent." + sessionID + " topic.fresh"
+	if got := strings.Join(stored.Topics, " "); got != want || stored.MachineID != "m1" || stored.Dir != "/workspace" {
+		t.Fatalf("the record Upsert wrote = %+v, want topics %q on m1 in /workspace", stored, want)
+	}
+	if got := strings.Join(item.Topics, " "); got != want {
+		t.Fatalf("Upsert returned topics %q, want %q", got, want)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != sessionID {
+		t.Fatalf("reviewer's holder after Upsert = %q, %v; want the claim kept for %s", holder, err, sessionID)
+	}
+	for _, want := range []string{"level=WARN", `msg="registry replaced an interest record it cannot decode"`, "session_id=" + sessionID} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("registry logs %q, want them to contain %q", logs.String(), want)
+		}
+	}
+}
+
+// A role claim goes through over an interest record this build cannot decode, the claimant's or
+// the role's previous holder's: the claimant's record is replaced by one naming the role, and the
+// previous holder's is left as it is.
+func TestSetRoleClaimsOverUndecodableInterestRecords(t *testing.T) {
+	captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const (
+		claimant = "ses_undecodable_claimant"
+		previous = "ses_undecodable_previous"
+	)
+	if _, err := kv.Put(claimant, []byte(undecodableInterestRecord)); err != nil {
+		t.Fatalf("store %s's interest record: %v", claimant, err)
+	}
+	storeUndecodableInterest(t, reg, kv, previous, "reviewer")
+	item, err := reg.SetRole(claimant, "m1", "reviewer", false)
+	if err != nil {
+		t.Fatalf("SetRole over undecodable records: %v", err)
+	}
+	if got := strings.Join(item.Topics, " "); got != "notifications.role.reviewer" {
+		t.Fatalf("SetRole returned topics %q, want the role topic", got)
+	}
+	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != claimant {
+		t.Fatalf("reviewer's holder after SetRole = %q, %v; want %s", holder, err, claimant)
+	}
+	entry, err := kv.Get(claimant)
+	if err != nil {
+		t.Fatalf("read %s's record after SetRole: %v", claimant, err)
+	}
+	var stored Interest
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil || strings.Join(stored.Topics, " ") != "notifications.role.reviewer" {
+		t.Fatalf("%s's record after SetRole = %q, %v; want it to decode with the role topic", claimant, entry.Value(), err)
+	}
+	if entry, err := kv.Get(previous); err != nil || string(entry.Value()) != undecodableInterestRecord {
+		t.Fatalf("%s's record after SetRole = %v, %v; want it unchanged", previous, entry, err)
+	}
+}
+
 func TestUpsert_TransientGetErrorPropagatesAndDoesNotClobber(t *testing.T) {
 	// Integration regression for the Atlas dropout bug: when the interest bucket's Get fails
 	// transiently (not ErrKeyNotFound), Upsert MUST return the error rather

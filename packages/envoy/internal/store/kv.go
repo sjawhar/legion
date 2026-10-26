@@ -352,6 +352,9 @@ func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 	return r.watcher.WaitReady(ctx)
 }
 
+// Upsert merges topics into item.SessionID's interest record (mergeForUpsert) and writes it. A
+// record this build cannot decode (ErrMalformedInterest) is replaced by item and topics alone, and
+// the registry logs that at WARN naming the session.
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(context.Background(), item.SessionID)
 	merged, err := mergeForUpsert(cur, getErr, item, topics, r.now().UnixMilli())
@@ -369,13 +372,20 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 	r.mu.Lock()
 	r.cacheInterestLocked(merged.SessionID, merged, revision)
 	r.mu.Unlock()
+	if errors.Is(getErr, ErrMalformedInterest) {
+		r.logger().Warn("registry replaced an interest record it cannot decode",
+			slog.String("session_id", merged.SessionID),
+			slog.Uint64("revision", revision),
+			slog.Any("topics", merged.Topics),
+		)
+	}
 	return merged, nil
 }
 
 // mergeForUpsert computes the Interest to persist by reconciling the requested
 // item/topics with the current cached/durable state returned by r.Get.
 //
-// Critical invariant: a transient KV error (anything other than ErrKeyNotFound)
+// Critical invariant: a transient KV error (anything other than ErrKeyNotFound or ErrMalformedInterest)
 // MUST be returned so the caller refuses to overwrite durable state with the
 // partial heartbeat payload. Silently treating transient errors as "no prior
 // state" is what caused Atlas's pr.11416.> subscription to disappear: when r.Get
@@ -385,9 +395,11 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 // events fall through registry.Match with "no matching interests".
 //
 // ErrKeyNotFound is the genuinely-new-session case — proceed with the passed-in
-// item and topics.
+// item and topics. ErrMalformedInterest is merged the same way: the record answered, so this is
+// not the transient case, its topics are ones this build never routed (the cache holds no record
+// it cannot decode), and the session's own subscribe is the authority on its record.
 func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
-	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) {
+	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
 	if getErr == nil {
@@ -581,6 +593,9 @@ func (r *Registry) releaseAllRoleClaims(sessionID string) error {
 	return nil
 }
 
+// Remove releases sessionID's role claims and removes topics from its interest record, or deletes
+// the record when topics is empty. A record this build cannot decode (ErrMalformedInterest) is
+// deleted all the same; removing some topics leaves it as it is (removeInterestTopics).
 func (r *Registry) Remove(sessionID string, topics []string) error {
 	if len(topics) == 0 {
 		item, err := r.Get(context.Background(), sessionID)
@@ -588,7 +603,7 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 			if err := r.releaseRoleClaims(sessionID, item.Topics); err != nil {
 				return err
 			}
-		} else if !errors.Is(err, nats.ErrKeyNotFound) {
+		} else if !errors.Is(err, nats.ErrKeyNotFound) && !errors.Is(err, ErrMalformedInterest) {
 			return err
 		}
 		if err := r.releaseAllRoleClaims(sessionID); err != nil {
@@ -600,12 +615,23 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	return r.removeInterestTopics(sessionID, topics)
 }
 
+// removeInterestTopics removes topics from sessionID's interest record, deleting it when none is
+// left or topics is empty. A record this build cannot decode routes none of its topics here, so
+// there is nothing to remove from it: it is left for the session's next subscribe to replace or a
+// delete to remove, and the registry logs that at WARN naming the session.
 func (r *Registry) removeInterestTopics(sessionID string, topics []string) error {
 	// Empty topics = unsubscribe from everything (delete the entry).
 	if len(topics) == 0 {
 		return r.deleteInterest(sessionID)
 	}
 	item, err := r.Get(context.Background(), sessionID)
+	if errors.Is(err, ErrMalformedInterest) {
+		r.logger().Warn("registry left an interest record it cannot decode unchanged",
+			slog.String("session_id", sessionID),
+			slog.Any("topics", topics),
+		)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
