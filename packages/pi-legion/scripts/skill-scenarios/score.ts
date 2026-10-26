@@ -1295,9 +1295,13 @@ export interface SpecWork {
   checks: SpecCheck[];
   rejected: RejectedCheck[];
 }
-/** Oh My Pi's envelope of one task's end (prompts/tools/task-summary.md): its id, its status
- * (`completed`, `failed (exit <n>)`, `cancelled` or `merge failed`) and its body. */
-const TASK_RESULT = /<task-result\b([^>]*)>([\s\S]*?)<\/task-result>/g;
+/** The opening tag of Oh My Pi's envelope of one task's end (prompts/tools/task-summary.md). Its
+ * attributes give the task's id. taskNames reads the opening tags alone, so a closing tag that a
+ * report quotes cannot make its list shorter. A greedy capture of the body would merge the
+ * envelopes of a blocking result of several tasks into one match and drop every name after the
+ * first, so a task that failed would not be required. A quoted opening tag adds a name that has no
+ * completed record, and that rejects the check. */
+const TASK_RESULT_OPEN = /<task-result\b([^>]*)>/g;
 const attribute = (attributes: string, name: string) =>
   new RegExp(`\\b${name}="([^"]*)"`).exec(attributes)?.[1];
 /** A task's report in its envelope's body: the `<output>` or `<preview>` part, else the body less
@@ -1333,7 +1337,7 @@ function taskNames(step: Step, own: Outcome | undefined): string[] {
   }
   const text = own?.text ?? "";
   for (const [, name] of text.matchAll(/`([^`\s]+)` \(job/g)) if (name) names.add(name);
-  for (const [, attributes = ""] of text.matchAll(TASK_RESULT)) {
+  for (const [, attributes = ""] of text.matchAll(TASK_RESULT_OPEN)) {
     const id = attribute(attributes, "id");
     if (id) names.add(id);
   }
@@ -1400,8 +1404,8 @@ function checkOutcome(
         index: own.index,
       });
     }
-  // As in the delivered branch below: the end anchor is gone, because Oh My Pi writes a line
-  // after the closing tag, and the capture stays greedy, so a tag the report quotes never ends it.
+  // As in the delivered branch below: no end anchor, and a greedy capture. A blocking result has no
+  // sections, so only reportOf bounds the report, and the same limit applies.
   else {
     const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>/.exec(own.text);
     if (envelope !== null)
@@ -1437,12 +1441,19 @@ function checkOutcome(
         typeof resultText === "string"
           ? resultText
           : jobSection(strings(entry.content).join(""), name, delivered);
-      // Oh My Pi writes a line of its own after the closing tag of most deliveries (the agent is
+      // Oh My Pi writes text of its own after the closing tag of most deliveries (the agent is
       // idle, how to message it, where its transcript is), so the envelope is not the text's end.
-      // The capture stays greedy: only that line follows the real closing tag, so a greedy match
-      // ends there, while a lazy one would end at the first `</task-result>` the report itself
-      // quotes and drop every finding after it. The agent being scored writes its checker's
-      // prompt, and Oh My Pi escapes no `task-result` tag, so it could ask for exactly that.
+      // The capture is greedy. A lazy capture would end at the first `</task-result>` that the
+      // report quotes and drop every finding after it; the agent being scored writes its checker's
+      // prompt, so it could ask for exactly that. The greedy body can run past the real closing
+      // tag: Oh My Pi escapes no `task-result` tag, and text it writes after the envelope can hold
+      // one. Two rules bound the report. In a message that delivers several jobs, jobSection ends
+      // this job's section at the framing line of the next job the message delivers. reportOf
+      // takes the first complete `<output>` or `<preview>` part, and task-summary.md always writes
+      // one, so text after that part is not in the report.
+      // Limit: two envelopes with neither part, with text between them, put that text and the
+      // second body into the report. The pinned task-summary.md always writes one of the two parts,
+      // so no supported producer gives that shape.
       const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>/.exec(text);
       const body =
         envelope !== null && attribute(envelope[1] ?? "", "id") === name ? (envelope[2] ?? "") : "";

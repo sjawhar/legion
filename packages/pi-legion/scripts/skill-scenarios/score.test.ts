@@ -1136,6 +1136,30 @@ specRun("spec-writing-head-68", {
     ]
   ),
 });
+// A blocking check whose call names no task, so the names come from its result's envelopes. The
+// first report quotes a closing `task-result` tag, and the second task failed. Each opening tag
+// names its task, so the failed task is required. A greedy scan of the names would make one match
+// of both envelopes, drop the second name, and count the check.
+const quotesCloser = "The spec quotes `</task-result>` in its last line.\nNo gaps.";
+specRun("spec-writing-head-69", {
+  transcript: firstCheck([
+    toolCall("c1", "task", {
+      context: `Read this spec alone and list each gap.\n\n${outlined()}`,
+      tasks: [{ task: "List each gap." }, { task: "List each gap again." }],
+    }),
+    toolResult(
+      "c1",
+      `${taskEnvelope("Checkc1-a", "completed", quotesCloser)}\n\n${taskEnvelope("Checkc1-b", "failed (exit 1)", "Error: the model refused.")}`,
+      false,
+      {
+        results: [
+          { id: "Checkc1-a", agent: "task", exitCode: 0, output: quotesCloser },
+          { id: "Checkc1-b", agent: "task", exitCode: 1, output: "Error: the model refused." },
+        ],
+      }
+    ),
+  ]),
+});
 // refusals from the dispatch CLI's ledger: a refusal Dispatch sent back, which the CLI logs as an
 // `error` line and prints with no `dispatch` prefix, so a call's output cannot mark it.
 const invalidOp = 'operation 0: invalid document operation field "after or before": ';
@@ -1999,6 +2023,12 @@ test("checked: a check counts only when its completed report came back before th
   fails("spec-writing-head-63", "no report of task Checkc1 arrived");
   // A delivery that names the check's section twice gives it no report.
   fails("spec-writing-head-66", "the report of task Checkc1 is empty");
+  // A call that names no task: every envelope's opening tag names one, a quoted closing tag in the
+  // first report removes none, and the second task failed.
+  expect(scoresOf("spec-writing-head-69")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-69")).toContain(
+    "check Checkc1-a, Checkc1-b (call c1) for spec write 1 does not count: task Checkc1-b ended failed (exit 1)"
+  );
 });
 
 test("checked: a background check's report in a wait result or an async-result message, and a blocking check's report, count", () => {
