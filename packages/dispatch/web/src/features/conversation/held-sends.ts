@@ -340,11 +340,12 @@ export class HeldSends {
 
   /** Sends `request` under `mutationKey` and holds it until it lands - unless a send under that
    *  name is out already, which refuses this one: a composer holds one draft. A refused send's
-   *  entry gives way to the new one. */
+   *  entry gives way to the new one, its Retry, which is no Discard (`Writes.supersede`): a
+   *  margin compose's mark stays in the document for it. */
   send(mutationKey: MutationKey, request: SentRequest): boolean {
     const held = this.get(mutationKey);
     if (held !== undefined && held.status !== "refused") return false;
-    if (held !== undefined) this.#writes.discard(held.id);
+    if (held !== undefined) this.#writes.supersede(held.id);
     const { owner } = request;
     this.#writes
       .run({

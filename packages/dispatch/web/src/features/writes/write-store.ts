@@ -414,6 +414,17 @@ export class Writes {
     return true;
   }
 
+  /** Lets the refused write `id` go because its surface makes it again as a press of its own - a
+   *  composer's Retry, with what the reader wrote over the refusal - which takes its place. It is
+   *  no Discard: the reader dropped nothing, so no outcome is told, and its kind already undid
+   *  what it showed at the refusal. Says whether there was one. */
+  supersede(id: number): boolean {
+    const entry = this.#entries.get(id);
+    if (entry?.write.status !== "refused") return false;
+    this.#remove(entry);
+    return true;
+  }
+
   /** Lets the made write `id` go, as its surface does once it is gone. */
   letGo(id: number): void {
     const entry = this.#entries.get(id);
@@ -668,9 +679,19 @@ export class Writes {
         if (current()) this.#show(entry, { ...entry.write, retried: true, uploaded: undefined });
       },
       signal: stop.signal,
-      // The person's session lapsed under the write: the page learns who is signed in, and a lapse
-      // holds every write until the sign-in that follows (`signedIn`).
-      unauthorized: () => void this.#client.invalidateQueries({ queryKey: ["whoami"] }),
+      // The person's session may have lapsed under the write: the page reads who is signed in
+      // again, and a lapse holds every write until the sign-in that follows (`signedIn`). The
+      // answer says whether the check, read afresh, still names the person who pressed it, which
+      // makes a repeated 401 Dispatch's refusal (`writeUnderKey`).
+      unauthorized: async () => {
+        await this.#client.invalidateQueries({ queryKey: ["whoami"] });
+        const state = this.#client.getQueryState<AuthenticatedUser>(["whoami"]);
+        return (
+          state?.status === "success" &&
+          !state.isInvalidated &&
+          state.data?.login === entry.write.login
+        );
+      },
     })
       .then(
         (answer) => {

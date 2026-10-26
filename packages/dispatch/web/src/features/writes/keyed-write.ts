@@ -165,14 +165,15 @@ function pause(
  *  any attempt of it went out, which every attempt must make; `signal` stops the trying; `sent` is
  *  told each attempt's request as it goes out; `uploading` is told how much of an upload's body
  *  each attempt has sent; `failed` is told each attempt that ended without Dispatch's verdict;
- *  `unauthorized` is told each attempt Dispatch answers `401`, the person's session having lapsed. */
+ *  `unauthorized` is told each attempt Dispatch answers `401`, and answers whether the page's
+ *  sign-in check, read again, still names the person who pressed it. */
 export interface KeyedWriteOptions {
   readonly failed?: () => void;
   readonly login?: string;
   readonly planned?: WriteRequest;
   readonly sent?: (request: WriteRequest) => void;
   readonly signal?: AbortSignal;
-  readonly unauthorized?: () => void;
+  readonly unauthorized?: () => Promise<boolean>;
   readonly uploading?: (loaded: number, total: number) => void;
 }
 
@@ -194,8 +195,11 @@ export class OneRequestPerWriteError extends Error {
  * connection failed (`NetworkError`), the attempt went silent (`RequestTimeoutError`), a 2xx was
  * not JSON (`UnreadableAnswerError`), the person's session lapsed (`401`, told to `unauthorized`),
  * or Dispatch answered a 5xx, a 408, a 429 or `409 KEY_IN_FLIGHT` (`retriesUnderKey`) - is made
- * again after 1 s, 2 s, 4 s … never more than 30 s apart, or after Dispatch's `Retry-After`. Only
- * the page learning Dispatch can be reached again on the write's own route - the browser coming
+ * again after 1 s, 2 s, 4 s … never more than 30 s apart, or after Dispatch's `Retry-After`. A
+ * `401` is a lapse only while the page's sign-in check does not contradict it: a second `401` in a
+ * row, each after the check said the person is still signed in, is Dispatch's verdict and refuses
+ * the write (the first may be a session that rotated between the two). Only the page learning
+ * Dispatch can be reached again on the write's own route - the browser coming
  * back online, the live socket reopening after it was lost, or an answer on this write's route
  * after a request there failed at the connection or went silent - starts that backoff over and ends
  * a wait early: the write's own transport failure followed by another route's answer resets
@@ -238,6 +242,9 @@ export async function writeUnderKey<T>(
   const stopListening = onReachable((how, path) => {
     if (ownRoute(how, path)) regained = true;
   });
+  // Whether the last attempt was answered `401` although the sign-in check, read again, still
+  // named the person: a second such answer is Dispatch's refusal, not a lapse.
+  let unauthorizedWhileSignedIn = false;
   try {
     for (;;) {
       try {
@@ -258,7 +265,13 @@ export async function writeUnderKey<T>(
         }
         const wait = retryAfter(error, backoff);
         if (wait === undefined) throw error;
-        if (isUnauthorized(error)) unauthorized?.();
+        if (isUnauthorized(error)) {
+          const stillSignedIn = (await unauthorized?.()) === true;
+          if (stillSignedIn && unauthorizedWhileSignedIn) throw error;
+          unauthorizedWhileSignedIn = stillSignedIn;
+        } else {
+          unauthorizedWhileSignedIn = false;
+        }
         failed?.();
         unanswered ||= !(error instanceof ApiError) || error.status >= 500;
         if (!(await pause(wait.ms, wait.wakes, signal, ownRoute))) throw new SendStoppedError();

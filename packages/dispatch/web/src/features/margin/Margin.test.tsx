@@ -995,6 +995,34 @@ test("the margin removes the composer's mark when the composer is cancelled or r
   }
 });
 
+// A refused compose's Retry is the same compose sent again, to the same mark: the refusal gives
+// way to the Retry's send, which is no Discard, so the mark stays in the document for it. Only
+// the reader's own Discard of a refusal takes the mark out.
+test("a refused compose's Retry keeps its mark and sends to it", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const createComment = spyOn(api, "createComment")
+    .mockRejectedValueOnce(new ApiError(400, { code: "INPUT_REFUSED", error: "refused" }))
+    .mockResolvedValue({ body: "Kept", id: "comment-1" } as unknown as Comment);
+  const view = renderMarginWithBridge(fake.bridge);
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(composer).getByLabelText("Comment"), { target: { value: "Kept" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    const retry = await within(composer).findByRole("button", { name: "Retry" });
+    fireEvent.click(retry);
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]?.[1]).toMatchObject({
+      anchor: { artifact: "artifact-1", mark_id: "m-1" },
+    });
+    expect(fake.removed).toEqual([]);
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
 // A selection-bar action while the open compose's own send is out cannot take the margin, and
 // the reader sees why: the open compose comes back on screen - here from under the Pinned tab -
 // saying its send is still out, until that send lands.

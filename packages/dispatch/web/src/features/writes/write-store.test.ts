@@ -1,5 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import { keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
 import {
@@ -540,6 +540,40 @@ test("a write answered 401 is asked again under its key, and whoami is read agai
     await tick(1_000);
     expect(await landed).toEqual({ key: "CORE-1" });
     expect(new Set(keys).size).toBe(1);
+  });
+});
+
+// A write Dispatch keeps answering 401 while the page's sign-in check, read again each time, still
+// names the person who pressed it is no lapse: it is Dispatch's refusal, and the surface is told
+// it, rather than waiting on a sign-in that already holds. A 401 is asked again once after the
+// check says the person is signed in (a session that rotated between the two), and the second is
+// the verdict.
+test("a write answered 401 again while its person is still signed in is refused", async () => {
+  await onFakeClock(async () => {
+    const client = signedIn("alice");
+    const whoami = new QueryObserver(client, {
+      queryFn: async () => ({ event_head: "0", kind: "user" as const, login: "alice" }),
+      queryKey: ["whoami"],
+    });
+    const stop = whoami.subscribe(() => {});
+    const writes = new Writes(client, keptTab().page(), memoryFiles());
+    try {
+      let attempts = 0;
+      const refused = statusWrite(writes, () => {
+        attempts += 1;
+        return Promise.reject(
+          new ApiError(401, { code: "UNAUTHENTICATED", error: "sign in again" })
+        );
+      }).catch((error: unknown) => error);
+      await tick(5_000);
+      expect(await refused).toMatchObject({ status: 401 });
+      expect(attempts).toBe(2);
+      expect(row(writes)).toMatchObject({ status: "refused" });
+      await tick(30_000);
+      expect(attempts).toBe(2);
+    } finally {
+      stop();
+    }
   });
 });
 
