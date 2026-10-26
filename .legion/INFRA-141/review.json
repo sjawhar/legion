@@ -2,22 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T05:42:00Z",
+  "completed": "2026-10-26T07:00:00Z",
   "generation": 3,
-  "round": "the round after review 5647344074; code head dfe43f43f471, handoff head fd4ce3c4",
-  "scope": "The architect's ruling (Envoy b68a456e77e3598357726cfe579ab120, decision dispatch://INFRA-141/comment/fa53f45b-5a24-4aa2-a198-339e5d3818e2): confirm that the seven items of 5647344074 and thread PRRT_kwDORFy7ds6wHB8w landed; raise a new finding only for a defect, false doc or comment statements included; approve once none stands.",
-  "decision": "changes_requested",
-  "lastRoundItems": "All seven landed, as did thread -8w, each verified in the code at fd4ce3c4: (1) store.Registry.Get/RoleClaim/ReleaseExpiredRoleClaim take ctx and are bounded inside the store (bounded, kv.go), and Get returns a cache hit before any goroutine; (2) the duplicated lookup subtests are removed; (3) store.ErrMalformedRoleClaim answers 500 with no Retry-After on both role routes, recorded role_claim_unreadable, covered by role_claim_unreadable_test.go; (4) one deliveryConfig value, with the configs type and its test deleted; (5) publishConfirmed(ctx, ...) checks ctx.Err() and the clock's deadline before publish; (6) unplaceableAgentDelivery finalizes in both arms and returns nothing (ShouldNAK is set only with Err, handler.go:96, so the ACK is the same); (7) the three stale texts are corrected.",
-  "ci": "CI head 2d63edbbc7cd (compare to fd4ce3c4: ahead, only .legion/). At reading, lint and test were in_progress and typecheck, envoy-go, envoy-go-race, envoy-e2e-local and envoy-smoke were queued. A request for changes does not wait for CI.",
-  "thermonuclear": "Both run at fd4ce3c4 under the defect-only rule. deep-review: CHANGES, three false docs, no code defect; checked every store caller, bounded's answered/err split, the status mapping (ErrRefused 413/400, ErrKeyNotFound unclaimed, ErrMalformedRoleClaim matched before bus-unavailable even through the release's wrap), and that an ended ctx neither waits nor dials without publishCoreTo's entry read (ensureConnWithContext's select; connectWithContext's ctx and deadline checks). code-quality: CHANGES, the same three docs plus one false test comment; no test-quality defect; items 1-7 LANDED.",
+  "round": "the round after review 5647844063; code head 954e9d184941, handoff head 5dcda609",
+  "scope": "The architect's ruling (Envoy 6628c26753c5eb3462a14cab9669a3e4): confirm that the four statements of 5647844063 are corrected and that no code changed after dfe43f43 apart from them; approve the head by SHA if both hold and no defect is found.",
+  "decision": "approved",
+  "verified": [
+    "All four statements are corrected in 954e9d184941: AGENTS.md's /v1/messages/publish row and docs/architecture.md:122-126 credit both a spent deadline and a cancel to publishConfirmed's single context check, which matches internal/bus/confirm.go; AGENTS.md's role-ownership bullet names store.Registry's RoleClaim/ReleaseExpiredRoleClaim through bounded; the comment on TestAPublishConfirmedWithASpentDeadlinePublishesNothing gives a true reason. CHANGELOG.md's matching sentence was corrected too. grep: no withinContext, 'reading it at entry', 'reading it once more' or 'publishCoreTo` refuses' remains in packages/envoy or docs.",
+    "The only non-.legion paths changed from dfe43f43 to 5dcda609 are packages/envoy/AGENTS.md, CHANGELOG.md, docs/architecture.md and internal/bus/publish_ended_context_test.go, and the test file's diff has no changed line outside // comments. No runtime code changed, so no thermonuclear pass runs this round.",
+    "Proofs: the implementer's real-binary proof at code head dfe43f43 (PR body, review 5647344074's round: malformed claim 500 on both routes, frozen bus 503 in 3.50 s, e2e-local exit 0) and the tester's line at faf41f3e (prose-only delta; the dfe43f43 real-binary evidence stands; the test file's comment-stripped AST is identical) both name this code."
+  ],
+  "ci": "CI head faf41f3eb85b (compare to 5dcda609: ahead, only .legion/). Required: lint, typecheck, test completed/success (Tests 40275967174); pr-title completed/success (PR Title 40276241104). Also success: Docs 40275967328, Worker Image 40275967173, envoy-e2e-local. Legion Envoy and Contracts 40275967201 was still running (envoy-go queued, envoy-go-race in progress) behind a repository-wide runner backlog; it is not required.",
+  "verdictProvenance": "provider not verified: this session's transcript is held in the SQL session store, and the per-turn provider and model of the turns that wrote this verdict could not be read from it in this pod.",
   "critical": 0,
   "important": 0,
-  "minor": 4,
-  "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Line 1954, the /v1/messages/publish row: says bus.publishCoreTo refuses a cancelled ctx 'reading it at entry and again once the connection is usable' and that publishConfirmed refuses only a spent deadline. 98fa1cc6 removed both reads; publishConfirmed's single ctx check (confirm.go:41-48) now sees both a spent deadline and a cancel."},
-    {"severity": "minor", "file": "packages/envoy/docs/architecture.md", "description": "Lines 122-127 say the same as the AGENTS.md row: publishConfirmed checks its deadline, and publishCoreTo refuses a cancelled ctx by reading it once more after a reconnect wait. False since 98fa1cc6."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Line 1893, the role-ownership bullet: names `withinContext`, which b2ed891c deleted. The bound is now store.Registry's (`bounded`, used by RoleClaim and ReleaseExpiredRoleClaim)."},
-    {"severity": "minor", "file": "packages/envoy/internal/bus/publish_ended_context_test.go", "description": "The comment on TestAPublishConfirmedWithASpentDeadlinePublishesNothing (lines 125-127) says a ctx reaches publishConfirmed ended only when it ended during or just after the wait for a connection. With publishCoreTo's entry read gone, an already-ended ctx reaches it on every core publish over a healthy connection (ensureConnWithContext returns nil without consulting ctx), which TestAPublishWithAnEndedContextSendsNothing drives end to end."}
-  ],
-  "threads": "41 threads in total, all resolved by the implementer. I replied on PRRT_kwDORFy7ds6wHB8w and on the seven threads of 5647344074 (PRRT_kwDORFy7ds6wIjCz, -wIjC3, -wIjC-, -wIjDC, -wIjDG, -wIjDI, -wIjDN): each is accepted as fixed; two replies point to the stale docs this round asks for. No bot threads."
+  "minor": 0,
+  "keyFindings": [],
+  "threads": "45 threads in total, all resolved. I replied 'Accepted: fixed in 954e9d184941' on each of 5647844063's four threads (PRRT_kwDORFy7ds6wJdhk, -wJdhn, -wJdhq, -wJdhs), each verified in the text. No bot threads."
 }
