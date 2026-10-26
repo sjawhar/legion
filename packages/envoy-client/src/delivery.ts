@@ -184,13 +184,6 @@ export interface DeliveryClaim {
 }
 
 /**
- * Where a frame stands in a host's live path: never claimed (or released), claimed and still
- * being delivered, or claimed and finished with. `settled` says nothing of whether it was shown:
- * a host that shows it records that in the replay ledger, which a replay sweep reads first.
- */
-export type DeliveryStatus = "none" | "pending" | "settled";
-
-/**
  * A host's record of the frames it handed its agent, which drops a repeat. The whole promise it is
  * part of is stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`; every host that
  * subscribes over core NATS (the Oh My Pi extension, the Claude Code channel) keeps one.
@@ -212,10 +205,12 @@ export interface DeliveryDedupe {
    */
   claim(frame: DedupeIdentity | undefined): DeliveryClaim | undefined;
   /**
-   * Where the frame stands, by the same identity rule `claim` drops a repeat by: a claim of its
-   * event id, or of a key that names its event inside the window, is that frame's claim.
+   * Whether a claim of the frame is still being delivered: neither settled nor released. A claim
+   * of its event id, or of a key that names its event, is that frame's claim, by the same identity
+   * rule `claim` drops a repeat by. A settled claim says nothing of whether the frame was shown: a
+   * host that shows it records that in the replay ledger, which a replay sweep reads first.
    */
-  status(frame: DedupeIdentity): DeliveryStatus;
+  pending(frame: DedupeIdentity): boolean;
 }
 
 /**
@@ -321,23 +316,13 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
         settle: close,
       };
     },
-    status(frame) {
+    pending(frame) {
       const eventId = frame.event_id;
       const key = frame.dedupe_key;
-      const named = key !== undefined && dedupeKeyNamesItsEvent(frame);
-      if (
+      return (
         (eventId !== undefined && pendingEvents.has(eventId)) ||
-        (named && pendingKeys.has(key))
-      ) {
-        return "pending";
-      }
-      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
-        return "settled";
-      }
-      const claimedAt = named ? keys.get(key) : undefined;
-      return claimedAt !== undefined && now() - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS
-        ? "settled"
-        : "none";
+        (key !== undefined && dedupeKeyNamesItsEvent(frame) && pendingKeys.has(key))
+      );
     },
   };
 }

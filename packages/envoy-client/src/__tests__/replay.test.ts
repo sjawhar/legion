@@ -227,6 +227,17 @@ function setup(
 
 const ids = (frames: readonly ReplayFrame[]) => frames.map((frame) => frame.envelope.event_id);
 
+/** Fails `frame` live on `followed`, and answers whether its failure notice was shown at once. */
+async function noticedAtOnce(
+  engine: ReplayEngine,
+  host: { readonly failureNotices: readonly ReplayFailureNotice[] },
+  followed: string,
+  frame: Envelope = envelope()
+): Promise<boolean> {
+  await engine.liveFailed(followed, frame, new Error("injection threw"));
+  return host.failureNotices.some((notice) => notice.eventId === frame.event_id);
+}
+
 describe("replay sweep", () => {
   test("a backlog longer than one page arrives whole, in order, across pages", async () => {
     const { stream, host, engine } = setup([AGENT], { maxMessages: 2 });
@@ -536,6 +547,58 @@ describe("replay sweep", () => {
     ]);
   });
 
+  test("a watermark moving on other subjects is written hourly; a real change at once", async () => {
+    const { clock, stream, host, engine } = setup();
+    await engine.sweep();
+    const elsewhere = "notifications.dispatch.issue.INFRA-9.comment";
+    for (let minute = 1; minute < 60; minute += 1) {
+      stream.publish(elsewhere, envelope());
+      clock.now = T0 + minute * 60_000;
+      await engine.sweep();
+    }
+
+    expect(host.writes).toHaveLength(1);
+    expect(engine.state().subjects[AGENT]).toEqual({ since: 0, after: 59 });
+
+    stream.publish(elsewhere, envelope());
+    clock.now = T0 + HOUR;
+    await engine.sweep();
+    stream.publish(elsewhere, envelope());
+    await engine.sweep();
+
+    expect(host.writes.map((write) => write.state?.subjects[AGENT])).toEqual([
+      { since: 0, after: 0 },
+      { since: 0, after: 60 },
+    ]);
+
+    // A new follow is written at once, with where the cursors stand now.
+    host.followed = [AGENT, ISSUE];
+    await engine.followedChanged();
+
+    expect(host.writes).toHaveLength(3);
+    expect(host.writes.at(-1)?.state?.subjects).toEqual({
+      [AGENT]: { since: 0, after: 61 },
+      [ISSUE]: {},
+    });
+
+    await engine.sweep();
+    const written = host.writes.length;
+    const frame = envelope();
+    stream.publish(AGENT, frame);
+    await engine.sweep();
+
+    // A shown frame is written at once: its record, then the cursors moved past it.
+    expect(ids(host.shown)).toEqual([frame.event_id]);
+    expect(host.writes.slice(written).map((write) => write.delivered)).toEqual([
+      [{ event_id: frame.event_id, dedupe_key: frame.dedupe_key, at: T0 + HOUR }],
+      [],
+    ]);
+    expect(host.writes.at(-1)?.state?.subjects).toEqual({
+      [AGENT]: { since: 0, after: 62 },
+      [ISSUE]: { since: 61, after: 62 },
+    });
+  });
+
   test("a session change while a frame is delivered stops the sweep before it writes", async () => {
     const { stream, host, engine } = setup();
     await engine.sweep();
@@ -651,7 +714,7 @@ describe("failed frames", () => {
     const { host, engine } = setup();
     const frame = envelope({ topic: "notifications.team.deploy" });
 
-    await engine.reportLiveFailure(frame, new Error("injection threw"));
+    await engine.liveFailed("notifications.team.deploy", frame, new Error("injection threw"));
 
     expect(host.failureNotices).toHaveLength(1);
     expect(host.failureNotices[0]).toMatchObject({
@@ -670,14 +733,17 @@ describe("failed frames", () => {
     const OTHER = "notifications.dispatch.issue.INFRA-2.>";
     const { stream, host, engine } = setup([AGENT, ISSUE]);
 
-    expect(engine.retries(AGENT)).toBe(false);
+    expect(await noticedAtOnce(engine, host, AGENT)).toBe(true);
 
     stream.refused.set(ISSUE, "not_retained");
     await engine.sweep();
 
-    expect(engine.retries(AGENT)).toBe(true);
-    expect(engine.retries(ISSUE)).toBe(false);
-    expect(engine.retries(OTHER)).toBe(false);
+    expect(await noticedAtOnce(engine, host, AGENT)).toBe(false);
+    expect(await noticedAtOnce(engine, host, ISSUE)).toBe(true);
+    expect(await noticedAtOnce(engine, host, OTHER)).toBe(true);
+    // A role forward stays live only: no sweep shows it, whatever subject it came on.
+    const forward = envelope({ topic: "notifications.role.reviewer" });
+    expect(await noticedAtOnce(engine, host, AGENT, forward)).toBe(true);
 
     // Followed again after an unfollow, the subject has no cursor until the next sweep starts one.
     host.followed = [ISSUE];
@@ -685,7 +751,7 @@ describe("failed frames", () => {
     host.followed = [AGENT, ISSUE];
     await engine.followedChanged();
 
-    expect(engine.retries(AGENT)).toBe(false);
+    expect(await noticedAtOnce(engine, host, AGENT)).toBe(true);
   });
 });
 
@@ -863,18 +929,18 @@ describe("listener outcomes", () => {
   });
 
   test("no failed live frame is left to a sweep while the listener's replay fails", async () => {
-    const { engine, answers } = setupListener();
+    const { host, engine, answers } = setupListener();
     await engine.sweep();
 
-    expect(engine.retries(AGENT)).toBe(true);
+    expect(await noticedAtOnce(engine, host, AGENT)).toBe(false);
 
     answers.push(Response.json({ error: "not found" }, { status: 404 }));
     await engine.sweep();
 
-    expect(engine.retries(AGENT)).toBe(false);
+    expect(await noticedAtOnce(engine, host, AGENT)).toBe(true);
 
     await engine.sweep();
 
-    expect(engine.retries(AGENT)).toBe(true);
+    expect(await noticedAtOnce(engine, host, AGENT)).toBe(false);
   });
 });

@@ -1,13 +1,10 @@
 import {
-  type ReplayFailureNotice,
   type ReplayLedgerEntry,
   ReplayLedgerEntrySchema,
-  type ReplayNotice,
   type ReplaySnapshot,
   type ReplayState,
   ReplayStateSchema,
 } from "@legion/envoy-client/replay";
-import { encode } from "@toon-format/toon";
 
 /**
  * Transcript entry recording one frame the replay ledger holds (`{event_id?, dedupe_key?, at}`):
@@ -18,8 +15,9 @@ export const REPLAY_DELIVERED_ENTRY = "envoy-replay-delivered";
 
 /**
  * Transcript entry holding the replay cursors (`{stream_created, subjects}`), written only when
- * they changed; the newest one is the state. Its subjects are every subject the session followed,
- * so a restart after the listener reaped its interests still follows its topics.
+ * they changed, and a cursor that only followed the stream's end at most hourly
+ * (`REPLAY_STATE_REFRESH_MS`); the newest one is the state. Its subjects are every subject the
+ * session followed, so a restart after the listener reaped its interests still follows its topics.
  */
 export const REPLAY_STATE_ENTRY = "envoy-replay-state";
 
@@ -63,39 +61,4 @@ export function replaySnapshot(entries: readonly unknown[]): ReplaySnapshot {
 /** The subjects the newest replay state says the session followed. */
 export function rememberedSubjects(entries: readonly unknown[]): readonly string[] {
   return Object.keys(newestState(entries)?.subjects ?? {});
-}
-
-/** A replayed frame's card: the rendered frame, then when it was published. */
-export function replayedCard(content: string, publishedAt: string): string {
-  return `${content}\nPublished at ${publishedAt} while this session's connection was down.`;
-}
-
-/** The card shown in place of a frame the session could not be shown. */
-export function failureNoticeCard(notice: ReplayFailureNotice): string {
-  const readWith =
-    notice.readWith === "dispatch read"
-      ? "Read it with the `dispatch read` command on the issue or ask it concerns."
-      : "Read it with the envoy_inbox tool.";
-  return encode({
-    envoy: {
-      notice: "message not shown",
-      event_id: notice.eventId,
-      from: notice.sender,
-      summary: notice.summary,
-      published_at: notice.publishedAt,
-      ...(notice.subject === undefined ? {} : { subject: notice.subject }),
-      error: notice.error,
-      detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`,
-    },
-  });
-}
-
-/** The card telling the session that replay may have missed messages. */
-export function replayNoticeCard(notice: ReplayNotice): string {
-  return encode({
-    envoy: {
-      notice: notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing",
-      detail: notice.message,
-    },
-  });
 }

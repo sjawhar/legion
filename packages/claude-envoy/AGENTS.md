@@ -20,7 +20,8 @@ notification stream through its listener (`POST /v1/replay`) with the shared eng
 `reconnect` status, on every heartbeat and after a new follow, and shows each stored frame the
 session was not shown, once, through the same path a live frame takes (the channel notification,
 or the Legion bridge's inbox), with a last line saying when it was published while the
-connection was down (`src/missed-messages.ts`); a frame there runs nothing. Role messages and team
+connection was down (`replayedText`, worded by the engine, as are the notices `src/missed-messages.ts`
+lays out); a frame there runs nothing. Role messages and team
 or other ad-hoc topics stay live only. The live path records each frame Claude Code was handed in
 the engine's ledger before its claim settles, and drops a frame the ledger holds (a repeat after
 a restart). The state is one file per session id, `replay-<url-encoded session id>.json` in the

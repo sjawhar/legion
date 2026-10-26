@@ -18,7 +18,6 @@ import {
 } from "@legion/contracts";
 import {
   createDeliveryDedupe,
-  type DedupeIdentity,
   DedupeIdentitySchema,
   type DispatchDelivery,
   expectsLaneReceipt,
@@ -52,10 +51,13 @@ import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import {
   createReplayEngine,
-  isRoleForward,
+  failureNoticeFields,
   type ReplayDeliveryOutcome,
   type ReplayEngine,
   type ReplayFrame,
+  replayedText,
+  replayNoticeFields,
+  replaySuppressed,
 } from "@legion/envoy-client/replay";
 import {
   sessionConfigFile,
@@ -127,12 +129,9 @@ import {
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import {
-  failureNoticeCard,
   REPLAY_DELIVERED_ENTRY,
   REPLAY_STATE_ENTRY,
   rememberedSubjects,
-  replayedCard,
-  replayNoticeCard,
   replaySnapshot,
 } from "../src/missed-messages";
 import { opensAsk } from "../src/opens-ask";
@@ -1149,7 +1148,7 @@ export default function envoyExtension(pi: PiApi): void {
       // The host took the frame: the ledger records it, so no sweep shows the stream's copy again,
       // here or after a restart, and the claim is settled, so a sweep stops waiting on it.
       const taken = async (): Promise<void> => {
-        if (identity !== undefined) await recordLiveDelivery(identity);
+        if (identity !== undefined) await replay?.recordDelivered(identity);
         claim.settle();
       };
       // An error reply means the agent was not handed the frame: Dispatch records the attempt
@@ -1268,9 +1267,7 @@ export default function envoyExtension(pi: PiApi): void {
         // A frame no sweep will show again (a role forward, already acknowledged; one on a
         // subscription the replay does not read: refused, not started, or the listener's replay
         // failing) gets its notice at once. The stream's copy of any other waits for a sweep.
-        if (envelope !== undefined && !sweepRetries(topic, envelope)) {
-          void replay?.reportLiveFailure(envelope, error);
-        }
+        if (envelope !== undefined) void replay?.liveFailed(topic, envelope, error);
         throw error;
       }
     }
@@ -1440,13 +1437,6 @@ export default function envoyExtension(pi: PiApi): void {
     return [...new Set([agentSubject(sessionID), ...topics])];
   };
 
-  // Whether a sweep will still show a frame the live path failed to: it is no role forward, which
-  // stays live only, and the replay reads the subscription it came on now.
-  const sweepRetries = (
-    topic: string,
-    envelope: NonNullable<RenderInboundResult["envelope"]>
-  ): boolean => !isRoleForward(envelope) && replay?.retries(topic) === true;
-
   // Replays a stored frame: a card and nothing else. A targeted frame (BTW, Aside, Steer, a
   // person's Send) runs no side turn, asks Dispatch to accept no user turn and posts no reply: a
   // person's input run late could act on an instruction they no longer mean, so the session is
@@ -1454,25 +1444,19 @@ export default function envoyExtension(pi: PiApi): void {
   // started following that topic, so an old one never closes a topic followed again since.
   const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
     const rendered = renderInbound(frame.data, sessionID, frame.subject);
-    const cursors = replay?.state().subjects ?? {};
     let removed = false;
     for (const topic of subscriptionRemovedTopics(frame.data, sessionID) ?? []) {
-      const since = cursors[topic]?.since;
-      if (since !== undefined && frame.seq > since && closeIntentionally(topic)) removed = true;
+      if (replay?.followedBefore(topic, frame.seq) === true && closeIntentionally(topic)) {
+        removed = true;
+      }
     }
     if (removed) await replayFollowedChanged();
-    if (
-      rendered.skip ||
-      rendered.malformedDelivery === true ||
-      rendered.rejectedDelivery !== undefined
-    ) {
-      return "suppressed";
-    }
+    if (replaySuppressed(rendered)) return "suppressed";
     if (rendered.envelope !== undefined) noteInbox(rendered.envelope);
     pi.sendMessage(
       {
         customType: "envoy-message",
-        content: replayedCard(rendered.content, frame.time),
+        content: replayedText(rendered.content, frame.time),
         display: true,
       },
       { deliverAs: "steer", triggerTurn: true }
@@ -1497,7 +1481,11 @@ export default function envoyExtension(pi: PiApi): void {
             deliver: showReplayed,
             showFailureNotice: async (notice) => {
               pi.sendMessage(
-                { customType: "envoy-message", content: failureNoticeCard(notice), display: true },
+                {
+                  customType: "envoy-message",
+                  content: encode({ envoy: failureNoticeFields(notice) }),
+                  display: true,
+                },
                 { deliverAs: "steer", triggerTurn: true }
               );
             },
@@ -1520,7 +1508,7 @@ export default function envoyExtension(pi: PiApi): void {
               pi.sendMessage(
                 {
                   customType: "envoy-message",
-                  content: replayNoticeCard(notice),
+                  content: encode({ envoy: replayNoticeFields(notice) }),
                   display: true,
                   details: LOCAL_ENVOY_NOTICE,
                 },
@@ -1552,16 +1540,6 @@ export default function envoyExtension(pi: PiApi): void {
   };
   const replayFollowedChanged = async (): Promise<void> => {
     if (replay !== undefined && replayOpen()) await replay.followedChanged();
-  };
-  // Never throws: the host already took the frame, so a failure here must not read as its loss.
-  const recordLiveDelivery = async (identity: DedupeIdentity): Promise<void> => {
-    try {
-      await replay?.recordDelivered(identity);
-    } catch (error) {
-      logger.warn("envoy: could not record a delivered message for replay", {
-        error: messageFor(error),
-      });
-    }
   };
 
   // The live agent conversation stream (LEGION-232). This session's own turns, tool calls and

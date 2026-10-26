@@ -70,11 +70,6 @@ type replayResponse struct {
 	Subjects []replaySubjectResult `json:"subjects"`
 }
 
-type replayUnavailableError struct {
-	Code  string `json:"code"`
-	Error string `json:"error"`
-}
-
 // replayUnavailable reports whether err is NATS refusing a replay outright rather than failing it
 // once: the read is not granted to the listener's user, no JetStream answers, or there is no
 // notification stream. The caller is told the listener cannot replay, not to retry at once.
@@ -91,7 +86,7 @@ func replayUnavailable(err error) bool {
 // NATS's error when NATS refuses it (replayUnavailable), and a plain 503 naming it otherwise.
 func writeReplayReadError(w http.ResponseWriter, err error) {
 	if replayUnavailable(err) {
-		writeJSON(w, http.StatusServiceUnavailable, replayUnavailableError{Code: replayUnavailableCode, Error: err.Error()})
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Code: replayUnavailableCode, Error: err.Error()})
 		return
 	}
 	writeJSONError(w, http.StatusServiceUnavailable, err.Error())

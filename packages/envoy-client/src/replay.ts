@@ -11,6 +11,7 @@ import {
   type DeliveryDedupe,
   type InboundEnvelope,
   inboundTimestamp,
+  type RenderInboundResult,
   senderLabel,
 } from "./delivery";
 import { messageFor } from "./errors";
@@ -45,6 +46,15 @@ export const REPLAY_PAGES_PER_SWEEP = 20;
  * naming it instead: a frame the host can never show must not hold its subject's cursor forever.
  */
 export const REPLAY_FAILURES_BEFORE_NOTICE = 3;
+
+/**
+ * How long a cursor that only followed the stream's end may go unwritten. A sweep that handled no
+ * message still moves every cursor to the stream's last sequence, which other subjects' traffic
+ * moves; that alone is not written at once, only with the next write or once the state last
+ * written is this old, so a restart's cursors lag the stream by no more than this and its
+ * retention check (a cursor below the oldest message the stream holds) stays accurate.
+ */
+export const REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
 
 /** The listener refuses a replay of more subjects than this with a 400. */
 const REPLAY_MAX_SUBJECTS = 32;
@@ -152,6 +162,7 @@ export type ReplayNoticeEnvelope = Pick<
   | "dedupe_key"
   | "payload_summary"
   | "issued_at"
+  | "topic"
 >;
 
 /**
@@ -175,8 +186,9 @@ export interface ReplayFailureNotice {
 /**
  * One persistence write. A host that appends entries appends one per `delivered` record and one
  * for `state` when it is present; a host that rewrites a file writes `snapshot()`. `state` is
- * present only when it differs from the last state written or restored, so an unchanged sweep
- * writes nothing at all.
+ * present only when it differs from the last state written or restored. A sweep that handled no
+ * message and changed nothing but where its cursors stand writes nothing (see
+ * `REPLAY_STATE_REFRESH_MS`), so an unchanged sweep writes nothing at all.
  */
 export interface ReplayChange {
   readonly delivered: readonly ReplayLedgerEntry[];
@@ -211,7 +223,7 @@ export interface ReplayEngineOptions {
   readonly host: ReplayHost;
   readonly transport: Pick<EnvoyClient, "replay">;
   /** The live path's claims: a frame it is delivering now is left for a later sweep. */
-  readonly dedupe?: Pick<DeliveryDedupe, "status">;
+  readonly dedupe?: Pick<DeliveryDedupe, "pending">;
   readonly now?: () => number;
   /** The most messages per replay call; the listener's default when absent. */
   readonly maxMessages?: number;
@@ -237,23 +249,27 @@ export interface ReplayEngine {
   followedChanged(): Promise<void>;
   /** Whether the ledger holds the frame: a live repeat of it after a restart is dropped. */
   delivered(frame: DedupeIdentity): boolean;
-  /** Records a frame the live path's host took, so no sweep shows it again. */
+  /**
+   * Records a frame the live path's host took, so no sweep shows it again. It never rejects: a
+   * write that fails is logged, and its record goes with the next write.
+   */
   recordDelivered(frame: DedupeIdentity): Promise<void>;
   /**
-   * Shows the failure notice at once for a live frame no sweep will retry (a role forward after
-   * its receipt, a subject the stream does not keep, or one `retries` says no sweep will read),
-   * and records it when shown.
+   * The host failed to show a live frame on the followed subject `followed`: shows its failure
+   * notice at once, and records it when shown, unless a sweep will show the stream's copy. A sweep
+   * will when the frame is no role forward (those stay live only), the latest replay call
+   * succeeded, a call since the last failed one answered `followed` without refusing it, and
+   * `followed` has a cursor. Any other frame (a role forward after its receipt, a subject the
+   * stream does not keep, a listener that does not replay or refuses the subject, a subject with
+   * no cursor yet) gets its notice at once instead of being dropped silently. It never rejects.
    */
-  reportLiveFailure(envelope: ReplayNoticeEnvelope, error: unknown): Promise<void>;
+  liveFailed(followed: string, envelope: ReplayNoticeEnvelope, error: unknown): Promise<void>;
   /**
-   * Whether a sweep will show a frame on the followed subject `followed` that the host failed to
-   * show live: the latest replay call succeeded, a call since the last failed one answered
-   * `followed` without refusing it, and `followed` has a cursor. A host's live path asks this when
-   * a frame fails, so a frame no sweep will show (the listener does not replay or refuses the
-   * subject, or the subject has no cursor yet) gets its failure notice at once instead of being
-   * dropped silently.
+   * Whether the session followed `topic` before the stream stored sequence `seq`: the topic has a
+   * cursor that started below `seq`. A replayed removal closes a topic only then, so an old one
+   * never closes a topic followed again since.
    */
-  retries(followed: string): boolean;
+  followedBefore(topic: string, seq: number): boolean;
   /**
    * Replaces everything the engine holds with what a host persisted for the session it is on now.
    * Ledger entries recorded 72 hours ago or more are dropped; the state is kept at any age, so a
@@ -298,9 +314,12 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   let streamCreated: string | undefined;
   // A frame's failures by its stream sequence; in memory only, so a restart gives it three more.
   const failures = new Map<number, { count: number; error: string }>();
-  // The ledger records no write has persisted yet, and the state JSON the last write persisted.
+  // The ledger records no write has persisted yet; the state JSON the last write persisted, that
+  // state without its `after`s, and when it was written (unknown after a restore).
   let unwritten: ReplayLedgerEntry[] = [];
   let writtenState: string | undefined;
+  let writtenShape: string | undefined;
+  let writtenAt: number | undefined;
   let writes: Promise<void> = Promise.resolve();
   // Bumped by restore: work started before it belongs to another session's record.
   let epoch = 0;
@@ -341,14 +360,15 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   };
 
   // Keys sorted, fields in one order: equal states serialise equally, so a comparison of the text
-  // says whether the state changed.
-  const stateJSON = (): string => {
+  // says whether the state changed. Without `afters`, it says whether anything but where the
+  // cursors stand changed.
+  const stateJSON = (afters = true): string => {
     const subjects: Record<string, ReplayCursor> = {};
     for (const subject of [...cursors.keys()].sort()) {
       const cursor = cursors.get(subject) ?? {};
       subjects[subject] = {
         ...(cursor.since === undefined ? {} : { since: cursor.since }),
-        ...(cursor.after === undefined ? {} : { after: cursor.after }),
+        ...(!afters || cursor.after === undefined ? {} : { after: cursor.after }),
       };
     }
     return JSON.stringify({
@@ -363,13 +383,25 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   };
 
   // Writes run one after another in call order, so a host that rewrites a file never has an older
-  // snapshot land after a newer one.
-  const flush = (alive: () => boolean): Promise<void> => {
+  // snapshot land after a newer one. `handled`: the cursors moved past messages a sweep handled,
+  // which is a change written at once; without it, a change of nothing but the `after`s is the
+  // stream's end moving, held until the state written is `REPLAY_STATE_REFRESH_MS` old.
+  const flush = (alive: () => boolean, handled = false): Promise<void> => {
     writes = writes.then(async () => {
       if (!alive()) return;
       const json = stateJSON();
       const delivered = unwritten;
       if (json === writtenState && delivered.length === 0) return;
+      const shape = stateJSON(false);
+      if (
+        delivered.length === 0 &&
+        !handled &&
+        shape === writtenShape &&
+        writtenAt !== undefined &&
+        now() - writtenAt < REPLAY_STATE_REFRESH_MS
+      ) {
+        return;
+      }
       unwritten = [];
       const state = json === writtenState ? undefined : (JSON.parse(json) as ReplayState);
       try {
@@ -378,7 +410,11 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
           state,
           snapshot: () => ({ state: JSON.parse(json) as ReplayState, ledger: ledger.list() }),
         });
-        writtenState = json;
+        if (state !== undefined) {
+          writtenState = json;
+          writtenShape = shape;
+          writtenAt = now();
+        }
       } catch (error) {
         unwritten = [...delivered, ...unwritten];
         log("replay: could not persist the replay state; the next write carries it", error);
@@ -451,14 +487,20 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       return "done";
     }
     // The live path is delivering a copy now; whether it shows it is not known yet.
-    if (dedupe?.status(envelope) === "pending") return "hole";
+    if (dedupe?.pending(envelope) === true) return "hole";
     if (!alive()) return "stopped";
-    const failure = failures.get(seq);
-    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
-      return showFailureNotice(
-        failureNotice(envelope, message.time, failure.error, message.subject),
+    // A notice shown settles the frame for good: its failures are no longer counted.
+    const giveUp = async (error: string): Promise<Handled> => {
+      const handled = await showFailureNotice(
+        failureNotice(envelope, message.time, error, message.subject),
         alive
       );
+      if (handled === "done") failures.delete(seq);
+      return handled;
+    };
+    const failure = failures.get(seq);
+    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
+      return giveUp(failure.error);
     }
     const followed = buffered.subjects[0] ?? message.subject;
     let outcome: ReplayDeliveryOutcome;
@@ -490,12 +532,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     }
     const count = (failure?.count ?? 0) + 1;
     failures.set(seq, { count, error });
-    if (count >= REPLAY_FAILURES_BEFORE_NOTICE) {
-      return showFailureNotice(
-        failureNotice(envelope, message.time, error, message.subject),
-        alive
-      );
-    }
+    if (count >= REPLAY_FAILURES_BEFORE_NOTICE) return giveUp(error);
     log(`replay: could not show stored message ${seq} (${envelope.event_id}): ${error}`);
     return "hole";
   };
@@ -547,6 +584,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     let gapNoticed = false;
 
     for (let page = 0; page < REPLAY_PAGES_PER_SWEEP; page += 1) {
+      let handledAny = false;
       // The subject read least far goes first: the listener reads subjects in request order under
       // one budget, and the first always gets a message, so the lowest reading moves every page.
       const asking = [...readings]
@@ -645,6 +683,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         if (!buffered.subjects.some((subject) => cursors.has(subject))) continue;
         const handled = await handle(seq, buffered, alive);
         if (handled === "stopped") return;
+        if (handled === "done") handledAny = true;
         if (handled === "hole") {
           for (const subject of buffered.subjects) {
             if (!holes.has(subject)) holes.set(subject, seq);
@@ -662,7 +701,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         if (hole !== undefined) after = Math.min(after, hole - 1);
         if (after > cursor.after) cursors.set(subject, { ...cursor, after });
       }
-      await flush(alive);
+      await flush(alive, handledAny);
       if (![...readings.values()].some((reading) => reading.more)) break;
     }
   };
@@ -708,7 +747,14 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       record(ledgerIdentity(frame));
       await flush(alive);
     },
-    async reportLiveFailure(envelope, error) {
+    async liveFailed(followed, envelope, error) {
+      if (
+        !isRoleForward(envelope) &&
+        answered.has(followed) &&
+        cursors.get(followed)?.after !== undefined
+      ) {
+        return;
+      }
       const alive = bind()?.alive;
       if (alive === undefined) return;
       try {
@@ -720,7 +766,10 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         log("replay: could not report a failed live frame", thrown);
       }
     },
-    retries: (followed) => answered.has(followed) && cursors.get(followed)?.after !== undefined,
+    followedBefore: (topic, seq) => {
+      const since = cursors.get(topic)?.since;
+      return since !== undefined && seq > since;
+    },
     restore(snapshot) {
       epoch += 1;
       ledger.restore(snapshot.ledger);
@@ -730,6 +779,8 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         cursors.set(subject, { ...cursor });
       }
       writtenState = snapshot.state === undefined ? undefined : stateJSON();
+      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
+      writtenAt = undefined;
       unwritten = [];
       failures.clear();
       listenerNoticed = undefined;
@@ -739,8 +790,50 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   };
 }
 
+/**
+ * Whether a replayed frame is suppressed: the renderer skips it for this session, or it is a
+ * targeted Dispatch delivery the renderer could not validate, which a replay answers nothing for.
+ * (A delivery the renderer rejects with a reply address is always malformed too.)
+ */
+export function replaySuppressed(
+  rendered: Pick<RenderInboundResult, "skip" | "malformedDelivery">
+): boolean {
+  return rendered.skip || rendered.malformedDelivery === true;
+}
+
+/** A replayed frame's text: the rendered frame, then when it was published. */
+export function replayedText(content: string, publishedAt: string): string {
+  return `${content}\nPublished at ${publishedAt} while this session's connection was down.`;
+}
+
+/** What the notice shown in place of a frame the session could not be shown says, field by field. */
+export function failureNoticeFields(notice: ReplayFailureNotice): Readonly<Record<string, string>> {
+  const readWith =
+    notice.readWith === "dispatch read"
+      ? "Read it with the `dispatch read` command on the issue or ask it concerns."
+      : "Read it with the envoy_inbox tool.";
+  return {
+    notice: "message not shown",
+    event_id: notice.eventId,
+    from: notice.sender,
+    summary: notice.summary,
+    published_at: notice.publishedAt,
+    ...(notice.subject === undefined ? {} : { subject: notice.subject }),
+    error: notice.error,
+    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`,
+  };
+}
+
+/** What the one-time notice that replay may have missed messages says, field by field. */
+export function replayNoticeFields(notice: ReplayNotice): Readonly<Record<string, string>> {
+  return {
+    notice: notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing",
+    detail: notice.message,
+  };
+}
+
 /** Whether a frame is a role lane's: those stay live only, so a sweep passes them over. */
-export function isRoleForward(envelope: {
+function isRoleForward(envelope: {
   readonly dedupe_key?: string | undefined;
   readonly topic?: string | undefined;
 }): boolean {

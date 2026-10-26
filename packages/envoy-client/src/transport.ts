@@ -259,10 +259,6 @@ export interface ReplayInput {
   readonly maxMessages?: number;
 }
 
-export interface ReplayOptions {
-  readonly timeoutMs?: number;
-}
-
 /** The listener's answer to `POST /v1/replay`, in its wire shape. */
 export type ReplayResult = z.infer<typeof ReplayWireSchema>;
 export type ReplaySubjectResult = ReplayResult["subjects"][number];
@@ -314,8 +310,10 @@ export type EnvoyClient = {
    * cursor. Tried once, with no retry of a 5xx: a sweep runs again on its next trigger, and a 503
    * `REPLAY_UNAVAILABLE` must reach the caller at once so the session can be told.
    */
-  readonly replay: (input: ReplayInput, options?: ReplayOptions) => Promise<ReplayResult>;
+  readonly replay: (input: ReplayInput) => Promise<ReplayResult>;
 };
+
+type RequestOptions = { readonly timeoutMs?: number; readonly retry?: boolean };
 
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
@@ -325,7 +323,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const request = async (
     path: string,
     init: RequestInit,
-    options: { readonly timeoutMs?: number; readonly retry?: boolean } = {}
+    options: RequestOptions = {}
   ): Promise<string> => {
     const url = `${baseUrl}${path}`;
     const attempts = config.retry === false || options.retry === false ? 1 : 2;
@@ -364,11 +362,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     throw new Error("Envoy request exhausted retries");
   };
 
-  const post = (
-    path: string,
-    body: object,
-    options?: { readonly timeoutMs?: number; readonly retry?: boolean }
-  ) =>
+  const post = (path: string, body: object, options?: RequestOptions) =>
     request(
       path,
       {
@@ -490,7 +484,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
-    replay: async (input, options = {}) =>
+    replay: async (input) =>
       ReplayWireSchema.parse(
         JSON.parse(
           await post(
@@ -504,7 +498,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               ),
               ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
             },
-            { timeoutMs: options.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false }
+            { timeoutMs: REPLAY_TIMEOUT_MS, retry: false }
           )
         )
       ),

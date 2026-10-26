@@ -19926,11 +19926,11 @@ function createEnvoyClient(config2) {
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
-    replay: async (input, options = {}) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
+    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
       session_id: input.sessionID,
       subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
       ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
-    }, { timeoutMs: options.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false })))
+    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
   };
 }
 function waitForRetry() {

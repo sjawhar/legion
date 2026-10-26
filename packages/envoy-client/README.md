@@ -39,15 +39,20 @@ The ledger holds the identity of each frame the session finished with (its `even
 20,000, the oldest dropped first. A host's live path calls `recordDelivered` once the host took a
 frame, before it settles the claim, and drops a frame `delivered` finds. A `createDeliveryDedupe`
 claim is settled (`settle()`) once the host is done with the frame, shown or not, or released as
-before; until then `status()` reads it `pending`, and a sweep leaves that frame's stored copy for
-a later sweep rather than show it beside the live one.
+before; until then `pending()` reads it true, and a sweep leaves that frame's stored copy for a
+later sweep rather than show it beside the live one.
 
 The state holds each followed subject's `since` and `after` and the stream's `created` time;
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
-state at any age. A frame the host fails to show is retried, and on its third failure the host
-shows a notice naming it instead (`showFailureNotice`); `reportLiveFailure` shows that notice at
-once for a live frame no sweep will retry, which `retries(followed)` tells. The session is told
-once when the stream was recreated, when its cursor fell behind the stream's oldest message
+state at any age. A write carries the state only when it changed; a sweep that handled no message
+and only moved its cursors to the stream's end goes with the next write, or once the state last
+written is an hour old (`REPLAY_STATE_REFRESH_MS`). A frame the host fails to show is retried, and
+on its third failure the host shows a notice naming it instead (`showFailureNotice`); a host whose
+live path failed a frame calls `liveFailed(followed, envelope, error)`, which shows that notice at
+once unless a sweep will show the stream's copy. A replayed removal closes a topic only when
+`followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames a replay does not show,
+and `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards. The session is
+told once when the stream was recreated, when its cursor fell behind the stream's oldest message
 (older than 72 hours), and when the listener does not replay (404) or cannot (503
 `REPLAY_UNAVAILABLE`, 401, 403). Work started for one session stops, writing nothing, once
 `sessionID()` names another.

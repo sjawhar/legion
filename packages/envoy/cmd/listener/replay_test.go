@@ -489,12 +489,12 @@ func replayGrantWithoutRead() []string {
 	}
 }
 
-func replayUnavailableAnswer(t *testing.T, recorder *httptest.ResponseRecorder) replayUnavailableError {
+func replayUnavailableAnswer(t *testing.T, recorder *httptest.ResponseRecorder) apiError {
 	t.Helper()
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
 	}
-	var answer replayUnavailableError
+	var answer apiError
 	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 		t.Fatalf("decode 503 answer %s: %v", recorder.Body.String(), err)
 	}

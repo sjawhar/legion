@@ -173,31 +173,31 @@ test("a second release of one claim leaves a later claim of the same key in plac
 test("a claim is pending until it settles, and a release leaves no trace", () => {
   let now = 0;
   const dedupe = createDeliveryDedupe(() => now);
-  expect(dedupe.status(attempt)).toBe("none");
+  expect(dedupe.pending(attempt)).toBe(false);
 
   const claim = dedupe.claim(attempt);
-  expect(dedupe.status(attempt)).toBe("pending");
+  expect(dedupe.pending(attempt)).toBe(true);
   // A re-send under the same key is the same frame, by its key.
-  expect(dedupe.status(retry)).toBe("pending");
+  expect(dedupe.pending(retry)).toBe(true);
 
   claim?.settle();
-  expect(dedupe.status(attempt)).toBe("settled");
-  expect(dedupe.status(retry)).toBe("settled");
+  expect(dedupe.pending(attempt)).toBe(false);
+  expect(dedupe.pending(retry)).toBe(false);
   // Settling did not undo the record: a repeat is still dropped.
   expect(dedupe.claim(retry)).toBeUndefined();
 
   const other = dedupe.claim(otherMode);
   other?.release();
-  expect(dedupe.status(otherMode)).toBe("none");
+  expect(dedupe.pending(otherMode)).toBe(false);
   // A release after a settle still undoes the record, as it always did.
   claim?.release();
-  expect(dedupe.status(attempt)).toBe("none");
+  expect(dedupe.pending(attempt)).toBe(false);
 
   dedupe.claim(attempt)?.settle();
   now = DELIVERY_DUPLICATE_WINDOW_MS;
-  // Past the window the key no longer names the claim; the event id still does.
-  expect(dedupe.status(retry)).toBe("none");
-  expect(dedupe.status(attempt)).toBe("settled");
+  // Past the window a settled claim is still not pending, by its key or its event id.
+  expect(dedupe.pending(retry)).toBe(false);
+  expect(dedupe.pending(attempt)).toBe(false);
 });
 
 test("a key that does not name its event never makes another frame pending", () => {
@@ -205,6 +205,6 @@ test("a key that does not name its event never makes another frame pending", () 
   const bridge = { event_id: "evt-b1", source: "mcp", dedupe_key: "mcp.0f3a" };
   dedupe.claim(bridge);
 
-  expect(dedupe.status(bridge)).toBe("pending");
-  expect(dedupe.status({ ...bridge, event_id: "evt-b2" })).toBe("none");
+  expect(dedupe.pending(bridge)).toBe(true);
+  expect(dedupe.pending({ ...bridge, event_id: "evt-b2" })).toBe(false);
 });

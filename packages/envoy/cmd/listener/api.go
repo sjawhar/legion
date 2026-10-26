@@ -36,6 +36,7 @@ type roleClaimResolver interface {
 }
 
 type apiError struct {
+	Code     string   `json:"code,omitempty"`
 	Error    string   `json:"error"`
 	Expected []string `json:"expected,omitempty"`
 }

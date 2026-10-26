@@ -38531,18 +38531,10 @@ function createDeliveryDedupe(now = Date.now) {
         settle: close
       };
     },
-    status(frame) {
+    pending(frame) {
       const eventId = frame.event_id;
       const key = frame.dedupe_key;
-      const named = key !== undefined && dedupeKeyNamesItsEvent(frame);
-      if (eventId !== undefined && pendingEvents.has(eventId) || named && pendingKeys.has(key)) {
-        return "pending";
-      }
-      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
-        return "settled";
-      }
-      const claimedAt = named ? keys.get(key) : undefined;
-      return claimedAt !== undefined && now() - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS ? "settled" : "none";
+      return eventId !== undefined && pendingEvents.has(eventId) || key !== undefined && dedupeKeyNamesItsEvent(frame) && pendingKeys.has(key);
     }
   };
 }
@@ -43643,11 +43635,11 @@ function createEnvoyClient(config2) {
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
-    replay: async (input, options = {}) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
+    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
       session_id: input.sessionID,
       subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
       ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
-    }, { timeoutMs: options.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false })))
+    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
   };
 }
 function waitForRetry() {
@@ -43673,6 +43665,7 @@ var REPLAY_LEDGER_TTL_MS = DELIVERY_DUPLICATE_WINDOW_MS;
 var REPLAY_LEDGER_LIMIT = 20000;
 var REPLAY_PAGES_PER_SWEEP = 20;
 var REPLAY_FAILURES_BEFORE_NOTICE = 3;
+var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
 var REPLAY_MAX_SUBJECTS = 32;
 var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
 var ReplayLedgerEntrySchema = exports_external.object({
@@ -43701,6 +43694,8 @@ function createReplayEngine(options) {
   const failures = new Map;
   let unwritten = [];
   let writtenState;
+  let writtenShape;
+  let writtenAt;
   let writes = Promise.resolve();
   let epoch = 0;
   let listenerNoticed;
@@ -43732,13 +43727,13 @@ function createReplayEngine(options) {
     const bound = epoch;
     return { sessionID, alive: () => bound === epoch && currentSession() === sessionID };
   };
-  const stateJSON = () => {
+  const stateJSON = (afters = true) => {
     const subjects = {};
     for (const subject2 of [...cursors.keys()].sort()) {
       const cursor = cursors.get(subject2) ?? {};
       subjects[subject2] = {
         ...cursor.since === undefined ? {} : { since: cursor.since },
-        ...cursor.after === undefined ? {} : { after: cursor.after }
+        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
       };
     }
     return JSON.stringify({
@@ -43751,7 +43746,7 @@ function createReplayEngine(options) {
     if (entry !== undefined)
       unwritten.push(entry);
   };
-  const flush = (alive) => {
+  const flush = (alive, handled = false) => {
     writes = writes.then(async () => {
       if (!alive())
         return;
@@ -43759,6 +43754,10 @@ function createReplayEngine(options) {
       const delivered = unwritten;
       if (json2 === writtenState && delivered.length === 0)
         return;
+      const shape = stateJSON(false);
+      if (delivered.length === 0 && !handled && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
+        return;
+      }
       unwritten = [];
       const state = json2 === writtenState ? undefined : JSON.parse(json2);
       try {
@@ -43767,7 +43766,11 @@ function createReplayEngine(options) {
           state,
           snapshot: () => ({ state: JSON.parse(json2), ledger: ledger.list() })
         });
-        writtenState = json2;
+        if (state !== undefined) {
+          writtenState = json2;
+          writtenShape = shape;
+          writtenAt = now();
+        }
       } catch (error48) {
         unwritten = [...delivered, ...unwritten];
         log("replay: could not persist the replay state; the next write carries it", error48);
@@ -43825,13 +43828,19 @@ function createReplayEngine(options) {
       failures.delete(seq);
       return "done";
     }
-    if (dedupe?.status(envelope2) === "pending")
+    if (dedupe?.pending(envelope2) === true)
       return "hole";
     if (!alive())
       return "stopped";
+    const giveUp = async (error49) => {
+      const handled = await showFailureNotice(failureNotice(envelope2, message.time, error49, message.subject), alive);
+      if (handled === "done")
+        failures.delete(seq);
+      return handled;
+    };
     const failure = failures.get(seq);
     if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
-      return showFailureNotice(failureNotice(envelope2, message.time, failure.error, message.subject), alive);
+      return giveUp(failure.error);
     }
     const followed = buffered.subjects[0] ?? message.subject;
     let outcome;
@@ -43864,9 +43873,8 @@ function createReplayEngine(options) {
     }
     const count = (failure?.count ?? 0) + 1;
     failures.set(seq, { count, error: error48 });
-    if (count >= REPLAY_FAILURES_BEFORE_NOTICE) {
-      return showFailureNotice(failureNotice(envelope2, message.time, error48, message.subject), alive);
-    }
+    if (count >= REPLAY_FAILURES_BEFORE_NOTICE)
+      return giveUp(error48);
     log(`replay: could not show stored message ${seq} (${envelope2.event_id}): ${error48}`);
     return "hole";
   };
@@ -43913,6 +43921,7 @@ function createReplayEngine(options) {
     const holes = new Map;
     let gapNoticed = false;
     for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
+      let handledAny = false;
       const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
       if (asking.length === 0)
         break;
@@ -44004,6 +44013,8 @@ function createReplayEngine(options) {
         const handled = await handle(seq, buffered, alive);
         if (handled === "stopped")
           return;
+        if (handled === "done")
+          handledAny = true;
         if (handled === "hole") {
           for (const subject2 of buffered.subjects) {
             if (!holes.has(subject2))
@@ -44024,7 +44035,7 @@ function createReplayEngine(options) {
         if (after > cursor.after)
           cursors.set(subject2, { ...cursor, after });
       }
-      await flush(alive);
+      await flush(alive, handledAny);
       if (![...readings.values()].some((reading) => reading.more))
         break;
     }
@@ -44070,7 +44081,10 @@ function createReplayEngine(options) {
       record2(ledgerIdentity(frame));
       await flush(alive);
     },
-    async reportLiveFailure(envelope2, error48) {
+    async liveFailed(followed, envelope2, error48) {
+      if (!isRoleForward(envelope2) && answered.has(followed) && cursors.get(followed)?.after !== undefined) {
+        return;
+      }
       const alive = bind()?.alive;
       if (alive === undefined)
         return;
@@ -44080,7 +44094,10 @@ function createReplayEngine(options) {
         log("replay: could not report a failed live frame", thrown);
       }
     },
-    retries: (followed) => answered.has(followed) && cursors.get(followed)?.after !== undefined,
+    followedBefore: (topic, seq) => {
+      const since = cursors.get(topic)?.since;
+      return since !== undefined && seq > since;
+    },
     restore(snapshot) {
       epoch += 1;
       ledger.restore(snapshot.ledger);
@@ -44090,12 +44107,40 @@ function createReplayEngine(options) {
         cursors.set(subject2, { ...cursor });
       }
       writtenState = snapshot.state === undefined ? undefined : stateJSON();
+      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
+      writtenAt = undefined;
       unwritten = [];
       failures.clear();
       listenerNoticed = undefined;
       answered.clear();
     },
     state: () => JSON.parse(stateJSON())
+  };
+}
+function replaySuppressed(rendered) {
+  return rendered.skip || rendered.malformedDelivery === true;
+}
+function replayedText(content, publishedAt) {
+  return `${content}
+Published at ${publishedAt} while this session's connection was down.`;
+}
+function failureNoticeFields(notice) {
+  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
+  return {
+    notice: "message not shown",
+    event_id: notice.eventId,
+    from: notice.sender,
+    summary: notice.summary,
+    published_at: notice.publishedAt,
+    ...notice.subject === undefined ? {} : { subject: notice.subject },
+    error: notice.error,
+    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
+  };
+}
+function replayNoticeFields(notice) {
+  return {
+    notice: notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing",
+    detail: notice.message
   };
 }
 function isRoleForward(envelope2) {
@@ -48920,28 +48965,8 @@ async function executeLegionTool(runtime, input) {
 }
 
 // src/missed-messages.ts
-function replayedContent(content, publishedAt) {
-  return `${content}
-Published at ${publishedAt} while this session's connection was down.`;
-}
-function failureNoticeContent(notice) {
-  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
-  return [
-    "envoy:",
-    "  notice: message not shown",
-    `  event_id: ${notice.eventId}`,
-    `  from: ${notice.sender}`,
-    `  summary: ${notice.summary}`,
-    `  published_at: ${notice.publishedAt}`,
-    ...notice.subject === undefined ? [] : [`  subject: ${notice.subject}`],
-    `  error: ${notice.error}`,
-    `  detail: This session could not be shown this message, so it is not coming back on its own. ${readWith}`
-  ].join(`
-`);
-}
-function replayNoticeContent(notice) {
-  const kind = notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing";
-  return ["envoy:", `  notice: ${kind}`, `  detail: ${notice.message}`].join(`
+function envoyNoticeContent(fields) {
+  return ["envoy:", ...Object.entries(fields).map(([key, value]) => `  ${key}: ${value}`)].join(`
 `);
 }
 
@@ -49217,10 +49242,9 @@ function createChannelDelivery(input) {
     },
     async replay(frame) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject);
-      if (rendered.skip || rendered.malformedDelivery === true || rendered.rejectedDelivery !== undefined) {
+      if (replaySuppressed(rendered))
         return "suppressed";
-      }
-      await show(rendered, frame.subject, replayedContent(rendered.content, frame.time));
+      await show(rendered, frame.subject, replayedText(rendered.content, frame.time));
       return "shown";
     },
     notice(content) {
@@ -49269,11 +49293,7 @@ async function startChannelSession(options) {
   const dedupe = createDeliveryDedupe();
   let replayBound;
   const showReplayed = async (frame) => {
-    const cursors = replay.state().subjects;
-    const removed = (subscriptionRemovedTopics(frame.data, identity.id) ?? []).filter((topic) => {
-      const since = cursors[topic]?.since;
-      return since !== undefined && frame.seq > since && userTopics.delete(topic);
-    });
+    const removed = (subscriptionRemovedTopics(frame.data, identity.id) ?? []).filter((topic) => replay.followedBefore(topic, frame.seq) && userTopics.delete(topic));
     if (removed.length > 0)
       await dropRemovedTopics(removed);
     return delivery.replay(frame);
@@ -49286,7 +49306,7 @@ async function startChannelSession(options) {
         ...[...userTopics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !topic.startsWith(AGENT_TOPIC_PREFIX))
       ],
       deliver: showReplayed,
-      showFailureNotice: (notice) => delivery.notice(failureNoticeContent(notice)),
+      showFailureNotice: (notice) => delivery.notice(envoyNoticeContent(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error48) => {
         process.stderr.write(`envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it \u2014 ${messageFor(error48)}
 `);
@@ -49297,7 +49317,7 @@ async function startChannelSession(options) {
 `);
           return;
         }
-        delivery.notice(replayNoticeContent(notice)).catch((error48) => {
+        delivery.notice(envoyNoticeContent(replayNoticeFields(notice))).catch((error48) => {
           process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error48)})
 `);
         });
@@ -49331,11 +49351,8 @@ async function startChannelSession(options) {
     ledger: replay,
     failed: (message, topic, error48) => {
       const envelope2 = renderInbound(message.raw, identity.id, message.subject).envelope;
-      if (envelope2 === undefined)
-        return;
-      if (!isRoleForward(envelope2) && replay.retries(topic))
-        return;
-      replay.reportLiveFailure(envelope2, error48);
+      if (envelope2 !== undefined)
+        replay.liveFailed(topic, envelope2, error48);
     },
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id);

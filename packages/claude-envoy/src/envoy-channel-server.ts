@@ -26,10 +26,13 @@ import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
   createReplayEngine,
-  isRoleForward,
+  failureNoticeFields,
   type ReplayDeliveryOutcome,
   type ReplayFrame,
   type ReplaySnapshot,
+  replayedText,
+  replayNoticeFields,
+  replaySuppressed,
 } from "@legion/envoy-client/replay"
 import {
   type SessionConfigFile,
@@ -85,7 +88,7 @@ import {
   type LegionToolRuntime,
   legionToolDefinition,
 } from "./legion-tool"
-import { failureNoticeContent, replayedContent, replayNoticeContent } from "./missed-messages"
+import { envoyNoticeContent } from "./missed-messages"
 import { readReplayState, replayStateFile, writeReplayState } from "./replay-state"
 import {
   pruneStaleSessionHandoffs,
@@ -438,14 +441,8 @@ export function createChannelDelivery(input: {
     },
     async replay(frame) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject)
-      if (
-        rendered.skip ||
-        rendered.malformedDelivery === true ||
-        rendered.rejectedDelivery !== undefined
-      ) {
-        return "suppressed"
-      }
-      await show(rendered, frame.subject, replayedContent(rendered.content, frame.time))
+      if (replaySuppressed(rendered)) return "suppressed"
+      await show(rendered, frame.subject, replayedText(rendered.content, frame.time))
       return "shown"
     },
     notice(content) {
@@ -533,11 +530,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * topic followed again since.
    */
   const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
-    const cursors = replay.state().subjects
-    const removed = (subscriptionRemovedTopics(frame.data, identity.id) ?? []).filter((topic) => {
-      const since = cursors[topic]?.since
-      return since !== undefined && frame.seq > since && userTopics.delete(topic)
-    })
+    const removed = (subscriptionRemovedTopics(frame.data, identity.id) ?? []).filter(
+      (topic) => replay.followedBefore(topic, frame.seq) && userTopics.delete(topic),
+    )
     if (removed.length > 0) await dropRemovedTopics(removed)
     return delivery.replay(frame)
   }
@@ -558,7 +553,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         ),
       ],
       deliver: showReplayed,
-      showFailureNotice: (notice) => delivery.notice(failureNoticeContent(notice)),
+      showFailureNotice: (notice) =>
+        delivery.notice(envoyNoticeContent(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error) => {
         process.stderr.write(
           `envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it — ${messageFor(error)}\n`,
@@ -571,7 +567,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
           process.stderr.write(`envoy-channel: ${notice.message}\n`)
           return
         }
-        delivery.notice(replayNoticeContent(notice)).catch((error: unknown) => {
+        delivery.notice(envoyNoticeContent(replayNoticeFields(notice))).catch((error: unknown) => {
           process.stderr.write(
             `envoy-channel: ${notice.message} (the session could not be told — ${messageFor(error)})\n`,
           )
@@ -621,9 +617,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       // acknowledged, or one on a subscription the replay does not read (refused, not started,
       // or the listener's replay failing). The stream's copy of any other waits for a sweep.
       const envelope = renderInbound(message.raw, identity.id, message.subject).envelope
-      if (envelope === undefined) return
-      if (!isRoleForward(envelope) && replay.retries(topic)) return
-      void replay.reportLiveFailure(envelope, error)
+      if (envelope !== undefined) void replay.liveFailed(topic, envelope, error)
     },
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id)

@@ -667,7 +667,7 @@ restore_connection() {
 
 # expect_once ID WHEN: exactly one card for ID within two heartbeats of WHEN (a SECONDS value),
 # and still exactly one three heartbeats later. The card is the replay's: a live copy carries no
-# "while this session's connection was down" line (replayedCard, src/missed-messages.ts).
+# "while this session's connection was down" line (replayedText, @legion/envoy-client/replay).
 expect_once() {
   local id=$1 since=$2 remaining
   remaining=$((since + 2 * heartbeat_s - SECONDS))
