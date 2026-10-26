@@ -1135,14 +1135,6 @@ export default function envoyExtension(pi: PiApi): void {
     // also reaches the issue's own topic (every subscriber, not just the
     // removed session), so this only fires for a removal naming us.
     for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) closeIntentionally(topic);
-    // A card never waits in the host's steering queue while a turn runs: the host drains that
-    // queue one message per turn, first in, first out, so a card there holds a person's Send
-    // back a turn, and an interrupt drops it. Mid-turn it goes as an aside, which the host folds
-    // in at the next step, after any steer and without cutting the running tool batch short
-    // (`agent-loop.ts`'s step boundary in the host). An idle session has no queue to wait in,
-    // and there a card stays a steer with `triggerTurn`, which starts a turn after an interrupt
-    // (an Esc, or the RPC `abort` a Legion daemon sends) and in plan mode, where an idle aside
-    // starts none. A targeted Aside stays an aside in both states.
     const dedupeIdentity = ClaimIdentitySchema.safeParse(rendered.envelope);
     const claim = rendered.skip
       ? undefined
@@ -1210,6 +1202,16 @@ export default function envoyExtension(pi: PiApi): void {
               true,
               shown
             );
+            // While a turn runs a card goes as an aside rather than into the host's steering
+            // queue: the host drains that queue one message per turn, first in, first out, so a
+            // card there held a person's Send back a turn. The host folds an aside in at the next
+            // step, after any steer, without cutting the running tool batch short (`agent-loop.ts`'s
+            // step boundary), and folds one still queued at an interrupt into the context with no
+            // run, where an Esc dropped a queued steer and an RPC `abort` resumed the run on it. An
+            // idle session has no queue to wait in, and there a card stays a steer with
+            // `triggerTurn`, which starts a turn after an interrupt (an Esc, or the RPC `abort` a
+            // Legion daemon sends) and in plan mode, where an idle aside starts none. A targeted
+            // Aside stays an aside in both states. The limit is in `AGENTS.md` ("Overview").
             pi.sendMessage(
               { customType: "envoy-message", content: card.content, display: true },
               {

@@ -9597,7 +9597,6 @@ describe("envoy OMP extension", () => {
       for (const [index, card] of asides.entries()) {
         expect(card).toContain(`notification ${index + 1}`);
       }
-      // Each card still asks for a turn of its own, should the turn end before it is folded in.
       expect(
         sends.filter(({ options }) => deliverAs(options) === "aside").map(({ options }) => options)
       ).toEqual(Array(3).fill({ deliverAs: "aside", triggerTurn: true }));
