@@ -41,6 +41,22 @@ set -euo pipefail
 unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_SEED_FILE
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
+# The model route first, and under box-login the one-at-a-time lock (lib/box-login-lock.sh), before
+# the run makes its work directory or anything else: a run the lock refuses leaves nothing behind.
+# shellcheck source-path=SCRIPTDIR source=lib/box-login-lock.sh
+. "$root/scripts/e2e/lib/box-login-lock.sh"
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file | box-login) ;;
+*)
+  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" >&2
+  exit 1
+  ;;
+esac
+if [ "$model_route" = box-login ] && ! take_box_login_lock; then
+  echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2
+  exit 1
+fi
 work=$(mktemp -d "/tmp/legion-e2e2.$$.XXXXXXXX")
 # Every line of the run also goes to $work/transcript.log (lib/transcript.sh), so the driver and its
 # cleanup, which stops the panes and removes both containers, never fail on a write whoever is
@@ -76,8 +92,6 @@ TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (l
 timeout_hook=
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/box-login-lock.sh
-. "$root/scripts/e2e/lib/box-login-lock.sh"
 
 # ---- reporting and waiting ------------------------------------------------------------------------
 
@@ -262,13 +276,6 @@ expect_refusal() {
 
 # ---- setup -----------------------------------------------------------------------------------------
 
-model_route=${LEGION_E2E_MODEL_ROUTE:-}
-case "$model_route" in
-gateway | key-file | box-login) ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" ;;
-esac
-# One box-login proof at a time, before this run starts anything (lib/box-login-lock.sh).
-[ "$model_route" != box-login ] || take_box_login_lock || fail "another box-login proof is running on this box (the holder is named above)"
 for tool in go docker jq curl ss tmux bun mise socat secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
@@ -373,8 +380,10 @@ envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_
 # The branch plugins, each packed as the release packs it, into this run's own OMP profile: the
 # Envoy plugin first, then the Legion plugin, whose manifest the daemon's contract gate reads.
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
+# The plugin installs run the same build as the daemon and panes ($pin), never .omp-pin behind
+# its back: under box-login the profile's agent.db is the operator's login database.
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" --omp "$pin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" --omp "$pin")
 want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-legion/package.json")
 echo "plugins: $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (daemonApiVersion $want_contract)"
 

@@ -184,8 +184,10 @@ agents reach Anthropic, independently of which devbox this runs on:
   ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). The panes run the
   operator's own Oh My Pi build, not `.omp-pin`: the operator's global mise pin for
   `github:sjawhar/oh-my-pi`, refused unless it carries the refresh-race fix (the build the
-  operator's own sessions already run against that database). One box-login proof runs at a time
-  on the box, Stage 2 or Stage 3 ([`lib/box-login-lock.sh`](#libbox-login-locksh)).
+  operator's own sessions already run against that database); the plugin installs, the plugin
+  gate's `omp plugin` calls and every pane run that one build. One box-login proof runs at a time
+  on the box, Stage 2 or Stage 3: the script takes the lock ([`lib/box-login-lock.sh`](#libbox-login-locksh))
+  first, before it makes its work directory or starts anything.
 
 CI runs the unit and integration tests, not this script; what only this
 run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
@@ -328,8 +330,9 @@ the agents reach Anthropic, independently of which devbox this runs on:
   `hawk-token` is involved, and nothing reads the credential
   ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). The panes run the
   operator's own Oh My Pi build (its global mise pin, refused unless it carries the refresh-race
-  fix) in place of `.omp-pin`, and `prerequisites` takes the one-at-a-time lock
-  ([`lib/box-login-lock.sh`](#libbox-login-locksh)) before it reads or starts anything.
+  fix) in place of `.omp-pin` for the plugin installs and every pane, and the script takes the
+  one-at-a-time lock ([`lib/box-login-lock.sh`](#libbox-login-locksh)) first, before it makes its
+  work or evidence directory or starts anything.
 
 `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet, the
@@ -2273,8 +2276,9 @@ manifest=$(scripts/e2e/lib/install-plugin-profile.sh --package pi-legion --profi
 | `--profile <name>` | the OMP profile to install into (`OMP_PROFILE=<name>`). Refused when OMP would read it as its default profile — empty, all whitespace, or `default` — since that is the profile every plain `omp` uses. Any other name goes to OMP as given, and OMP refuses one it cannot use. |
 | `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, which is then `<dir>/.omp/profiles/<name>`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
 | `--dest <dir>` | where the tarball is unpacked. `omp plugin install` links this directory into the profile rather than copying it, so it **is** the installed plugin and must outlive the run. Refused inside the checkout (jj would snapshot it, symlinks resolved first) and when it exists and is not an empty directory (an unpack over an earlier build would keep that build's stale files). |
+| `--omp <mise tool spec>` | optional: the Oh My Pi build steps 2 and 3 run (`github:sjawhar/oh-my-pi@<version>`), `.omp-pin`'s by default. Stage 2 and Stage 3 pass the build their daemon and panes run, so no other build opens the profile; under `LEGION_E2E_MODEL_ROUTE=box-login` that profile's `agent.db` is the operator's login database ([`lib/install-box-login-route.sh`](#libinstall-box-login-routesh)). Refused when empty. |
 
-All four flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
+The first four flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
 installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; for
 `pi-legion` that is the manifest the daemon's contract gate reads under the same profile
 (`pluginManifestPath`, `packages/daemon/internal/daemon/bootgate.go`). Every step's own output
@@ -2291,7 +2295,7 @@ strands no `.tgz` in the checkout). Then:
 3. `OMP_PROFILE=<name> omp plugin list --json` must show the package, by its npm name, at the
    tarball's version, enabled, and resolving to `<dir>`.
 
-Steps 2 and 3 run the Oh My Pi the daemon pins (`.omp-pin`, through `mise x <pin>`) under
+Steps 2 and 3 run the Oh My Pi `--omp` names, else the one the daemon pins (`.omp-pin`), through `mise x <pin>`, under
 `HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
 there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
 
@@ -2553,7 +2557,10 @@ one. It takes the one active `github:sjawhar/oh-my-pi` entry's `version` and pri
 stdout, which the stage proof writes into `omp_invocation`.
 
 Each refusal goes to stderr and writes nothing into the profile. Exit 2 (arguments): a missing
-flag, OMP's default profile, `--home` equal to `HOME` or `--operator-home` or without `.omp`, an
+flag, OMP's default profile, a `--profile` that is not one plain path segment (`--profile '<name>'
+is not one plain name …`: a letter or digit, then letters, digits, `.`, `_` or `-`, and no `..`), an
+agent directory whose canonical path is not `<home>/.omp/profiles/<name>/agent` (`… resolves to <path>,
+outside …`: a symlinked directory on the way), `--home` equal to `HOME` or `--operator-home` or without `.omp`, an
 existing `agent/models.yml` or `agent/config.yml`, a profile `agent.db` that exists and is not the
 symlink it would make (`… exists and is not the symlink to <db>; this installs a fresh profile's
 model route only, and never replaces a profile's own database`), and a `--dest` that is not empty.
@@ -2571,12 +2578,13 @@ it holds no secret. Claude Code has no such route
 
 ## lib/box-login-lock.sh
 
-One box-login proof at a time on a box. Sourced, never run; Stage 2 and Stage 3 call it under
-`LEGION_E2E_MODEL_ROUTE=box-login` before they start anything.
+One box-login proof at a time on a box. Sourced, never run; Stage 2 and Stage 3 source it and,
+under `LEGION_E2E_MODEL_ROUTE=box-login`, call it first, before they make their work directory or
+start anything.
 
 ```sh
 . "$root/scripts/e2e/lib/box-login-lock.sh"
-take_box_login_lock || fail "another box-login proof is running on this box (the holder is named above)"
+take_box_login_lock || { echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2; exit 1; }
 ```
 
 `take_box_login_lock [DIR]` takes a non-blocking `flock` on `DIR/legion-e2e-box-login.lock`, `DIR`

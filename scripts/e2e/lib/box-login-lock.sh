@@ -3,7 +3,8 @@
 #
 # take_box_login_lock [DIR] — takes a non-blocking flock on DIR/legion-e2e-box-login.lock, DIR
 # being the operator's XDG_RUNTIME_DIR when it names a directory, else /tmp (pass DIR to choose
-# it; the stage proofs pass none and call it before they move any XDG directory). The lock is
+# it; the stage proofs pass none and call it first, before they make a work directory or start
+# anything). The lock is
 # held on a file descriptor of the calling shell for the rest of its life, and by every process it
 # starts that keeps that descriptor, so a pane or daemon a run leaves behind still holds it. A run
 # whose lock is taken fails at once, naming the holder the lock file records (its pid and command,

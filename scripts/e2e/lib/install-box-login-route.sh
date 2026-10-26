@@ -9,6 +9,8 @@
 #
 # --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh):
 # the profile's files go under <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
+# --profile must be one plain name, and the agent directory must canonicalise to that very path, so
+# the link to the operator's login can never land outside the run's home.
 #
 # --operator-home is the operator's real home, given explicitly: the caller captures it before it
 # moves HOME anywhere, and this script never reads the login's location from its own $HOME.
@@ -108,6 +110,12 @@ trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
 if [ -z "$trimmed" ] || [ "$trimmed" = default ]; then
   refuse "--profile '$profile' is OMP's default profile, the one plain \`omp\` uses; name a dedicated profile"
 fi
+# The name becomes one directory under <home>/.omp/profiles, and this script writes a link to the
+# operator's login there: one plain path segment, never a path that could leave the run's home.
+profile_re='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+if [[ ! $profile =~ $profile_re ]] || [[ $profile == *..* ]]; then
+  refuse "--profile '$profile' is not one plain name (a letter or digit, then letters, digits, '.', '_' or '-', and no '..'); the profile must stay a directory under --home's .omp/profiles"
+fi
 [ -n "$operator_home" ] || refuse "--operator-home is empty"
 operator_home=$(realpath -m -- "$operator_home")
 # The profile goes under the run's own home, never the caller's or the operator's.
@@ -117,6 +125,10 @@ home=$(realpath -m -- "$home")
 [ "$home" != "$operator_home" ] || refuse "--home $home is --operator-home; give the profile a home of its own (make_omp_home, lib/omp-home.sh)"
 [ -d "$home/.omp" ] || refuse "--home $home has no .omp directory; make it with make_omp_home (lib/omp-home.sh)"
 agent=$home/.omp/profiles/$profile/agent
+# No symlinked directory on the way may carry the profile, and the link with it, out of the run's
+# home: the canonical agent directory must be this very path.
+[ "$(realpath -m -- "$agent")" = "$agent" ] ||
+  refuse "$agent resolves to $(realpath -m -- "$agent"), outside $home/.omp/profiles/$profile; the profile must be a plain directory under --home"
 for file in models.yml config.yml; do
   [ ! -e "$agent/$file" ] || refuse "$agent/$file exists; this installs a fresh profile's model route only"
 done

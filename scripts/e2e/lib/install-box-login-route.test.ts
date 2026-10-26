@@ -4,9 +4,11 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,10 +33,17 @@ interface Setup {
   version?: string;
   /** Whether the fake operator home holds .omp/agent/agent.db. */
   operatorDb?: boolean;
-  /** Prepares the run's profile before the installer runs. */
-  prepare?: (agent: string) => void;
+  /** Prepares the run's home before the installer runs. */
+  prepare?: (agent: string, home: string, run: string) => void;
+  /** The --profile value. */
+  profile?: string;
 }
-function install({ version = fixed, operatorDb = true, prepare }: Setup = {}) {
+function install({
+  version = fixed,
+  operatorDb = true,
+  prepare,
+  profile = "legion-e2e-test",
+}: Setup = {}) {
   const run = join(dir, `install-${++installs}`);
   const home = join(run, "omp-home");
   mkdirSync(join(home, ".omp"), { recursive: true });
@@ -43,7 +52,7 @@ function install({ version = fixed, operatorDb = true, prepare }: Setup = {}) {
   const db = join(operatorHome, ".omp", "agent", "agent.db");
   if (operatorDb) writeFileSync(db, dbBytes, { mode: 0o600 });
   const agent = join(home, ".omp", "profiles", "legion-e2e-test", "agent");
-  prepare?.(agent);
+  prepare?.(agent, home, run);
   const bin = join(run, "bin");
   mkdirSync(bin);
   const listing = join(run, "listing.json");
@@ -66,7 +75,7 @@ function install({ version = fixed, operatorDb = true, prepare }: Setup = {}) {
       "bash",
       join(lib, "install-box-login-route.sh"),
       "--profile",
-      "legion-e2e-test",
+      profile,
       "--home",
       home,
       "--dest",
@@ -78,6 +87,8 @@ function install({ version = fixed, operatorDb = true, prepare }: Setup = {}) {
   );
   return {
     agent,
+    home,
+    run,
     db,
     dest,
     operatorHome,
@@ -187,6 +198,33 @@ describe("the box-login model route installer", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain(message);
     expect(existsSync(r.agent)).toBe(false);
+  });
+
+  test.each([
+    "../../escape",
+    "x/../../../escape",
+    "nested/name",
+    ".hidden",
+    "a..b",
+  ])("refuses the profile name %p, which is not one plain path segment, and writes nothing", (profile) => {
+    const r = install({ profile });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(`--profile '${profile}' is not one plain name`);
+    expect(existsSync(join(r.home, "escape"))).toBe(false);
+    expect(existsSync(join(r.run, "escape"))).toBe(false);
+    expect(existsSync(join(r.home, ".omp", "profiles"))).toBe(false);
+  });
+
+  test("refuses a profiles directory that is a symlink out of the run's home, and writes nothing there", () => {
+    const r = install({
+      prepare: (_agent, home, run) => {
+        mkdirSync(join(run, "elsewhere"));
+        symlinkSync(join(run, "elsewhere"), join(home, ".omp", "profiles"));
+      },
+    });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(`resolves to ${join(r.run, "elsewhere", "legion-e2e-test", "agent")}`);
+    expect(readdirSync(join(r.run, "elsewhere"))).toEqual([]);
   });
 });
 

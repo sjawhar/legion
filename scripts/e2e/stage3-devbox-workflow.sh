@@ -38,6 +38,23 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
+# The model route first, and under box-login the one-at-a-time lock (lib/box-login-lock.sh), before
+# the run makes its work or evidence directory or anything else: a run the lock refuses leaves
+# nothing behind.
+# shellcheck source-path=SCRIPTDIR source=lib/box-login-lock.sh
+. "$root/scripts/e2e/lib/box-login-lock.sh"
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file | box-login) ;;
+*)
+  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" >&2
+  exit 1
+  ;;
+esac
+if [ "$model_route" = box-login ] && ! take_box_login_lock; then
+  echo "FAIL setup: another box-login proof is running on this box (the holder is named above)" >&2
+  exit 1
+fi
 work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # Evidence survives every outcome: logs, captured state, negative controls, the production audit,
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
@@ -111,8 +128,6 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/box-login-lock.sh
-. "$root/scripts/e2e/lib/box-login-lock.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
@@ -570,13 +585,6 @@ spec_block_ask() {
 approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.kind == "approval")] | length'; }
 
 begin prerequisites
-model_route=${LEGION_E2E_MODEL_ROUTE:-}
-case "$model_route" in
-gateway | key-file | box-login) ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" ;;
-esac
-# One box-login proof at a time, before this run reads or starts anything (lib/box-login-lock.sh).
-[ "$model_route" != box-login ] || take_box_login_lock || fail "another box-login proof is running on this box (the holder is named above)"
 refuse_leftovers legion-e2e3
 for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
@@ -717,12 +725,14 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
 # The repository's pin, or under box-login the operator's own build: panes sharing the operator's
-# login must refresh it with the refresh-race fix (lib/install-box-login-route.sh).
+# login must refresh it with the refresh-race fix (lib/install-box-login-route.sh). Resolved before
+# the plugin installs, which run the same build as the daemon and panes, never .omp-pin behind its
+# back: under box-login the profile's agent.db is the operator's login database.
 pin=${box_pin:-$(<"$root/.omp-pin")}
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" --omp "$pin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" --omp "$pin")
 cat >"$work/instructions.md" <<'EOF'
 # Stage 3 proof instructions
 
