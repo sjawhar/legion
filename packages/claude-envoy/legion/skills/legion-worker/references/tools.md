@@ -13,8 +13,11 @@ which you have; those need no runner.
 
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
-  dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without it on
-  `PATH` — so a role whose change owes that suite can run it.
+  dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`,
+  `psql`, `flock` and `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is
+  given. The image carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`,
+  and `psql` was the one a role had no way to supply — so a role whose change owes that suite can
+  run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a
   megabyte, because a second image roll costs more than a megabyte.
 - `sqlite3` — a repository's own SQLite fixture or database has no other way to open from a shell,
@@ -88,8 +91,10 @@ variable the runtime sets for you there or under a path on that volume your harn
 itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under `/legion/workspaces`) and
 the runtime's own directories (`/legion/repos`, `/legion/feed`, `/legion/sessions`); and after
 the command exits nothing else resolves differently. The workspace is excluded because its jj
-working copy tracks every new file, so a root written there is added to the change every role
-shares; the one write into it that is sanctioned is a repository's own dependency install into
+working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB in a role
+container), so a root written there is added to the change every role shares, and a larger new
+file is left untracked, every jj command in the workspace then warning `Refused to snapshot some
+files`. The one write into it that is sanctioned is a repository's own dependency install into
 its ignored directories, below. The variables the runtime sets on the volume, where a tool's own
 cache already goes, are
 `XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
@@ -371,11 +376,11 @@ $ grep -rn redis-cli
 $ grep -rn redis-tools
 ```
 
-Two kinds of hit want more than a substitution. The toolchain smoke step in
+One kind of hit wants more than a substitution: the toolchain smoke step in
 `packages/daemon/docker/worker.Dockerfile` runs each tool once, so a new one needs its own
-invocation there (`nc` and `dig` take no `--version`); and the `THIRD_PARTY_NOTICES` intro string
-in the same file is a licence file that hand-lists the Debian packages the image installs,
-assembled into the image at `/usr/share/doc/legion/THIRD_PARTY_NOTICES`.
+invocation there (`nc` and `dig` take no `--version`). The licence file the image carries at
+`/usr/share/doc/legion/THIRD_PARTY_NOTICES` needs no edit: its list of Debian packages is written at
+build time from the image's own dpkg database.
 
 Four of the files the grep finds are in Go, and those four are the gated ones: the `toolchain`
 name list in `packages/daemon/internal/capabilities/image.go` makes the probe require it; that
@@ -386,13 +391,9 @@ the capability and `probe-image` tests fail on an image that does not carry it; 
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
 
 Miss one of those four and the suite is red, which is what makes them easy to find. Nothing holds
-a Dockerfile comment, the notices string or the smoke step to anything today, so a change that
-stops at the gated sites opens green and ships a licence file that does not name the package it
-installs. That is a fact about this build rather than a property: dispatch://INFRA-255 generates
-the package list from `dpkg-query` at build time and drops the hand-kept string, and once it lands
-the notices half of this warning goes with it while the smoke step and the comments stay yours to
-carry. It reaches a role only once a deployment pins the new image digest, as every Legion change
-does — never within your own phase.
+a Dockerfile comment or the smoke step to anything, so a change that stops at the gated sites opens
+green with comments that no longer describe the image and a smoke step that never runs the new
+tool.
 
 So when your work needs such a tool, say so to the architect that owns your issue (`envoy_publish`
 to its role topic), with the tool, what your phase needs it for, and the runner forms you already

@@ -88,6 +88,10 @@ Inbox row. Choose it and pick a value. Closed issues cannot change priority.
 
 The assignee is the person who answers the issue's asks, and whose Inbox lists them by default.
 Change it from the issue header. The choices are **Unassigned** and every login allowed to sign in.
+An agent that creates an issue without naming one gets the person its token acts for, else the
+parent's assignee, else the project's default assignee: the person you name in the projects table
+in **Settings → Projects**, who takes every issue the chain leaves without an owner. Only a person
+sets a project's default; no agent command does.
 
 ### Labels
 

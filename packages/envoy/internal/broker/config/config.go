@@ -22,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -58,11 +59,20 @@ type Config struct {
 	// machine login's code (Dispatch's /credentials/machine). Required. The device grant's
 	// verification_uri names it, so a machine shows its person where to go.
 	MachineLoginURL string
-	// BROKER_UI_TOKEN, BROKER_UI_TOKEN_FILE: the bearer token Dispatch's server presents on the
-	// broker's approval routes, given directly or as a file whose trimmed contents win over the
-	// variable. Required. It vouches for the approver each decision names, so only Dispatch's
-	// server may hold it.
-	UIToken string
+	// BROKER_API_ACCOUNTS: the Kubernetes service accounts that call the broker's named-caller
+	// routes — the approval routes Dispatch's server calls on a person's behalf, and the
+	// introspection route a resource server reads one of the broker's access tokens back through —
+	// whitespace-separated <caller>=<service account> entries, such as
+	// dispatch=system:serviceaccount:example-ns:example-dispatch. Each caller presents its own
+	// projected token, for BROKER_K8S_OIDC_AUDIENCE, on those routes, verified against
+	// BROKER_K8S_OIDC_ISSUER as every other ServiceAccount token the broker takes is, so this
+	// needs that pair. A token that lives longer than an hour from its issue is refused, as a
+	// service's login token is. The caller's name
+	// (lowercase letters, digits and hyphens, at most 64) is what the broker's log names it when
+	// it acts; nothing else reads it. A namespace's default account is refused, as is an account
+	// given twice, since each account names one caller. Keyed by account, each answering its
+	// caller. Unset, no caller reaches those routes.
+	APIAccounts map[string]string
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -121,6 +131,42 @@ type Config struct {
 	K8sOIDCIssuer string
 	// BROKER_K8S_OIDC_AUDIENCE: the audience a pod's projected service-account token must carry.
 	K8sOIDCAudience string
+	// BROKER_EXCHANGE_K8S_AUDIENCE: the audience a pod's projected service-account token must
+	// carry to be exchanged (RFC 8693) for a Dispatch access token. Its issuer is the one cluster
+	// the broker is told about, BROKER_K8S_OIDC_ISSUER, which this needs; the audience is its own
+	// because an exchanging pod projects a token for it beside the one it enrolls with
+	// (BROKER_K8S_OIDC_AUDIENCE), so neither token is spendable where the other is. Unset, no
+	// pod exchanges.
+	ExchangeK8sAudience string
+	// BROKER_EXCHANGE_GITHUB_ISSUER: the issuer of the token a continuous-integration workflow
+	// run presents to the exchange, https://token.actions.githubusercontent.com for runs on
+	// GitHub's own hosts. Set it with BROKER_EXCHANGE_GITHUB_AUDIENCE, or neither, in which case
+	// the broker accepts no workflow token at all.
+	ExchangeGitHubIssuer string
+	// BROKER_EXCHANGE_GITHUB_AUDIENCE: the audience a workflow run's token must carry, the one
+	// the run asks GitHub to mint it for.
+	ExchangeGitHubAudience string
+	// BROKER_EXCHANGE_ACCOUNTS: the Kubernetes service accounts whose pods exchange their
+	// projected token, whitespace-separated
+	// <service account>=<project>=<person>[=<session>] entries, such as
+	// system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com. The token minted
+	// for a pod of the account may write that one project, acts for that person, and writes under
+	// the session the entry fixes; an entry that fixes none requires the pod to name its own
+	// session. The session is everything after the third "=", so it alone may carry one. A
+	// namespace's default account is refused, as is an account listed twice. Needs
+	// BROKER_K8S_OIDC_ISSUER and BROKER_EXCHANGE_K8S_AUDIENCE, whose tokens its pods present.
+	// Unset, no account exchanges.
+	ExchangeAccounts []exchange.AccountEntry
+	// BROKER_EXCHANGE_WORKFLOWS: the GitHub workflows whose runs exchange their token,
+	// whitespace-separated <repository>=<workflow path>=<ref>=<project>=<person>[=<session>]
+	// entries, such as
+	// example-org/example-repo=.github/workflows/release.yaml=refs/heads/main=EXAMPLE=ada@example.com.
+	// Each field is compared exactly and nothing is wildcarded: a run of another workflow, or of
+	// this one on another ref, is not this entry. The session is everything after the fifth "=",
+	// so it alone may carry one, and a workflow listed twice is refused. Needs
+	// BROKER_EXCHANGE_GITHUB_ISSUER and BROKER_EXCHANGE_GITHUB_AUDIENCE, whose tokens its runs
+	// present. Unset, no workflow exchanges.
+	ExchangeWorkflows []exchange.WorkflowEntry
 	// BROKER_ENVOY_URL: an Envoy listener the broker notifies, best effort, when a session's
 	// pending request expires undecided. Unset, the broker sends nothing.
 	EnvoyURL string
@@ -134,6 +180,11 @@ type Config struct {
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
 	ProofSkewSeconds int
+	// BROKER_ACCESS_TOKEN_SECONDS: how long an access token the broker's OAuth provider issues
+	// lasts, a machine login's and an exchanged one's alike. A caller renews within it rather
+	// than holding one token for a whole run, so it trades how often every caller renews against
+	// how long a revoked credential's last token stays spendable.
+	AccessTokenSeconds int
 	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login lasts without a refresh. An
 	// approval mints its credential for this long, and each refresh moves its expiry to this long
 	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
@@ -141,6 +192,19 @@ type Config struct {
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
 	SweepSeconds int
+	// BROKER_DRAIN_SECONDS: how long the broker goes on serving after SIGTERM while answering
+	// GET /healthz with 503, so Kubernetes has stopped sending it new requests before it stops
+	// accepting them. It is configuration rather than a compiled constant because the right value
+	// is the cluster's EndpointSlice propagation time — how long a pod the control plane has
+	// marked for deletion keeps receiving traffic — which lives in the deployment's own
+	// repository, not this one, and must be tunable there without a new image. Removal from a
+	// Service's EndpointSlice starts when the pod's deletion timestamp appears, concurrently with
+	// the kubelet beginning termination, so what the drain must outlast is that propagation and
+	// not a readiness probe's periodSeconds × failureThreshold, which no longer stands between
+	// the pod and the endpoint controller by then; 5 seconds is what this repository's own
+	// Dispatch deployment sizes its preStop wait at, for the same reason. 0 is for a local run or
+	// a dev stack, where nothing propagates and the wait is pure delay.
+	DrainSeconds int
 	// BROKER_TRUSTED_PROXY_HEADER: the request header (e.g. X-Forwarded-For) whose last entry the
 	// machine-login and secret-reread rate limiters take as the caller's address. Unset, they use
 	// the connection's own address, which is right only when nothing proxies the broker. Set it
@@ -148,6 +212,10 @@ type Config struct {
 	// otherwise a caller can forge the header and pick its own rate-limit bucket.
 	TrustedProxyHeader string
 }
+
+// noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
+// caller's own Kubernetes ServiceAccount token now.
+const noUIToken = "the broker's approval routes take the calling service's own Kubernetes ServiceAccount token, verified against BROKER_K8S_OIDC_ISSUER, so list that account in BROKER_API_ACCOUNTS instead of sharing a bearer with Dispatch's server"
 
 // noDispatchCredential is why the broker's Dispatch variables are gone: it asks and issues nothing
 // in Dispatch.
@@ -178,6 +246,8 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
 	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
 	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
+	{"BROKER_UI_TOKEN", noUIToken},
+	{"BROKER_UI_TOKEN_FILE", noUIToken},
 	{"BROKER_DATABASE_PASSWORD", noDatabasePassword},
 	{"BROKER_RULES_FILE", noRulesFile},
 	{"BROKER_RULES_S3_URI", noRulesFile},
@@ -215,7 +285,7 @@ func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) 
 		if !ok || !record.ValidService(service) || service == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) {
 			return nil, fmt.Errorf("%s must be <service>=system:serviceaccount:<namespace>:<name> entries, each service lowercase letters, digits and hyphens, at most 64, not %s, got %q", setting, policy.OwnerShared, text)
 		}
-		if _, account, _ := strings.Cut(strings.TrimPrefix(subject, "system:serviceaccount:"), ":"); account == defaultServiceAccount {
+		if isDefaultServiceAccount(subject) {
 			return nil, fmt.Errorf("%s names a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; name a dedicated account", setting, text)
 		}
 		if other, twice := seen[subject]; twice {
@@ -226,6 +296,85 @@ func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) 
 		}
 		seen[subject] = service
 		entries = append(entries, serviceAccountEntry{service: service, subject: subject, text: text})
+	}
+	return entries, nil
+}
+
+// isDefaultServiceAccount reports whether subject is a namespace's default account, the one
+// Kubernetes gives every namespace and runs every pod whose spec names no account as. No setting
+// takes one: a token for it says only that some pod of that namespace is asking.
+func isDefaultServiceAccount(subject string) bool {
+	_, account, _ := strings.Cut(strings.TrimPrefix(subject, "system:serviceaccount:"), ":")
+	return account == defaultServiceAccount
+}
+
+// exchangeFields splits one entry of an exchange setting into want fields on "=", the last field
+// — a session name — taking everything after the last separator, since a session name may carry
+// "=" and no other field may. An entry one field short fixes no session and answers "" for it;
+// any other count is not of the form.
+func exchangeFields(text string, want int) ([]string, bool) {
+	fields := strings.SplitN(text, "=", want)
+	switch len(fields) {
+	case want:
+		return fields, true
+	case want - 1:
+		return append(fields, ""), true
+	}
+	return nil, false
+}
+
+// parseExchangeAccounts reads setting's whitespace-separated
+// <service account>=<project>=<person>[=<session>] entries, the identities BROKER_EXCHANGE_ACCOUNTS
+// lists, in order. It refuses, naming the entry: one not of that form or with a blank field; an
+// account that is not system:serviceaccount:<namespace>:<name>; a namespace's default account; and
+// an account listed twice, since one account writes as one identity. exchange.NewSet is the second
+// gate, and the session name's own form is its to refuse.
+func parseExchangeAccounts(setting, value string) ([]exchange.AccountEntry, error) {
+	var entries []exchange.AccountEntry
+	seen := map[string]bool{}
+	for _, text := range strings.Fields(value) {
+		fields, ok := exchangeFields(text, 4)
+		if !ok || fields[0] == "" || fields[1] == "" || fields[2] == "" {
+			return nil, fmt.Errorf("%s must be <service account>=<project>=<person>[=<session>] entries, the session everything after the third =, got %q", setting, text)
+		}
+		if !serviceAccountPattern.MatchString(fields[0]) {
+			return nil, fmt.Errorf("%s must name system:serviceaccount:<namespace>:<name> accounts, got %q", setting, text)
+		}
+		if isDefaultServiceAccount(fields[0]) {
+			return nil, fmt.Errorf("%s names a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it, so its token says nothing about which pod is asking; name a dedicated account", setting, text)
+		}
+		if seen[fields[0]] {
+			return nil, fmt.Errorf("%s names the service account %s twice; one account writes as one identity, so name it once", setting, fields[0])
+		}
+		seen[fields[0]] = true
+		entries = append(entries, exchange.AccountEntry{Account: fields[0], Project: fields[1], Person: fields[2], Session: fields[3]})
+	}
+	return entries, nil
+}
+
+// parseExchangeWorkflows reads setting's whitespace-separated
+// <repository>=<workflow path>=<ref>=<project>=<person>[=<session>] entries, the identities
+// BROKER_EXCHANGE_WORKFLOWS lists, in order. It refuses, naming the entry: one not of that form or
+// with a blank field, and a repository, workflow and ref listed twice, since one workflow run
+// writes as one identity. exchange.NewSet is the second gate, and the repository's own form is its
+// to refuse.
+func parseExchangeWorkflows(setting, value string) ([]exchange.WorkflowEntry, error) {
+	var entries []exchange.WorkflowEntry
+	seen := map[string]bool{}
+	for _, text := range strings.Fields(value) {
+		fields, ok := exchangeFields(text, 6)
+		if !ok || fields[0] == "" || fields[1] == "" || fields[2] == "" || fields[3] == "" || fields[4] == "" {
+			return nil, fmt.Errorf("%s must be <repository>=<workflow path>=<ref>=<project>=<person>[=<session>] entries, the session everything after the fifth =, got %q", setting, text)
+		}
+		key := strings.Join(fields[:3], "=")
+		if seen[key] {
+			return nil, fmt.Errorf("%s names the workflow %s twice; one workflow run writes as one identity, so name it once", setting, key)
+		}
+		seen[key] = true
+		entries = append(entries, exchange.WorkflowEntry{
+			Repository: fields[0], Workflow: fields[1], Ref: fields[2],
+			Project: fields[3], Person: fields[4], Session: fields[5],
+		})
 	}
 	return entries, nil
 }
@@ -422,14 +571,40 @@ func Load(getenv func(string) string) (Config, error) {
 	if len(cfg.ServiceLogins) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its accounts log in with")
 	}
-	token, err := secretValue(getenv, "BROKER_UI_TOKEN")
+	callers, err := parseServiceAccounts("BROKER_API_ACCOUNTS", getenv("BROKER_API_ACCOUNTS"))
 	if err != nil {
 		return Config{}, err
 	}
-	if token == "" {
-		return Config{}, fmt.Errorf("BROKER_UI_TOKEN_FILE or BROKER_UI_TOKEN is required")
+	for _, entry := range callers {
+		if cfg.APIAccounts == nil {
+			cfg.APIAccounts = map[string]string{}
+		}
+		cfg.APIAccounts[entry.subject] = entry.service
 	}
-	cfg.UIToken = token
+	if len(cfg.APIAccounts) > 0 && cfg.K8sOIDCIssuer == "" {
+		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its callers present")
+	}
+	githubIssuer, githubAudience, err := oidc.ConfigFromEnv(getenv, "BROKER_EXCHANGE_GITHUB_ISSUER", "BROKER_EXCHANGE_GITHUB_AUDIENCE")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ExchangeGitHubIssuer, cfg.ExchangeGitHubAudience = githubIssuer, githubAudience
+	cfg.ExchangeK8sAudience = strings.TrimSpace(getenv("BROKER_EXCHANGE_K8S_AUDIENCE"))
+	if cfg.ExchangeK8sAudience != "" && cfg.K8sOIDCIssuer == "" {
+		return Config{}, fmt.Errorf("BROKER_EXCHANGE_K8S_AUDIENCE needs BROKER_K8S_OIDC_ISSUER, the cluster whose pods carry it")
+	}
+	if cfg.ExchangeAccounts, err = parseExchangeAccounts("BROKER_EXCHANGE_ACCOUNTS", getenv("BROKER_EXCHANGE_ACCOUNTS")); err != nil {
+		return Config{}, err
+	}
+	if len(cfg.ExchangeAccounts) > 0 && cfg.ExchangeK8sAudience == "" {
+		return Config{}, fmt.Errorf("BROKER_EXCHANGE_ACCOUNTS needs BROKER_K8S_OIDC_ISSUER and BROKER_EXCHANGE_K8S_AUDIENCE, whose tokens its pods present")
+	}
+	if cfg.ExchangeWorkflows, err = parseExchangeWorkflows("BROKER_EXCHANGE_WORKFLOWS", getenv("BROKER_EXCHANGE_WORKFLOWS")); err != nil {
+		return Config{}, err
+	}
+	if len(cfg.ExchangeWorkflows) > 0 && cfg.ExchangeGitHubIssuer == "" {
+		return Config{}, fmt.Errorf("BROKER_EXCHANGE_WORKFLOWS needs BROKER_EXCHANGE_GITHUB_ISSUER and BROKER_EXCHANGE_GITHUB_AUDIENCE, whose tokens its runs present")
+	}
 	if cfg.EnvoyURL != "" {
 		if cfg.EnvoyToken, err = secretValue(getenv, "BROKER_ENVOY_TOKEN"); err != nil {
 			return Config{}, err
@@ -443,8 +618,10 @@ func Load(getenv func(string) string) (Config, error) {
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
+		{"BROKER_ACCESS_TOKEN_SECONDS", &cfg.AccessTokenSeconds, 900, 1, 3600},
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
+		{"BROKER_DRAIN_SECONDS", &cfg.DrainSeconds, 5, 0, 120},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)

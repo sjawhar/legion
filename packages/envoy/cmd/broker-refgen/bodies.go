@@ -40,6 +40,11 @@ func (g *graph) structOf(src *source, file *ast.File, e ast.Expr) (structRef, bo
 		if ts == nil {
 			return structRef{}, false, nil
 		}
+		// A name for another package's type — `type answer = pkg.Answer`, which a route uses so
+		// its answer is documented from the type that defines it — resolves to that type.
+		if sel, ok := ts.Type.(*ast.SelectorExpr); ok {
+			return g.structOf(src, src.fileOf(ts), sel)
+		}
 		_, isStruct := ts.Type.(*ast.StructType)
 		return structRef{src, ts, gd}, isStruct, nil
 	case *ast.SelectorExpr:

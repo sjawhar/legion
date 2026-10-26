@@ -23,6 +23,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
 | `merged-root-waits.sh` | the daemon keeps a tree's order, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child, and lands once that child is parked; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
+| `no-required-checks.sh` | a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches: a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`; the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it; a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
@@ -57,7 +58,7 @@ itself (`unreviewedChange`) on the same two heads with the implement App's token
 publishes a pull request already merged without reading it. With `LEGION_READY_SCOPE_REFUSE` set,
 both must be refused `READY_UNREVIEWED_CHANGE` naming that path. Unset, the check must pass, and
 READY must be accepted, or refused only by a check that runs after it: the head's handoffs, a
-conflict, a by-hand file list or a required check. It only reads GitHub; the pull request and its
+conflict or a by-hand file list. It only reads GitHub; the pull request and its
 two heads are the operator's to make and close.
 
 
@@ -653,8 +654,13 @@ pane. The checks:
 
 - `claude-implementer-registers`: the implementer's claim registers its Claude Code transcript,
   `<state>/claude/<claim token>/projects/<cwd>/<session id>.jsonl`, as its session file and the
-  session id as its session; its `claude` runs as a child of `legion claude-bridge`, started with
-  `--session-id <that id>`.
+  session id as its session; its `claude` runs as a child of the run's `legion claude-bridge`,
+  started with `--session-id <that id>`. The parent counts as the bridge only when its executable
+  (`/proc/<pid>/exe`) is the run's `legion` and its arguments, read whole from the NUL-delimited
+  `/proc/<pid>/cmdline` in the shell, are `claude-bridge`, `--` and the run's `claude`, in that
+  order, after the executable's name: no other word of the command line counts, the pane's system
+  prompt (past 64 KB, with newlines) included, and no pipe can end early on it. A failure prints
+  the claude's ancestry.
 - `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write
   and push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records
   the completion's commit, which the implement App authored and committed, which is on
@@ -666,7 +672,9 @@ pane. The checks:
   marker its earlier instruction carried, quotes it, so the earlier turns are in its context and
   not only on disk.
 - `every-launch-endpoint-checked`: every pane the daemon launched, Oh My Pi or Claude Code, was
-  checked by the watcher before it registered.
+  checked by the watcher before it registered. The watcher reads an agent's environment once,
+  NUL-delimited; an environment it cannot read is not checked, never clean, and is recorded with
+  why in the evidence's `pane-endpoints-unchecked.txt`, which this check's failure names.
 
 Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
@@ -675,20 +683,25 @@ the variable, before anything else, and refuses a key Anthropic's `GET /v1/model
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
 the daemon creates only when missing) before the claim exists: a `settings.json` whose
 `apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
-pane's environment carries `ANTHROPIC_API_KEY`, which the watcher checks for every agent process,
-and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is the Oh My
-Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
+pane's environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
+`ANTHROPIC_FOUNDRY_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, which the watcher checks for every agent
+process, and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is
+the Oh My Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
 ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
 the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
 [`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, and the design gate off, so the
-architect's gate registration starts planning with no approval. The daemon is started with
-`LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` set to the `claude` and `bun` on the operator's `PATH`,
-and `LEGION_CLAUDE_PLUGIN_DIR` set to this checkout's `packages/claude-envoy`, whose
-`dist/envoy-channel.js` and generated `legion/` must be built. Legion's role Apps resolve as Stage
-3's do: the daemon runs `secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
+architect's gate registration starts planning with no approval. The daemon is started with the
+real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, which every pane
+inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
+box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
+pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
+`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
+`packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
+Legion's role Apps resolve as Stage 3's do: the daemon runs
+`secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
 GH_REVIEW_APP_PRIVATE_KEY_B64 -- …` as each App's `private_key_command`, and `prerequisites`
 checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, and
 refuses one that does not resolve to the agent tier. The proof human is the devbox's ordinary
@@ -1995,7 +2008,8 @@ names the PostgreSQL the daemon migrates and runs on; the script starts none, so
 devbox container and a pod's own embedded PostgreSQL all satisfy it. The broker is the run's own:
 the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with
 `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it
-(`-p -1`, read back from its log) and stopped on any exit.
+(`-p -1`, read back from its log) and stopped on any exit. The four checks below are
+[`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `no-required-checks.sh` makes too.
 
 | check | what it holds |
 | :--- | :--- |
@@ -2036,9 +2050,73 @@ package's fake runtime and brought to ready over the daemon's own worker stream 
 The records that put the tree at each step are seeded through the store, as every daemon test
 seeds its fixture, and each seed is printed as one. The configuration load, the store and its
 migrations, the HTTP API, the claim supervision, `openWorkflow`, the JetStream consumers and the
-outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fresh `/tmp`
-directory, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
+outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fresh directory under
+`TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
 which the driver writes through `LEGION_E2E_DAEMON_LOG`.
+
+## no-required-checks.sh
+
+```sh
+LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
+  [LEGION_E2E_NATS_BIN=<nats-server>] bash scripts/e2e/no-required-checks.sh     # → "no required checks e2e: PASS in <n>s", exit 0
+```
+
+Runs on any Linux host with `go` — no Docker, no cluster. `LEGION_TEST_PG_DSN` is required and
+names the PostgreSQL the daemon migrates and runs on; the script starts none, so CI's service, a
+devbox container and a pod's own embedded PostgreSQL all satisfy it. The broker is the run's own:
+the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with
+`go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it
+(`-p -1`, read back from its log) and stopped on any exit. A run takes about seven minutes: the
+daemon reads what each base branch requires at boot and every two minutes after
+(`requiredChecksInterval`), and the proof waits for three of those reads. The four checks below
+are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` makes
+too.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
+| `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
+| `driver` | a test binary of `TestABaseThatRequiresNothingGivesNoVerdictLive` (`internal/daemon/no_required_checks_live_test.go`, `-tags e2e`) |
+| `proof` | the four steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+
+The driver boots the whole daemon through `run`, the function `legion start` calls, over that
+PostgreSQL and that broker, with `max_fix_attempts` 1, and seeds three roots, each holding its
+tree's slot on an open pull request at its first head, each on a base branch of its own so each
+has its own required set: one in `testing` on a base that requires nothing, its set not yet read;
+one in `reviewing` on a base that requires `ci`; and one in `testing` on a base that requires
+`ci`, its one fix attempt counted at its head. Every fact enters by a transport production has: CI
+settlements, the push and the synchronize as `notifications.github.…` envelopes on the
+`ENVOY_NOTIFICATIONS` stream, and what each base requires as the daemon's own required-checks pass
+reads it from the GitHub stand-in — the pull request (its base, head and `mergeable: true`), its
+reviews (none), the base's rulesets (`/rules/branches/<base>`, switched between a lone
+`pull_request` rule and a `required_status_checks` rule for `ci`) and the base branch itself,
+unprotected, every read answered 2xx, since a failed read keeps the set last read. Every assertion
+is a read of `GET /legion/v1/state` — raw, where a step holds that `checksVerdict` is absent — or
+of the notices the daemon published to the Envoy listener stand-in. The store is read only to know
+the daemon took what a step drove, which no route shows: the settlement it recorded
+(`checked_head`), the set its pass read (`required`, polled for up to three minutes after each
+switch), and the `processed_events` rows of the push and the synchronize.
+
+| step | driven by | read back as |
+| :--- | :--- | :--- |
+| `nothing-required-failed-check` | CI's settlement of the first issue's head with `ci` failed, on a base that requires nothing | once the settlement and the boot's read of the empty set are recorded, `issues[<key>].pullRequest` has no `checksVerdict` key; over three seconds the issue stays in `testing` and its architect is told no `checks-red` |
+| `the-same-failure-once-required-is-red` | the stand-in switched to make that base require `ci`, read by the daemon's next pass | `checksVerdict` `red`, the issue in `implementing`, and one `checks-red` reading `CI is red at a1: ci` — the control that step 1's absent verdict was the empty set's, not an unread set or a lost settlement |
+| `a-passing-required-check-is-green` | CI's settlement of the second issue's head with `ci` passed, on a base that requires it | `checksVerdict` `green`, the issue still in `reviewing` |
+| `a-push-onto-a-base-that-requires-nothing-leaves-the-attempt` | CI's settlement of the third issue's counted head `b1` with `ci` failed; the base switched to require nothing; the implementer's push of `b2` onto `b1` (a code path, pushed by the implement App) and GitHub's synchronize to `b2`; the base switched back to require `ci`; CI's settlement of `b2` with `ci` failed | the held red: `testing`, `checksVerdict` `red`, `fixAttempts` 1 and one `pr-blocked`; then no `checksVerdict` key and still `testing`; then head `b2` with `fixAttempts` still 1; then, at `b2`'s red, `implementing`, `checksVerdict` `red`, `fixAttempts` 1, one `checks-red` reading `CI is red at b2: ci` and still the one `pr-blocked` — where a push that stayed in the counted attempt leaves `b2`'s red held in `testing` |
+
+What the proof stands in for lies outside the rule: the broker is a native `nats-server` rather
+than the testcontainers one the daemon's other NATS tests start, GitHub is a REST stand-in that
+also answers the repository a launch reads and a GraphQL root that knows no pull request, Dispatch
+is the board both whole-daemon drivers share (`liveDispatch`, in
+`internal/daemon/live_proof_test.go`), Envoy's listener is the package's `noticeListener`, the two
+Apps' tokens are placeholders, and no agent runs: a send-back's implementer is launched by the
+package's fake runtime, which provisions its own workspace so the daemon clones nothing, and never
+registers. The records are seeded through the store, as every daemon test seeds its fixture, and
+each seed is printed as one. The configuration, the store and its migrations, the HTTP API,
+`openWorkflow` and its required-checks pass, the JetStream consumers and the outbox lanes are the
+real ones. `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and
+printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver
+writes through `LEGION_E2E_DAEMON_LOG`.
 
 ## lib/free-port.sh
 
@@ -2221,14 +2299,15 @@ and OMP's `logs/`).
 
 ### The natives download
 
-OMP's native modules (`pi_natives.linux-x64-{baseline,modern}.node`, ~350 MB) live in
+OMP's native module (`pi_natives.linux-x64-modern.node` or `…-baseline.node`, the one the CPU
+selects, 111 MiB at the pin; builds before 18.11.0 wrote every variant they embed, about twice that) lives in
 `$HOME/.omp/natives/<omp version>/` — `$XDG_DATA_HOME/omp/natives/` when `$XDG_DATA_HOME/omp`
-exists — and every profile under that `HOME` shares them (`getNativesDir`,
-`@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes them
+exists — and every profile under that `HOME` shares it (`getNativesDir`,
+`@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes it
 on its first run under a `HOME` that has not run this OMP version, and in this script that run is
 `omp plugin install`. The run's own home links `.omp/natives` to the operator's
 ([`lib/omp-home.sh`](#libomp-homesh)), so a fresh CI runner, a container, or a newly bumped OMP pin
-pays ~350 MB there, once, into the operator's cache; on a box where the pinned OMP has already run,
+pays that once, into the operator's cache; on a box where the pinned OMP has already run,
 a fresh profile pays nothing. Measured on the
 devbox with OMP 18.2.2: build, pack, install and verify took 2 s into a new profile, the profile got
 no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.
@@ -2905,6 +2984,40 @@ trap. `LEGION_E2E_KIND` names the kind binary when it is not on `PATH`.
 | `kind_sandbox_load_image IMAGE` | pulls `IMAGE`, which must be named by digest, into the node's containerd, so a pod's start never waits on a registry |
 | `kind_sandbox_internal_kubeconfig FILE` | writes the kubeconfig a container on the kind network reads, whose server is the node's address on that network |
 | `kind_sandbox_teardown STATUS EVIDENCE` | when `STATUS` is not 0, writes the cluster's pods, the `legion` namespace's Sandboxes, volume claims, events and container logs to `EVIDENCE/cluster-at-failure.txt`; then deletes the cluster. It does nothing before `kind_sandbox_create` named a cluster, or once the cluster is gone |
+
+## lib/live-daemon-proof.sh
+
+The run a whole-daemon live proof makes around its driver. `merged-root-waits.sh` and
+`no-required-checks.sh` differ only in what their driver proves, so each sets its own values and
+makes this run.
+
+```sh
+. "$root/scripts/e2e/lib/live-daemon-proof.sh"     # sourced, never run
+live_daemon_proof LABEL SLUG TEST EVIDENCE         # the script's last command
+```
+
+The caller sets `set -euo pipefail` and `root`, the checkout. `live_daemon_proof` starts the
+transcript ([`lib/transcript.sh`](#libtranscriptsh)) in the evidence directory, then runs the four
+checks each script's section lists — `prerequisites`, `broker`, `driver` and `proof` — each
+printing `== <check>`, what it observed and `ok <check> (<s>s)`, and the first that fails
+`FAIL <check>: <why>`. On any exit it stops the `nats-server`, removes the work directory and
+prints `LABEL e2e: PASS in <n>s (evidence: <dir>)`, or
+`LABEL e2e: FAIL at <check> after <n>s (evidence: <dir>)` on stderr.
+
+| argument | is |
+| :--- | :--- |
+| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks` |
+| `SLUG` | the name of the run's own files under `TMPDIR` (or `/tmp` when it is unset): the work directory `legion-e2e-SLUG.<pid>.*`, which holds the broker's store and the driver binary `SLUG.test`, and the evidence directory `legion-e2e-SLUG-evidence.*` when `EVIDENCE` is empty |
+| `TEST` | the one test the driver runs (`-test.run '^TEST$'`); `proof` fails unless the driver reports `--- PASS: TEST`, so a driver that skipped, or a pattern that matched nothing, is no pass |
+| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
+
+The two drivers share their Go harness the same way: `internal/daemon/live_proof_test.go`
+(`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`);
+the configuration the daemon boots with (`newLiveProof` reads `LEGION_E2E_NATS_URL`, skips when it
+is unset, and builds the workflow configuration around it); the stream the daemon's intake
+consumes; the Dispatch board stand-in (`liveDispatch`); the store; the seeding of a tree into the
+next free admission slots (`admit`); and the envelope, `processed_events` and notice reads and
+writes a step makes, the notices read by the issue whose architect they tell (`architectNotices`).
 
 ## lib/secret-leaks.ts
 

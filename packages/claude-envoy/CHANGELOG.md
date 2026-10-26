@@ -13,6 +13,11 @@
 
 ### Changed
 
+- The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
+  tells a role to add a new image package to the licence file by hand: the worker image lists every
+  Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg
+  database (INFRA-255). The Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
@@ -101,6 +106,26 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `claude-envoy:asd-ste100`, as a symlink into the root
+  `skills/`: the ASD-STE100 rules (Simplified Technical English) for text a reader must not
+  misread. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69, with
+  its licence and without its linter.
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch read --events N` (an issue's last N
+  events) and `--all-events` (every one), on an issue read and its `dispatch://KEY/log`, which list
+  the last 10 without either; the bundled tool specs in `dist/envoy-channel.js` and
+  `dist/session-hook.js` carry the two arguments, and the shipped `dispatch` skill's reading
+  reference names the two flags.
+- A Claude Code session registers under the name a person gave it (`claude -n`, `--name`,
+  `/rename`), alone, so Dispatch's Agents page shows that name where it showed
+  `<tmux pane or folder> <short id>`; `ENVOY_SESSION_TITLE` still wins, and a session nobody named
+  keeps that `<tmux pane or folder> <short id>` title. Claude Code hands the chosen name to a hook
+  alone, as `session_title`, so a new `UserPromptSubmit` hook, and the `SessionStart` one, records
+  it under `${CLAUDE_PLUGIN_DATA}/titles/` and the channel server reads it on every registration:
+  a rename shows after the session's next prompt and the heartbeat that follows, and taking the
+  name away brings the fallback title back. That hook is a bundle of its own, since Claude Code
+  holds the prompt until it returns: it costs about what starting `bun` at all costs. Title files
+  are pruned at thirty days, and so are the role files beside them, which a session that held its
+  role to the end used to leave behind for ever.
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight
   characters. Inside tmux the name is `session:window` for a window whose `automatic-rename` is

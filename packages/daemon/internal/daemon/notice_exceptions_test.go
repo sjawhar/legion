@@ -722,8 +722,23 @@ func TestANoticeToALiveClaimThatHearsNothingKeepsItsSchedule(t *testing.T) {
 		now: func() time.Time { return clock }}
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, start))
 
+	// The schedule this run must keep, derived from the delays themselves so that it stays right
+	// when one of them moves: the original goes on the first tick, the copy due at once on the
+	// next, and every later copy its own delay after the report of the one before it, rounded up
+	// to a tick because a copy that comes due between ticks waits for the following one. The
+	// report of the last copy is where the cap drops the notice, and the loop runs a minute past
+	// that, so a schedule that grows is still watched to its end.
+	const tick = 5 * time.Second
+	onTick := func(d time.Duration) time.Duration { return (d + tick - 1) / tick * tick }
+	wantSent, at := []string{time.Duration(0).String(), tick.String()}, tick
+	for _, delay := range noticeReholdDelays[1:] {
+		at += onTick(delay)
+		wantSent = append(wantSent, at.String())
+	}
+	wantDropped := at
+
 	taken, sent, dropped := 0, []string{}, time.Duration(0)
-	for clock.Before(start.Add(15*time.Minute)) && dropped == 0 {
+	for clock.Before(start.Add(wantDropped+time.Minute)) && dropped == 0 {
 		if err := runner.RunOnce(context.Background()); err != nil {
 			t.Fatalf("run at %s: %v", clock.Sub(start), err)
 		}
@@ -739,10 +754,10 @@ func TestANoticeToALiveClaimThatHearsNothingKeepsItsSchedule(t *testing.T) {
 		if strings.Contains(logged.String(), `msg="outbox notice not re-held again`) {
 			dropped = clock.Sub(start)
 		}
-		clock = clock.Add(5 * time.Second)
+		clock = clock.Add(tick)
 	}
-	if fmt.Sprint(sent) != "[0s 5s 2m5s 8m5s]" || dropped != 8*time.Minute+5*time.Second {
-		t.Fatalf("forwards at %v, dropped at %s; want the original, one copy at once, then copies 2 and 6 minutes apart, dropped only at the cap after them", sent, dropped)
+	if fmt.Sprint(sent) != fmt.Sprint(wantSent) || dropped != wantDropped {
+		t.Fatalf("forwards at %v, dropped at %s; want %v dropped at %s: the original, one copy at once, then one heartbeat (noticeReholdDelays[1]) after it, then the cap, and dropped only at that last report", sent, dropped, wantSent, wantDropped)
 	}
 }
 

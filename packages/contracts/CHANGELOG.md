@@ -4,6 +4,16 @@
 
 ### Added
 
+- `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
+  (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
+  read lists the last 10 without either.
+- `DEFAULT_ISSUE_READ_EVENTS` (10), how many of an issue's newest events `dispatch_read` lists
+  without `events` or `all_events`: the number its description names and `DispatchClient.read`'s
+  default.
+- The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
+  `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
+  still names a person who has signed in, and `dispatch_whoami` says a session under the shared
+  token creates issues that fall to the parent's assignee and then to that default.
 - Two optional arguments on `dispatch_issue_update`, `before` and `after`, which move an issue on
   its project's board: `before` puts it above that issue, `after` below, and both together land it
   between them. Either one is a field, so the rule that requires at least one field besides `issue`
@@ -117,6 +127,11 @@
 
 ### Changed
 
+- `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
+  head's checks, so a base branch that requires none produces no note at all. What is left is the
+  already-merged sentence, for a pull request a person merged before READY, and the by-hand
+  `MANUAL_MERGE_REQUIRED:` note. The wire shape is unchanged — one optional `note` string — so no
+  daemon API contract bump (sjawhar/legion#2121).
 - `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
   broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
   `POST /api/v1/.../comments` and `POST /api/v1/broadcasts` accept, generated into Go as

@@ -41,8 +41,8 @@ ask for the person who asked, and the walk below skips it.
 1. **Where the tree stands.** Read `issues.<root>` with `read_state`.
    - Its `phase` is not `done`: the tree runs. When `architect.state` is `failed` or `retired`,
      nobody in the tree heard the decision: skip step 2 and judge it in steps 3 and 4. A decision
-     that gives the work a next step re-admits the tree as the `worker-died` row of the
-     [wake routing table](skill://legion-controller/SKILL.md#wake-routing-table) says
+     that gives the work a next step re-admits the tree as the `worker-died` section of
+     [the wakes reference](skill://legion-controller/references/wakes.md) says
      (`set_status` of the root to `backlog`, then to `todo`), not to `todo` alone. Answer a
      question as step 4 says, and leave the tree as it is. In that reply and in the root's copy,
      write `<root>'s architect has stopped, so it` for `<root> is parked, so its architect`,
@@ -60,8 +60,8 @@ ask for the person who asked, and the walk below skips it.
    legion-daemon:<PROJECT>` and, after it and at most 10 minutes after it, `Events:` show a
    `comment.created` from a session (any controller session: its id changes when the controller
    restarts or is taken over) that begins `Parked by Legion while it waits on:`. That is the mark
-   you post on the root, in the same turn, when you park a tree for a hold (the `held` row of the
-   [wake routing table](skill://legion-controller/SKILL.md#wake-routing-table)), and for no other
+   you post on the root, in the same turn, when you park a tree for a hold (the `held` section of
+   [the wakes reference](skill://legion-controller/references/wakes.md)), and for no other
    park: a park a person asks for, or one you make at triage, gets no mark. The window pairs the
    mark with the park it was posted for: `set_status` writes the status to Dispatch before it
    returns, so the mark's line follows the park's within the turn, and a mark older than the park
@@ -71,7 +71,7 @@ ask for the person who asked, and the walk below skips it.
    under that same session, so the author alone does not show your own hold. A decision older than
    the park is no reason to run: the park is the later word. When that run reaches the oldest such
    line `Events:` shows, read the root's events through the API, which keeps more than 10: the
-   `curl` of [New issue triage](skill://legion-controller/SKILL.md#new-issue-triage) step 2, whose
+   `curl` of [Triage a root](skill://legion-controller/references/triage.md#triage-a-root) step 2, whose
    events carry `type`, `actor`, `created_at` and `payload.status` or `payload.body`. When the run
    still reaches the oldest event you read, the park is that line or an older one, and you cannot
    read who parked it: judge only the events newer than it, and name in your summary each older
@@ -98,7 +98,7 @@ ask for the person who asked, and the walk below skips it.
        (`dispatch comment --issue <KEY> --body-file -`): `Parked decision read: <ref> by <login>
        gives this tree its next step (<one sentence>). Legion runs it again.`
      - Any other park, or you cannot read who parked the tree: set nothing, since you move only a
-       hold of your own ([Free slots](skill://legion-controller/SKILL.md#free-slots-go-daemon)).
+       hold of your own ([Free slots](skill://legion-controller/SKILL.md#free-slots)).
        Post one comment there: `Parked decision read: <ref> by <login> gives this tree its next
        step (<one sentence>).`, then the sentence for that park, then `Its architect then starts
        with this decision.` For a comment that is no reply on an ask, leave out the last sentence:
@@ -146,11 +146,12 @@ ask for the person who asked, and the walk below skips it.
 
 ## The walk
 
-At every start (step 3 of the start procedure) and on each `tick`:
+At every start (step 4 of the start procedure) and on each `tick`:
 
 1. List the parked roots: `dispatch issues --project <PROJECT> --status backlog --label legion
-   --limit 250 --offset 0`, then the same with `--status icebox`, each paged as the start
-   procedure pages triage. Keep the rows that `read_state` records under `issues` at phase `done`.
+   --limit 250 --offset 0`, then the same with `--status icebox`, each paged as
+   [At every start](skill://legion-controller/references/triage.md#at-every-start) pages triage.
+   Keep the rows that `read_state` records under `issues` at phase `done`.
 2. For each, read the root (`dispatch read --issue <root>`), then its children
    (`dispatch read --ref dispatch://<root>/children`) and each child (`dispatch read --issue
    <child>`), and each child's children the same way, down the tree.

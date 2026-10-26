@@ -125,6 +125,23 @@ export interface Project {
   readonly created_at: string;
 }
 
+/**
+ * A project's default assignee: the last step of an issue create's assignee chain, reached when
+ * the create named nobody, the session acts for nobody, and no parent carries one. `assignee` is
+ * a person's lowercase email, or null for a project that names nobody — which
+ * `GET /api/v1/settings/project-default-assignees` leaves out of its list entirely.
+ */
+export interface ProjectDefaultAssignee {
+  readonly project: string;
+  readonly assignee: string | null;
+}
+
+/** The body of `PUT /api/v1/projects/{key}/default-assignee`: the person the project's unowned
+ *  work lands on, or null to clear the default. */
+export interface ProjectDefaultAssigneeInput {
+  readonly assignee: string | null;
+}
+
 export interface RepoProject {
   readonly repo: string;
   readonly project: string;
@@ -1698,6 +1715,10 @@ export interface RepoProjectUpdatedEventPayload {
   readonly deleted: boolean;
 }
 
+/** `settings.project_default_assignee.updated`: a human set or cleared a project's default
+ *  assignee. The payload is the stored row, so a clear carries `assignee: null`. */
+export type ProjectDefaultAssigneeUpdatedEventPayload = ProjectDefaultAssignee;
+
 export interface ArchitectureSourceUpdatedEventPayload {
   readonly source: ArchitectureSource;
   readonly deleted: boolean;
@@ -1817,6 +1838,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "settings.repo_project.updated";
       readonly payload: RepoProjectUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "settings.project_default_assignee.updated";
+      readonly payload: ProjectDefaultAssigneeUpdatedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "settings.architecture_source.updated";
@@ -2065,7 +2090,8 @@ export interface CreateIssueInput {
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;
   /** The email of a person who has signed in; omitted, the server picks the creating person, the
-   *  personal token's owner, or the parent's assignee. */
+   *  personal token's owner, the parent's assignee, or the project's default assignee when that
+   *  still names a person who has signed in. */
   readonly assignee?: string;
   /** The issue's own component attachment; omitted, it inherits its parent's. */
   readonly components?: IssueComponentsInput;
@@ -2343,6 +2369,12 @@ export interface IssueRead {
   readonly issue: IssueDetails;
   readonly events: Event[];
 }
+
+/**
+ * How many of an issue's events `dispatch_read` lists, the newest ones, when it names neither
+ * `events` nor `all_events`: what `DispatchClient.read` returns by default.
+ */
+export const DEFAULT_ISSUE_READ_EVENTS = 10;
 
 export interface ArtifactText {
   readonly markdown: string;
