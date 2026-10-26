@@ -54,9 +54,16 @@ type Registry struct {
 	// including delete tombstones. It prevents a delayed local write-through
 	// from replacing a newer watcher update.
 	cacheRevisions map[string]uint64
-	// watcher feeds the cache from the interest bucket. Once it is ready the cache is consistent
-	// with the bucket, and Match answers every "is this session subscribed?" question without
-	// falling through.
+	// marks are the sessions the current read of the interest bucket has evidence of
+	// (kvwatch.Marks), and readEpoch the epoch that read began in: the bucket incarnation
+	// cacheRevisions belongs to.
+	marks     kvwatch.Marks
+	readEpoch uint64
+	// watcher feeds the cache from the interest bucket. Every watcher it installs reads the whole
+	// bucket again (interestCache): the cache keeps every interest through the read and removes
+	// the ones the read found no evidence of only once it completes. Once a read has completed the
+	// cache is consistent with the bucket, and Match answers every "is this session subscribed?"
+	// question without falling through.
 	watcher *kvwatch.Watcher
 }
 
@@ -124,7 +131,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
 	}
-	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
+	r.watcher = kvwatch.New("interest registry", kv, interestCache{r}, kvwatch.WithLogger(opts.log))
 	// No eager load: the watcher populates the cache asynchronously. A synchronous load of N
 	// individual kv.Get() calls blocks indefinitely when the KV stream leader is on a remote node.
 	r.watcher.Start()
@@ -144,6 +151,14 @@ func (r *Registry) Ping() error {
 		return err
 	}
 	return r.watcher.Err()
+}
+
+// Servable reports whether the copy List answers from can be served (kvwatch.Watcher.Servable):
+// nil once a read of the interest bucket has completed and the copy follows it, or stopped
+// following it no longer ago than the stale bound, and kvwatch.ErrRefilling otherwise. It reads the
+// watcher's state only, never the cache.
+func (r *Registry) Servable() error {
+	return r.watcher.Servable()
 }
 
 // WatchErr is the cache watcher's terminal error, or nil while it runs, so the listener can tell a
@@ -205,12 +220,6 @@ func roleRevisions(kv bus.KeyValue, log *slog.Logger) (map[string]uint64, error)
 	return revisions, nil
 }
 
-func (r *Registry) cachedRevision(sessionID string) uint64 {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.cacheRevisions[sessionID]
-}
-
 func (r *Registry) cacheInterestLocked(sessionID string, item Interest, revision uint64) {
 	if revision < r.cacheRevisions[sessionID] {
 		return
@@ -238,47 +247,46 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 
 // deleteInterest deletes sessionID's interest at the revision it reads (bus.KeyValue.DeleteAtRead).
 func (r *Registry) deleteInterest(sessionID string) error {
-	revision := r.cachedRevision(sessionID)
-	read, err := r.interests().DeleteAtRead(sessionID)
+	// The revision fence read before the delete belongs to the bucket this handle reaches only when
+	// the read under way began in its epoch: between a watch moving the epoch and that read
+	// beginning, the fence still holds the recreated bucket's revisions.
+	r.mu.RLock()
+	kv, epoch := r.watcher.Handle()
+	var revision uint64
+	if r.readEpoch == epoch {
+		revision = r.cacheRevisions[sessionID]
+	}
+	r.mu.RUnlock()
+	read, err := kv.DeleteAtRead(sessionID)
 	if err != nil {
 		return err
 	}
 	revision = max(revision, read)
 
-	entries, err := r.interests().History(sessionID)
-	if err == nil && len(entries) > 0 {
-		latest := entries[len(entries)-1]
-		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
-			r.mu.Lock()
-			r.evictCachedInterestLocked(sessionID, latest.Revision())
-			r.mu.Unlock()
-			return nil
-		}
-
-		var item Interest
-		if err := json.Unmarshal(latest.Value(), &item); err != nil {
-			r.mu.Lock()
-			r.evictCachedInterestLocked(sessionID, latest.Revision())
-			r.mu.Unlock()
-			r.logger().Warn("registry cache evicted malformed value",
-				slog.String("key", latest.Key()),
-				slog.Uint64("revision", latest.Revision()),
-				slog.String("error", err.Error()),
-			)
-			return nil
-		}
-		r.mu.Lock()
-		r.cacheInterestLocked(sessionID, item, latest.Revision())
+	entries, err := kv.History(sessionID)
+	r.mu.Lock()
+	if !r.currentLocked(epoch, sessionID) {
 		r.mu.Unlock()
 		return nil
 	}
-
-	// KeyValue.Delete does not return its revision. A successful delete must
-	// still fence off any watcher update from the preceding revision while the
-	// delete marker remains pending.
-	r.mu.Lock()
-	r.evictCachedInterestLocked(sessionID, revision+1)
+	if err != nil || len(entries) == 0 {
+		// KeyValue.Delete does not return its revision. A successful delete must
+		// still fence off any watcher update from the preceding revision while the
+		// delete marker remains pending.
+		r.evictCachedInterestLocked(sessionID, revision+1)
+		r.mu.Unlock()
+		return nil
+	}
+	latest := entries[len(entries)-1]
+	malformed := r.applyEntryLocked(latest)
 	r.mu.Unlock()
+	if malformed != nil {
+		r.logger().Warn("registry cache evicted malformed value",
+			slog.String("key", latest.Key()),
+			slog.Uint64("revision", latest.Revision()),
+			slog.String("error", malformed.Error()),
+		)
+	}
 	return nil
 }
 
@@ -308,40 +316,81 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 	return nil
 }
 
-// resetCache empties the cache and its revision fence, for a recreated interest bucket.
-func (r *Registry) resetCache() {
+// interestCache is the registry as the cache its watcher feeds (kvwatch.Cache). The hooks are its
+// own type's, not the registry's methods, so nothing but the watcher calls them.
+type interestCache struct{ r *Registry }
+
+// BeginRead starts a read of the interest bucket: a fresh set of marks and, for a recreated bucket
+// whose revisions number from 1 again, no revision fence. Every interest stays.
+func (c interestCache) BeginRead(read kvwatch.Read) {
+	r := c.r
 	r.mu.Lock()
-	r.cache = map[string]Interest{}
-	r.cacheRevisions = map[string]uint64{}
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	r.marks.Reset()
+	r.readEpoch = read.Epoch
+	if read.Recreated {
+		clear(r.cacheRevisions)
+	}
 }
 
-// applyWatched applies one entry the KV watcher delivered to the cache. The revision fence in
-// cacheInterestLocked and evictCachedInterestLocked keeps a delayed local write-through and a
-// watcher update from undoing each other.
-func (r *Registry) applyWatched(entry nats.KeyValueEntry) {
-	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-		r.mu.Lock()
-		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
-		r.mu.Unlock()
-		return
-	}
-
-	var item Interest
-	if err := json.Unmarshal(entry.Value(), &item); err != nil {
-		r.mu.Lock()
-		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
-		r.mu.Unlock()
+// Apply takes one record the read delivered. Its session is marked before the revision fence is
+// compared, so a delivered value older than a local write still keeps the interest through the
+// sweep. The fence keeps a delayed local write-through and a watcher update from undoing each
+// other.
+func (c interestCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
+	r := c.r
+	r.mu.Lock()
+	r.marks.Mark(entry.Key())
+	malformed := r.applyEntryLocked(entry)
+	r.mu.Unlock()
+	if malformed != nil {
 		r.logger().Warn("registry watcher evicted malformed value",
 			slog.String("key", entry.Key()),
 			slog.Uint64("revision", entry.Revision()),
-			slog.String("error", err.Error()),
+			slog.String("error", malformed.Error()),
 		)
-		return
 	}
+}
+
+// CompleteRead removes every interest and fence entry the read found no evidence of: the bucket
+// no longer holds that session's interest.
+func (c interestCache) CompleteRead(kvwatch.Read) {
+	r := c.r
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	kvwatch.Sweep(&r.marks, r.cache, nil)
+	kvwatch.Sweep(&r.marks, r.cacheRevisions, nil)
+	r.marks.Reset()
+}
+
+// applyEntryLocked applies one record of the bucket, delivered or read, to the cache under r.mu.
+// A value it cannot decode evicts the interest, and is returned for the caller to log once it has
+// released r.mu.
+func (r *Registry) applyEntryLocked(entry nats.KeyValueEntry) error {
+	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
+		return nil
+	}
+	var item Interest
+	if err := json.Unmarshal(entry.Value(), &item); err != nil {
+		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
+		return err
+	}
 	r.cacheInterestLocked(entry.Key(), item, entry.Revision())
-	r.mu.Unlock()
+	return nil
+}
+
+// currentLocked reports, under r.mu, whether the result of a KV call made through a handle of
+// epoch (kvwatch.Watcher.Handle) may reach the cache, and marks sessionID for the read under way
+// when it may. A result from a bucket since recreated is dropped and marks nothing: its revision
+// would fence out the new bucket's, which number from 1 again, and the new bucket's read delivers
+// what it holds for the session.
+func (r *Registry) currentLocked(epoch uint64, sessionID string) bool {
+	if r.watcher.Epoch() != epoch {
+		return false
+	}
+	r.marks.Mark(sessionID)
+	return true
 }
 
 // WaitForCacheReady blocks until the watcher has delivered every existing interest, or until ctx
@@ -362,12 +411,15 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 	if err != nil {
 		return Interest{}, err
 	}
-	revision, err := r.interests().Put(merged.SessionID, buf)
+	kv, epoch := r.watcher.Handle()
+	revision, err := kv.Put(merged.SessionID, buf)
 	if err != nil {
 		return Interest{}, err
 	}
 	r.mu.Lock()
-	r.cacheInterestLocked(merged.SessionID, merged, revision)
+	if r.currentLocked(epoch, merged.SessionID) {
+		r.cacheInterestLocked(merged.SessionID, merged, revision)
+	}
 	r.mu.Unlock()
 	return merged, nil
 }
@@ -566,12 +618,15 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 	if err != nil {
 		return err
 	}
-	revision, err := r.interests().Put(sessionID, buf)
+	kv, epoch := r.watcher.Handle()
+	revision, err := kv.Put(sessionID, buf)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
-	r.cacheInterestLocked(sessionID, item, revision)
+	if r.currentLocked(epoch, sessionID) {
+		r.cacheInterestLocked(sessionID, item, revision)
+	}
 	r.mu.Unlock()
 	return nil
 }
@@ -699,15 +754,14 @@ func (r *Registry) RoleHolder(role string) (string, error) {
 
 // Get returns the Interest for a session. Cache first, direct KV read on miss.
 // The KV fallback also repopulates the cache, bridging the warm-up window after
-// Open() before watch() has fully populated the cache.
+// Open() before watch() has fully populated the cache. A read of a bucket since recreated is
+// answered but not cached: the new bucket's read delivers what it holds.
 func (r *Registry) Get(sessionID string) (Interest, error) {
-	r.mu.RLock()
-	item, ok := r.cache[sessionID]
-	r.mu.RUnlock()
-	if ok {
+	if item, ok := r.Cached(sessionID); ok {
 		return item, nil
 	}
-	entry, err := r.interests().Get(sessionID)
+	kv, epoch := r.watcher.Handle()
+	entry, err := kv.Get(sessionID)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -715,10 +769,21 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 	err = json.Unmarshal(entry.Value(), &fresh)
 	if err == nil {
 		r.mu.Lock()
-		r.cacheInterestLocked(sessionID, fresh, entry.Revision())
+		if r.currentLocked(epoch, sessionID) {
+			r.cacheInterestLocked(sessionID, fresh, entry.Revision())
+		}
 		r.mu.Unlock()
 	}
 	return fresh, err
+}
+
+// Cached returns sessionID's interest from the cache alone, with no bucket read on a miss, for a
+// caller that must make no per-key read, such as one joining a whole list with its interests.
+func (r *Registry) Cached(sessionID string) (Interest, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	item, ok := r.cache[sessionID]
+	return item, ok
 }
 
 func (r *Registry) Match(machineID string, topic string) []Interest {
@@ -739,8 +804,13 @@ func (r *Registry) Match(machineID string, topic string) []Interest {
 	return out
 }
 
-// List returns all cached interests sorted by SessionID for deterministic output.
-func (r *Registry) List() []Interest {
+// List returns all cached interests sorted by SessionID for deterministic output, or
+// kvwatch.ErrRefilling while the copy cannot be served (Servable): before its first complete read
+// of the bucket, and once it has not followed the bucket for longer than the stale bound.
+func (r *Registry) List() ([]Interest, error) {
+	if err := r.Servable(); err != nil {
+		return nil, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]Interest, 0, len(r.cache))
@@ -750,7 +820,7 @@ func (r *Registry) List() []Interest {
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].SessionID < out[j].SessionID
 	})
-	return out
+	return out, nil
 }
 
 func first(value string, fallback string) string {
@@ -764,33 +834,49 @@ func curValue(value string) string {
 	return value
 }
 
-// Reap cross-references the interest cache with a session liveness check and
-// deletes interests whose sessions are dead AND whose UpdatedAt exceeds the
-// grace window. A role claim is intentionally not an interest: it remains
-// available for its holder to re-register after a listener restart, and the
-// role delivery path drops it if that holder never becomes live again.
-func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
+// Reap deletes the interests of sessions that are gone and whose UpdatedAt is past the grace
+// window. It collects the interests past the window from the cache under its read lock, asking
+// nothing of any session there, and only then asks live of each, outside every lock. live answers
+// from the session's own record (the listener's reads the session's key in the session bucket when
+// its cache does not hold it): a session missing from a session copy that is reading its bucket
+// again, or has not read it yet, is not gone. live's error is a read that did not answer, and
+// keeps the interest for the next pass, as does an interest written again since it was collected.
+// A role claim is intentionally not an interest: it remains available for its holder to
+// re-register after a listener restart, and the role delivery path drops it if that holder never
+// becomes live again.
+func (r *Registry) Reap(live func(sessionID string) (bool, error), graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
 	graceMs := graceWindow.Milliseconds()
 
+	type candidate struct {
+		sessionID string
+		updatedAt int64
+	}
 	r.mu.RLock()
-	var stale []string
+	var candidates []candidate
 	for sid, item := range r.cache {
-		if isAlive(sid) {
-			continue // session still alive
+		if now-item.UpdatedAt > graceMs {
+			candidates = append(candidates, candidate{sessionID: sid, updatedAt: item.UpdatedAt})
 		}
-		if now-item.UpdatedAt <= graceMs {
-			continue // within grace window
-		}
-		stale = append(stale, sid)
 	}
 	r.mu.RUnlock()
 
 	reaped := 0
-	for _, sid := range stale {
-		err := r.deleteInterest(sid)
+	for _, c := range candidates {
+		alive, err := live(c.sessionID)
+		if err != nil {
+			r.logger().Warn("reaper kept the interest of a session whose record it could not read", slog.String("session_id", c.sessionID), slog.String("error", err.Error()))
+			continue
+		}
+		if alive {
+			continue
+		}
+		if item, ok := r.Cached(c.sessionID); !ok || item.UpdatedAt != c.updatedAt {
+			continue // removed, or written again, since it was collected
+		}
+		err = r.deleteInterest(c.sessionID)
 		if errors.Is(err, bus.ErrRefused) {
-			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
+			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(c.sessionID)), slog.String("error", err.Error()))
 			continue
 		}
 		if err != nil {
@@ -853,9 +939,9 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 // lists the bucket through watchers whose consumers nats.go creates and deletes, so the listener's
 // shutdown waits for it before it drains NATS (kvwatch.Watcher.End says what a drain does to such
 // a delete).
-func (r *Registry) StartReaper(ctx context.Context, isAlive func(string) bool, interval, graceWindow time.Duration) <-chan struct{} {
+func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) (bool, error), interval, graceWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
-		count, err := r.Reap(isAlive, graceWindow)
+		count, err := r.Reap(live, graceWindow)
 		if err != nil {
 			r.logger().Error("reaper cycle failed", slog.String("error", err.Error()))
 			return

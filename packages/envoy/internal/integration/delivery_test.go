@@ -1025,7 +1025,10 @@ func TestDelivery_RegistryListReturnsSortedInterests(t *testing.T) {
 	// Allow watcher to propagate Upsert events to cache
 	time.Sleep(500 * time.Millisecond)
 
-	items := env.registry.List()
+	items, err := env.registry.List()
+	if err != nil {
+		t.Fatalf("list interests: %v", err)
+	}
 	if len(items) != 3 {
 		t.Fatalf("expected 3 interests, got %d", len(items))
 	}

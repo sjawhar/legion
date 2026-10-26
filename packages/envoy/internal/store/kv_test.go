@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -522,7 +523,7 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
 	r := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
-	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, interestCache{r})
 	return r, kv
 }
 
@@ -940,8 +941,8 @@ func TestInterestReaper(t *testing.T) {
 	}
 
 	// Reap with 0 grace window — all dead sessions should be reaped
-	count, err := reg.Reap(func(sessionID string) bool {
-		return sessionID == "ses_alive"
+	count, err := reg.Reap(func(sessionID string) (bool, error) {
+		return sessionID == "ses_alive", nil
 	}, 0)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
@@ -993,7 +994,7 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	reg.cacheInterestLocked(sessionID, stale, revision)
 	reg.mu.Unlock()
 
-	count, err := reg.Reap(func(string) bool { return false }, 0)
+	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, 0)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
@@ -1142,7 +1143,7 @@ func TestReaperGraceWindow(t *testing.T) {
 	}
 
 	// Reap with 10 min grace window — ses_recent updated only 2 min ago, should survive
-	count, err := reg.Reap(func(string) bool { return false }, 10*time.Minute)
+	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, 10*time.Minute)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
 	}
@@ -1531,7 +1532,7 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 func useKV(t *testing.T, r *Registry, kv natsgo.KeyValue) {
 	t.Helper()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, interestCache{r})
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1969,23 +1970,17 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 	}
 }
 
-// A rebuild onto an interest bucket that was deleted and created again refills the cache from the
-// new bucket. The recreated stream numbers its revisions from 1, so a cache still fenced by the
-// old bucket's revisions would keep an old value for every key the new bucket has not yet written
-// past, and a key the new bucket does not hold at all.
+// A rebuild onto an interest bucket that was deleted and created again reads the new bucket while
+// the cache keeps every interest it had: the new bucket's values replace the old ones as they are
+// delivered, and an interest the new bucket does not hold stays until the read completes, and is
+// then swept. The recreated stream numbers its revisions from 1, so a cache still fenced by the old
+// bucket's revisions would keep an old value for every key the new bucket has not yet written past.
 func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	reg, err := Open(conn, WithReplicas(1))
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	t.Cleanup(reg.StopWatch)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := reg.WaitForCacheReady(ctx); err != nil {
-		t.Fatalf("WaitForCacheReady: %v", err)
-	}
+	reg, held, _ := rebuiltRegistry(t, conn)
+	reg.watcher.Start()
+	waitFor(t, 5*time.Second, reg.watcher.Following)
 	for i := range 20 {
 		if _, err := reg.Upsert(Interest{SessionID: "ses_a", MachineID: "m1"}, []string{fmt.Sprintf("notifications.old.%d", i)}); err != nil {
 			t.Fatalf("upsert ses_a: %v", err)
@@ -2011,13 +2006,31 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	putInterest(t, recreated, Interest{SessionID: "ses_a", MachineID: "m1", Topics: []string{"notifications.new"}})
 	putInterest(t, recreated, Interest{SessionID: "ses_b", MachineID: "m1", Topics: []string{"notifications.b"}})
+	var swept []string
+	completion := held.holdCompletion(t, func() { swept = cachedIDs(reg) })
 	if err := reg.Rewatch(conn); err != nil {
 		t.Fatalf("Rewatch: %v", err)
 	}
+	waitClosed(t, completion.reached, "the new bucket's read to deliver every record")
+	if got := reg.Match("m1", "notifications.ghost"); len(got) != 1 {
+		t.Fatalf("during the read the cache dropped ses_ghost before the read completed: %v", got)
+	}
+	if got := reg.Match("m1", "notifications.new"); len(got) != 1 {
+		t.Fatalf("during the read ses_a = %v, want the new bucket's value as delivered", got)
+	}
+	if got := reg.Match("m1", "notifications.old.0"); len(got) != 0 {
+		t.Fatalf("during the read the old bucket's ses_a is still matched: %v", got)
+	}
+	if got := reg.Match("m1", "notifications.b"); len(got) != 1 {
+		t.Fatalf("during the read ses_b = %v, want it as delivered", got)
+	}
 
-	waitFor(t, 5*time.Second, func() bool {
-		return len(reg.Match("m1", "notifications.new")) == 1 && len(reg.Match("m1", "notifications.b")) == 1
-	})
+	completion.open()
+	waitClosed(t, completion.done, "the read's sweep")
+	if want := []string{"ses_a", "ses_b"}; !slices.Equal(swept, want) {
+		t.Fatalf("cached right after the sweep = %v, want the new bucket's %v", swept, want)
+	}
+	waitFor(t, 5*time.Second, reg.watcher.Following)
 	if got := reg.Match("m1", "notifications.ghost"); len(got) != 0 {
 		t.Fatalf("the cache kept a session the recreated bucket does not hold: %v", got)
 	}

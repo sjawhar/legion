@@ -769,7 +769,12 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 				writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
-			writeJSON(w, http.StatusOK, registry.List())
+			interests, err := registry.List()
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, interests)
 			return
 		}
 

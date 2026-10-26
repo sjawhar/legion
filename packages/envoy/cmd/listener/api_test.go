@@ -937,6 +937,61 @@ func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testin
 	}
 }
 
+// The interest reaper runs on every listener too, and a session missing from this listener's
+// session cache -- one another listener registered that the cache has yet to see, or one a copy
+// reading its bucket again has not delivered yet -- is not gone: the reaper asks the session bucket
+// before it removes anything, keeps the interest of a session the bucket holds, and removes the
+// interest of one the bucket has lost.
+func TestTheInterestReaperWhoseSessionCacheTrailsTheBucketKeepsALiveSessionsInterest(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	interests, err := claimant.client.JS().KeyValue(bus.InterestBucket)
+	if err != nil {
+		t.Fatalf("open the interest bucket: %v", err)
+	}
+	stale := time.Now().Add(-20 * time.Minute).UnixMilli()
+	for _, sessionID := range []string{"ses_fresh", "ses_gone"} {
+		if err := claimant.sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+			t.Fatalf("register %s: %v", sessionID, err)
+		}
+		stored, err := json.Marshal(store.Interest{SessionID: sessionID, MachineID: "test-machine", Topics: []string{"notifications.agent." + sessionID}, UpdatedAt: stale})
+		if err != nil {
+			t.Fatalf("encode %s's interest: %v", sessionID, err)
+		}
+		if _, err := interests.Put(sessionID, stored); err != nil {
+			t.Fatalf("store %s's interest: %v", sessionID, err)
+		}
+	}
+	if err := claimant.sessions.Delete("ses_gone"); err != nil {
+		t.Fatalf("end ses_gone's session: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, fresh := observer.registry.Cached("ses_fresh")
+		_, gone := observer.registry.Cached("ses_gone")
+		if fresh && gone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the observer's interest cache never held both interests")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := observer.sessions.Get("ses_fresh"); err == nil {
+		t.Fatal("the observer's session cache already holds ses_fresh, so the reaper's bucket read is not under test")
+	}
+
+	reaped, err := observer.registry.Reap(func(sessionID string) (bool, error) { return sessionMayBeLive(observer.sessions, sessionID) }, 10*time.Minute)
+	if err != nil || reaped != 1 {
+		t.Fatalf("reap interests = %d, %v; want the one interest whose session left the bucket", reaped, err)
+	}
+	if _, err := interests.Get("ses_fresh"); err != nil {
+		t.Fatalf("ses_fresh's interest after the reaper: %v, want it kept", err)
+	}
+	if _, err := interests.Get("ses_gone"); !errors.Is(err, nats.ErrKeyNotFound) {
+		t.Fatalf("ses_gone's interest after the reaper: %v, want it deleted", err)
+	}
+}
+
 // stalledReadKV is a session bucket whose writes land and whose reads never answer, like a bucket
 // the listener can write through but whose direct get has stopped answering.
 type stalledReadKV struct {
@@ -959,8 +1014,16 @@ func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
 	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
 	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
 	stalled := bus.KeyValue{KeyValue: stalledReadKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue, released: released}}
-	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, func(nats.KeyValueEntry) {}, func() {})))
+	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, discardingCache{})))
 }
+
+// discardingCache is a kvwatch.Cache that keeps nothing: stallSessionReads's watcher never starts,
+// and only its handle is read.
+type discardingCache struct{}
+
+func (discardingCache) Apply(nats.KeyValueEntry, kvwatch.Read) {}
+func (discardingCache) BeginRead(kvwatch.Read)                 {}
+func (discardingCache) CompleteRead(kvwatch.Read)              {}
 
 // When the session bucket cannot be read, every path that could take a role from its holder takes
 // nothing, and answers inside its bound (roleHolderReadTimeout, well under the 10 s HTTP write

@@ -76,20 +76,28 @@ func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry,
 	return caches
 }
 
-func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
-	_, err := sessions.Get(sessionID)
-	return err == nil
+// sessionMayBeLive is the reapers' liveness check: a session is gone only when the session bucket
+// itself says so (roleHolderSession: a cache hit, or else a read of the session's own key), so a
+// reaper takes nothing from a session another listener registered a moment ago, nor from one the
+// session cache does not hold because it has not read its bucket yet or is reading it again. It
+// answers false only on that word; its error is a read that did not answer, on which the reaper
+// keeps what it would have removed for its next cycle.
+func sessionMayBeLive(sessions *session.SessionRegistry, sessionID string) (bool, error) {
+	_, err := roleHolderSession(sessions, sessionID, registered)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return false, nil
+	}
+	return true, err
 }
 
-// roleHolderMayBeLive is the role reaper's liveness check: a claim's holder is gone only when the
-// session bucket itself says so (roleHolderSession), so the reaper never ends a claim another listener
-// accepted a moment ago. A read that did not answer keeps the claim for the next cycle.
+// roleHolderMayBeLive is the role reaper's liveness check (sessionMayBeLive), logging a read that
+// did not answer, on which the claim is kept for the next cycle.
 func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegistry, sessionID string) bool {
-	_, err := roleHolderSession(sessions, sessionID, registered)
-	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+	live, err := sessionMayBeLive(sessions, sessionID)
+	if err != nil {
 		logger.Warn("role claim reaper kept a claim whose holder's session it could not read", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}
-	return !errors.Is(err, nats.ErrKeyNotFound)
+	return live
 }
 
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
@@ -581,7 +589,11 @@ func main() {
 		if d == nil {
 			return 0
 		}
-		return int64(len(d.registry.List()))
+		interests, err := d.registry.List()
+		if err != nil {
+			return 0
+		}
+		return int64(len(interests))
 	})
 
 	// Phase 3: Build HTTP mux.
@@ -834,7 +846,7 @@ func main() {
 	// a pass in flight before it drains NATS (kvLoopsDone).
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
-		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute),
+		registry.StartReaper(kvLoopsCtx, func(sessionID string) (bool, error) { return sessionMayBeLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute),
 		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
 	}
 

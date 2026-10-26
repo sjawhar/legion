@@ -585,7 +585,7 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 	records := captureJSONLogs(t)
 	registry := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
 	handle := bus.KeyValue{KeyValue: kvwatchtest.TimingOut(kv, 2)}
-	registry.watcher = kvwatch.New("interest registry", handle, registry.applyWatched, registry.resetCache)
+	registry.watcher = kvwatch.New("interest registry", handle, interestCache{registry})
 	t.Cleanup(registry.StopWatch)
 	registry.watcher.Start()
 	waitFor(t, 30*time.Second, registry.watcher.Ready)

@@ -146,7 +146,7 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
 	t.Helper()
 	s.watcher.Stop()
-	s.watcher = kvwatch.New("cistore", bus.KeyValue{KeyValue: kv}, s.applyWatched, s.resetCache)
+	s.watcher = kvwatch.New("cistore", bus.KeyValue{KeyValue: kv}, ciCache{s})
 	s.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

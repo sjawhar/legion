@@ -1043,7 +1043,7 @@ func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
 			t.Fatalf("delete %d: expected 200, got %d (body: %s)", i+1, rr.Code, rr.Body.String())
 		}
 	}
-	if isSessionLive(sessions, "ses_closed") {
+	if _, err := sessions.Get("ses_closed"); err == nil {
 		t.Fatal("deleted session remains live")
 	}
 }
@@ -4167,7 +4167,11 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		found := false
-		for _, interest := range registry.List() {
+		interests, err := registry.List()
+		if err != nil {
+			t.Fatalf("list interests: %v", err)
+		}
+		for _, interest := range interests {
 			found = found || interest.SessionID == "ses_after_move"
 		}
 		if found {

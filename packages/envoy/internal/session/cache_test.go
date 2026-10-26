@@ -40,15 +40,37 @@ func TestExpiryFor_ZeroTTLNeverExpires(t *testing.T) {
 	}
 }
 
+// followingRegistry opens a registry on the test's own session bucket and waits for its first read
+// to complete, so the copy follows the bucket and prunes rows past their TTL (pruneLocked). The
+// bucket is empty, so a test puts rows in the cache itself.
+func followingRegistry(t *testing.T) *SessionRegistry {
+	t.Helper()
+	client := setupNATS(t)
+	r, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(5*time.Minute))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	t.Cleanup(r.StopWatch)
+	waitFor(t, 5*time.Second, r.watcher.Following)
+	return r
+}
+
+// hold puts rows in r's cache as if a read had delivered them.
+func hold(r *SessionRegistry, rows map[string]cachedSession) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for sessionID, row := range rows {
+		r.cache[sessionID] = row
+	}
+}
+
 func TestList_PrunesExpiredEntries(t *testing.T) {
 	now := time.Now()
-	r := &SessionRegistry{
-		ttl: 5 * time.Minute,
-		cache: map[string]cachedSession{
-			"ses_live":    {entry: SessionEntry{Port: 1}, expiresAt: now.Add(time.Minute)},
-			"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Minute)},
-		},
-	}
+	r := followingRegistry(t)
+	hold(r, map[string]cachedSession{
+		"ses_live":    {entry: SessionEntry{Port: 1}, expiresAt: now.Add(time.Minute)},
+		"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Minute)},
+	})
 	entries, err := r.List()
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
@@ -64,12 +86,10 @@ func TestList_PrunesExpiredEntries(t *testing.T) {
 
 func TestGet_ExpiredReturnsKeyNotFound(t *testing.T) {
 	now := time.Now()
-	r := &SessionRegistry{
-		ttl: 5 * time.Minute,
-		cache: map[string]cachedSession{
-			"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Second)},
-		},
-	}
+	r := followingRegistry(t)
+	hold(r, map[string]cachedSession{
+		"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Second)},
+	})
 	if _, err := r.Get("ses_expired"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("expected ErrKeyNotFound for expired entry, got %v", err)
 	}
@@ -80,12 +100,10 @@ func TestGet_ExpiredReturnsKeyNotFound(t *testing.T) {
 
 func TestGet_ValidReturnsEntry(t *testing.T) {
 	now := time.Now()
-	r := &SessionRegistry{
-		ttl: 5 * time.Minute,
-		cache: map[string]cachedSession{
-			"ses_ok": {entry: SessionEntry{Port: 99, MachineID: "m1"}, expiresAt: now.Add(time.Minute)},
-		},
-	}
+	r := followingRegistry(t)
+	hold(r, map[string]cachedSession{
+		"ses_ok": {entry: SessionEntry{Port: 99, MachineID: "m1"}, expiresAt: now.Add(time.Minute)},
+	})
 	got, err := r.Get("ses_ok")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
@@ -126,17 +144,13 @@ func TestPingPrunesExpiredLastSeen(t *testing.T) {
 }
 func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	now := time.Now()
-	r := &SessionRegistry{
-		ttl:            5 * time.Minute,
-		cache:          map[string]cachedSession{},
-		cacheRevisions: map[string]uint64{},
-		lastSeen: map[string]lastSeenSession{
-			"ses_lapsed": {
-				lastSeen:  now.Add(-time.Minute).UnixMilli(),
-				expiresAt: now.Add(time.Minute),
-			},
-		},
+	r := followingRegistry(t)
+	r.mu.Lock()
+	r.lastSeen["ses_lapsed"] = lastSeenSession{
+		lastSeen:  now.Add(-time.Minute).UnixMilli(),
+		expiresAt: now.Add(time.Minute),
 	}
+	r.mu.Unlock()
 
 	if _, err := r.Get("ses_lapsed"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(lapsed) error = %v, want key not found", err)
@@ -371,9 +385,11 @@ func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if reg.ttl != 2*time.Minute {
-		t.Fatalf("expected registry to adopt bucket TTL 2m, got %v", reg.ttl)
+	if ttl := reg.TTL(); ttl != 2*time.Minute {
+		t.Fatalf("expected registry to adopt bucket TTL 2m, got %v", ttl)
 	}
+	// Rows are pruned for their age only once the copy follows the bucket (pruneLocked).
+	waitFor(t, 5*time.Second, reg.watcher.Following)
 	// An entry created 3 minutes ago is past the real 2-minute TTL but still
 	// within the 5-minute default. Pruning against the bucket TTL drops it;
 	// pruning against the default would wrongly keep it live.

@@ -355,7 +355,7 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
 	t.Helper()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("session registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("session registry", bus.KeyValue{KeyValue: kv}, sessionCache{r})
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

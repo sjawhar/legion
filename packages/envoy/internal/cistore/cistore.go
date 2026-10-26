@@ -272,8 +272,12 @@ type Store struct {
 	mu             sync.RWMutex
 	cache          map[string]State
 	cacheRevisions map[string]uint64
-	// watcher feeds the cache and holds the handle the store writes through. The summary loop
-	// reads only the cache (no KV fallback), so a dead watcher silently stops summaries; Ping
+	// marks are the records the current read of the bucket has evidence of (kvwatch.Marks).
+	marks kvwatch.Marks
+	// watcher feeds the cache and holds the handle the store writes through. Every watcher it
+	// installs reads the whole bucket again (ciCache): the cache keeps every record through the
+	// read and removes those the read found no evidence of only once it completes. The summary
+	// loop reads only the cache (no KV fallback), so a dead watcher silently stops summaries; Ping
 	// exposes its terminal error to the listener, which re-establishes the watcher or exits for
 	// Docker to restart.
 	watcher *kvwatch.Watcher
@@ -347,7 +351,7 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 		rewatched:      make(chan struct{}),
 		logger:         logger,
 	}
-	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache, kvwatch.WithLogger(logger.Slog()))
+	s.watcher = kvwatch.New("cistore", kv, ciCache{s}, kvwatch.WithLogger(logger.Slog()))
 	s.watcher.Start()
 	return s, nil
 }
@@ -374,19 +378,31 @@ func (s *Store) Rewatch(conn *nats.Conn) error {
 	return err
 }
 
-// resetCache empties the cache and its revision fence, for a recreated CI bucket.
-func (s *Store) resetCache() {
+// ciCache is the store as the cache its watcher feeds (kvwatch.Cache). The hooks are its own
+// type's, not the store's methods, so nothing but the watcher calls them.
+type ciCache struct{ s *Store }
+
+// BeginRead starts a read of the CI bucket: a fresh set of marks and, for a recreated bucket whose
+// revisions number from 1 again, no revision fence. Every record stays.
+func (c ciCache) BeginRead(read kvwatch.Read) {
+	s := c.s
 	s.mu.Lock()
-	s.cache = map[string]State{}
-	s.cacheRevisions = map[string]uint64{}
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	s.marks.Reset()
+	if read.Recreated {
+		clear(s.cacheRevisions)
+	}
 }
 
-// applyWatched applies one entry the KV watcher delivered to the cache.
-func (s *Store) applyWatched(entry nats.KeyValueEntry) {
+// Apply takes one record the read delivered. Its key is marked before the revision fence is
+// compared, so a delivered value older than a local write still keeps the record through the
+// sweep.
+func (c ciCache) Apply(entry nats.KeyValueEntry, _ kvwatch.Read) {
+	s := c.s
 	key := entry.Key()
 	var malformed error
 	s.mu.Lock()
+	s.marks.Mark(key)
 	switch {
 	case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
 		s.evictCachedLocked(key, entry.Revision())
@@ -419,6 +435,17 @@ func (s *Store) applyWatched(entry nats.KeyValueEntry) {
 			slog.String("error", malformed.Error()),
 		)
 	}
+}
+
+// CompleteRead removes every record and fence entry the read found no evidence of: the bucket no
+// longer holds it.
+func (c ciCache) CompleteRead(kvwatch.Read) {
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kvwatch.Sweep(&s.marks, s.cache, nil)
+	kvwatch.Sweep(&s.marks, s.cacheRevisions, nil)
+	s.marks.Reset()
 }
 
 func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
@@ -589,8 +616,13 @@ func isCASConflict(err error) bool {
 	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
 }
 
+// casState reads key's record, has apply change it, and writes it back at the revision it read,
+// retrying a lost compare-and-swap within recordBudget. A written record reaches the cache only
+// while the bucket the write went to is the one the watcher reads (kvwatch.Watcher.Handle): a
+// revision of a bucket since recreated would fence out the new bucket's, which number from 1
+// again.
 func (s *Store) casState(key string, apply func(st *State) (ok bool, err error)) (State, bool, error) {
-	kv := s.watcher.KV()
+	kv, epoch := s.watcher.Handle()
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
 		entry, err := kv.Get(key)
@@ -615,7 +647,10 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 		revision, err := kv.Update(key, buf, entry.Revision())
 		if err == nil {
 			s.mu.Lock()
-			s.cacheStateLocked(key, state, revision)
+			if s.watcher.Epoch() == epoch {
+				s.marks.Mark(key)
+				s.cacheStateLocked(key, state, revision)
+			}
 			s.mu.Unlock()
 			return state, true, nil
 		}

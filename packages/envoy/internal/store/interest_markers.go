@@ -28,8 +28,8 @@ import (
 //     that PUT or a later write with a higher sequence, so nothing below the floor belongs to a live
 //     key (the bucket keeps one message per subject);
 //   - no value is decoded and no key is parsed on the way, so a live key this build cannot decode --
-//     which applyWatched evicts from the cache while its message stays in the stream -- is protected
-//     exactly like any other, and a cache short of the bucket cannot raise the floor;
+//     which the cache evicts (interestCache.Apply) while its message stays in the stream -- is
+//     protected exactly like any other, and a cache short of the bucket cannot raise the floor;
 //   - a put or a delete after the scan is given a higher sequence than anything the scan saw, so it
 //     lands above the floor and survives.
 //
