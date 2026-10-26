@@ -207,6 +207,22 @@ function whyNotAPage(answer: unknown): string | undefined {
 }
 
 /**
+ * Why `answer` is not the bare array `listAllIssues` asked for. A page here is the telling case:
+ * it means Dispatch paged a request that carried neither `limit` nor `offset`, so the caller did
+ * not get the exact set it needs. Text looks like a proxy in the way, which a retry can get past.
+ */
+function whyNotAnArray(answer: unknown): string {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null) return "null";
+  if (typeof answer !== "object") return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
+}
+
+/**
  * What a body that is not Dispatch's JSON is. Dispatch writes every answer as JSON, its errors and
  * its `/api` 404 included, so anything else in its place came from a proxy or gateway in the way.
  */
@@ -368,6 +384,25 @@ export class DispatchClient {
     throw new Error(
       `GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` +
         refusal
+    );
+  }
+
+  /**
+   * Every issue the filters match, in one read: `GET /api/v1/issues` with neither `limit` nor
+   * `offset`, which Dispatch answers as a bare array rather than a page (`parseIssuePage` returns
+   * no page when the query carries neither). A caller whose own writes move issues out of what it
+   * filtered on cannot walk offsets safely, because a row that shifts across a page boundary is
+   * served twice or never; this read is the exact set at one moment. Any answer that is not an
+   * array is refused, naming what arrived: a page here means a Dispatch that still pages a request
+   * carrying no paging parameters.
+   */
+  async listAllIssues(options: ListIssuesOptions): Promise<IssueSummary[]> {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer: unknown = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer)) return answer as IssueSummary[];
+    throw new Error(
+      `GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`
     );
   }
 

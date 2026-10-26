@@ -2482,6 +2482,101 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // --all is for a caller that must not miss or repeat a row: Dispatch answers the whole filtered
+  // listing only when the request carries neither limit nor offset (api/issue_page.go's
+  // parseIssuePage), so what matters is the query string that goes out, not just the rows back.
+  test("dispatch_issues --all asks Dispatch for the unpaged listing and renders every row", async () => {
+    const issues = Array.from({ length: 251 }, (_, index) => ({
+      key: `ACME-${index}`,
+      title: `Issue ${index}`,
+      status: "needs_review",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+    }));
+    const served: Array<{ limit: string | null; offset: string | null; status: string | null }> =
+      [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const query = new URL(String(url)).searchParams;
+      served.push({
+        limit: query.get("limit"),
+        offset: query.get("offset"),
+        status: query.get("status"),
+      });
+      // The unpaged path answers a bare array, never a page.
+      return response(issues);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME", status: "needs_review", all: true },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(served).toEqual([{ limit: null, offset: null, status: "needs_review" }]);
+    expect(result.details.issues).toHaveLength(251);
+    expect(result.details).toMatchObject({ total: 251, offset: 0 });
+    // Every row is the answer, so the render names no page.
+    expect(result.text).toContain("251 issues in ACME");
+    expect(result.text).not.toContain("showing");
+    expect(result.text).toContain("ACME-250 [needs_review] Issue 250");
+  });
+
+  test("dispatch_issues without --all still pages, limit and offset unchanged", async () => {
+    const served: Array<{ limit: string | null; offset: string | null }> = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const query = new URL(String(url)).searchParams;
+      served.push({ limit: query.get("limit"), offset: query.get("offset") });
+      return response({ issues: [], total: 0, limit: 50, offset: 0 });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(served).toEqual([{ limit: "50", offset: "0" }]);
+  });
+
+  test.each([
+    [{ project: "ACME", all: true, limit: 100 }, "--limit"],
+    [{ project: "ACME", all: true, offset: 250 }, "--offset"],
+    [{ project: "ACME", all: true, limit: 100, offset: 250 }, "--limit or --offset"],
+  ])("dispatch_issues refuses --all beside paging (%#)", async (args, named) => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_issues",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(`cannot be combined with ${named}`);
+  });
+
   test("dispatch_issues names an empty page past the listing's end", async () => {
     const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
       response({ issues: [], total: 1, limit: 50, offset: 1 });
