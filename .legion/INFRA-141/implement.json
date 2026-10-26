@@ -2,50 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T05:20:00Z",
-  "round": "generation 3, review 5647344074 at 93a30a85 (seven items and thread PRRT_kwDORFy7ds6wHB8w); no merge of main (PR MERGEABLE)",
+  "completed": "2026-10-26T05:44:59Z",
+  "round": "generation 3, review 5647844063 at 23c91195: four false statements, text only (architect: change no code); no merge of main",
   "proof": [
     {
-      "criterion": "Item 3: a malformed role-claim record is answered on both role routes as 500 with no Retry-After and no bus-unavailable prefix, and the publish records it as role_claim_unreadable, not bus_unavailable",
-      "surface": "the real envoy-listener binary built at this head against a real NATS (internal/testnats/cmd/natsd); the raw claim {\"holder_session_id\":\"\"} written into envoy_roles with a throwaway nats.go client; driven with curl",
-      "command": "bash smoke.sh listener-new: putter envoy_roles broken-role '{\"holder_session_id\":\"\"}'; GET /v1/roles/broken-role; POST /v1/messages/publish {topic: notifications.role.broken-role}",
-      "observed": "lookup: 500 in 0.0029 s {\"error\":\"envoy: the claim record of role broken-role is unreadable: malformed role claim: it names no holder\"}, no Retry-After; publish: 500 in 0.0034 s, same body, no Retry-After; listener.log WARN listener publish {outcome: role_claim_unreadable, status: 500, topic: notifications.role.broken-role}",
-      "headSha": "dfe43f43f471a98e93d1888da21e8c36beb48d34",
-      "negativeControl": "The same rig with the listener built from the previous head 57d8d3bb: lookup and publish both 503 {\"error\":\"envoy: the message bus did not answer: role claim has no holder\"} with Retry-After: 1, and the publish recorded outcome bus_unavailable"
+      "criterion": "The four statements review 5647844063 names are true of the code: the core publish's context check is publishConfirmed's alone (cancel and spent deadline), and the role routes' claim read and release are bounded by store.Registry, not withinContext; no other mention in packages/envoy or docs/solutions is left stale",
+      "surface": "the repository text against the code at dfe43f43 (unchanged by this round)",
+      "command": "grep -rn -e withinContext -e 'reading it at entry' -e 'entry read' -e 'reads of ctx' -e \"publishCoreTo's read\" -e 'publishCoreTo refuses' -e 'handed only the deadline' -e 'deadline alone cannot' packages/envoy docs/solutions --include=*.go --include=*.md; grep -rn publishCoreTo packages/envoy docs/solutions; read internal/bus/nats.go publishCoreTo and internal/bus/confirm.go publishConfirmed",
+      "observed": "No mention of withinContext remains; the only grep hit is an unrelated 'entry read back' in send_route_acceptance_test.go:144; every remaining publishCoreTo mention (nats.go:917-927 comment, publish_ended_context_test.go:16 historical, :125 corrected, publish_cancel_reconnect_test.go:147/216 publishBound) is true of the code. The CHANGELOG's INFRA-141 sentence that said a core publish reads its context 'once more after any wait for a reconnect' was false the same way and is corrected too. gofmt and go vet ./internal/bus clean; go test ./internal/bus -run '^TestAPublishConfirmedWithASpentDeadlinePublishesNothing$' ok; check-private-names.sh clean. The test file's diff is comment lines only.",
+      "headSha": "954e9d1849419594a3488e45ba5fd0f533b040f3",
+      "negativeControl": "At 23c91195 the same grep finds withinContext in packages/envoy/AGENTS.md:1893, and AGENTS.md:1954, docs/architecture.md:122-127 and CHANGELOG.md:656-659 credit publishCoreTo with reads of the context that nats.go no longer makes"
     },
     {
-      "criterion": "Item 1 keeps the frozen-bus answers: with the bound moved into store.Registry, a send to a cached target from a sender with no interest record, a topic publish and a role lookup each answer 503 with Retry-After: 1 inside the 3.5 s budget",
-      "surface": "the same real binary, connected through a TCP relay that is then frozen (connection open, nothing forwarded)",
-      "command": "bash smoke.sh listener-new (after the malformed-claim step): subscribe ses_live; send from ses_no_interest (bus up); freeze the relay; send, publish notifications.github.smoke.topic, GET /v1/roles/stall-role",
-      "observed": "bus up send 200 in 0.0058 s; frozen send 503 in 3.502876 s, frozen publish 503 in 3.502962 s, both {\"error\":\"envoy: the message bus did not answer: context deadline exceeded\"}; frozen lookup 503 in 3.503104 s {\"error\":\"envoy: the message bus did not answer: read role stall-role's claim: context deadline exceeded\"}; each Retry-After: 1",
+      "criterion": "The behaviour the corrected text describes is unchanged and proven at the code head",
+      "surface": "the real envoy-listener binary at dfe43f43 against a real NATS, frozen relay and a malformed claim (previous round's proof; no code changed since)",
+      "command": "previous round's smoke.sh and scripts/e2e-local.sh at dfe43f43 (implement.json at 2d63edbb)",
+      "observed": "malformed claim: lookup and role publish 500, no Retry-After, recorded role_claim_unreadable; frozen bus: send, publish and lookup 503 with Retry-After: 1 in 3.50 s; e2e-local exit 0",
       "headSha": "dfe43f43f471a98e93d1888da21e8c36beb48d34",
-      "negativeControl": "The identical send answered 200 before the freeze; the listener from 278ff802, before any bound on the sender read, gave the same frozen send and publish no answer at 10 s (the previous round's control, same rig)"
-    },
-    {
-      "criterion": "Every item pinned and the suites green: the tester's two red tests pass unmodified; the new malformed-claim tests fail before the fix; the bus, store, integration and listener suites and e2e-local pass",
-      "surface": "go test against the in-process NATS test server; scripts/e2e-local.sh against the real binary and a real NATS",
-      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip '^(TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills)$'; go test ./internal/bus (after the publishConfirmed change); go test ./internal/store ./internal/integration; bash scripts/e2e-local.sh",
-      "observed": "cmd/listener ok 264.171s, 0 '--- FAIL', --- PASS for TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering, TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget, TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError, TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError, TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget (publish only now), TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt; internal/bus ok 217.323s; internal/store ok 18.617s (incl. TestReadsWhoseContextHasEndedAnswerOnlyFromTheCache, TestRoleClaimReadsAnUndecodableRecordAsErrMalformedRoleClaim); internal/integration ok 98.925s; e2e-local exit 0, both PASS, bus-down send 503 in 3.502923 s, client EnvoyApiError 503, three WARN bus_unavailable records; go build ./..., go vet ./..., gofmt, check-private-names.sh clean",
-      "headSha": "dfe43f43f471a98e93d1888da21e8c36beb48d34",
-      "negativeControl": "go test -overlay with both ErrMalformedRoleClaim branches cut from api.go: TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError fails 'status 503, body {\"error\":\"envoy: the message bus did not answer: malformed role claim: it names no holder\"}; want 500' (and the publish test likewise); with publishConfirmed's ctx read removed, TestAPublishCancelledAsTheReconnectCompletesSendsNothing fails with the message received"
+      "negativeControl": "the binary from 57d8d3bb answered the malformed claim 503 'envoy: the message bus did not answer' with Retry-After: 1 and recorded bus_unavailable"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/bus/confirm.go, nats.go and tests — publishConfirmed takes ctx; publishCoreTo's two reads and most of its comment removed",
-    "packages/envoy/internal/store/kv.go — Get, RoleClaim, ReleaseExpiredRoleClaim take ctx; bounded at the store (bucket read only; cache hit stays in the caller's goroutine); ErrMalformedRoleClaim",
-    "packages/envoy/cmd/listener/role_holder.go — withinContext deleted; writeRoleClaimUnreadable",
-    "packages/envoy/cmd/listener/api.go, request_record.go — both role routes answer ErrMalformedRoleClaim 500; outcome role_claim_unreadable",
-    "packages/envoy/cmd/listener/main.go — one deliveryConfig again; listenerDeliveryHandlerConfigs and its test deleted",
-    "packages/envoy/cmd/listener/unplaceable_delivery.go, delivery.go — unplaceableAgentDelivery finalizes both arms, no bool",
-    "packages/envoy/cmd/listener/role_claim_unreadable_test.go (new), publish_refusal_answers_test.go (lookup subtests removed from the implementer's test; comment fixed), callers' ctx updates in tests and internal/integration",
-    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md; docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md; docs/solutions/best-practices/an-instrument-…-INFRA-141.md"
+    "packages/envoy/AGENTS.md — the role-ownership bullet names store.Registry's bound; the /v1/messages/publish row credits publishConfirmed's one check",
+    "packages/envoy/docs/architecture.md — the ended-context paragraph",
+    "packages/envoy/CHANGELOG.md — the same sentence in the INFRA-141 bullet",
+    "packages/envoy/internal/bus/publish_ended_context_test.go — the reason comment only"
   ],
-  "trickyParts": [
-    "senderStamp still creates one context.WithTimeout per send/publish with a source_session (its 1 s cap); the goroutine, channel and error string are gone from the cache-hit path. Removing the timer would need a second read API.",
-    "Of the two duplicate lookup tests, the tester's (TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering) is kept unmodified and the implementer's lookup/* subtests were removed, so the lookup's lower time bound is no longer asserted; its upper bound and answer are."
-  ],
-  "deviations": [
-    "ReleaseExpiredRoleClaim now prefixes every failure with 'release role <r>'s expired claim held by <s>: ' (wording only; errors.Is unchanged)."
-  ],
+  "deviations": [],
   "openQuestions": []
 }
