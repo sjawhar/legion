@@ -128,10 +128,13 @@ export default defineConfig({
     // IndexedDB-backed document recovery must run in the engines people use. So those specs also
     // run in WebKit. So does the one-socket invariant (`live-socket`): a tab holds one live socket
     // in every engine, and WebKit is the one iOS Safari uses for every subscription its row opens.
+    // The keyed write path (`keyed-writes`, `keyed-send`) runs here and in Firefox too: each engine
+    // has its own way of failing a request, aborting one, keeping a tab's storage across a reload
+    // and asking before it unloads, and a write must land once through all of them.
     {
       name: "webkit",
       testMatch:
-        /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|live-socket|offline-edits)\.e2e\.ts/,
+        /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|offline-edits)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
@@ -150,12 +153,12 @@ export default defineConfig({
     // the issue picker's and the header session pickers' keyboard-step rule rests on the engine's
     // select dispatch, offline document recovery owns browser storage, and a click on a link
     // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
-    // link). Those specs, the whole deep-links spec, and the one-socket invariant (`live-socket`,
-    // which holds in every engine) run in Firefox too.
+    // link). Those specs, the whole deep-links spec, the one-socket invariant (`live-socket`,
+    // which holds in every engine) and the keyed write path run in Firefox too.
     {
       name: "firefox",
       testMatch:
-        /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|live-socket|offline-edits|picture-link-click)\.e2e\.ts/,
+        /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|offline-edits|picture-link-click)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
 

@@ -1134,8 +1134,11 @@ derives the target's Envoy URL from it. Before any row runs, `e2e/preflight.ts` 
 requires the target's `GET /api/v1/agents` to list it, then clears the fake: a target that reads
 another Envoy listener refuses the run naming the fake's port, rather than answering every row
 from sessions none of them seeded. Tests seed live sessions and their capabilities with
-`setLiveSessions`, change their scripted 200/404 send response with `setSessionSendStatus`, and
-inspect targeted sends with `getSentMessages`; persisted subscriptions use `setInterests`, all from
+`setLiveSessions`, change their scripted 200/404 send response with `setSessionSendStatus`, hold
+every send to a session before it is answered with `setSessionSendDelay` (a listener slow to take
+it; Dispatch's listener client gives up on an answer at 5 s, so a hold meant to end in a delivery
+stays under that), and inspect targeted sends with `getSentMessages`, which records each send as it
+arrives, held or not; persisted subscriptions use `setInterests`, all from
 `e2e/agents.ts`. `resetDatabase()` clears every fake Envoy fixture as well as the database, so a
 subscription from an earlier row cannot match a recycled issue key; the fake holds all of its
 fixture state in one object that the reset replaces whole, so a field added to it is reset with the
@@ -1169,14 +1172,21 @@ wherever it means "mounted but hidden" it needs `toHaveCount(1)` beside it. A hi
 screen for every purpose: its list marks nothing read (`open` is expanded and not hidden).
 `e2e/sends.ts` holds what a send needs from the network and the clipboard: `holdPosts` and
 `refusePosts` hold a route's `POST`s until released or refused, as a slow or failing server
-would. `refusePosts` takes the refusal it answers (`Refusal`: status, code and reason; a 503 from a
-server that is down by default), and throws before it routes anything when that is a 5xx or a 429
-on the agent-messages route: a send to one session tries those again under its key rather than
-taking them as a refusal, so a row that needs one refused passes `MESSAGE_REFUSED`, a
-`400 MESSAGE_INPUT`. `keyed-send.e2e.ts` runs the keyed send against the real server: the first
-`POST` to a session reaches Dispatch through `route.fetch()` and its answer is then dropped
-(`route.abort`), or a server that is down answers it 503; either way the page tries again under
-the same key, the fake Envoy records one send, and the composer clears with no refusal.
+would, and `holdPosts`' `settled()` resolves once every POST it held has been answered or cut off
+by the page, so a row counts what Dispatch made only after every attempt that could reach it has.
+`refusePosts` takes the refusal it answers (`Refusal`: status, code and reason;
+`WRITE_REFUSED`, a `400 INPUT_REFUSED`, by default), and throws before it routes anything when
+that is a 5xx or a 429, on any route: every write the page makes tries those again under its key
+rather than taking them as a refusal, so only a 4xx of Dispatch's own refuses one (a send to one
+session passes `MESSAGE_REFUSED`, its route's `400 MESSAGE_INPUT`). `e2e/keyed-writes.ts` holds
+what a keyed row reads off the network: `watchWrites` (each attempt's body and key, the body
+checked against a `BodyShape` guard when a row reads its fields), `watchAnswers` (each answer's
+status, code, `Retry-After` and `Idempotency-Replayed`), `replayed` (the first replayed answer)
+and `dropFirstAnswer` (the first request reaches Dispatch through `route.fetch()` and its answer
+is dropped, at once or once a reload has cancelled it). `keyed-send.e2e.ts` runs the keyed send
+against the real server: the first `POST` to a session reaches Dispatch and its answer is dropped,
+or a server that is down answers it 503; either way the page tries again under the same key, the
+fake Envoy records one send, and the composer clears with no refusal.
 `pasteFile` pastes a file into a field as the clipboard does (`pastePicture` a PNG).
 `pictures.e2e.ts` pastes a picture into an issue message, an ask's answer and a direct message
 and checks each `<img>` loads from its version's bytes route; it also writes a picture line into
@@ -1328,8 +1338,9 @@ after a 4001 and after a 1012: its second subscribe arrives within 500 ms of the
 other close waits out a first backoff of at least 750 ms.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/live-socket.e2e.ts`,
-and `e2e/offline-edits.e2e.ts`. Every row of the live-socket spec runs in every project that lists
+`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
+`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Every row of
+the live-socket spec runs in every project that lists
 the spec - `chromium`, `iphone`, `firefox` and, in CI, `webkit`: the APIs its rows need
 (`routeWebSocket`, the request events it counts navigations with, `page.clock`) exist in all three
 engines, and what they prove - one socket per tab, an idle page holding no request, a rotation that
@@ -1354,8 +1365,13 @@ reason: the live view's header model and thinking pickers keep the same rule (`u
 switch the session at once in an engine that moved `change` to the queued task. The project selects
 every listed spec by file name, not title, so renaming
 a row cannot drop it. The offline-edits rows exercise browser-held IndexedDB updates and the
-WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. CI installs WebKit
-beside Chromium for them (`bun run e2e:install` does the same locally).
+WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. The keyed write path
+(`e2e/keyed-writes.e2e.ts`, `e2e/keyed-send.e2e.ts`) runs here and in `firefox` as well: each engine
+fails a request whose network is down, aborts one the page gives up on, keeps a tab's
+`sessionStorage` across a reload and asks before it unloads in its own way, and a write has to land
+once through every one of them. Its throttled-upload row skips outside Chromium, the one engine
+whose DevTools protocol paces a page's own upload. CI installs WebKit beside Chromium for them
+(`bun run e2e:install` does the same locally).
 
 The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
@@ -1373,20 +1389,21 @@ reader's by counting rendering frames, not milliseconds, since a busy page can d
 task (CI's WebKit did), and a text change in the margin opens that window too: a `dispatch://` reference resolving to
 its title can resize an ask card and make Firefox or WebKit anchor the margin's scroll.
 
-The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four rows of `e2e/agent-view.e2e.ts` (the live view's phone layout, its Jump to latest, a capped model name, and a document-scrolling route the keyboard cap leaves alone), the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone (the stuck live-updates pill's Reload among them), `e2e/delivery-live.e2e.ts`'s `on a phone the delivery page` row, and `e2e/live-socket.e2e.ts`'s one-socket row: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
+The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four rows of `e2e/agent-view.e2e.ts` (the live view's phone layout, its Jump to latest, a capped model name, and a document-scrolling route the keyboard cap leaves alone), `e2e/agent-view-settings.e2e.ts`'s `the header shows the session's reported model` row, the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone (the stuck live-updates pill's Reload among them), `e2e/delivery-live.e2e.ts`'s `on a phone the delivery page` row, and `e2e/live-socket.e2e.ts`'s one-socket row: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/live-socket.e2e.ts`,
-`e2e/offline-edits.e2e.ts`, and `e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text
+`e2e/keyboard-agents-picker.e2e.ts`, `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`,
+`e2e/keyed-writes.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
+`e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text
 typed over a code block's last line before that line's newline, and deletes a paragraph's hard break
 along with the text after it, which Chromium and WebKit never do, so that spec is the one that needs
-a second engine; the two picker specs, the deep-links spec and the live-socket spec run for the
-reasons given under `webkit` above; and a click on a link inside the editor meets the engine's focus
-rule — Firefox focuses the editing host, not the link — so the picture view's fallback link is
-clicked there too. CI installs Firefox beside Chromium for them (`bun run e2e:install` does the same
-locally).
+a second engine; the two picker specs, the deep-links spec, the two keyed specs and the live-socket
+spec run for the reasons given under `webkit` above; and a click on a link inside the editor meets
+the engine's focus rule — Firefox focuses the editing host, not the link — so the picture view's
+fallback link is clicked there too. CI installs Firefox beside Chromium for them (`bun run
+e2e:install` does the same locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
 `e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to

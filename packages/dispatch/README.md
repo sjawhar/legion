@@ -180,10 +180,12 @@ specs; the iPhone project uses Chromium with iPhone 13 viewport, touch, and user
 differs by engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
 mishandles text typed over what follows a block's last line break; both also run
 `e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch,
-and the whole of `e2e/live-socket.e2e.ts`, since one socket per tab, its rotation and its resume
-are each engine's own connection behaviour (`AGENTS.md` lists the rest of each project's specs).
-`webkit-iphone` runs the live view's
-phone rows of `e2e/agent-view.e2e.ts`, the rows of `e2e/phone-conversation.e2e.ts` that check what
+the whole of `e2e/live-socket.e2e.ts`, since one socket per tab, its rotation and its resume
+are each engine's own connection behaviour, and the keyed write path, `e2e/keyed-writes.e2e.ts`
+and `e2e/keyed-send.e2e.ts`, since each engine fails, aborts and resumes a request its own way
+(`AGENTS.md` lists the rest of each project's specs). `webkit-iphone` runs the live view's
+phone rows of `e2e/agent-view.e2e.ts`, the header row of `e2e/agent-view-settings.e2e.ts` that
+shows the session's reported model, the rows of `e2e/phone-conversation.e2e.ts` that check what
 the Conversation's floating pills cover, the phone row of `e2e/delivery-live.e2e.ts` and the
 one-socket row, in WebKit with the iPhone 13 profile, since iOS Safari is the engine those layouts
 exist for. `firefox-download-navigation` runs the `e2e/shell.e2e.ts` row that fails a chunk after
