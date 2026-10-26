@@ -36475,19 +36475,17 @@ function actorName(actor, titles) {
   const live = titles?.get(actor.id)?.trim();
   return sessionLabel(actor.id, live === undefined || live === "" ? actor.origin?.session_title : live);
 }
-function actorLabel(actor, titles) {
-  const name = actorName(actor, titles);
+function actorAttribution(actor) {
   if (actor.kind !== "session") {
-    return name;
+    return "";
   }
   if (actor.owner !== undefined) {
-    return `${name} (for ${actor.owner})`;
+    return ` (for ${actor.owner})`;
   }
-  const service = actor.service;
-  if (service === undefined) {
-    return name;
-  }
-  return `${name} (as ${serviceSubjectLabel(service)})`;
+  return actor.service === undefined ? "" : ` (as ${serviceSubjectLabel(actor.service)})`;
+}
+function actorLabel(actor, titles) {
+  return `${actorName(actor, titles)}${actorAttribution(actor)}`;
 }
 // ../contracts/src/agent-stream.ts
 var AGENT_STREAM_LIMITS = {
@@ -44766,6 +44764,65 @@ async function callReadyWithRetry(label, call) {
     }
   }
 }
+var DAEMON_RESTART_BUDGET_MS = 10 * 60000;
+var DAEMON_RESTART_FIRST_DELAY_MS = 500;
+var DAEMON_RESTART_MAX_DELAY_MS = 30000;
+function daemonUnreachable(error48) {
+  if (error48 instanceof LegionDaemonApiError) {
+    return (error48.status === 502 || error48.status === 503) && error48.code === undefined ? "dropped" : undefined;
+  }
+  if (!(error48 instanceof Error))
+    return;
+  const code = "code" in error48 && typeof error48.code === "string" ? error48.code : undefined;
+  if (code === "ConnectionRefused" || code === "ECONNREFUSED")
+    return "refused";
+  if (code === "ConnectionClosed" || code === "ECONNRESET" || code === "EPIPE")
+    return "dropped";
+  return error48 instanceof TypeError && (error48.message === "Failed to fetch" || error48.message === "fetch failed") ? "dropped" : undefined;
+}
+async function retryWhileDaemonRestarts(label, call, options = {}) {
+  const { signal } = options;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms, abort) => {
+    const wait = Promise.withResolvers();
+    const timer = setTimeout(wait.resolve, ms);
+    abort?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      wait.resolve();
+    }, { once: true });
+    return wait.promise;
+  });
+  const deadline = now() + DAEMON_RESTART_BUDGET_MS;
+  let delay = DAEMON_RESTART_FIRST_DELAY_MS;
+  let told = false;
+  let dropped = false;
+  for (;; ) {
+    try {
+      return await call();
+    } catch (error48) {
+      const unreachable = daemonUnreachable(error48);
+      if (unreachable === undefined) {
+        if (dropped && error48 instanceof LegionDaemonApiError) {
+          error48.message += ` (an earlier attempt of ${label} lost its connection before the daemon answered, and may have been applied: read the record before calling again)`;
+        }
+        throw error48;
+      }
+      dropped ||= unreachable === "dropped";
+      const remaining = deadline - now();
+      if (remaining <= 0 || signal?.aborted) {
+        throw new Error(`${label}: the Legion daemon was unreachable (${messageFor(error48)}) and ${signal?.aborted ? "the call was aborted" : `stayed so for ${DAEMON_RESTART_BUDGET_MS / 60000} minutes`}${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`);
+      }
+      if (!told) {
+        told = true;
+        const message = `The Legion daemon is unreachable, most likely restarting (${messageFor(error48)}); ${label} is being retried for up to ${DAEMON_RESTART_BUDGET_MS / 60000} minutes. Wait for this call to return; do not call it again.`;
+        console.error(`[legion] ${message}`);
+        options.onRetrying?.(message);
+      }
+      await sleep(Math.min(delay, remaining), signal);
+      delay = Math.min(delay * 2, DAEMON_RESTART_MAX_DELAY_MS);
+    }
+  }
+}
 function parseStrictly(schema, body) {
   let json2;
   try {
@@ -48408,36 +48465,8 @@ async function executePhaseOp(runtime, input) {
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
-    case "handoff_complete": {
-      const record3 = recordFrom(await daemon.state(), claim.issue);
-      if (claim.role === "implementer" && record3.phase === "done") {
-        if (record3.check !== undefined) {
-          if (args.verdict === undefined) {
-            throw new Error("handoff_complete on a production check names a verdict of pass, pending or fail");
-          }
-          if (args.ready === true) {
-            throw new Error("handoff_complete on a production check is no READY: leave ready out");
-          }
-        }
-        return daemon.handoffComplete({
-          grantId: await mintClaimGrant(daemon, claim),
-          summary: args.summary,
-          verdict: args.verdict ?? "",
-          ready: false
-        });
-      }
-      if (args.verdict === "pending") {
-        throw new Error("handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's");
-      }
-      const commit = await runtime.handoffCommit(record3.phase, claim.role);
-      return daemon.handoffComplete({
-        grantId: await mintClaimGrant(daemon, claim),
-        summary: args.summary,
-        verdict: args.verdict ?? "",
-        ready: args.ready ?? false,
-        commit
-      });
-    }
+    case "handoff_complete":
+      return retryWhileDaemonRestarts("handoff_complete", () => completeHandoff(runtime, args), runtime.restart);
     case "request_backward_move": {
       let issue2;
       if (claim.role === "architect") {
@@ -48457,6 +48486,37 @@ async function executePhaseOp(runtime, input) {
       return {};
     }
   }
+}
+async function completeHandoff(runtime, args) {
+  const { daemon, claim } = runtime;
+  const record3 = recordFrom(await daemon.state(), claim.issue);
+  if (claim.role === "implementer" && record3.phase === "done") {
+    if (record3.check !== undefined) {
+      if (args.verdict === undefined) {
+        throw new Error("handoff_complete on a production check names a verdict of pass, pending or fail");
+      }
+      if (args.ready === true) {
+        throw new Error("handoff_complete on a production check is no READY: leave ready out");
+      }
+    }
+    return daemon.handoffComplete({
+      grantId: await mintClaimGrant(daemon, claim),
+      summary: args.summary,
+      verdict: args.verdict ?? "",
+      ready: false
+    });
+  }
+  if (args.verdict === "pending") {
+    throw new Error("handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's");
+  }
+  const commit = await runtime.handoffCommit(record3.phase, claim.role);
+  return daemon.handoffComplete({
+    grantId: await mintClaimGrant(daemon, claim),
+    summary: args.summary,
+    verdict: args.verdict ?? "",
+    ready: args.ready ?? false,
+    commit
+  });
 }
 
 // src/legion-tool.ts

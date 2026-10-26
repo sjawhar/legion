@@ -63,6 +63,11 @@
 
 ### Fixed
 
+- The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
+  closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
+  minutes, each attempt with a fresh grant. The retry notice goes to the MCP server's stderr only;
+  the call returns once the daemon answers. Every answer the daemon gives is passed on at once.
+
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
   record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
