@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -604,14 +605,14 @@ func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Iss
 
 // prepareRepository readies a Dispatch issue event before it is applied (intake's
 // ConsumerSpec.PrepareRepository), and is the event to apply. An issue's repository is its
-// record's once recorded, so a recorded issue's event asks nothing of Dispatch or GitHub: a
-// retained event that names no repository (ResolvedRepoMissing) takes the record's, and one naming
-// another is applied as it is, for the workflow to keep the record's and say so. For an issue not
-// yet recorded, a retained event's repository is read from Dispatch's issue detail, a read that
-// fails leaving the event to be retried; then, for an event in todo, what the workflow reads in
-// memory when it records the issue (ResolveRepository) is readied: an issue coming up for
-// admission (handed to Legion, or a child of a tree) on a repository the mapping did not serve
-// when last read waits for a read of the mapping that covers it (awaitMappingRead), so a
+// record's once recorded, so a recorded issue's event asks nothing of GitHub, nor of Dispatch about
+// its repository: a retained event that names no repository (ResolvedRepoMissing) takes the
+// record's, and one naming another is applied as it is, for the workflow to keep the record's and
+// say so. For an issue not yet recorded, a retained event's repository is read from Dispatch's
+// issue detail, a read that fails leaving the event to be retried; then, for an event in todo, what
+// the workflow reads in memory when it records the issue (ResolveRepository) is readied: an issue
+// coming up for admission (handed to Legion, or a child of a tree) on a repository the mapping did
+// not serve when last read waits for a read of the mapping that covers it (awaitMappingRead), so a
 // repository just mapped, or an App just installed, is served for it, and a served repository's
 // default branch is read when the read Legion holds is older than its TTL. An unrecorded issue's
 // event in any other status asks GitHub nothing.
@@ -627,6 +628,10 @@ func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Iss
 // (intake.DispatchIssue.Observed): once release_children records it first, the event applies as
 // it was delivered, and once the issue is recorded, a stale event below its sequence is fenced as
 // any is.
+//
+// Every todo of an issue unrecorded or recorded as a root, whose Dispatch parent the workflow does
+// not record, also reads that parent's chain from Dispatch for the live tree above it
+// (withAncestorTree), which keeps the issue out of admission's line while that tree is live.
 func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
 	return w.prepareIssue(ctx, issue, true, true)
 }
@@ -652,10 +657,14 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 		if issue.ResolvedRepoMissing {
 			issue.ResolvedRepo, issue.ResolvedRepoMissing = recorded.Repo, false
 		}
-		return issue, nil
+		return w.withAncestorTree(ctx, issue, recorded)
 	}
 	if !await || !admissionBound(issue) {
-		return w.prepareUnrecorded(ctx, issue, false, 0)
+		prepared, err := w.prepareUnrecorded(ctx, issue, false, 0)
+		if err != nil {
+			return prepared, err
+		}
+		return w.withAncestorTree(ctx, prepared, nil)
 	}
 	delivered := issue.Seq
 	if observe {
@@ -671,8 +680,59 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 	if err != nil {
 		return prepared, err
 	}
+	if prepared, err = w.withAncestorTree(ctx, prepared, nil); err != nil {
+		return prepared, err
+	}
 	w.forgetHolds(issue.Key, prepared.Seq)
 	return prepared, nil
+}
+
+// withAncestorTree is issue with its AncestorTree (intake.DispatchIssue.AncestorTree) read, for a
+// todo of an issue unrecorded or recorded as a root (recorded) whose Dispatch parent the workflow
+// does not record: the walk (ancestorTree) reads Dispatch outside the fact lock, as the rest of the
+// preparation does. Any other issue's is empty: a recorded parent is admission's own sweep's to
+// read (adoptQueuedRoots), and a child already runs in its tree.
+func (w *workflowRuntime) withAncestorTree(ctx context.Context, issue intake.DispatchIssue, recorded *record.Issue) (intake.DispatchIssue, error) {
+	if issue.Status != "todo" || issue.Parent == "" || recorded != nil && !claim.IsTreeRoot(recorded.Key, recorded.Tree) {
+		return issue, nil
+	}
+	tree, err := w.ancestorTree(ctx, issue.Key, issue.Parent)
+	if err != nil {
+		return issue, err
+	}
+	issue.AncestorTree = tree
+	return issue, nil
+}
+
+// ancestorTree is the recorded tree of the nearest ancestor of key that the workflow records, read
+// up Dispatch's parent chain from parent, when parent itself is not recorded; empty when parent is
+// recorded, or the chain ends, repeats a key or comes back to key first with none recorded — the
+// bound release_children's own walk of the chain keeps (api's releasableChild). A failed read of
+// Dispatch or the record fails the preparation, and the event is delivered again.
+func (w *workflowRuntime) ancestorTree(ctx context.Context, key, parent string) (string, error) {
+	recorded, err := w.recordOf(ctx, parent)
+	if err != nil || recorded != nil {
+		return "", err
+	}
+	seen := map[string]bool{key: true, parent: true}
+	for ancestor := parent; ; {
+		detail, err := w.dispatch.GetIssue(ctx, ancestor)
+		if err != nil {
+			return "", fmt.Errorf("read %s from Dispatch, an ancestor of %s: %w", ancestor, key, err)
+		}
+		if detail.Parent == nil || seen[*detail.Parent] {
+			return "", nil
+		}
+		ancestor = *detail.Parent
+		seen[ancestor] = true
+		recorded, err := w.recordOf(ctx, ancestor)
+		if err != nil {
+			return "", err
+		}
+		if recorded != nil {
+			return recorded.Tree, nil
+		}
+	}
 }
 
 // prepareUnrecorded readies the event of an issue the workflow does not record, as

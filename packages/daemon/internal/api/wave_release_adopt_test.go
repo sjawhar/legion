@@ -279,6 +279,34 @@ func TestReleaseAdoptsTheStateInfra214Reached(t *testing.T) {
 	a.assertParked(adoptionChild)
 }
 
+// A labelled todo issue under a backlog child of the live tree, which the tree's architect has not
+// released, is recorded as a root of its own that waits for no slot (its preparation read the tree
+// above its unrecorded parent). One release of it runs it in the tree, planning under the open
+// gate, its parent recorded as the backlog child it sits under.
+func TestReleaseAdoptsAHeldRootUnderAnUnreleasedChild(t *testing.T) {
+	const parent = "LEGION-169"
+	a := newAdoptionHarness(t, 2)
+	a.apply("queued", intake.DispatchIssue{Key: adoptionChild, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
+		Title: adoptionChild, Parent: parent, Rank: "B", HandedOver: true, AncestorTree: adoptionTree})
+	if got := a.record(adoptionChild); got.Tree != adoptionChild || a.slotted(adoptionChild) || len(a.waiting()) != 0 {
+		t.Fatalf("%s = %#v, waiting %q; want it recorded as a root of its own that waits for no slot", adoptionChild, got, a.waiting())
+	}
+	a.shows(adoptionChild, "todo", parent, 1, true)
+	a.shows(parent, "backlog", adoptionTree, 1, false)
+
+	if status, failure := a.release(adoptionChild); status != http.StatusOK {
+		t.Fatalf("release of %s = %d %#v, want released", adoptionChild, status, failure)
+	}
+	a.assertJoinedAndPlanning(adoptionChild, 2)
+	if got := a.record(adoptionChild); got.Parent == nil || *got.Parent != parent {
+		t.Fatalf("%s's parent = %v, want %s", adoptionChild, got.Parent, parent)
+	}
+	if len(a.statuses.writes) != 0 {
+		t.Fatalf("Dispatch writes = %#v, want none: the child is already todo", a.statuses.writes)
+	}
+	a.assertParked(adoptionChild)
+}
+
 // A child the release cannot adopt is refused with the reason, naming the child, and nothing is
 // written: a root that ran as a tree of its own, one the operator runs a tree under, one carrying
 // a run handed over to it, and a child running in another live tree. In a wave, one such child

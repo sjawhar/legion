@@ -427,14 +427,18 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
-	// The transaction performs no I/O: what admission reads of a todo issue's repository is read now.
-	for _, summary := range issues {
+	// The transaction performs no I/O: what admission reads of a todo issue's repository, and the
+	// live tree above its unrecorded parent (withAncestorTree), are read now; the summary carries
+	// that tree to admission.
+	for i, summary := range issues {
 		if summary.Status != "todo" {
 			continue
 		}
-		if _, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false); err != nil {
+		prepared, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false)
+		if err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}
+		issues[i].AncestorTree = prepared.AncestorTree
 	}
 	target, err := w.consumers.DispatchTarget(ctx)
 	if err != nil {

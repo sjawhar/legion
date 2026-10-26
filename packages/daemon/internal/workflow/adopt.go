@@ -73,12 +73,13 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 // Adopt moves issue, a recorded root AdoptionRefusal found adoptable into root's live tree, into
 // that tree with every record of its own tree, its parent recorded as parent; each member keeps
 // its own. Each record takes its next generation, the fence every row of the old tree already
-// checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold or
-// pending READY, no hand-over fence and its generation's facts cleared. A todo record enters the
-// tree's run admitted, as an unrecorded todo child does (enterChild), so an open gate starts its
-// planning; any other status keeps it as a parked child at done, which a todo runs again
-// (ReenterChild). The tree's architect is told with a child-status notice. Everything is written
-// in the caller's transaction.
+// checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold,
+// pending READY or ancestor tree (record.Issue.AncestorTree: a member waits in no line), no
+// hand-over fence and its generation's facts cleared. A todo record enters the tree's run
+// admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning;
+// any other status keeps it as a parked child at done, which a todo runs again (ReenterChild).
+// The tree's architect is told with a child-status notice. Everything is written in the caller's
+// transaction.
 func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue, parent string) error {
 	members, err := e.store.TreeIssues(ctx, tx, issue.Key)
 	if err != nil {
@@ -113,7 +114,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 			continue
 		}
 		member.Tree, member.Project, member.Generation, member.Phase = root.Tree, root.Project, next, phase.Done
-		member.LingerUntil, member.Hold, member.ReadyPendingVersion = nil, nil, nil
+		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.AncestorTree = nil, nil, nil, ""
 		if err := e.store.PutIssue(ctx, tx, member); err != nil {
 			return err
 		}

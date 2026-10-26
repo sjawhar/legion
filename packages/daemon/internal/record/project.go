@@ -35,6 +35,11 @@ func OutOfWorkflow(status string) bool {
 // root without the label waits for nothing; a child's tree holds its place, so a child needs none.
 // A root that never ran, whose recorded parent is a live tree's member, is adopted into that tree
 // before admission reads the line (admit's adoptQueuedRoots), so it is not read as waiting there.
+// A root whose parent is not recorded, under an ancestor recorded in another live tree
+// (AncestorTree), waits for nothing either: it is that tree's unreleased work, which its
+// architect's release, or its parent's, brings into the tree. A tree is live here when its root
+// does not linger and holds a slot or is itself in the line this reads before leaving such roots
+// out; once that tree lingers or leaves the workflow, the root waits as its own again.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	slotted := make(map[string]struct{}, len(slots))
 	for _, slot := range slots {
@@ -47,6 +52,24 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 				waiting = append(waiting, issue)
 			}
 		}
+	}
+	if slices.ContainsFunc(waiting, func(issue Issue) bool { return issue.AncestorTree != "" }) {
+		queued := make(map[string]struct{}, len(waiting))
+		for _, issue := range waiting {
+			queued[issue.Key] = struct{}{}
+		}
+		live := make(map[string]struct{}, len(slots)+len(waiting))
+		for _, issue := range issues {
+			_, holds := slotted[issue.Key]
+			_, waits := queued[issue.Key]
+			if (holds || waits) && !issue.Lingers() {
+				live[issue.Key] = struct{}{}
+			}
+		}
+		waiting = slices.DeleteFunc(waiting, func(issue Issue) bool {
+			_, under := live[issue.AncestorTree]
+			return under && issue.AncestorTree != issue.Key
+		})
 	}
 	sort.Slice(waiting, func(i, j int) bool { return RankLess(waiting[i], waiting[j]) })
 	return waiting

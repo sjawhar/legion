@@ -50,6 +50,13 @@ type DispatchIssue struct {
 	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
 	// never records an issue from a fact still missing it.
 	ResolvedRepoMissing bool
+	// AncestorTree is the recorded tree of the nearest recorded Dispatch ancestor above the issue's
+	// parent when that parent is not recorded (a backlog child of a live tree, never released),
+	// read from Dispatch when the fact is prepared, outside the fact lock; empty when the issue has
+	// no parent, its parent is recorded, no ancestor is, or the fact is no todo of an unrecorded
+	// issue or a recorded root. Admission records it, and keeps such a root out of its waiting line
+	// while that tree is live (record.Waiting).
+	AncestorTree string
 	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
 	// fact was prepared (ObservedIssue), not from one event, so no actor is known to have written
 	// its state. It reaches only an issue still unrecorded when it applies: ApplyFact, under the fact
@@ -83,7 +90,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, AncestorTree: issue.AncestorTree}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo

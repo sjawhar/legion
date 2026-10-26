@@ -268,3 +268,44 @@ func TestAHeldQueuedRootIsAdoptedOnlyOnceTheHoldReleases(t *testing.T) {
 	}
 	assertJoinedAndPlanning(t, pool, child, tree, 2)
 }
+
+// A labelled todo issue under a backlog child of a running tree, which that tree's architect has
+// not released, is recorded as a root of its own (its parent is not recorded) but waits for no
+// slot while the tree runs: it takes no slot and no architect, even with a slot free. Once the
+// tree leaves the workflow, it waits as its own root again and takes the slot.
+func TestAQueuedRootUnderAnUnreleasedChildOfALiveTreeTakesNoSlot(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, parent, child = "LEGION-168", "LEGION-169", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+
+	// The preparation read the parent's chain from Dispatch: parent is not recorded, tree is.
+	apply(t, pool, admission, "queued", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
+		Title: child, Parent: parent, Rank: "B", HandedOver: handed, AncestorTree: tree}, admission.engine)
+	if got := issue(t, pool, child); got.Tree != child || got.Status != "todo" || got.Parent == nil || *got.Parent != parent {
+		t.Fatalf("%s = %#v, want it recorded todo as a root of its own under %s", child, got, parent)
+	}
+	assertWaiting(t, pool, nil)
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	assertWaiting(t, pool, nil)
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+	if starts := architectStarts(t, pool, child); starts != 0 {
+		t.Fatalf("%s has %d architect starts queued, want none while %s runs", child, starts, tree)
+	}
+	if got := issue(t, pool, child); got.Status != "todo" {
+		t.Fatalf("%s = %#v, want it still todo", child, got)
+	}
+
+	apply(t, pool, admission, "tree-done", intake.DispatchIssue{Key: tree, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "done",
+		Title: tree, Rank: "A", HandedOver: handed}, admission.engine)
+	if got := issue(t, pool, tree); !got.Lingers() {
+		t.Fatalf("%s = %#v, want it lingering after its close", tree, got)
+	}
+	if got := issue(t, pool, child); got.Tree != child || got.Status != "in_progress" {
+		t.Fatalf("%s = %#v, want it promoted as its own root once %s left the workflow", child, got, tree)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
+	if starts := architectStarts(t, pool, child); starts != 1 {
+		t.Fatalf("%s has %d architect starts queued, want one once it took the slot", child, starts)
+	}
+}

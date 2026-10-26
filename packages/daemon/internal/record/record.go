@@ -85,6 +85,12 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
+	// AncestorTree is the recorded tree of the nearest recorded Dispatch ancestor above a root's
+	// unrecorded parent, as the newest Dispatch observation applied to the record was prepared with
+	// (intake's DispatchIssue.AncestorTree): a labelled todo issue under a child of a live tree that
+	// tree's architect has not released. Such a root waits for no slot while that tree is live
+	// (Waiting). Empty for every other record, and cleared when adoption takes the record into a tree.
+	AncestorTree string
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
