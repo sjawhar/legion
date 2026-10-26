@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scriptFunctions } from "./script-functions";
+import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./script-functions";
 
 // Stage 4b's own blocked, fail, pass, until_reached, cleanup, audit_verdict and audit_failure,
 // taken from the script by name and run after the controller checkpoint ends (blocked, failed, or
@@ -11,8 +11,10 @@ import { scriptFunctions } from "./script-functions";
 // Dispatch read replaced by its result: a write outside LEGSMOKE, or none. A timed-out wait runs
 // the script's own capacity hook and limit_pending against a kubectl that answers pods (filtered by
 // the -l selector, as the API server does) and FailedScheduling events from the test's fixture.
-const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
+const script = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
+const fn = scriptFunctions(script);
 const rigFn = scriptFunctions(join(import.meta.dir, "rig.sh"));
+const helperGuard = nameMissingHelpers(script, join(import.meta.dir, "rig.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
@@ -193,9 +195,10 @@ mkdir -p "$work" "$evidence/model-gateway"
 # would list it, and a failed checkpoint's do.
 printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:05Z 4242 /x controller timeout no-key >"$evidence/model-gateway/hawk-token.calls"
 exec 7>&1
+${helperGuard}
 stop_tree() { :; }; stop_pid() { :; }; collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
 teardown() { :; }; namespace_clean() { :; }; delete_consumers() { :; }; remove_run_branches() { :; }
-run_processes() { :; }; note() { echo "   $*"; }
+run_processes() { :; }; note() { echo "   $*"; }; interests_sample() { :; }
 production_audit() {
   audited=1
   printf '%s\\n' "$OUTSIDE" >"$evidence/production-issues-touched-outside.json"
@@ -214,6 +217,7 @@ ${fn("on_subject")}
 ${fn("on_tree")}
 ${fn("limit_pending_blocked")}
 ${rigFn("until_true")}
+${fn("remove_negative_config")}
 ${fn("cleanup")}
 trap cleanup EXIT
 ${tail}
@@ -230,7 +234,9 @@ ${tail}
   );
   const stdout = result.stdout.toString();
   // cleanup's ERR trap reports every teardown command that fails, a helper this harness neither
-  // takes nor stubs included (exit 127).
+  // takes nor stubs included (exit 127); the guard above names that helper, on whichever stream
+  // the shell was writing to when it was called.
+  expectNoMissingHelpers(stdout, result.stderr.toString());
   expect(stdout).not.toContain("cleanup warning:");
   return { code: result.exitCode, stdout };
 }

@@ -528,7 +528,10 @@ begin retried-frame-starts-no-second-turn
 # prompt and answers every repeat from its dedupe record.
 pane2_pid=$(jq -r '.locator.incarnation | split(":")[0]' <<<"$c2_json")
 shim2=$(first_child "$pane2_pid")
-tr '\0' ' ' <"/proc/$shim2/cmdline" | grep -q 'worker-shim' || fail "the first child of pane process $pane2_pid is not the shim"
+# The shim is the process whose argv[1] is worker-shim, as every reader of a Legion process tree
+# takes it, never one naming it in a later argv word.
+[ "$(tr '\0' '\n' <"/proc/$shim2/cmdline" | sed -n 2p)" = worker-shim ] ||
+  fail "the first child of pane process $pane2_pid is not the shim"
 kill -STOP "$shim2"
 marker2="S2E-RETRY-$RANDOM$RANDOM"
 delivery2=$(claims deliver --json --claim "$c2" --task "Reply with the single word pong. ($marker2)" | jq -r .pending.id)

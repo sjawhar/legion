@@ -107,16 +107,18 @@ func (r *liveRig) revoke(c *liveClaim) error {
 	return nil
 }
 
-// agentSecrets runs `agent-secrets <args>` in c's worker container as the agent would, with the
-// pod's own AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR, and returns stdout, the exit code, and
-// stderr. kubectl exec answers exit 1 for any non-zero code, so the command's own code is echoed.
+// agentSecrets runs `agent-secrets <args>` in c's role as the agent would, under the agent's own
+// environment (asAgent), so with the AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR the launch told
+// it, and returns stdout, the exit code, and stderr. kubectl exec answers exit 1 for any non-zero
+// code, so the command's own code is echoed.
 func (r *liveRig) agentSecrets(c *liveClaim, args ...string) (stdout string, code int, stderr string, err error) {
 	script := "/opt/legion/bin/agent-secrets " + shellJoin(args) + " 2>/tmp/agent-secrets.err; code=$?; printf '\\n---exit %d---\\n' $code; cat /tmp/agent-secrets.err"
-	out, err := r.exec(c, "sh", "-c", script)
+	out, err := r.asAgent(c, script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return "", -1, "", err
 	}
-	head, tail, _ := strings.Cut(out, "\n---exit ")
+	// exec trims the output, so with nothing on stdout it begins with the marker itself.
+	head, tail, _ := strings.Cut("\n"+out, "\n---exit ")
 	codeText, rest, _ := strings.Cut(tail, "---\n")
 	fmt.Sscanf(codeText, "%d", &code)
 	return strings.TrimSpace(head), code, strings.TrimSpace(rest), nil
@@ -236,12 +238,13 @@ func (r *liveRig) checkSecretsAutomaticGrant() error {
 func (r *liveRig) checkSecretsCrossPodNegative() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	for _, attempt := range [][]string{{"status", r.requests[root.token]}, {"revoke", r.grants[root.token]}} {
-		_, code, stderr, err := r.agentSecrets(worker, attempt...)
+		out, code, stderr, err := r.agentSecrets(worker, attempt...)
 		if err != nil {
 			return err
 		}
 		if code == 0 || !strings.Contains(stderr, "NOT_YOURS") {
-			return fmt.Errorf("the worker's agent-secrets %s %s: exit %d: %s; want NOT_YOURS", attempt[0], attempt[1], code, stderr)
+			return fmt.Errorf("the worker's agent-secrets %s %s (the root's; root enrollment %s, worker enrollment %s): exit %d, stdout %q, stderr %q; want NOT_YOURS",
+				attempt[0], attempt[1], r.enrollments[root.token].id, r.enrollments[worker.token].id, code, out, stderr)
 		}
 		note("runtime", "worker: agent-secrets %s <root's> → exit %d NOT_YOURS", attempt[0], code)
 	}
@@ -251,7 +254,7 @@ func (r *liveRig) checkSecretsCrossPodNegative() error {
 	note("runtime", "root: its grant still works after the worker's attempts")
 	rootID := r.enrollments[root.token].id
 	script := fmt.Sprintf("mkdir -p /tmp/swapped && cp %s/key.pem /tmp/swapped/ && printf '%%s\\n' %s >/tmp/swapped/enrollment && AGENT_SECRETS_KEY_DIR=/tmp/swapped /opt/legion/bin/agent-secrets self 2>&1; echo \"---exit $?---\"", AgentSecretsKeyDir, rootID)
-	out, err := r.exec(worker, "sh", "-c", script)
+	out, err := r.asAgent(worker, script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
 	}
@@ -287,7 +290,7 @@ func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 	root := r.claim("root")
 	script := `mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --runtime-id "$POD_UID" --thumbprint "$tp" 2>&1; echo "---exit $?---"`
-	out, err := r.exec(root, "sh", "-c", script)
+	out, err := r.asAgent(root, script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
 	}
