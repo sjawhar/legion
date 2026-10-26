@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-366",
+  "completed": "2026-10-26T01:03:31Z",
+  "headSha": "acdf007b667ce556559326eafd6fede6e7c10f15",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the driver (packages/dispatch/e2e/acceptance/block-graph.sh) against a server built at acdf007b on a fresh database: exit 0, 37 PASS. Re-ran `bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts` at the head: 26 passed; the head's block-references.e2e.ts alone in a fresh git archive of main 81a3b5ef: 6 failed on new-behaviour assertions (lines 89, 115, 162). Re-ran the A12 sequence (the implementer's throwaway driver, on my own database and ports) with binaries I built from git archives of 81a3b5ef (contains INFRA-364's merge d5a8e37a), the head and 371d6c87 (lacks it): every step PASS, the negative witness answered 500 with 'graph node kind \"block\" is not addressable' in its log. Re-ran block-coverage.sh and its control (block rows deleted, document marked owed: not_indexed=1, healed by the loop within 32 s)."
+  },
+  "failures": [
+    {
+      "criterion": "Pin reading (plan design 1, 'Reading a pin' table): a pin to a version the document lacks answers 404 NOT_FOUND 'no version N of <doc ref>' (A15, R1)",
+      "evidence": "GET /api/v1/references?to=dispatch://CORE-2/spec#b-ship%5Fit@v2147483648 (and @v9223372036854775807, and ?from= with either) answers 500 INTERNAL against the head server on port 8801; the server logs 'read block \"ship_it\" of <uuid> at version 2147483648: failed to encode args[2]: unable to encode 2147483648 into binary format for int4 (OID 23)'. `dispatch read --ref dispatch://CORE-2/spec#b-ship%5Fit@v2147483648` exits 1 printing 'internal server error'. The pin grammar accepts any `[1-9][0-9]*` that fits a Go int (text/refs.go parseBlock), and refs.BlockTextAt binds it against integer columns. @v2147483647 answers the expected 404. Red test: TestAPinPastEveryVersionNumberAnswers404 in packages/envoy/internal/dispatch/api/references_test.go (commit 82a20bd1); `cd packages/envoy && go test ./internal/dispatch/api/ -run TestAPinPastEveryVersionNumberAnswers404 -count=1 -v` fails with 'status=500 body={\"code\":\"INTERNAL\",\"error\":\"internal server error\"}, want 404'."
+    }
+  ],
+  "failed": 1,
+  "attempted": [
+    "Malformed pins @v0, @v01, @vx, @v, @V1, @v1@v1, @v-1, @v1.5 and a pin past 64 bits: 400 INVALID_REFERENCE (correct).",
+    "Pins to a missing version, to a version written by raw SQL as an older build (404 'has no record of its blocks; the earliest is version 1', then 200 once the loop indexed it 22 s later), and to a version before the block existed: each answers its own 404 message (correct).",
+    "Pin states: changed after a reword, removed with removed_version after a delete (edges []), unchanged after restoring the same text, changed for a pin to the reworded version (correct).",
+    "Block references from a comment's dashboard URL, lower-case percent hex, an ask, an issue message, a project document; an ask edit dropping its block link removes the edge; `dispatch ask --ref <block ref>` cites the block in the question (listed under ?to=) (correct).",
+    "CLI: comment/doc-read/doc-edit --ref <block ref> refused naming the block; read --ref of an absent unpinned block exits 1 'No block nope in …' (correct).",
+    "block-links: from=block, issue, versioned document, two references, missing parameter → 400; unknown document → 404; dashboard URL accepted; unauthenticated → 401 NO_IDENTITY; bad bearer → 401 (correct).",
+    "Twelve concurrent doc-edits of one spec: all applied (versions 2-13), 24 blocks = 24 part_of, 12 block sources citing the target, issue referenced_by_count 15 = list 15; no server error.",
+    "A 2000-paragraph document: 2000 part_of edges; target issue count 2005 = list 2005 (read in 0.09 s); single edits about as fast as main 81a3b5ef through the CLI.",
+    "rebuild-refs (blocks_owed=12) then the block-index loop: pins, sources and counts unchanged."
+  ],
+  "ci": "Tests run 40249820589 success (lint, typecheck, test), Docs 40249820590 success, Worker Image 40249820588 success, PR Title 40249963712 success, Legion Envoy and Contracts 40249820587 queued, at 042c0195."
+}
