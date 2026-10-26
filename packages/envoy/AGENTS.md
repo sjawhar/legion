@@ -2043,7 +2043,18 @@ requires it; a write without one runs as it always did, unkeyed, logged at DEBUG
 Legion daemon's outbox and scripts send such writes. `PUT` and `DELETE` are idempotent already and
 take no key. A key is 1 to 128 (`IDEMPOTENCY_KEY_MAX`) letters, digits, `.`, `_`, `:` and `-`,
 bare or as a structured-field string in double quotes; any other value, or the header sent twice,
-is `400 IDEMPOTENCY_KEY_INVALID`.
+is `400 KEY_INVALID` (`IDEMPOTENCY_KEY_INVALID`).
+
+A write the page pressed names its presser in the `Dispatch-Login` request header
+(`contracts.DispatchLoginHeader`), and every `POST`, `PATCH`, `PUT` and `DELETE` route that gets
+it runs only as that person (`refuseChangedLogin`, `api/server.go`, wrapped outside the key
+layer): a caller that is another person, compared as `model.CanonicalLogin` compares them, or no
+person at all (any bearer), is answered `409 LOGIN_CHANGED` (`contracts.DispatchLoginChanged`)
+before anything runs and before its key is read, so the key is untouched. Another tab can sign
+someone else in in place, and a retry can go out on the new cookie before this tab knows; the
+page drops the presser's writes on that answer. A caller that resolves to nobody (a lapsed
+cookie) keeps the route's own `401`, and a write without the header (the `dispatch` command, an
+agent, a script) is not checked.
 
 `keyedWrites` (`internal/dispatch/api/request_keys.go`), which `register` wraps around every
 `POST` and `PATCH` route, keeps one `request_keys` row per key (migration `0118`), keyed on
@@ -2064,8 +2075,10 @@ from a reuse:
   finds it answers from it instead. A different request under the key is `422 KEY_REUSED`, whose
   message names the method and path that used it; nothing runs. A first request still running is
   `409 KEY_IN_FLIGHT` with `Retry-After: 1`, which a client asks again after. A finished one is
-  replayed: its stored status, content type and body, with `Idempotency-Replayed: ?1`, and the
-  handler does not run again.
+  replayed: its stored status, every header its handler set (`request_keys.headers`, a
+  `Content-Type` among them) and its body, with `Idempotency-Replayed: ?1`, and the handler does
+  not run again. The table's checks hold a row to those states: an answered row holds no lease, and
+  nothing of an answer is stored without its status.
 - The handler finishes whatever its client does: it runs on the request's context with the
   client's cancellation taken off (`context.WithoutCancel`), bounded by `keyedHandlerLimit` (ten
   minutes, past which its work rolls back and the key is released as for a 5xx) and counted in the
@@ -2092,15 +2105,20 @@ from a reuse:
   1 MiB is answered in full but kept as its status alone, and its replay is that status with the
   body `ANSWER_NOT_KEPT` (`IDEMPOTENCY_ANSWER_NOT_KEPT`): the write ran, and the client reads what
   it wrote again.
-- Every transaction a keyed request commits that wrote anything sets the row's `committed_at` in
-  that same transaction (`store.WithBeforeCommit`, the pool's hook), so the key knows the write
-  landed even when its answer never made it into the row. A repeat that finds such a row in
-  flight past its lease, or released after a 5xx or a panic, is `409 KEY_COMMITTED`
-  (`IDEMPOTENCY_KEY_COMMITTED`) at once, with the echo and no `Retry-After`: `the write under
-  Idempotency-Key "k" (POST /path) landed, but Dispatch lost its answer, so it is not run again
-  and has no answer to replay: read what it wrote`. A client treats it as a landing and reads
-  again what it wrote. A request that wrote nothing is not marked, so a repeat past the lease runs
-  it again.
+- Every transaction a keyed request commits that wrote - one holding the `ROW EXCLUSIVE` lock an
+  `INSERT`, `UPDATE`, `DELETE` or `MERGE` takes on a table other than `request_keys` - sets the
+  row's `committed_at` in that same transaction (`markRequestKeyCommitted`, through
+  `store.WithBeforeCommit`, the pool's hook), so the key knows the write landed even when its
+  answer never made it into the row; a lock-only `SELECT … FOR UPDATE` marks nothing, and a COMMIT
+  refused after the mark leaves none. `TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks`
+  (`keyed_write_guard_test.go`) walks the copy-lock graph from every `POST` and `PATCH` route and
+  fails the build on a write outside the shared pool's transactions, the one way a write could miss
+  the mark. A repeat that finds a marked row in flight past its lease, or released after a 5xx or a
+  panic, is `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`) at once, with the echo and no
+  `Retry-After`: `the write under Idempotency-Key "k" (POST /path) landed, but Dispatch lost its
+  answer, so it is not run again and has no answer to replay: read what it wrote`. A client treats
+  it as a landing and reads again what it wrote. A request that wrote nothing is not marked, so a
+  repeat past the lease runs it again.
 - A row whose holder never finished and committed nothing (its process died first) is taken over
   by the first repeat past the lease, `attempt + 1`; every write the holder makes to the row is
   scoped to its own attempt, so a holder that was only slow changes nothing once it has lost the
@@ -2116,8 +2134,9 @@ from a reuse:
   `POST /api/v1/artifacts/{id}/comments`), whose replay resumes every mention whose latest attempt
   is pending under a lapsed claim, under that attempt's own number (so its dedupe key is the same
   and the stream drops a frame that landed), then answers the comment with its mentions and
-  deliveries in the first answer's shape, its `advice` and `ask_waiting_on` kept and every other
-  member read fresh; the issue message does the same. The layer replays the answer; the delivery
+  deliveries in the first answer's shape, read fresh, keeping from the stored answer only its
+  `advice` and `ask_waiting_on`, and only when that answer was a 2xx; the issue message does the
+  same. The layer replays the answer; the delivery
   code decides what is still owed. A repeat only resumes owed deliveries sooner: the delivery sweep
   ("The delivery sweep", below) makes each of them whether anyone asks again or not.
 
@@ -2136,10 +2155,14 @@ ago and inside `DeliveryDuplicateWindow`, under its own attempt number; and the 
 keyed send whose process died between committing its message and opening that attempt, found by its
 key's recovery point once the key's holder is gone. Of two senders that find one attempt owed - the
 sweep and a repeat, or two processes' sweeps - the one that claims it sends and the other sends
-nothing.
+nothing. The sweep's read stays as small as the attempts still pending: migration `0119` indexes
+them (`message_deliveries_pending`, `comment_deliveries_pending`, partial on
+`state = 'pending'`). `cmd/dispatch/keyed_kill_multiprocess_test.go` proves the takeover on two
+real processes: one killed mid-handler (held there by the slow-write hook), the other answers
+`409 KEY_IN_FLIGHT` while the lease lasts, then makes the write once and replays it.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
-`400 IDEMPOTENCY_KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body
+`400 KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body
 is past its route's limit, each of which runs unkeyed - and `/healthz` answers
 `idempotency_keys: true` on every build that judges the header, a fact of the binary
 rather than of the probe, so its `503` carries it too. Together they are how a client tells a

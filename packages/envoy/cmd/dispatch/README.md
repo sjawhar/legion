@@ -795,6 +795,12 @@ release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the b
 table before it, and the table is kept: dropping it is a contracting migration, so it ships no
 earlier than the release after this one.
 
+Migration `0119_pending_delivery_indexes` adds two partial indexes, `message_deliveries_pending` and
+`comment_deliveries_pending`, on the delivery attempts still pending, which the delivery sweep reads
+every minute (Keyed writes, below). It reads, refuses and rewrites no row, and the release before
+it neither reads nor depends on them; its census answers `0`. Each build holds its table's writes
+(a `SHARE` lock) for as long as it reads the table once.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -1099,12 +1105,13 @@ lapses. A write Dispatch takes longer to finish than its client waits still land
 
 | Status / code | Meaning |
 | --- | --- |
-| The first answer, with `Idempotency-Replayed: ?1` | A repeat under a key whose first request finished, with the same method, route, path values, query, media type and body: the stored status, content type and body, and nothing runs again. |
+| The first answer, with `Idempotency-Replayed: ?1` | A repeat under a key whose first request finished, with the same method, route, path values, query, media type and body: the stored status, every header the first answer set and its body, and nothing runs again. |
 | The first status with `ANSWER_NOT_KEPT` | That repeat, when the first answer was larger than the 1 MiB a key keeps: the write ran, and the caller reads what it wrote again. |
 | `409 KEY_IN_FLIGHT`, `Retry-After: 1` | A repeat while the key's first request still runs (its lease renewed every 20 s while it does); nothing ran, and the caller asks again under the same key. A repeat once the lease has lapsed, 60 s after the last renewal, takes over a key whose holder died before it committed anything, and runs the request. |
-| `409 KEY_COMMITTED`, no `Retry-After` | A repeat whose first request committed a write but whose answer was lost: its lease lapsed in flight, or it ended in a 5xx or a panic after committing (every transaction a keyed request commits marks the key's `committed_at` in that same transaction). The write landed and is not run again; there is no answer to replay, so the caller reads what it wrote. Also a repeat of a keyed `POST /api/v1/me/agent-tokens` that minted, once that first request has finished, answer lost or not: the mint's answer carries the plaintext token, so it is never kept under the key, never replayed, and no second token is minted (a mint refused with a 4xx commits nothing, so its key is released and a repeat runs it again). That is the one route whose answer is not stored. |
+| `409 KEY_COMMITTED`, no `Retry-After` | A repeat whose first request committed a write but whose answer was lost: its lease lapsed in flight, or it ended in a 5xx or a panic after committing (every transaction a keyed request commits that wrote a row marks the key's `committed_at` in that same transaction; a lock-only `SELECT … FOR UPDATE` marks nothing, and a COMMIT refused after the mark leaves none). The write landed and is not run again; there is no answer to replay, so the caller reads what it wrote. Also a repeat of a keyed `POST /api/v1/me/agent-tokens` that minted, once that first request has finished, answer lost or not: the mint's answer carries the plaintext token, so it is never kept under the key, never replayed, and no second token is minted (a mint refused with a 4xx commits nothing, so its key is released and a repeat runs it again). That is the one route whose answer is not stored. |
 | `422 KEY_REUSED` | The key was already used for a different request; the message names its method and path, and this request did not run. A changed request needs a new key. |
-| `400 IDEMPOTENCY_KEY_INVALID` | The header is not 1 to 128 of those characters, or was sent twice. |
+| `400 KEY_INVALID` | The header is not 1 to 128 of those characters, or was sent twice. |
+| `409 LOGIN_CHANGED` | The write names its presser in `Dispatch-Login` (every write the page makes does, `POST`, `PATCH`, `PUT` and `DELETE` alike) and its caller is someone else, or no person at all (any bearer): nothing ran and the key was not read, so it is untouched. A caller that resolves to nobody (a lapsed cookie) gets the route's own `401` instead, and a write without the header is not checked. The page drops every write that login pressed. |
 | `400 REQUEST_BODY_UNREADABLE` | The client did not finish sending the body the layer reads before the handler; nothing ran and the key was not claimed, so the same key may be sent again. |
 
 A 5xx, a 401, a 408 and a 429 are not stored: the key is released and the next attempt runs the
@@ -1115,8 +1122,9 @@ repeat of `POST /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`
 `POST /api/v1/artifacts/{id}/comments`) answers what it made as it stands now, under the first's
 `201`, however the first request ended, and puts on its way whatever delivery a dead process left
 owed; a broadcast's repeat answers at once and sends what it owes behind the answer. A comment's
-or an issue message's replay keeps the first answer's `advice` and `ask_waiting_on` and reads every
-other member fresh. Neither send route takes a body `idempotency_key` any more.
+or an issue message's replay reads every member fresh and keeps from the first answer only its
+`advice` and `ask_waiting_on`, and only when that answer was a 2xx. Neither send route takes a body
+`idempotency_key` any more.
 
 A delivery a dead process left owed is made whether anyone asks again or not. Every write that
 delivers to sessions claims each attempt before its send and settles it after, on a context its
@@ -1137,7 +1145,7 @@ it runs unkeyed and its route refuses it. A body the client did not finish sendi
 own failure, a 5xx with the key echoed, which the client asks again.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
-`400 IDEMPOTENCY_KEY_INVALID`, a request whose caller it could not resolve, or one whose body is
+`400 KEY_INVALID`, a request whose caller it could not resolve, or one whose body is
 past its route's limit, each of which runs unkeyed - and `/healthz`
 answers `idempotency_keys: true` on every build that judges the header - a fact of the binary, so
 it is true whatever the database or NATS answer, on a `503` too. A client tells a Dispatch that runs

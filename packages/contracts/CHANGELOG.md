@@ -163,13 +163,16 @@
   `POST /api/v1/issues/{key}/messages`, `POST /api/v1/issues/{key}/comments` or
   `POST /api/v1/artifacts/{id}/comments` is answered from its recovery point: what it made, read
   afresh, under the first's `201`. Added `IDEMPOTENCY_KEY_MAX`, `IDEMPOTENCY_KEY_PATTERN` (built
-  from the max), `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_ANSWER_NOT_KEPT`, `IDEMPOTENCY_KEY_TTL_MS`
+  from the max), `IDEMPOTENCY_KEY_INVALID` (`KEY_INVALID`, beside its siblings'
+  unprefixed codes), `IDEMPOTENCY_ANSWER_NOT_KEPT`, `IDEMPOTENCY_KEY_TTL_MS`
   (24 hours) and `IDEMPOTENCY_LEASE_MS` (60 seconds); `retriesUnderKey(status, code)`, the one
   rule the page and the `dispatch` command retry a write by (a 5xx, 408, 429 or
   `409 KEY_IN_FLIGHT`); `answerNotKept(status, replayed, body)`, whether a replayed 2xx reads
   `ANSWER_NOT_KEPT`; and `IdempotencyLandedCode`, the two codes of a write made without its answer.
   `DISPATCH_LOGIN_HEADER` (`Dispatch-Login`) names the login that pressed a page write and
-  `DISPATCH_LOGIN_CHANGED` (`LOGIN_CHANGED`) the `409` for one whose caller is someone else.
+  `DISPATCH_LOGIN_CHANGED` (`LOGIN_CHANGED`) the `409` Dispatch answers, before anything runs, a
+  write whose caller is someone else or no person; both are generated into Go as
+  `contracts.DispatchLoginHeader` and `contracts.DispatchLoginChanged`.
 - **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`,
   `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`,
   `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`,

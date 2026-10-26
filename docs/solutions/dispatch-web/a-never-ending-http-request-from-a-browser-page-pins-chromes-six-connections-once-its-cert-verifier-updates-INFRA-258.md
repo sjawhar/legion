@@ -88,8 +88,8 @@ Specs: dispatch://INFRA-258 and dispatch://INFRA-292.
   (`packages/envoy/internal/dispatch/api/request_keys.go`, a `request_keys` row per key) runs a
   key's request once, replays its stored answer to a repeat with `Idempotency-Replayed: ?1`,
   refuses the key reused for another request (`422 KEY_REUSED`), keeps no 5xx, and keeps each key
-  24 hours. Every transaction a keyed request commits marks its key in that same transaction, so a
-  write that landed but lost its answer is never run again: its repeat is `409 KEY_COMMITTED`,
+  24 hours. Every transaction a keyed request commits that wrote a row marks its key in that same
+  transaction, so a write that landed but lost its answer is never run again: its repeat is `409 KEY_COMMITTED`,
   which the page treats as a landing and reads again, and the `dispatch` command reports as made,
   telling the session to read it back. A write that also reaches outside the
   database (the single-session send, the broadcast, the issue message and a comment, each of which

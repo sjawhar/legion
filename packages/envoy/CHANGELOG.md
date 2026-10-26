@@ -20,8 +20,8 @@
   socket replaces are gone: see the Breaking entries under Changed.
 - Every Dispatch `POST` and `PATCH` route takes an optional `Idempotency-Key` request header
   (INFRA-258), after the IETF `Idempotency-Key` draft: 1 to 128 letters, digits, `.`, `_`, `:` and
-  `-`, anything else `400 IDEMPOTENCY_KEY_INVALID`. A repeat with the same key and the same
-  request, once the first has finished, is answered the first's stored status and body with
+  `-`, anything else `400 KEY_INVALID`. A repeat with the same key and the same request, once the
+  first has finished, is answered the first's stored status, headers and body with
   `Idempotency-Replayed: ?1`, and nothing runs again; the same key with a different request is
   `422 KEY_REUSED`, naming the request that used it; a repeat while the first still runs is
   `409 KEY_IN_FLIGHT` with `Retry-After: 1`. A keyed write finishes on the server whatever its
@@ -37,7 +37,10 @@
   repeat whose first request committed a write but whose answer was lost (its lease lapsed, or it
   ended in a 5xx or a panic after committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the
   write landed and is not run again, and the client reads what it wrote; every transaction a keyed
-  request commits marks the key in that same transaction. `POST /api/v1/me/agent-tokens` keeps no
+  request commits that wrote a row marks the key in that same transaction (a lock-only
+  `SELECT … FOR UPDATE` marks nothing, and a COMMIT refused after the mark leaves none), and a
+  guard test fails the build on a keyed route that writes outside the transactions the mark is
+  taken in. `POST /api/v1/me/agent-tokens` keeps no
   answer under its key, since the answer carries the plaintext token: a repeat of a keyed mint that
   minted is `409 KEY_COMMITTED` once the first has finished, never a replay of the token, and mints
   nothing more, while a mint refused with a 4xx commits nothing, so its repeat runs again. The
@@ -46,10 +49,11 @@
   a body Dispatch cannot spool to its temporary directory is a 5xx, which the client asks again.
   The single-session send, the broadcast, the issue message and both comment routes commit a
   recovery point with what they made, so a repeat of any of them answers what it made as it
-  stands, under the first's `201`, even across a crash between the commit and its answer. The
+  stands, under the first's `201`, even across a crash between the commit and its answer, keeping
+  from the stored answer only its `advice` and `ask_waiting_on`, and only from a 2xx. The
   dashboard and the `dispatch` CLI send a key on every `POST` and `PATCH` and retry under it.
   Every answer the layer judged carries the key back (`Idempotency-Key: <key>`): not
-  `400 IDEMPOTENCY_KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body
+  `400 KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body
   is past its route's limit, each of which runs unkeyed. `/healthz` answers
   `idempotency_keys: true` on every build that judges the header, its `503` included, so a client
   can tell this Dispatch from one that ignores the header and would run a retried write a second
@@ -57,6 +61,13 @@
   `{method, path, delay_ms}` makes every keyed run of that method and exact path wait `delay_ms`
   once its key is claimed (0 removes it), so the browser suite drives a write Dispatch is slow to
   finish.
+- A write the dashboard pressed runs only as the person who pressed it (INFRA-258). The page names
+  its presser in a `Dispatch-Login` request header on every write, and every `POST`, `PATCH`, `PUT`
+  and `DELETE` that carries it is answered `409 LOGIN_CHANGED` before anything runs, its
+  `Idempotency-Key` untouched, when its caller is another person or no person at all (any bearer),
+  so a retry that goes out on a cookie another tab signed in in place never runs as them. A caller
+  that resolves to nobody keeps the route's own `401`, and a write without the header, as the
+  `dispatch` command and every agent send, is not checked.
 - `GET /auth/whoami` answers `event_head`, the newest committed event id as of the sign-in check
   (INFRA-292). A page's first events subscription on `/ws/live` resumes from it, so a change
   committed between that answer and the socket opening reaches the page instead of being lost
@@ -78,7 +89,9 @@
   its repeat as soon as it has read the broadcast, with the recipients it still owes put on their
   way behind the answer; a send to one session answers once its own attempt has settled, which
   keeps a person's sends to one session in the order they pressed them. A broadcast is not ordered
-  against a later send to one of its recipients.
+  against a later send to one of its recipients. Migration `0119_pending_delivery_indexes` adds the
+  two partial indexes on pending message and comment-mention attempts that pass reads; its census is
+  `0`.
 
 - Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
   Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
