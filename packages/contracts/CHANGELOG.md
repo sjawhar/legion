@@ -4,8 +4,16 @@
 
 ### Added
 
-- `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own (INFRA-140).
+- `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
+- The agent stream's `settings` frame (`AgentStreamSettings`, in `AgentStreamFrame`): the model
+  and thinking level an Oh My Pi session runs now, the whole state each time it changes and the
+  frame before `commands` in every replay. `AgentStreamSettingsReported` carries `model`
+  (`provider/id`, absent with no model selected), `models` (every model the session lists as
+  available, never cut or truncated) and `thinking` (`level`, what `/effort` reports, `null` for the
+  model's default, and `levels`, what `/effort` offers; `thinking` is `null` when the model has no
+  adjustable thinking). `AgentStreamSettingsUnreported` (`reported: false`) is a session whose
+  plugin cannot read them from its host. A viewer older than the frame ignores it (INFRA-195).
 - `dispatch_issues` takes `all` (`--all`), which asks Dispatch for the whole filtered listing in
   one read instead of a page: the request goes out with neither `limit` nor `offset`, the two
   parameters whose absence makes the server answer every match
@@ -139,7 +147,7 @@
 ### Changed
 
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
-  place of the dispatch skill's "Writing a spec" (INFRA-140). Five descriptions take a rule the
+  place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
   (which kind to use, and that resolving records no decision), `dispatch_comment` (a reply under an
   open ask asks for clarification), `dispatch_doc_edit` (one replace per paragraph, then one
@@ -148,7 +156,7 @@
   credential or branch problem with `repo` is `409 SOURCE_ACCESS`).
 - `dispatch ask --help` says never to create an issue to park a question, and `dispatch issue
   --help` says to create a project only when a person asks for one, and that work across projects
-  goes in the project that owns most of it (INFRA-140).
+  goes in the project that owns most of it.
 
 - **Breaking:** a project's architecture model comes from any number of sources, one per
   repository (INFRA-391). `ArchitectureTree.sources`, each source's sync bookkeeping in the order

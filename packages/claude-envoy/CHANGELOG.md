@@ -53,7 +53,7 @@
 ### Fixed
 
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
-  record every request you accept in Dispatch and read that record back before a turn ends (INFRA-140).
+  record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
   reference: its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
@@ -125,8 +125,8 @@
 - The `dispatch` command (`dist/dispatch.js`) waits for its stdout and stderr writes before it
   exits. Bun's `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the
   end of any output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
-- The `dispatch` command (`dist/dispatch.js`), given a bare issue key where `--issue` belongs,
-  names the fix in its refusal: `use --issue <KEY>`, with the corrected command.
+- The `dispatch` command (`dist/dispatch.js`) takes a bare issue key where `--issue` belongs as
+  that `--issue` (`dispatch read ACME-12`), once and only when `--issue` is not also given.
 - The `dispatch` command (`dist/dispatch.js`) refuses an ask, comment or message link as `--ref`
   to `comment`, `suggest`, `doc-edit` and `doc-read`, which used to act on the link's owner and
   drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
@@ -146,7 +146,7 @@
   both reviewers.
 
 - The plugin ships `claude-envoy:dispatch-writing-specs` in place of
-  `claude-envoy:dispatch-brainstorming` (INFRA-140): `skills/dispatch-writing-specs` links the
+  `claude-envoy:dispatch-brainstorming`: `skills/dispatch-writing-specs` links the
   repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words
   together, and `dispatch` no longer has a `references/` directory; `pi-envoy`'s changelog lists
   what each skill holds and which rules are gone. The bundled `dispatch` command (`dist/dispatch.js`,

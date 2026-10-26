@@ -66,9 +66,17 @@ func TestEventStreamClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("event stream status %d, want 200", response.StatusCode)
 	}
+	// The stream opens with ": open"; the first heartbeat after it resolved the person and kept
+	// the stream going.
 	reader := bufio.NewReader(response.Body)
-	if line, err := reader.ReadString('\n'); err != nil {
-		t.Fatalf("first heartbeat: %q %v", line, err)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("first heartbeat: %q %v", line, err)
+		}
+		if line == ": heartbeat\n" {
+			break
+		}
 	}
 
 	person.ended.Store(true)

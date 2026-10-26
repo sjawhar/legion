@@ -4,8 +4,20 @@
 
 ### Added
 
-- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships (INFRA-140).
+- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
 
+- The agent stream reports the model and thinking level the session runs now, so Dispatch's live
+  view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
+  every model the session lists as available, the configured thinking level `/effort` reports
+  (`null` for the model's default) and the levels `/effort` offers (`thinking: null` for a model
+  with no adjustable thinking), read from the live `AgentSession`'s own getters. Ids are never
+  truncated and the list is never cut. A host that cannot be read (no `AgentRegistry` export, no
+  live session under this id, or a missing getter) sends `reported: false`. The session re-reads
+  the getters on every replay and watch, on `turn_start` and `retry_fallback_applied`, and after a
+  person's typed input runs, before its reply is posted, and publishes the frame only when it
+  changed and a viewer is attached; a getter that throws is logged and never blocks the replay
+  answer. A replay ends with the history, the settings, then the commands; the settings frame is
+  paid for first and whole, and the commands keep the prefix that fits what is left (INFRA-195).
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
@@ -24,6 +36,16 @@
 
 ### Fixed
 
+- A live view held open while its session is relaunched with `--resume` now shows the resumed
+  process's model, thinking level and command changes. Two things stopped it. Every process
+  numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only
+  when its `seq` beats the one it already applied, so it ignored everything the resumed process sent
+  below the earlier process's count: the publisher now seeds `seq` from its clock (milliseconds ×
+  1,000) and never moves it back on a reset, so a later process of the session numbers above every
+  frame an earlier one sent. And the page's relay asks the new process for no replay, only re-arms
+  it with bare watches, so the settings and commands the process read before the first watch never
+  reached the page: a control message that arms a publisher nobody was watching now also sends the
+  settings and commands as they stand (INFRA-195).
 - A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
   queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
   interval: past it the caller's call rejects, the queue starts the next task, and the abandoned
@@ -124,7 +146,7 @@
   `plan-reviewer`. `--summary` says that a Legion architect ends it with one sentence giving the
   two reviews' results.
 
-- Three Dispatch skills ship, under 2,000 words together (INFRA-140), from four skills and the
+- Three Dispatch skills ship, under 2,000 words together, from four skills and the
   dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
   `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
   spec's seven parts (Summary, Problem, Goals and non-goals, Requirements, Design, Decisions,
@@ -138,7 +160,7 @@
   holds only what the person settled, ask in stages, "density is the problem, not length", and
   "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
   reach 2,000 words.
-- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages (INFRA-140): the
+- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages: the
   Design gives a value for each limit, size and time; a choice the person's messages favour is
   settled; each design choice no source states is a decision entry; the fresh reader gets the whole
   spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
@@ -162,7 +184,7 @@
   asked to approve the spec again for a small change.
 - The `dispatch` command's notice after a primary spec with no ask block says that a person does
   not watch the session's chat and sees its need only through an open ask or a spec that waits for
-  approval (INFRA-140). The notice for a typed-block opening stored as text cites
+  approval. The notice for a typed-block opening stored as text cites
   `dispatch-writing-specs`, "Questions". `dispatch issue --spec` and `dispatch doc-edit` point at
   `skill://dispatch-writing-specs`.
 - The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any

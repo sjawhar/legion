@@ -149,9 +149,9 @@
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
   code 0.
-- A `dispatch` command that takes `--issue`, given a bare issue key in its place
-  (`dispatch read ACME-12`), names the fix in its refusal: `use --issue <KEY>, as in: dispatch
-  read --issue ACME-12`. The command still refuses a positional value.
+- A `dispatch` command that takes `--issue` takes a bare issue key as its `--issue`
+  (`dispatch read ACME-12` is `dispatch read --issue ACME-12`), once and only when `--issue` is
+  not also given. Every other positional value is still refused.
 - `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse an ask, comment or message link
   as `--ref`, before any request. They take `--ref` as the issue or document they act on, so such
   a link used to post or read on its owner and drop the item: a comment meant for an ask's thread
@@ -164,12 +164,12 @@
 - The notice after a primary spec with no ask block reads: "This spec holds no ask blocks. A person
   does not watch your chat. They see that you need them only through an open ask or a spec that
   waits for their approval. If the design needs a person's choice, add an ask block. If it does not,
-  request approval with `dispatch request-approval`." (INFRA-140). The notice for a typed-block
+  request approval with `dispatch request-approval`." The notice for a typed-block
   opening stored as text cites the `dispatch-writing-specs` skill, "Questions". A test holds each
   skill section a notice cites to a heading of that skill.
 - `dispatch read` names each message, comment and ask on an issue's event log by its
   `dispatch://KEY/message|comment|ask/<id>` reference, after the event type. A message had no other
-  address there, so an agent that read the log could not open or link one (INFRA-140).
+  address there, so an agent that read the log could not open or link one.
 - `dispatch whoami` under the shared token says an issue you create without an assignee takes its
   parent's assignee, else the project's default assignee, else nobody, rather than calling it
   unassigned: a project whose default a person set on the Settings page is the create chain's last

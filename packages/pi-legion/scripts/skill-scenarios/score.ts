@@ -337,7 +337,7 @@ function brainstormSurface(runDir: string, run: string, label: string): Row {
   };
 }
 
-/** measure-before-ask: gate 2 of the dispatch skill's "Before you ask", which INFRA-140 removed.
+/** measure-before-ask: gate 2 of the dispatch skill's "Before you ask", which the cut to three Dispatch skills removed.
  * rig.sh's export lists 430 stranded issues, 412 of them without the owner that fix A (email each
  * issue's owner) needs, while fixes B and C repair all 430. So the ask gate 2 calls for names the
  * 430 and that measurement, offers B and C, and drops A rather than offering it cut down to the 18

@@ -1044,7 +1044,7 @@ describe("dispatchToolSpecs", () => {
     expect(existsSync(resolve(repoRoot, "skills/dispatch-writing-specs/SKILL.md"))).toBe(true);
   });
 
-  // Contract C1 of INFRA-140: the Dispatch skill keeps the headings code and other skills cite.
+  // The Dispatch skill keeps the headings code and other skills cite.
   test("the Dispatch skill keeps every heading code and other skills cite", () => {
     expect(dispatchSkillHeadings()).toEqual(
       expect.arrayContaining([
@@ -1061,7 +1061,7 @@ describe("dispatchToolSpecs", () => {
   });
 
   // Rules the Dispatch skill's references held move into the one command each is about, where
-  // `dispatch <command> --help` prints them (INFRA-140, rule 3 of its cut).
+  // `dispatch <command> --help` prints them.
   test.each([
     [
       "dispatch_resolve_ask",
