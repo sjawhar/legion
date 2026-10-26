@@ -136,6 +136,16 @@
 
 ### Changed
 
+- `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
+  own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
+  the session's own tree touches is fixed in that tree's pull request, any other goes to the
+  Legion controller, and a finding that needs a decision is an ask.
+
+- `dispatch request-approval --help`, and `dispatch-writing-specs`, "Each version", name both
+  reviewers a Legion architect runs before an approval request, `plan-gap-analyst` and
+  `plan-reviewer`. `--summary` says that a Legion architect ends it with one sentence giving the
+  two reviews' results.
+
 - Three Dispatch skills ship, under 2,000 words together, from four skills and the
   dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
   `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
