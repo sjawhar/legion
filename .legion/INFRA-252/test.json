@@ -2,12 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T12:15:00Z",
-  "round": 6,
-  "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
+  "completed": "2026-10-26T15:20:00Z",
+  "round": 7,
+  "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
+  "fingerprint": "3b91e647b693 8f1e6192875b71f7ba5fd225feeb5123010c5050c0814b1adc38317eaa95887d -> dd04f49c458d 1ab2a88188fe0ce166108d2067dabd3e8e0f25af22c3ae5cb75eea1e7b51fed7: changed, full round",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at 3b91e647b693: `child adoption e2e: PASS in 41s`, all eleven steps (transcript https://github.com/sjawhar/legion/pull/2226#issuecomment-6415362280)."
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at dd04f49c458d: `child adoption e2e: PASS in 42s`, all eleven steps, migrating a fresh database through 0054_issue_ancestry (transcript https://github.com/sjawhar/legion/pull/2226#issuecomment-6419355359)."
   },
   "failures": [],
   "failed": 0,
@@ -15,35 +16,43 @@
     {
       "criterion": "D2: a todo root held under an unrecorded parent of a live tree queues once that parent leaves the tree",
       "round": 1,
-      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree passes at 3b91e647b693"
+      "status": "fixed; red test TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree passes at dd04f49c458d"
     }
   ],
   "proof": [
     {
-      "criterion": "The refactor preserves the boot path: across a daemon restart the boot listing and the retained envelopes free, adopt and hold as live events do",
-      "surface": "whole daemon stopped and started again (rebindHeldPorts, a fresh fake runtime) over the same PostgreSQL and nats-server, against a Dispatch stand-in whose GET /api/v1/issues lists the board (throwaway -tags e2e driver)",
-      "command": "before: H held under unrecorded P under T, C waiting; daemon stopped; while down: P moved to no parent, C re-parented under T, N labelled todo under unreleased P2 of T; daemon started; run twice, with P's move as an envelope and with P's move on the board only",
-      "observed": "both runs: H in admission.waiting with ancestry [P]; C planning in T at generation 2 with no slot or architect; N recorded as its own root, held with ancestry [P2, T], no slot",
-      "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
-      "negativeControl": "before the restart H was held (ancestry [P, T]) and C waiting; the second run gives the boot listing's own walk as the only way to see P's move"
+      "criterion": "Merge with #2188: an adopted queued root that waits on an unfinished Dispatch issue is held at admitted in the tree and starts once the blocker is done",
+      "surface": "whole daemon over real PostgreSQL and its own nats-server, JetStream Dispatch envelopes carrying blocked_by, the Legion HTTP API (throwaway -tags e2e driver)",
+      "command": "B backlog; W labelled todo with blocked_by [B], waiting; W re-parented under T (blocked_by [B]); B done",
+      "observed": "W recorded in T at phase admitted, no planner, no slot, not waiting, over 3 s; after B's done event W is planning at generation 2 with its planner, no slot, no architect",
+      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
+      "negativeControl": "the unfinished blocker is the deliberately withheld input: W did not start until it was done"
     },
     {
-      "criterion": "AC1-AC4 and D2 at the refactor head",
+      "criterion": "Merge with #2188 (RanAsRoot reads CarriesRun()||TakenBack): a root carrying a taken-back run is refused, not adopted",
+      "surface": "POST /legion/v1/waves/release on the whole daemon (throwaway driver)",
+      "command": "K seeded as its own root, phase implementing, TakenBack, todo; Dispatch shows K todo under T; release {K}",
+      "observed": "409 CHILD_NOT_ADOPTABLE `K cannot join the tree of T: it carries a run handed over to it as a root of its own`; K still its own tree at generation 2, phase implementing; no Dispatch write",
+      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
+      "negativeControl": "the release itself is the refused call"
+    },
+    {
+      "criterion": "AC1-AC4 and D2 at the merge head",
       "surface": "whole daemon (scripts/e2e/child-adoption.sh) and round 1's red test",
       "command": "LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh; go test -run TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree ./internal/daemon/",
-      "observed": "PASS in 41s, all eleven steps; red test PASS",
-      "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
+      "observed": "PASS in 42s, all eleven steps; red test PASS",
+      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
       "negativeControl": "release-refuses: 409 CHILD_IN_OTHER_TREE, record unchanged, no Dispatch write; red test failed at fac524684344 before the fix"
     },
     {
-      "criterion": "The tester's round 1-4 scenarios at the refactor head",
-      "surface": "whole daemon (throwaway -tags e2e driver)",
-      "command": "stale-ancestor, parent-release-adopts-held, two-level-move, reverse-move-holds, hold-follows-ancestor-adoption, concurrent-release, wave-atomic, not-adoptable, held-child-follows-freed-root, unreadable-chain-skips-one, stale-unrecorded-ancestor-event, parked-root-on-chain",
-      "observed": "all twelve ok",
-      "headSha": "3b91e647b69340a714cc2e72ae74eea8055e5156",
-      "negativeControl": "wave-atomic and not-adoptable drive the refusals (409 CHILD_IN_OTHER_TREE, 409 CHILD_NOT_ADOPTABLE) with nothing written"
+      "criterion": "The tester's round 1-4 scenarios and round 6 daemon restarts at the merge head",
+      "surface": "whole daemon (throwaway -tags e2e drivers)",
+      "command": "twelve scenarios (stale-ancestor ... parked-root-on-chain) and two restarts against a listing Dispatch stand-in (with envelopes; with the parent's move on the listing alone)",
+      "observed": "all ok",
+      "headSha": "dd04f49c458d1d150d4121204ba8358608f9c0d9",
+      "negativeControl": "wave-atomic and not-adoptable drive 409 CHILD_IN_OTHER_TREE and 409 CHILD_NOT_ADOPTABLE with nothing written"
     }
   ],
-  "ci": "At 3b91e647b693, read 2026-10-26T12:10Z: Tests 40317495101 queued; Legion Envoy and Contracts 40317494961 queued; Docs 40317495032 queued; Worker Image 40317495011 queued; PR Title 40317609872 queued (40317494960 cancelled). GitHub reports MERGEABLE; main 8298fc710323 still carries only 0051_issue_suspend_release, so 0052_issue_ancestry does not collide.",
+  "ci": "At dd04f49c458d, read 2026-10-26T15:15Z: Tests 40344153501 queued; Legion Envoy and Contracts 40344153598 queued; Docs 40344153510 queued; Worker Image 40344153589 queued; PR Title 40344385280 pending (40344153549, 40344357516 cancelled). GitHub reports MERGEABLE; main 0587774a744f's highest migration is 0053.",
   "verdictProvider": "provider not verified (no review subagents ran)"
 }
