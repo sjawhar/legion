@@ -101,7 +101,7 @@ function harnessEnvironment(databaseUrl: string): string {
   const variables = [
     ...harnessListeners.map((listener) => listener.variable),
     "DISPATCH_E2E_AGENT_SECRETS_URL",
-    "DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE",
+    "DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE",
   ];
   const given = variables.filter((variable) => process.env[variable] !== undefined);
   return [

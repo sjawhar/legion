@@ -66,15 +66,15 @@ type DispatchArgs struct {
 	SignInClientSecret pulumi.StringInput `pulumi:"signInClientSecret" provider:"secret"`
 	SignInDomain       string             `pulumi:"signInDomain"`
 
-	// AgentSecretsUrl and agentSecretsTokenSecret turn on Dispatch's secrets-broker relay
-	// together: DISPATCH_AGENT_SECRETS_URL (an absolute http(s) URL with no path; a trailing
-	// slash is trimmed, as Dispatch trims it) and the token the app reads at run time from the
-	// file DISPATCH_AGENT_SECRETS_TOKEN_FILE names. The token is never an input:
-	// AgentSecretsTokenSecret is the Secret Manager secret's resource path
-	// (projects/<project>/secrets/<id>), mounted through the Secret Manager CSI driver, so its
-	// value never enters the component or its state. Set both or neither.
-	AgentSecretsUrl         string             `pulumi:"agentSecretsUrl,optional"`
-	AgentSecretsTokenSecret pulumi.StringInput `pulumi:"agentSecretsTokenSecret,optional"`
+	// AgentSecretsUrl and agentSecretsAudience turn on Dispatch's secrets-broker relay together:
+	// DISPATCH_AGENT_SECRETS_URL (an absolute http(s) URL with no path; a trailing slash is
+	// trimmed, as Dispatch trims it) and the audience of the projected ServiceAccount token the
+	// app presents to the broker on every call, read at call time from the file
+	// DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names. AgentSecretsAudience is the broker's
+	// BROKER_K8S_OIDC_AUDIENCE: the kubelet mints the token for it and refreshes it in place, so
+	// no token is an input, a stored secret or part of the component's state. Set both or neither.
+	AgentSecretsUrl      string `pulumi:"agentSecretsUrl,optional"`
+	AgentSecretsAudience string `pulumi:"agentSecretsAudience,optional"`
 
 	// AppClientId, appId, appPrivateKeySecretName and appPrivateKeySecretKey turn on Dispatch's
 	// GitHub App together: DISPATCH_APP_CLIENT_ID and DISPATCH_APP_ID as plain values, and
@@ -124,6 +124,7 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 		{"signInClientId", args.SignInClientId},
 		{"signInDomain", args.SignInDomain},
 		{"agentSecretsUrl", args.AgentSecretsUrl},
+		{"agentSecretsAudience", args.AgentSecretsAudience},
 		{"appClientId", args.AppClientId},
 		{"appId", args.AppId},
 		{"appPrivateKeySecretName", args.AppPrivateKeySecretName},
@@ -175,7 +176,8 @@ type dispatchSettings struct {
 	images                                      struct{ envoy, tailscale, proxy string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
-	agentSecretsURL, appClientID, appID         string
+	agentSecretsURL, agentSecretsAudience       string
+	appClientID, appID                          string
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
@@ -262,13 +264,13 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if args.SignInClientSecret == nil {
 		return dispatchSettings{}, errors.New("signInClientSecret is required")
 	}
-	if args.AgentSecretsTokenSecret != nil && args.AgentSecretsUrl == "" {
-		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsTokenSecret is set")
+	if args.AgentSecretsAudience != "" && args.AgentSecretsUrl == "" {
+		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsAudience is set")
 	}
 	agentSecretsURL := strings.TrimSuffix(args.AgentSecretsUrl, "/")
 	if args.AgentSecretsUrl != "" {
-		if args.AgentSecretsTokenSecret == nil {
-			return dispatchSettings{}, errors.New("agentSecretsTokenSecret is required when agentSecretsUrl is set")
+		if args.AgentSecretsAudience == "" {
+			return dispatchSettings{}, errors.New("agentSecretsAudience is required when agentSecretsUrl is set")
 		}
 		// The shape Dispatch itself requires of DISPATCH_AGENT_SECRETS_URL, checked here so a bad
 		// URL fails the resolver rather than the pod's boot. It is rendered as a plain environment
@@ -328,6 +330,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.signIn.clientID = args.SignInClientId
 	s.signIn.domain = args.SignInDomain
 	s.agentSecretsURL = agentSecretsURL
+	s.agentSecretsAudience = args.AgentSecretsAudience
 	s.appClientID = args.AppClientId
 	s.appID = args.AppId
 	s.appKeySecretName = args.AppPrivateKeySecretName

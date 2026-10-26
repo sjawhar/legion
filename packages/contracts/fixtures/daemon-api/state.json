@@ -473,6 +473,13 @@
         "slack_channels": [
           "C0123ABCD",
           "C0123ABCE"
+        ],
+        "deploys": [
+          {
+            "repo": "sjawhar/legion",
+            "workflow": ".github/workflows/release.yaml",
+            "step": "Apply"
+          }
         ]
       },
       "WIDGETS": {
@@ -483,7 +490,8 @@
             "\\.sql$"
           ]
         },
-        "slack_channels": []
+        "slack_channels": [],
+        "deploys": []
       }
     },
     "gates": {

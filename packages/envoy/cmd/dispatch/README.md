@@ -63,7 +63,7 @@ carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
+| `DISPATCH_APP_PEM_B64` | GitHub App private key, as a PEM or the base64 of a PEM: a value holding `-----BEGIN` is the PEM itself, and any other is base64-decoded. A key that does not parse stops boot with an error naming the variable, never the key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
 
 When no GitHub App credentials are configured, the server still starts, but
@@ -847,8 +847,11 @@ questions, comment bodies, and issue messages are indexed into `refs` on every w
 that introduced it), and creates the `graph_edges` view, which unions those mentions with the
 structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`,
 `owned_by`, `replies_to`, `followed_by`). `GET /api/v1/references?to=<ref>` lists everything that
-points at a node and `?from=<ref>` everything it points to, cross-project. The migration refuses
-to run when an ask or comment anchor carries a non-uuid `artifact_id`.
+points at a node and `?from=<ref>` everything it points to, cross-project. A row whose other end is
+a node kind the running build does not know (a newer build's, read during a rolling deploy) is left
+out of every list and every count that build serves (`nodeLoaders`, `refs/graph.go`, names the
+kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
+`artifact_id`.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs

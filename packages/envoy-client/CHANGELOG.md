@@ -39,6 +39,14 @@
 
 ### Fixed
 
+- The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
+  flag or command, a missing or unknown host, a session it cannot name a directory for, a file
+  that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader
+  of the ledger now sees a call whose output a pipe, `$(…)` or another program swallowed. A call
+  with no session id logs nothing, as before. A `--help` that prints help and a `--dry-run` that
+  passes its checks log nothing; a `--help` of an unknown command and a `--dry-run` with a bad
+  argument are refused, and logged like any other refusal.
+
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
   aborts the lookup and returns the origin without `tmux` and `pane`. An aborted `defaultExec` call
   kills its child with SIGKILL. A tmux client waiting to connect to a tmux server too busy to
@@ -232,6 +240,20 @@
 
 ### Added
 
+- `dispatch-cli` exports `cliRefusals(text)`, which lists each refusal line the `dispatch` CLI
+  printed in `text`, with the command a `was not called` line names (null for a usage refusal).
+  It reads the CLI's output as a transcript holds it, so a refusal counts when a pipe hid the
+  CLI's exit. A warning, the note that the session's state was not written, and the notice of a
+  file that is not read are not refusals. pi-legion's skill-scenario scorer reads refusals with it.
+- `dispatch read --events N` lists an issue's last N events and `--all-events` every one, on an
+  issue read and on its `dispatch://KEY/log`; without either the read lists the last 10, as before.
+  `DispatchClient.read` takes `{ events: N | "all" }` (`IssueReadOptions`; `DEFAULT_ISSUE_READ_EVENTS`
+  when absent) and reads the newest N with `GET /api/v1/issues/{key}/events`, 200 to a request,
+  the most one request may ask for. Both flags together, or either beside a read that lists no
+  events (a document summary, an ask, a comment, a message's conversation, the issue's children),
+  are refused before any request, naming what the read prints instead. An agent that audits who
+  asked what and which ask was answered reads it with the command, not the events API by hand. A
+  `dispatch://KEY/children` read reads only the issue, no longer its last 10 events.
 - `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
   repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
   `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the

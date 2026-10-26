@@ -140,10 +140,11 @@ type DepsInput struct {
 	OIDC          *oidc.Verifier
 	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
 	AgentStream agentstream.Source
-	// AgentSecretsURL is the secrets broker's UI-bearer API base URL (DISPATCH_AGENT_SECRETS_URL);
-	// empty means the feature is off. AgentSecretsToken is the resolved UI bearer.
-	AgentSecretsURL   string
-	AgentSecretsToken string
+	// AgentSecretsURL is the secrets broker's API base URL (DISPATCH_AGENT_SECRETS_URL); empty
+	// means the feature is off. AgentSecretsTokenFile is the file holding Dispatch's own
+	// projected Kubernetes ServiceAccount token, which the client presents on every broker call.
+	AgentSecretsURL       string
+	AgentSecretsTokenFile string
 	// Files is the uploaded-file store; nil keeps files in Postgres. See Deps.Files.
 	Files            files.Store
 	TestHooksEnabled bool
@@ -185,7 +186,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	var agentSecretsClient *agentsecrets.Client
 	if url := strings.TrimSpace(input.AgentSecretsURL); url != "" {
-		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsToken)
+		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsTokenFile)
 	}
 	heartbeat := input.StreamHeartbeat
 	if heartbeat == 0 {

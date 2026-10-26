@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -48,27 +47,10 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// multiprocessNATSEnv names a NATS server already running beside the tests, the one the INFRA-66
-// pod harness starts. See multiprocessNATS.
-const multiprocessNATSEnv = "DISPATCH_TEST_NATS_URL"
-
-// multiprocessNATS is the NATS server this file's processes share: the one
-// DISPATCH_TEST_NATS_URL names when it is set, and otherwise a container of this test's own.
-//
-// Both paths exist because the two places these tests run differ. CI has Docker, so
-// testnats.Start gives each run a server nothing else has touched - the testcontainers NATS
-// module's default command is `-DV -js` (modules/nats's Run), so JetStream, which Dispatch's
-// outbox needs for its stream, is on without this passing anything. A development pod has no
-// Docker at all, so testnats.Start cannot run there; the harness runs one `nats-server -js` for
-// the pod instead and names it in the environment.
-//
-// A server named in the environment outlives the run, so a row that reads the notification
-// stream reads it from where it stood when that row began (streamHead), never from empty.
+// multiprocessNATS is the NATS server this file's processes share: one of this test's own, with
+// JetStream for Dispatch's outbox stream, running in this test process and ending with the test.
 func multiprocessNATS(t *testing.T) string {
 	t.Helper()
-	if url := strings.TrimSpace(os.Getenv(multiprocessNATSEnv)); url != "" {
-		return url
-	}
 	_, url := testnats.Start(t)
 	return url
 }
@@ -360,8 +342,7 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JetStream context: %v", err)
 	}
-	// The stream outlives a run against the harness's own NATS, so this row reads only what it
-	// publishes itself.
+	// This row counts only what it publishes itself: readStreamFrom starts past this head.
 	head := streamHead(t, js)
 
 	lane := make(chan contracts.Envelope, 256)
@@ -452,9 +433,10 @@ func waitForEveryEventPublished(t *testing.T, database *store.Store, within time
 	}
 }
 
-// streamHead is the last sequence the notification stream holds, read before a row publishes
-// anything: readStreamFrom reads past it, so an earlier run's messages on a long-lived server are
-// never counted as this row's.
+// streamHead is the last sequence the notification stream holds when a row begins, read before
+// that row publishes anything: readStreamFrom reads past it, so nothing already on the stream is
+// counted as the row's. A row starts a NATS server of its own, whose stream begins empty, so the
+// head it reads is zero; reading it is what keeps that an assumption the row does not make.
 func streamHead(t *testing.T, js natsgo.JetStreamContext) uint64 {
 	t.Helper()
 	info, err := js.StreamInfo(bus.Stream)
@@ -713,7 +695,7 @@ func TestADocumentWriteOnOneProcessClosesTheStaleRoomOnTheOther(t *testing.T) {
 	pair.a.createProject(t, project, "Documents")
 	_, artifactID := pair.a.createIssueIn(t, project, "Open here, written there", "before")
 
-	editor := pair.a.openEditor(t, artifactID, "before\n")
+	editor := openSyncedEditor(t, pair, artifactID, "before\n")
 	wrote := time.Now()
 	pair.b.call(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits",
 		`{"ops":[{"op":"replace","find":"before","with":"after"}]}`, http.StatusOK)
@@ -751,6 +733,64 @@ func settlementOwedFor(t *testing.T, pair *dispatchPair, artifactID string) bool
 		t.Fatalf("read whether %s owes a settlement: %v", artifactID, err)
 	}
 	return owed
+}
+
+// storedHead is the version of the document's latest durable update, which is the version a room
+// of it must stand at to append anything (ErrRoomBehindHead).
+func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
+	t.Helper()
+	var head int64
+	if err := pair.database.Pool.QueryRow(context.Background(),
+		`select coalesce(max(version), 0) from doc_updates where artifact_id = $1`, artifactID).Scan(&head); err != nil {
+		t.Fatalf("read the stored head of %s: %v", artifactID, err)
+	}
+	return head
+}
+
+// openSyncedEditor opens a spec tab on A, as openEditor does, and returns once the update the tab
+// sends as it syncs is stored, so that whatever B writes next is the only thing that can leave A's
+// room behind the durable head.
+//
+// A browser's provider answers the room's sync step 1 with its own state (docstest.Peer.read, as
+// y-websocket does), and the room appends that update even when it changes nothing, since ygo runs
+// the room's update observer for every transaction it commits. An append from a room standing
+// behind the head is refused by the durable gate, and the refusal fails the room
+// (ErrRoomBehindHead; docs/stale_room.go names this path): the room closes and the browser
+// reconnects. That is correct for a browser, but a row timing which path closes A's room reads it
+// as some other path. So a tab whose update is still on its way when B's write lands closes its
+// own socket within milliseconds of that write, which is how the refused-notification row failed
+// 2 of 20 runs on a development machine (dispatch://INFRA-396).
+//
+// The head is read before the dial, and nothing else writes the document while the tab connects:
+// B writes only after this returns, and a settlement is at least the settle delay away (2 s by
+// default). So the head moves by exactly one, the tab's own update, and anything more fails the
+// row rather than letting it run on with that update still on its way. The wait is openEditor's
+// own ten seconds: on a loaded development machine 52 such updates were stored 16-294 ms after
+// the dial, and one was not stored within a second. A tab whose update is not stored in ten fails
+// the row: either the room stopped storing an update for a sync that changes nothing, and this
+// wait has outlived its reason, or the machine is too slow for the row. How much of the eviction
+// window a reconnect spent is the gap burstLeavingTheRoomBehind asserts.
+func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
+	t.Helper()
+	const within = 10 * time.Second
+	before := storedHead(t, pair, artifactID)
+	dialled := time.Now()
+	editor := pair.a.openEditor(t, artifactID, want)
+	for {
+		head := storedHead(t, pair, artifactID)
+		switch {
+		case head == before+1:
+			t.Logf("the tab's own sync update was stored %v after it dialled the room", time.Since(dialled))
+			return editor
+		case head > before+1:
+			t.Fatalf("the document moved from update %d to %d while a tab connected, and only the tab's own sync update was to be stored: something else wrote it, and the tab's update may still be on its way",
+				before, head)
+		case time.Since(dialled) >= within:
+			t.Fatalf("the tab's own sync update was not stored within %v of its dial: the document still stands at update %d. Either the room no longer stores an update for a sync that changes nothing, which makes this wait unnecessary, or the machine is too slow for this row.",
+				within, before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
@@ -800,9 +840,9 @@ const staleRoomEvictInterval = 2 * time.Second
 // whose sum passed it would be evicted on the spot by a notification the interval allowed, which
 // is a different scenario wearing this one's name. This row's first construction went wrong that
 // way once.
-func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID string, beforeReload func()) (*docstest.Peer, time.Time) {
+func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID string) (*docstest.Peer, time.Time) {
 	t.Helper()
-	editor := pair.a.openEditor(t, artifactID, "before\n")
+	editor := openSyncedEditor(t, pair, artifactID, "before\n")
 	writeThroughRetrying503s(t, pair.b, artifactID, "before", "middle")
 	var evicted time.Time
 	select {
@@ -824,6 +864,20 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	case <-time.After(30 * time.Second):
 		t.Fatalf("the room A held never closed after B's first write:\n%s", pair.a.Output.String())
 	}
+	// The tab reconnects the moment its socket closes, as the dashboard's document provider does
+	// (@hocuspocus/provider's initialDelay is 0, features/doc/connection.ts), so the reloaded room's
+	// load - which arms the settlement the document owes, the settle delay out - lands with the
+	// eviction that starts the window. A reconnect that waited for the eviction's log line first
+	// put up to that poll's 50 ms between the two, so the evictor's re-examination at the window's
+	// end and that settlement met less often than they do for a browser (dispatch://INFRA-396). Its
+	// own sync update is stored before the trailing write (openSyncedEditor), so that write alone
+	// leaves the room behind the head.
+	//
+	// Dialling this early can land in ygo's own window between a close's peer hang-up and its
+	// removal of the room, where the dial is refused: a real browser's reconnect has the same
+	// window, and the row then fails at its open, naming the refusal, rather than passing on
+	// something it did not measure.
+	reconnected := openSyncedEditor(t, pair, artifactID, "middle\n")
 	// The eviction's own line is written after the room has closed, so it is waited for rather
 	// than read the moment the socket went.
 	pair.a.waitForLog(t, 10*time.Second,
@@ -831,10 +885,6 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	if evictions := evictionsOf(pair.a, artifactID); evictions != 1 {
 		t.Fatalf("want one eviction after the first write, got %d", evictions)
 	}
-	if beforeReload != nil {
-		beforeReload()
-	}
-	reconnected := pair.a.openEditor(t, artifactID, "middle\n")
 	wrote := time.Now()
 	writeThroughRetrying503s(t, pair.b, artifactID, "middle", "after")
 	// Measured to the write's own answer, not to the moment it was begun: the notification is
@@ -873,8 +923,9 @@ func requireTheRoomClosed(t *testing.T, p *dispatchProcess, editor *docstest.Pee
 }
 
 // requireTheSecondEviction is what credits the close above to the window: editor.Ended says the
-// socket went, not who ended it, and both rows below have another path that ends it - the
-// settlement rescue's failRoomLocked for the room that owes one, an unload for either - so the
+// socket went, not who ended it, and both rows below have other paths that end it - a browser
+// append the durable gate refused (ErrRoomBehindHead), which fails the room, the settlement
+// rescue's failRoomLocked for the room that owes one, an unload for either - so the
 // close is the window's only if the evictor closed that room a second time. The first eviction
 // is asserted in burstLeavingTheRoomBehind, so the count here is two. The line is written after
 // the room has closed, so it is waited for rather than counted the moment the socket went; ten
@@ -893,7 +944,7 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 			t.Fatalf("%s: the evictor closed this room %d times, and the burst leaves it exactly two - the first write's and the refused notification's window - so something else wrote this document:\n%v",
 				what, evictions, p.logLines("closed a document room another process's write left behind", "room="+artifactID))
 		case time.Now().After(deadline):
-			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - the settlement rescue's failRoomLocked, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
+			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - a browser append the durable gate refused, the settlement rescue's failRoomLocked, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
 				what, evictions, budget,
 				p.logLines("closed a document room another process's write left behind", "room="+artifactID),
 				p.logLines("close a document room another process's write left behind", "room="+artifactID),
@@ -936,7 +987,7 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 	pair.a.createProject(t, project, "Owes a settlement")
 	_, artifactID := pair.a.createIssueIn(t, project, "Written in a burst elsewhere", "before")
 
-	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID, nil)
+	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID)
 	if !settlementOwedFor(t, pair, artifactID) {
 		t.Fatalf("this document owes no settlement, so this row is not the branch it is named for")
 	}
@@ -991,7 +1042,7 @@ func TestTheRefusedNotificationClosesARoomNoSettlementWillFail(t *testing.T) {
 	pair.b.createProject(t, project, "No settlement will fail it")
 	_, artifactID := pair.b.createIssueIn(t, project, "Open here, typed into never", "before")
 
-	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID, nil)
+	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID)
 	requireTheRoomClosed(t, pair.a, reconnected, artifactID, wrote, 30*time.Second, "no settlement will fail it")
 	if settled := pair.a.logLines("dispatch: settle document", artifactID); len(settled) > 0 {
 		t.Errorf("A settled this room after all, so something other than the window could have closed it:\n%v", settled)
