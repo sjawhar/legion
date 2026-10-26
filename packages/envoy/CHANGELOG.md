@@ -39,6 +39,22 @@
   Legion agent registry entries for the issue, which add `legion: {role, role_token, started_at,
   replaced_by, replaced_at}`), each with `reasons` and `last_at`. A listener that is not
   configured or does not answer leaves `legion_registry: "unavailable"` and the rest of the answer.
+- A release of a `github-app` secret can be narrowed: `POST /v1/grants/{id}/values` takes an
+  optional `github_app` body (`owner`, `repositories`, `read_only`) that mints the token of one
+  account `github-owners` lists alone, sent to GitHub as the `access_tokens` body, limited to
+  those repositories of the account (at most 100), to `contents: read` and `metadata: read`, or
+  to both; a token limited to repositories alone keeps every permission the App holds. It can
+  only narrow, applies to that release alone, and the answer names it as `github_app`, which the
+  broker releases only once GitHub's own answer shows the token holds no more, revoking at GitHub
+  a token whose answer holds more. A bad body, a `repositories` list present but empty among
+  them, is `400 INVALID_NARROWING`, a narrowing of a grant holding no `github-app` secret
+  `400 NARROWING_NOT_APPLICABLE`, one to an account its `github-owners` tag does not list
+  `403 NARROWING_OWNER_NOT_LISTED`, and one GitHub refuses (a repository the installation does not
+  reach) `422 NARROWING_REFUSED`; the last two are logged at WARN as `broker: narrowing refused`.
+  `agent-secrets`' exec form takes `--github-owner`, `--github-repo` and `--github-read-only`,
+  exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
+  and runs its command only once the broker names the narrowing it applied, so deploy the broker
+  before any caller passes `--github-owner`.
 - Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
   Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
   `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces
@@ -754,6 +770,11 @@
   edit, a named version, an upload, a review, an approval request, a claim, a PATCH outside the
   closed allow-list, and the comment actions resolve, reopen, edit, accept and reject on an
   existing comment are still `409 ISSUE_CLOSED` until the issue reopens.
+- A rate-limited answer to any minter call, a release with no narrowing and a Google login's
+  refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
+  its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
+  body naming a rate limit (GitHub's secondary limit, Google's `rateLimitExceeded`). A rate limit
+  is not the App owner's to fix. The release's answer is unchanged, `502 MINT_FAILED`.
 - **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
   its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
   Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
