@@ -798,9 +798,11 @@ func prNaming(n int, merged time.Time, issue string) delivery.DeliveryPullReques
 func seedHubComponents(t *testing.T, database *store.Store) {
 	t.Helper()
 	for _, statement := range []string{
+		`insert into architecture_sources (project_key, id, repo, branch, installation_id, created_by)
+			values ('HUB', 1, 'acme/hub', 'main', 1, '{"kind":"system","id":"test"}')`,
 		`insert into architecture_snapshots (id, project_key, commit, files) values (901, 'HUB', 'c1', '{}')`,
-		`insert into components (project_key, id, title, prose, parent, snapshot_id) values
-			('HUB', 'platform', 'The platform', '', null, 901), ('HUB', 'api', 'Public API', '', 'platform', 901)`,
+		`insert into components (project_key, id, title, prose, parent, snapshot_id, source_id) values
+			('HUB', 'platform', 'The platform', '', null, 901, 1), ('HUB', 'api', 'Public API', '', 'platform', 901, 1)`,
 	} {
 		if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
 			t.Fatalf("seed components: %v\n%s", err, statement)

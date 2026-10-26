@@ -84,6 +84,9 @@ interface ConversationTabProps {
   focusItemId?: string;
   isClosed: boolean;
   issueKey: string;
+  /** Called once, when the tab first places the reader at the newest card (`useFollowLatest`'s
+   *  `onFirstPlacement`), before the parent's layout effects of that commit run. */
+  onFirstPlacement?: () => void;
   state: UserState | undefined;
   visible: boolean;
 }
@@ -770,6 +773,7 @@ export function ConversationTab({
   focusItemId,
   isClosed,
   issueKey,
+  onFirstPlacement,
   state,
   visible,
 }: ConversationTabProps): ReactNode {
@@ -929,11 +933,22 @@ export function ConversationTab({
   };
   const phoneReplyTargetsThread =
     phoneThread !== undefined && phone.replyTo?.id === phoneThread.root.id;
-  // `useFollowLatest` follows the newest card by a number that rises with its recency; the list
-  // is ordered by activity, so that number is the activity's own millisecond.
-  const newestShown = shown.at(0);
+  // The list is on the page only once all three reads answer: `loading` and `failed` both hide it
+  // (the early returns below) and withhold `latestItemSeq`, so the two cannot drift apart. The
+  // number is the newest activity's own millisecond, since the list is ordered by activity.
+  // Passed while a read is still pending, the hook's first placement would find no card and
+  // scroll to the top, and a read answering last without changing the newest time would leave
+  // the reader there (INFRA-303).
+  const loading = asks.isPending || comments.isPending || messages.isPending;
+  const failed = asks.isError || comments.isError || messages.isError;
+  const newestShown = loading || failed ? undefined : shown.at(0);
   const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
-  const follow = useFollowLatest({ enabled: visible, latestItemSeq, ownSendCount });
+  const follow = useFollowLatest({
+    enabled: visible,
+    latestItemSeq,
+    onFirstPlacement,
+    ownSendCount,
+  });
   const { agents } = useAgents(visible);
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
@@ -1021,10 +1036,10 @@ export function ConversationTab({
       op: isPinnedConversation(dismissed, id) ? "unpin" : "pin",
     }));
 
-  if (asks.isPending || comments.isPending || messages.isPending) {
+  if (loading) {
     return <p className={textMutedOnCanvas}>Loading conversation…</p>;
   }
-  if (asks.isError || comments.isError || messages.isError) {
+  if (failed) {
     return <p className={dangerText}>Could not load the conversation.</p>;
   }
 

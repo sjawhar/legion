@@ -53,10 +53,16 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
         : `set the default assignee of ${event.payload.project} to ${event.payload.assignee}`;
     case "settings.architecture_source.updated":
       return `${event.payload.deleted ? "removed" : "updated"} architecture source ${event.payload.source.repo}`;
+    // An event retained from before a project had several sources names no repository and
+    // keeps its original wording.
     case "architecture.synced":
-      return `synced the architecture model at ${event.payload.commit.slice(0, 12)}`;
+      return event.payload.repo === undefined
+        ? `synced the architecture model at ${event.payload.commit.slice(0, 12)}`
+        : `synced the architecture model from ${event.payload.repo} at ${event.payload.commit.slice(0, 12)}`;
     case "architecture.sync_failed":
-      return `failed to sync the architecture model: ${event.payload.error}`;
+      return event.payload.repo === undefined
+        ? `failed to sync the architecture model: ${event.payload.error}`
+        : `failed to sync the architecture model from ${event.payload.repo}: ${event.payload.error}`;
     case "user_state.updated":
       return "updated user state";
     case "user_agent_state.updated":
