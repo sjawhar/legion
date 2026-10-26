@@ -1154,6 +1154,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d))
+	v1.HandleFunc("/v1/replay", replayHandler(d))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})
