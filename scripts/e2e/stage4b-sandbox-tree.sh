@@ -2146,11 +2146,13 @@ jq_modules_compile() {
 # tool ran and answered, where assistant_said only proves the model said so. An error result never
 # counts, and a result is the tool's by the call it answers, not by the toolName it records: a write
 # to xd://<name> records write (lib/stage4b-tools.jq).
+# shellcheck disable=SC2016 # $tool and $want are jq's own variables
 tool_result_said() {
   session_jq "$1" -e --arg tool "$2" --arg want "$3" 'include "stage4b-tools"; tool_result_said($tool; $want)' >/dev/null
 }
 # tool_ran SESSION TOOL: one call of TOOL in the session returned without error
 # (lib/stage4b-tools.jq).
+# shellcheck disable=SC2016 # $tool is jq's own variable
 tool_ran() {
   session_jq "$1" -e --arg tool "$2" 'include "stage4b-tools"; tool_ran($tool)' >/dev/null
 }
@@ -2164,6 +2166,7 @@ tool_ran() {
 # dispatched through eval, or through a write to xd://bash whose content is no JSON object, has no
 # command, so a bound bash assertion does not see it, while `tool_result_said SESSION bash TEXT`
 # still counts it.
+# shellcheck disable=SC2016 # $tool, $args and $want are jq's own variables
 tool_result_answered() {
   session_jq "$1" -e --arg tool "$2" --arg args "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' >/dev/null
 }
@@ -2172,6 +2175,7 @@ tool_result_answered() {
 # arguments without the intent otherwise) on one line, each with its call's arguments, an error
 # marked and its text trimmed: what the tool did return, for the fail line of an expectation it did
 # not meet.
+# shellcheck disable=SC2016 # $tool and $args are jq's own variables
 tool_result_quotes() {
   session_jq "$1" -r --arg tool "$2" --arg args "${3:-}" 'include "stage4b-tools";
     [tool_results($tool)[] | select(arguments_carry($tool; $args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
@@ -2220,6 +2224,7 @@ full_agent_merger_message() {
 # of the session that returned without error, whose text carries LOGIN; nothing when none does.
 # The id is the task's name, and the subagent's own session lies beside its parent's at <session
 # stem>/<id>.jsonl, where review-pair reads the pair's.
+# shellcheck disable=SC2016 # $want is jq's own variable
 full_agent_task_id() {
   session_jq "$1" -r --arg want "$2" 'include "stage4b-tools";
     [tool_result_texts("task")[] | select(contains($want)) | capture("<task-result id=\"(?<id>[^\"]+)\"") | .id] | first // ""'
@@ -2228,6 +2233,7 @@ full_agent_task_id() {
 # its own bash calls returned APP (login), whether its yield was accepted (yield: an accepted yield
 # ends a subagent, as review-pair reads it), whether any bash returned OTHER (other, the other App,
 # which must be false), and its bash results trimmed.
+# shellcheck disable=SC2016 # $app, $other and $bash are jq's own variables
 full_agent_subagent_verdict() {
   session_jq "$1" -c --arg app "$2" --arg other "$3" 'include "stage4b-tools";
     tool_results("bash") as $bash
@@ -2237,6 +2243,7 @@ full_agent_subagent_verdict() {
 }
 # full_agent_summary SESSION APP prints one line of what the session's tools returned: the login,
 # the browser's title line, the toolchain's versions and the first search hit, each trimmed.
+# shellcheck disable=SC2016 # $app, $texts and $text are jq's own variables
 full_agent_summary() {
   session_jq "$1" -r --arg app "$2" 'include "stage4b-tools";
     def said($texts; $text): [$texts[] | select(contains($text))] | first // "none";
@@ -3456,7 +3463,7 @@ released_lines() { log_lines "$released_msg" | jq -c --arg issue "$1" 'select(.i
 # grep -c exits 1 on a count of 0, which errexit would take as a failure; `|| true` keeps the count.
 released=$(released_lines "$child1" | grep -c . || true)
 [ "$released" = 0 ] || fail "the daemon logged $child1's release before its done: $(released_lines "$child1" | head -1)"
-set_status "$child1" done
+set_status "$child1" "done"
 # A gone-wait holds the read to its exit status: `[ -z "$(...)" ]` would take a failed read (an API
 # refusal, a throttle, op's timeout) for an empty answer and pass at once.
 child1_released() {
@@ -4651,9 +4658,9 @@ if [ "$now_s" -lt $((before_expiry_s + 60)) ]; then
   note "waiting $((before_expiry_s + 60 - now_s)) s for the lease read at issue-independence to expire"
   sleep $((before_expiry_s + 60 - now_s))
 fi
-old_answer=$(GH_TOKEN="$gh_before_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's token read at issue-independence still answers GitHub after its lease's expiry $before_expiry: $old_answer"
+old_answer=$(GH_TOKEN="$gh_before_token" GITHUB_TOKEN='' GH_HOST='' GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's token read at issue-independence still answers GitHub after its lease's expiry $before_expiry: $old_answer"
 grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's token read at issue-independence was refused for another reason than its expiry: $old_answer"
-new_answer=$(GH_TOKEN="$gh_after_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
+new_answer=$(GH_TOKEN="$gh_after_token" GITHUB_TOKEN='' GH_HOST='' GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
 [ "$new_answer" = "$(role_app architect)" ] || fail "the architect's refreshed token answers as $new_answer, want $(role_app architect)"
 unset gh_before_token gh_after_token
 note "after $before_expiry the token read at issue-independence answers 401 and the refreshed one $new_answer"
@@ -6082,7 +6089,7 @@ expect_failure pod-shape-wrong-runtime test -z "$(pod_shape_verdict "$evidence/c
 jq -c '.object.spec.containers |= map(if .name == "tester" then .resources.limits.cpu = "2" else . end) | .object.status.qosClass = "Burstable"' "$work/last-ready-pod.json" >"$work/bursting-shape.json"
 cat "$evidence/pod-watch.json" "$work/bursting-shape.json" >"$evidence/controls/pod-watch-bursting.json"
 bursting=$(pod_shape_verdict "$evidence/controls/pod-watch-bursting.json")
-grep -qF "container tester requests" <<<"$bursting" && grep -qF "qosClass Burstable" <<<"$bursting" ||
+{ grep -qF "container tester requests" <<<"$bursting" && grep -qF "qosClass Burstable" <<<"$bursting"; } ||
   fail "the pod shape did not refuse a recorded pod whose tester container is limited past its request and that is Burstable: ${bursting:-no departure}"
 note "negative control: a recorded pod whose tester container bursts past its request departs from the pod shape: $(tr '\n' ' ' <<<"$bursting" | cut -c1-300)"
 jq -c '.object.spec.affinity = {podAffinity: {requiredDuringSchedulingIgnoredDuringExecution: [{topologyKey: "kubernetes.io/hostname", labelSelector: {matchLabels: {"legion.dev/tree": .object.metadata.labels["legion.dev/tree"]}}}]}}' "$work/last-ready-pod.json" >"$work/pinned-shape.json"

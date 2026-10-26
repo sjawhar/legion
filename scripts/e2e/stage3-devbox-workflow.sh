@@ -1282,8 +1282,8 @@ restart_scenarios() {
   for dir in "$cred_root" "$cred_dir"; do
     [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
   done
-  [ "$(ls -A "$cred_root" | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(ls -A "$cred_root" | tr '\n' ' '), want $owner's directory alone"
-  [ "$(ls -A "$cred_dir" | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(ls -A "$cred_dir" | tr '\n' ' '), want config.yml and hosts.yml alone"
+  [ "$(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want $owner's directory alone"
+  [ "$(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want config.yml and hosts.yml alone"
   [ "$(stat -c %a "$cred_dir/hosts.yml")" = 600 ] || fail "$cred_dir/hosts.yml is mode $(stat -c %a "$cred_dir/hosts.yml"), want 600"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.msg == "tmux runtime: github credential written" and .role == "implementer")] | length > 0' <"$evidence/logs/daemon.log" >/dev/null ||
     fail "the daemon log has no 'github credential written' line for an implementer pane"
@@ -1296,7 +1296,7 @@ restart_scenarios() {
   # Negative control: a directory with no gh files is no credential — the same gh with it set is
   # refused by gh itself, naming GH_TOKEN, so the pane's identity comes from the daemon's files and
   # nothing else on this box.
-  if GH_CONFIG_DIR="$work/empty-gh" GH_TOKEN= GITHUB_TOKEN= GH_HOST= "$real_gh" api graphql -f query='{viewer{login}}' >/dev/null 2>"$evidence/cred-negative.txt"; then
+  if GH_CONFIG_DIR="$work/empty-gh" GH_TOKEN='' GITHUB_TOKEN='' GH_HOST='' "$real_gh" api graphql -f query='{viewer{login}}' >/dev/null 2>"$evidence/cred-negative.txt"; then
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"

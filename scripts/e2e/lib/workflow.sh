@@ -658,7 +658,7 @@ merge_when_clean_read() {
         autoMergeRequest { enabledAt mergeMethod } mergeQueueEntry { position state } } } }' \
     --jq '.data.repository.pullRequest | .state, .mergeStateStatus, .headRefOid, .headRefName, (.mergeCommit.oid // ""),
       (.autoMergeRequest.enabledAt // ""), (.autoMergeRequest.mergeMethod // ""), (.mergeQueueEntry.position // ""), (.mergeQueueEntry.state // "")' || true)
-  pull_request_state= pull_request_merge_state= pull_request_head= pull_request_head_ref= pull_request_merge_commit= pull_request_armed=
+  pull_request_state='' pull_request_merge_state='' pull_request_head='' pull_request_head_ref='' pull_request_merge_commit='' pull_request_armed=''
   [ "${#fields[@]}" -eq 9 ] || return 0
   pull_request_state=${fields[0]} pull_request_merge_state=${fields[1]} pull_request_head=${fields[2]}
   pull_request_head_ref=${fields[3]} pull_request_merge_commit=${fields[4]}
@@ -671,7 +671,7 @@ merge_when_clean() {
   local bound=${MERGE_WHEN_CLEAN_BOUND:-300} poll=${MERGE_WHEN_CLEAN_POLL:-0.5}
   local started=$SECONDS beat=$SECONDS polls=0 armed="" flag delete_branch=""
   for flag in "$@"; do [ "$flag" != --delete-branch ] || delete_branch=1; done
-  merge_when_clean_by= merge_when_clean_commit=
+  merge_when_clean_by='' merge_when_clean_commit=''
   note "waiting up to ${bound}s for $repo_name#$pr to merge: merged, enqueued or auto-merge armed is left to land; the proof human merges by hand only once it reads CLEAN with nothing armed"
   while ((SECONDS - started < bound)); do
     polls=$((polls + 1))

@@ -496,7 +496,7 @@ instruction_for() {
   esac
 }
 instructor() {
-  local issue spec role phase f key tick=0 n st cl cur live
+  local issue spec role phase f key tick=0 n st cl cur live watched
   trap - EXIT ERR
   set +e
   mkdir -p "$evidence/instructed"
@@ -504,7 +504,8 @@ instructor() {
     # One state read and one claims read per pass, so the watcher adds two daemon calls every two
     # seconds, not one per issue and role.
     if ! st=$(daemon_state 2>/dev/null) || ! cl=$(claims list --json 2>/dev/null); then sleep 2; continue; fi
-    for issue in $(cat "$work/instructor-issues"); do
+    mapfile -t watched <"$work/instructor-issues"
+    for issue in "${watched[@]}"; do
       cur=$(jq -r --arg i "$issue" '.issues[$i].phase // ""' <<<"$st")
       for spec in implementer:implementing tester:testing reviewer:reviewing implementer:retro merger:merging; do
         role=${spec%%:*} phase=${spec#*:}
@@ -726,7 +727,8 @@ holder_tree="${project}-900"
 # the directory, and a delivery first adopts the working copy for the role's App (jj metaedit), so it
 # is a jj repository of its own; the holder never touches the smoke repository.
 holder_dir="$state/workspaces/$repo/${holder_tree,,}"
-mkdir -p "$holder_dir" && jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
+mkdir -p "$holder_dir" || fail "could not create the holder's jj workspace"
+jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
 holder=$(claims spawn --json --tree "$holder_tree" --issue "$holder_tree" --role architect \
   --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, so this session holds the merge-queue role. Then reply with the single line 'holding merge-queue' and wait. Do nothing else." | jq -er .token)
 claim_registered() { claim_is "$1" '(.session // "") != ""'; }
