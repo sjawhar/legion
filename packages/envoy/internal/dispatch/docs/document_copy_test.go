@@ -223,7 +223,7 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 		if room == nil {
 			t.Fatal("the peer's room has gone")
 		}
-		// The room's own apply of a peer's update, as ygo makes it (sjawhar/ygo v1.51.3-sami.2,
+		// The room's own apply of a peer's update, as ygo makes it (sjawhar/ygo v1.51.3-sami.5,
 		// provider/websocket/peer_update.go:75-84), with the room's persistence taking what it
 		// leaves.
 		if err := crdt.ApplyUpdateV1(room, update, nil); err != nil {

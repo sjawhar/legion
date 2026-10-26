@@ -2,8 +2,9 @@
 
 Tracked Oh My Pi extension package `@sjawhar/pi-legion`: the Legion entry (`extensions/legion.ts`),
 the Legion lifecycle modules (`src/`), the task agents Legion's prompts dispatch (`agents/`), and
-the eight Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `ce-simplify-code`, `thermonuclear-code-quality`, `thermonuclear-deep-review`),
+the nine Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
+`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`,
+`thermonuclear-deep-review`),
 staged into `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. It is installed
 beside `@sjawhar/pi-envoy` (`packages/pi-envoy`), which every session loads for Envoy messaging and
 the Dispatch tools; the Legion daemon installs both into its Oh My Pi profile and a worker image
@@ -77,9 +78,9 @@ variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/e
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
 when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
 `workspace-init provision` init container (`initEnvironment`, `internal/runtime/sandbox/manifest.go`:
-the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME` when the issue's volume must already hold the clone
-or a retained session, `LEGION_WORKSPACE_RECOVERED_FROM` on a relaunch after that volume was lost,
-and the XDG base directories), which the image's own `legion`, built from the same commit as this
+the image's `PATH` and the XDG base directories, and nothing of a disk carried forward — the pod's
+disk is created with the pod and empty, so every provision is the first), which the image's own
+`legion`, built from the same commit as this
 plugin, reads. A change to any of these surfaces bumps the field and the
 daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
 history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
@@ -89,11 +90,25 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 35's `settings` on
+number is the one `DaemonAPIVersion` declares, last bumped by contract 39's one-container issue pod
+(INFRA-208: a sandbox locator of an issue pod's role names container `roles`, and `settings` on
+`GET /legion/v1/state` gives `runtime.kubernetes.resources` as `{issue, controller}`), after
+contract 38's blocked issues on `GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every
+root and child Legion is waiting to start behind an unfinished Dispatch issue, and
+`release_children` answers `started` and `held` beside `released`), after contract 37's pod-owned
+issue disk
+(INFRA-80: an issue's disk is a generic ephemeral volume its pod owns, created with the pod and
+deleted with it, so the init container above is no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the
+lost-disk machinery that variable drove — `workspace-init`'s exit code 3, its recovery marker, the
+probe for an issue's retained sessions and `legion sessions mark-lost` — is gone, and
+`runtime.kubernetes.session_store` must name a store that keeps sessions in a database, `postgres`
+or `cloudsql-iam`), after contract 36's pull request `state`
+on `GET /legion/v1/state` (INFRA-229: `open`, `merged` or `closed`, always emitted, since a merged
+root's close now waits for the rest of its tree), after contract 35's `settings` on
 `GET /legion/v1/state` (LEGION-791: the daemon's resolved legion.yaml with every credential,
 credential source and credential file path left out, parsed loosely so a later legion.yaml key
 bumps nothing), after contract 34's shared issue scratch
-(INFRA-31: every role container of a Kubernetes pod, a workflow role's and the
+(INFRA-31: every role of a Kubernetes pod, a workflow role's and the
 controller's, told the issue's own `/legion/scratch/{tmp,cache,data,bun/install/cache}` through
 `TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR`, beside the issue's
 `GOCACHE` and `GOMODCACHE` pair, with `XDG_STATE_HOME=/legion/scratch/state/<role>` the one
@@ -131,7 +146,7 @@ and `live` is gone from the capability status enum), after contract 20's control
 controller holds the review App's GitHub token like every role — `POST
 /legion/v1/controller/github-credential` answers the operator-launched controller's `legion
 controller start` the review App's gh files for the current controller capability, and the
-daemon-launched controller's pod gets the GitHub variables above like any role's container),
+daemon-launched controller's pod gets the GitHub variables above like any role of an issue pod),
 contract 19's token file (LEGION-631: the three routes that redeemed a grant for a GitHub or git
 credential and the grant request's `push` are gone, the pane
 gains the GitHub variables above and loses the absolute-path pins of its gh, git and jj, the
@@ -139,7 +154,8 @@ credential-helper variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/com
 `commit` and answers `note`; `POST /legion/v1/threads/resolve` is deleted), contract 18's
 independent issue pods, each on a volume of its own (LEGION-632: the init container's environment
 is the four surfaces above and nothing of a shared disk — no removable-workspaces list, no lock
-wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`), contract 17's `dispatch`
+wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`, the
+variable contract 37 removed), contract 17's `dispatch`
 command instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
 `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
@@ -241,7 +257,7 @@ grant on `/grants` and posts it with the request, so no grant is written to the 
 keeps its claim for resumption.
 
 A daemon that sets `controller: daemon` launches the controller itself, in a Sandbox pod of its own
-whose one container, `controller`, runs `legion launcher` as an issue pod's role containers do: the
+whose one container, `controller`, runs `legion launcher` as an issue pod's `roles` container does: the
 launcher starts the session's shim and Oh My Pi with `LEGION_CONTROLLER=1` and
 `LEGION_BOOT_TOKEN_FILE`, the generation's boot token it wrote into its private directory from the
 daemon's start command (`controllerSession` in
@@ -368,10 +384,11 @@ there; `pending` is refused on a phase completion) and `summary` alone, no hando
 the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
 (`packages/daemon/internal/api/handoff.go`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
-pull request's head, each refusal named in the merger's role prompt
+reported for its previous phase) and, for the merger's `ready: true`, reads the pull request's
+head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
+merger's role prompt
 (`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
-`note` is what READY's checks said when they read no head, or the by-hand note
+`note` is the already-merged sentence, for a pull request merged before READY, or the by-hand note
 (`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's

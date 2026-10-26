@@ -13,7 +13,7 @@ import (
 // and an issue routed to a role nobody holds reads as owned while nobody is working it. So every
 // issue read carries route_status beside the route, resolved from one GET /v1/sessions per
 // request (each listener row carries the roles its session holds), never one lookup per issue,
-// and stored nowhere. Like fetchLiveSessions, the listener call runs with no transaction open
+// and stored nowhere. Like fetchHolderLiveness, the listener call runs with no transaction open
 // and no pooled connection held (envoy_resolve.go carries the reason).
 //
 // no_holder is one read and says only "nobody right now": a session that restarts or moves
@@ -23,7 +23,8 @@ import (
 // releasing the expired claim as it answers (cmd/listener resolveLiveRoleHolder), so a read
 // would mutate role state and the next read would see "unclaimed" with no last_seen, and the
 // last-seen memory behind it is the answering listener's own process cache, not the shared
-// registry. The owner audit (skills/dispatch) asks for two reads ten minutes apart instead.
+// registry. The owner audit (skills/legion-controller/references/backlog-stewardship.md) and
+// `dispatch issues --help` (route_status) ask for two reads ten minutes apart instead.
 
 // routeRoster is one listener answer about who is running, read once per request. answered is
 // false when the listener is unconfigured or did not answer; every route then reads unknown.

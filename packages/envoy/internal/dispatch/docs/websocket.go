@@ -98,11 +98,23 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // lands its credit here instead: the room drops it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
+		// The failed room's update is dropped and its browser resends it to the room that
+		// replaces this one, but its class is taken all the same, so the work the record counts
+		// for it ends here. Left counted, it would be an append no callback can ever finish:
+		// the record - or the one registered in its place, which carries the updates the room's
+		// persistence never took (handOverFailedRoomLocked) - would wait on it for ever, so its
+		// settlement would retry without end, never closing a room behind the head
+		// (reloadRoomBehindHead), and the record would never be released (unusedLocked).
+		class, counted, found := a.service.consumeUpdateClass(room, update)
+		if found && class.durable {
+			a.service.finishDurableAppend(room, counted)
+		}
+		class.credit.landed()
 		return nil
 	}
-	class, found := a.service.consumeUpdateClass(room, update)
+	class, counted, found := a.service.consumeUpdateClass(room, update)
 	if found && class.durable {
-		defer a.service.finishDurableAppend(room)
+		defer a.service.finishDurableAppend(room, counted)
 	}
 	defer class.credit.landed()
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
@@ -373,7 +385,7 @@ func (s *Service) refuseIfRebuilding(room string) error {
 // allowInject decides whether ygo may apply an injection to a room. Its issue read goes
 // through the shared pool for a caller that need hold no connection of its own (the
 // settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
-// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.51.3-sami.2,
+// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.51.3-sami.5,
 // provider/websocket/inject.go:321-330): an injection refused here has published no room
 // placeholder for a connection-holder to park on, so nothing holding a connection is waiting
 // on this read. A vendored reordering of those two calls puts it back in the cycle.
@@ -405,8 +417,8 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
-	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.2,
-	// provider/websocket/inject.go:517-525) and closes the channel awaitRoomRecovery waits on
+	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.5,
+	// provider/websocket/inject.go:521-529) and closes the channel awaitRoomRecovery waits on
 	// only once CloseRoom has returned (failRoomLocked), so a wait here is a cycle: the load
 	// holds the eviction, and the eviction holds the load. No deadline breaks it either -
 	// both loaders that reach this one carry context.Background(), the settlement warm-up
@@ -434,19 +446,23 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The load takes no advisory lock, which a durable writer can hold for as long as its
 	// transaction runs: the row it reads is written whole by each writer's transaction, so a
-	// plain read sees one writer's commit or the one before it.
+	// plain read sees one writer's commit or the one before it. What the record has recorded by
+	// then is taken first, so an edit source recorded after the read is told from one before it.
+	mark := s.markEditSource(room)
 	owed, lastActor, err := readOwedSettlement(ctx, rooms, room)
 	if err != nil {
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
-	// returns (sjawhar/ygo v1.51.3-sami.2, provider/websocket/server.go:1762-1850: loadRoom closes
+	// returns (sjawhar/ygo v1.51.3-sami.5, provider/websocket/server.go:1765-1853: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	tree, err := treeOf(doc)
 	var markdown string
 	if err == nil {
 		markdown, err = documentMarkdown(tree)
 	}
+	// The load's rendering is the room's first measurement (keepReplica), which the peer update
+	// hook weighs the room's first update against and the room budget charges the load by.
 	var contentMarkdown *string
 	var askBlocks map[string]struct{}
 	switch {
@@ -477,21 +493,35 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// edit source the settlement names. A closed room keeps the row; it settles only after its
 	// issue reopens. A room that failed again while this load ran leaves the row for its own
 	// replacement.
-	if owed && open && lastActor != nil {
+	//
+	// The row is that source as the store has it, so it replaces whatever the record held for a
+	// room that has gone (a forced close keeps the record, evictRoom): a row naming none - an edit
+	// any of several connected browsers could have made - leaves the settlement its own actor
+	// rather than the last source an earlier room saw, and no row leaves no source, as on a fresh
+	// record. The record keeps its own when the row may be older than it (rowIsCurrent).
+	switch {
+	case !open || !mark.rowIsCurrent(state):
+	case owed && lastActor != nil:
 		state.lastActor = lastActor
 		state.unsettled = true
+	default:
+		state.lastActor = nil
+		state.unsettled = false
 	}
 	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
 	}
 	s.unlockState(room, state)
-	replica := s.keepReplica(doc, contentMarkdown)
+	// The log is opened before the observer is registered and before ygo hands the room to anyone
+	// (above), so it holds every transaction the room commits from here on, in commit order.
+	replica := s.keepReplica(doc, doc.OpenUpdateLog(), contentMarkdown)
 	// The room's charge in the room budget replaces the reservations of the sockets admitted to it
 	// (reserveRoom), which counted the stored version at both copies, with the count its load just
 	// made of the room's own document, at both copies too (roomCopies). From here the content every
-	// transaction adds is charged until a later count of its rendering re-bases it, and what the
-	// peer hook admits adds to the room's structure part (roomCharge).
-	charge := s.chargeLoadedRoom(room, doc, replica)
+	// transaction adds is charged, once per committed update as the replica drains the room's
+	// update log (renderedReplica.chargeAdded), until a later count of its rendering re-bases it,
+	// and what the peer hook admits adds to the room's structure part (roomCharge).
+	s.chargeLoadedRoom(room, doc, replica)
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -502,10 +532,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		if published, ok := origin.(*liveWriteOrigin); ok {
 			s.finishSuppressedPersistence(published.slot, update)
 		}
-		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
-			// A repair is the server's own write, charged as every transaction is: by the content
-			// it adds, which the next count of a rendering holding it re-bases (contentAdded).
-			charge.adds(contentAdded(update))
+		repair, identityRepair := origin.(*identityClosureOrigin)
+		if identityRepair {
 			s.recordSuppressedCommit(repair.slot, update)
 			// A repair's update is not classified or credited - its writer appends it in its own
 			// transaction - but it names this instance all the same: one that reaches the room's
@@ -514,36 +542,64 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			// it was made in has to take that version in or stand behind the head for good. The
 			// class counts for nothing else: it is not durable work the room's state waits on.
 			s.recordUpdateClass(room, update, documentUpdateClass{contentChanged: true, cursor: &instance.cursor})
-			return
-		}
-		if s.beforeObserveUpdate != nil {
+		} else if s.beforeObserveUpdate != nil {
 			s.beforeObserveUpdate(room)
 		}
-		// Charged before the observer renders it, so the rendering it publishes holds this update
-		// and the count of that rendering re-bases the charge past it (renderedReplica.publishSize).
-		// What is charged is the content the transaction added, whoever wrote it - a browser's
-		// update the peer hook admitted, or the server's own write - never the update's bytes,
-		// which carry the room's whole delete set on every transaction (contentAdded). The
-		// observer's first update copies the room into its replica, the room's second copy, which
-		// the charge has held since the room loaded (roomCopies).
-		charge.adds(contentAdded(update))
-		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
-			s.observeAskBlocksForUpdate(room, tree)
-		})
-		// The cursor is this instance's, taken here rather than looked up when the update reaches
-		// the store: a room evicted and reloaded in between is a different instance, which did not
-		// take this update and must not be recorded as holding the version it is stored at.
-		class := documentUpdateClass{contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
-		if contentChanged {
-			class.credit = s.creditContentChange(room, origin, hold)
-			if s.afterCreditUpdate != nil {
-				s.afterCreditUpdate(room)
+		// Every observer drains the room's update log, a repair's too, and each committed update
+		// is charged and classified once, by whichever observer reaches it first, against the
+		// room as the commit before it left it (renderedReplica). This observer's own update is in
+		// the log - ygo appended it under the document's lock at its commit - so its class is
+		// recorded before ygo's persistence observer, which runs after this one on this goroutine,
+		// hands it on. Another observer's update is recorded while the replica is held: that
+		// observer can be waiting for the replica, and runs its persistence observer as soon as it
+		// has it.
+		var classified, changed bool
+		var own *documentUpdateClass
+		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
+			if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
+				// Its own observer records its class (above). The replica takes it all the same,
+				// so the update after it is measured against the room the repair left, and its
+				// content is charged as every transaction's is (chargeAdded).
+				return
 			}
+			classified = true
+			if tree != nil {
+				s.observeAskBlocksForUpdate(room, tree)
+			}
+			// The cursor is this instance's, taken here rather than looked up when the update
+			// reaches the store: a room evicted and reloaded in between is a different instance,
+			// which did not take this update and must not be recorded as holding the version it
+			// is stored at.
+			class := documentUpdateClass{contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
+			if contentChanged {
+				class.credit = s.creditContentChange(room, logged.Origin, hold)
+				changed = true
+			}
+			if sameUpdate(logged.Update, update) {
+				own = &class
+				return
+			}
+			s.recordUpdateClass(room, logged.Update, class)
+		})
+		if changed && s.afterCreditUpdate != nil {
+			s.afterCreditUpdate(room)
 		}
-		s.recordUpdateClass(room, update, class)
-		s.scheduleSettle(room)
+		if own != nil {
+			s.recordUpdateClass(room, update, *own)
+		}
+		if classified {
+			s.scheduleSettle(room)
+		}
 	})
 	return nil
+}
+
+// sameUpdate reports whether logged, an update the room's update log handed over, is update, the
+// one an observer was called with: ygo hands both the very slice it encoded at the commit
+// (crdt.LoggedUpdate), so the same backing array is the same commit, where equal bytes need not be
+// - two commits that change nothing encode alike.
+func sameUpdate(logged, update []byte) bool {
+	return len(logged) > 0 && len(logged) == len(update) && &logged[0] == &update[0]
 }
 
 // soleConnectedActor is the one actor connected to a room, and whether more than one distinct
@@ -638,8 +694,11 @@ func (s *Service) removeConnection(room string, id uint64) {
 // settleLastPeer runs the settlement a room's last browser leaving owes now rather than when its
 // timer fires. It takes over the timer's settleWG count, so Shutdown joins it as it would the
 // timer's settlement: Shutdown reports which documents settled, and stops ygo, only once it has
-// returned. First it marks every browser the room's state names as connected departed: ygo has
-// none left in the room, and their handlers forget them only once this returns (departed).
+// returned. It counts itself as running (settling) from the moment it takes the timer, as the timer
+// it replaces counted as armed: a write that opens before the settlement reaches its own count
+// then takes the settlement over (openLiveWrite) rather than ending it with nobody to arm it again.
+// First it marks every browser the room's state names as connected departed: ygo has none left in
+// the room, and their handlers forget them only once this returns (departed).
 func (s *Service) settleLastPeer(_ context.Context, room string) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -656,7 +715,13 @@ func (s *Service) settleLastPeer(_ context.Context, room string) {
 		return
 	}
 	generation := state.roomGeneration
+	state.settling++
 	s.unlockState(room, state)
 	defer s.settleWG.Done()
+	defer func() {
+		state.mu.Lock()
+		state.settling--
+		s.unlockState(room, state)
+	}()
 	s.settleRoom(room, generation)
 }

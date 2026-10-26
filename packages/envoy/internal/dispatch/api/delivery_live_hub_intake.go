@@ -10,7 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pglisten"
+	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
 // intake moves the hub's two cursors. It subscribes to the broker before it reads where the event

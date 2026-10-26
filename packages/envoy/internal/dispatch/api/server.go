@@ -66,9 +66,10 @@ type Deps struct {
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
-	// Embedder embeds a search request's query for meaning search (LEGION-549); nil means
-	// Dispatch is configured without a Cohere key, and search answers keyword-only on every
-	// request, always setting SearchResponse.Degraded.
+	// Embedder embeds a search request's query for meaning search (LEGION-549), and its Identity
+	// is the only one search compares queries with (INFRA-393); nil means Dispatch has no
+	// embedder, and search answers keyword-only on every request, always setting
+	// SearchResponse.Degraded.
 	Embedder embed.Embedder
 	Envoy    *envoy.Client
 	Events   *events.Broker
@@ -140,10 +141,11 @@ type DepsInput struct {
 	OIDC          *oidc.Verifier
 	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
 	AgentStream agentstream.Source
-	// AgentSecretsURL is the secrets broker's UI-bearer API base URL (DISPATCH_AGENT_SECRETS_URL);
-	// empty means the feature is off. AgentSecretsToken is the resolved UI bearer.
-	AgentSecretsURL   string
-	AgentSecretsToken string
+	// AgentSecretsURL is the secrets broker's API base URL (DISPATCH_AGENT_SECRETS_URL); empty
+	// means the feature is off. AgentSecretsTokenFile is the file holding Dispatch's own
+	// projected Kubernetes ServiceAccount token, which the client presents on every broker call.
+	AgentSecretsURL       string
+	AgentSecretsTokenFile string
 	// Files is the uploaded-file store; nil keeps files in Postgres. See Deps.Files.
 	Files            files.Store
 	TestHooksEnabled bool
@@ -185,7 +187,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	var agentSecretsClient *agentsecrets.Client
 	if url := strings.TrimSpace(input.AgentSecretsURL); url != "" {
-		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsToken)
+		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsTokenFile)
 	}
 	heartbeat := input.StreamHeartbeat
 	if heartbeat == 0 {
@@ -242,6 +244,16 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
+	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
+	// server the deployment builds leaves it, means writeSuggestionTimeout. Only tests set it
+	// (newFailingAdviceHandler, and suggestionsBehindLock for the two lock tests), so a case's
+	// outcome is its own choice rather than its machine's speed (INFRA-56).
+	suggestionTimeout time.Duration
+	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
+	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
+	// Only a test sets it, so a budget that ends before every selected session is read is the
+	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
+	broadcastResolveBudget time.Duration
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.
 	deliveryHub *deliveryHub
@@ -315,7 +327,10 @@ func (s *server) waitBackground() {
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream
-// relay a test waits out before its database closes.
+// relay a test waits out before its database closes. It is also called with a zero Deps, as
+// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
+// must not dial or read the nil Store: whatever reaches the database or the network starts
+// later, from a handler or the relay's first subscriber.
 func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())

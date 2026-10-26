@@ -197,6 +197,33 @@ type Notice struct {
 	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
 	// live row's the session's environment to fix, and neither is the controller's.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
+	// Blocked is every issue Legion is waiting to start because it waits on a Dispatch issue
+	// nobody has finished (INFRA-225), with what each still waits on. Only a tick controller
+	// notice carries it, as OpenCapabilities does: the tick is the turn that posts the day's
+	// report, so the controller names each there and takes nothing for it. A tick with nothing
+	// blocked carries none.
+	Blocked []BlockedIssue `json:"blocked,omitempty"`
+}
+
+// BlockedIssue is one issue Legion is waiting to start and the issues it waits on that are not
+// done, in the order Dispatch lists them (blockers.Unfinished): a root admission skips, or a
+// child the workflow holds at `admitted`. It lives here, below both readers, so the tick notice
+// above and the state's `blocked` (api.BlockedIssue, an alias of this type) carry one shape
+// rather than two that could drift.
+type BlockedIssue struct {
+	Issue     string   `json:"issue"`
+	BlockedBy []string `json:"blockedBy"`
+}
+
+// MarshalJSON keeps `blockedBy` an array on the wire, empty rather than `null`: the plugin's
+// strict reader refuses a null.
+func (b BlockedIssue) MarshalJSON() ([]byte, error) {
+	type wire BlockedIssue
+	out := wire(b)
+	if out.BlockedBy == nil {
+		out.BlockedBy = []string{}
+	}
+	return json.Marshal(out)
 }
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
@@ -275,8 +302,8 @@ const (
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
 // the request that ends the claim, the tree's root claim included; "issue_close" is a child issue's
-// close as done, which ends the claim as a tree close does and drops its session, since the
-// issue's volume the session lived on is released with the close (IssueSuspend's Release). There
+// close as done, which ends the claim as a tree close does and drops its session, since the issue
+// is finished and its next run, should a person set it todo again, starts fresh. There
 // is no plain stop: only a close ends a claim from the workflow, so the op states which.
 type SuperviseOp string
 
@@ -348,16 +375,15 @@ type LingerClose struct {
 
 func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
 
-// IssueSuspend retains an issue's shared resources after its close stops every role. Both
-// workflow generations and this row's ID fence a later re-admission or start. Release is a child's
-// close as done: once every claim of the issue has retired, the issue's Sandbox and the volume it
-// owns are deleted rather than kept, so a later todo re-enters the child fresh. An absent field
-// reads false, the close that keeps.
+// IssueSuspend stops an issue's pod after its close has stopped every role, and deletes the
+// Sandbox the roles ran in (runtime.IssueSuspender). Both workflow generations and this row's ID
+// fence a later re-admission or start. The issue keeps nothing: its disk is its pod's own and
+// goes with the pod, so a later todo re-enters the issue fresh on a Sandbox its next launch
+// makes.
 type IssueSuspend struct {
 	Tree           string `json:"tree"`
 	Generation     uint64 `json:"generation"`
 	TreeGeneration uint64 `json:"treeGeneration"`
-	Release        bool   `json:"release,omitempty"`
 }
 
 func (IssueSuspend) OutboxKind() OutboxKind { return OutboxKindIssueSuspend }
@@ -414,28 +440,55 @@ func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisa
 // row having seen Head armed for auto-merge or in the merge queue on GitHub, which its executor
 // records on the row (Store.ReplaceOutboxPayload): from then on the arm or entry disappearing
 // without a merge is a removal the row reads from GitHub rather than a cue to submit again
-// (ghautomerge.Submit). A queue of the same issue and head starts the row over unarmed
-// (readyMergeConflict).
+// (ghautomerge.Submit). Warned is the row having told the issue's architect once that GitHub has
+// not completed the merge it submitted (merge-waiting, the daemon's mergeWaitWarn), which keeps it
+// from telling again however much longer it waits, and Queued is the moment the workflow queued
+// this submission, which that wait is measured from. A queue of the same issue and head starts the
+// row over unarmed, unwarned and at a fresh Queued (readyMergeConflict): the upsert replaces the
+// payload, so a reopen resets the clock and the once-flag together and the two can never disagree,
+// as they would were the wait measured from the row's created_at, which the upsert leaves at the
+// original queueing. A row a daemon before Queued enqueued carries the zero time, and its executor
+// measures that one from created_at, which is what it was measured from then.
 type ReadyMerge struct {
-	Number int    `json:"number"`
-	Head   string `json:"head"`
-	Armed  bool   `json:"armed,omitempty"`
+	Number int       `json:"number"`
+	Head   string    `json:"head"`
+	Armed  bool      `json:"armed,omitempty"`
+	Warned bool      `json:"warned,omitempty"`
+	Queued time.Time `json:"queued,omitzero"`
 }
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
-// CheckCompare wakes a production check from a build: a GitHub compare of the check's merge
-// commit with Build, the commit a daemon boot or a Dispatch start reported itself built from,
-// which the executor runs as the implement App and which starts the look Look when the build
-// contains the merge. Cause names what asked for it (`daemon boot`, `dispatch start` or
-// `dispatch build`), for the look's wake. OpenedAt is the check instance the compare was queued
-// for (ProductionCheck.OpenedAt): the executor compares nothing once a later merge replaced it;
-// zero names no instance and is not fenced.
+// CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
+// Deploy it carries (exactly one). Build is the commit a daemon boot or a Dispatch start reported
+// itself built from: the executor runs a GitHub compare of the check's merge commit with it, as the
+// implement App, and starts the look Look when the build contains the merge. Deploy is a completed
+// run attempt of a deploy workflow the project names (`projects.<KEY>.deploys`): the executor reads
+// the run and its jobs from GitHub, and wakes the check once for each job whose named step succeeded
+// after the pull request merged. Cause names what asked for it (`daemon boot`, `dispatch start`,
+// `dispatch build` or `deploy run`), for the look's wake. OpenedAt is the check instance the
+// compare was queued for (ProductionCheck.OpenedAt): the executor compares nothing once a later
+// merge replaced it; zero names no instance and is not fenced. A row queued before Deploy existed
+// carries a build and no deploy, and decodes as it did.
 type CheckCompare struct {
-	Look     int       `json:"look"`
-	Cause    string    `json:"cause"`
-	Build    string    `json:"build"`
-	OpenedAt time.Time `json:"openedAt,omitzero"`
+	Look     int        `json:"look"`
+	Cause    string     `json:"cause"`
+	Build    string     `json:"build,omitempty"`
+	Deploy   *DeployRun `json:"deploy,omitempty"`
+	OpenedAt time.Time  `json:"openedAt,omitzero"`
+}
+
+// DeployRun is the deploy workflow run a CheckCompare reads: attempt Attempt of GitHub Actions run
+// Run, of the configured Workflow (its `.github/workflows/` path) and Step (the step whose success
+// is a deploy), on Branch, the issue's recorded default branch. The executor holds the run GitHub
+// returns to each of them, since anyone holding an Envoy bearer can publish the envelope the row
+// was queued from.
+type DeployRun struct {
+	Run      int64  `json:"run"`
+	Attempt  int    `json:"attempt"`
+	Workflow string `json:"workflow"`
+	Step     string `json:"step"`
+	Branch   string `json:"branch"`
 }
 
 func (CheckCompare) OutboxKind() OutboxKind { return OutboxKindCheckCompare }
@@ -680,8 +733,14 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Look <= 0 {
 			return fmt.Errorf("check compare requires the look it starts")
 		}
-		if value.Build == "" || value.Cause == "" {
-			return fmt.Errorf("check compare requires the build commit and what asked for it")
+		if (value.Build == "" && value.Deploy == nil) || value.Cause == "" {
+			return fmt.Errorf("check compare requires the build commit and what asked for it, or a deploy run in place of the build commit")
+		}
+		if value.Build != "" && value.Deploy != nil {
+			return fmt.Errorf("check compare carries both a build commit and a deploy run; it compares exactly one")
+		}
+		if deploy := value.Deploy; deploy != nil && (deploy.Run <= 0 || deploy.Attempt <= 0 || deploy.Workflow == "" || deploy.Step == "" || deploy.Branch == "") {
+			return fmt.Errorf("check compare's deploy run requires a positive run and attempt and its workflow, step and branch")
 		}
 	case CheckLook:
 		if value.Look <= 0 {
@@ -695,7 +754,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

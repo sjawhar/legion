@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -231,9 +232,21 @@ type Admission struct {
 	Cap     int      `json:"cap"`
 	Active  []string `json:"active"`
 	Waiting []string `json:"waiting"`
+	// Blocked is every issue Legion is waiting to start that waits on a Dispatch issue nobody has
+	// finished (INFRA-225), by issue key: a waiting root admission skips and a child the workflow
+	// holds at `admitted`, together in one list, each with what it still waits on. Waiting is the
+	// waiting line and stays roots alone, so a blocked root is in both. Never null; empty when
+	// nothing waits on a link.
+	Blocked []BlockedIssue `json:"blocked"`
 }
 
-// MarshalJSON keeps `active` and `waiting` arrays on the wire, empty rather than `null`.
+// BlockedIssue is one issue of Blocked and the issues it waits on that are not done. It is
+// record.BlockedIssue: the state's `blocked` and a tick controller notice's are the same list
+// read two ways, and the row is declared once, under both.
+type BlockedIssue = record.BlockedIssue
+
+// MarshalJSON keeps `active`, `waiting` and `blocked` arrays on the wire, empty rather than
+// `null`.
 func (a Admission) MarshalJSON() ([]byte, error) {
 	type wire Admission
 	out := wire(a)
@@ -242,6 +255,9 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 	}
 	if out.Waiting == nil {
 		out.Waiting = []string{}
+	}
+	if out.Blocked == nil {
+		out.Blocked = []BlockedIssue{}
 	}
 	return json.Marshal(out)
 }
@@ -352,11 +368,15 @@ type PhaseView struct {
 // decided it until the next round opens or a new generation clears it, so a request for changes
 // stays through implementing and testing, and an approval through retro and every phase after
 // it; absent until a review in a round decides.
+// State is whether the pull request is open, merged, or closed unmerged, always one of the three:
+// a merged root waits in awaiting_merge for the rest of its tree, so an operator reads the merge
+// here rather than guessing at it.
 type PullRequestView struct {
 	// Repo is the repository (owner/name) the pull request is in, its issue's.
 	Repo           string `json:"repo"`
 	Number         int    `json:"number"`
 	Head           string `json:"head"`
+	State          string `json:"state"`
 	ChecksVerdict  string `json:"checksVerdict,omitempty"`
 	ReviewDecision string `json:"reviewDecision,omitempty"`
 	FixAttempts    int    `json:"fixAttempts"`
@@ -397,8 +417,9 @@ type CheckView struct {
 }
 
 // CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`), Detail the
-// cause's own detail (the run and its completion, or the build's commit), and At when.
+// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
+// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
+// job and step success, or the build's commit), and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`

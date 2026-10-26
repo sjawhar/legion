@@ -52,10 +52,28 @@ export async function setSessionSendStatus(sessionID: string, status: 200 | 404)
   });
 }
 
-/** Takes a seeded session out of the live registry, or puts it back, without reseeding: a
- *  reseed clears every fixture send status with it. */
+/** What the fake listener's session store holds for an id, the question its per-session route
+ *  answers. Only `absent` is a session that has ended. */
+export type SessionRecord = "present" | "absent" | "unreadable";
+
+/** Takes a seeded session out of the listener's live list, or puts it back, without reseeding: a
+ *  reseed clears every fixture send status with it. This is the refilling-cache state and
+ *  nothing more - the list is the listener's in-memory cache, while its per-session route reads
+ *  the session store through - so the session still resolves 200 there and is still delivered
+ *  to. A row that needs a session to have genuinely ended uses `setSessionRecord(id, "absent")`.
+ */
 export async function setSessionLive(sessionID: string, live: boolean): Promise<void> {
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { live });
+}
+
+/** Says what the listener's session store holds for a seeded session: `present` is a record the
+ *  per-session route answers 200 from, and answering it puts the id back in the live list as the
+ *  real listener's read-through warms its cache; `absent` ends the session, which drops it from
+ *  the live list and makes every answer about it - the per-session route, the list and a send -
+ *  report no live session; `unreadable` is the store read that did not answer at all, a 503 the
+ *  caller must retry rather than read as an ended session. */
+export async function setSessionRecord(sessionID: string, record: SessionRecord): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { record });
 }
 
 export async function getSentMessages(): Promise<Record<string, unknown>[]> {

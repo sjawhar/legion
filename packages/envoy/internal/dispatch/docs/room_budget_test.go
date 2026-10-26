@@ -154,7 +154,7 @@ func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t 
 	}
 
 	live := newDocumentCopy()
-	replica := service.keepReplica(live, &loaded)
+	replica := service.keepReplica(live, nil, &loaded)
 	charge := service.chargeLoadedRoom("room", live, replica)
 	requireCharged(t, &service.budget, charge, 2*int64(len(loaded))*bytesOfHeapAByteAtTheDensest,
 		"a room loaded with a rendering the counter cannot finish is priced from its bytes at the densest price")

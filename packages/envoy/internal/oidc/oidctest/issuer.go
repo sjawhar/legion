@@ -7,7 +7,8 @@
 // package rather than a _test.go file so the packages that need it —
 // internal/oidc, internal/dispatch/api, internal/dispatch/routes,
 // internal/dispatch/store, cmd/dispatch and cmd/listener — can all import it;
-// Go cannot share test-only code across packages.
+// Go cannot share test-only code across packages. cmd/dev-oidc-issuer serves it
+// outside any test, as the local development stand-in for a cluster's issuer.
 package oidctest
 
 import (

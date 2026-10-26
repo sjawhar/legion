@@ -26,8 +26,10 @@ type dispatchCloud struct {
 	listenerToken *random.RandomPassword
 	principal     pulumi.StringOutput
 	seedAccessor  *secretmanager.SecretIamMember
-	// tokenAccessor is set only with agentSecretsTokenSecret.
-	tokenAccessor *secretmanager.SecretIamMember
+	// azureKeyAccessor is set only with azureEmbedKeySecret.
+	azureKeyAccessor *secretmanager.SecretIamMember
+	// issuer is the cluster's service-account token issuer.
+	issuer pulumi.StringOutput
 }
 
 func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption) (pulumi.ProviderResource, error) {
@@ -175,14 +177,31 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	var tokenAccessor *secretmanager.SecretIamMember
-	if args.AgentSecretsTokenSecret != nil {
-		// The broker token is read by the app at run time through the CSI driver, so the pods'
+	var azureKeyAccessor *secretmanager.SecretIamMember
+	if s.azure.key {
+		// The Azure key is read by the app at run time through the CSI driver, so the pods'
 		// principal needs the same per-secret accessor grant the NATS seed has.
-		tokenAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-agent-secrets-token-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.AgentSecretsTokenSecret, dispatch, "agentSecretsTokenSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
+		azureKeyAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-azure-embed-key-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.AzureEmbedKeySecret, dispatch, "azureEmbedKeySecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 		if err != nil {
 			return nil, err
 		}
 	}
-	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, tokenAccessor: tokenAccessor}, nil
+	// GKE signs a cluster's service-account tokens as the issuer
+	// https://container.googleapis.com/v1/projects/<project id>/locations/<location>/clusters/<name>,
+	// the URL Google's Workload Identity documentation names the cluster by (its kubernetes.cluster
+	// principal set). It is built from the project, the location and the name rather than taken from
+	// the cluster's selfLink, which the provider documents only as "the server-defined URL for the
+	// resource", a form it does not promise.
+	issuer := pulumi.All(project.ProjectId(), cluster.Location, cluster.Name).ApplyT(func(values []interface{}) (string, error) {
+		parts := make([]string, len(values))
+		for i, what := range []string{"the project's id", "the cluster's location", "the cluster's name"} {
+			value, err := outputString(values[i])
+			if err != nil {
+				return "", fmt.Errorf("%s: %s: %w", dispatch, what, err)
+			}
+			parts[i] = value
+		}
+		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", parts[0], parts[1], parts[2]), nil
+	}).(pulumi.StringOutput)
+	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, azureKeyAccessor: azureKeyAccessor, issuer: issuer}, nil
 }

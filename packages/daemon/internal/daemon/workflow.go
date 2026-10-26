@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -267,7 +268,13 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	engineCfg.Repositories = w
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
-	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine, w.admission}, reviewAppLogin
+	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
+	// whether to start a child and admission whether to admit a root inside this same
+	// transaction, from the mirror's rows, so the row an event carries must already be written
+	// when they look. Neither could write it itself: the engine returns early on an event whose
+	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
+	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
+	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
 	w.pool = st.Pool()
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
 		return nil, err
@@ -285,15 +292,17 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 
 // engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
 // login from its boot lease and the daemon's own build: its own project's merge_queue_role is the
-// role the merger's READY is published to, and the repository the binary is built from is the one
-// whose open production checks a build is compared against — only for a release build, one with
-// a revision, since nothing else names a commit a merge could be in; a build with none compares
-// nothing, Dispatch's start included.
+// role the merger's READY is published to, its own project's deploys are the workflows whose runs
+// wake its production checks, and the repository the binary is built from is the one whose open
+// production checks a build is compared against — only for a release build, one with a revision,
+// since nothing else names a commit a merge could be in; a build with none compares nothing,
+// Dispatch's start included.
 func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
+	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
-		ReviewAppLogin: reviewAppLogin, MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
+		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
 	}
 	if build.Revision != "" {
 		engine.BuiltFrom = build.Repository
@@ -450,6 +459,13 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
 		if err := intake.SerializeFacts(scoped, tx); err != nil {
 			return fmt.Errorf("serialize the reconcile with every fact: %w", err)
+		}
+		// The mirror takes every summary, before admission decides anything from it — including a
+		// summary admission defers to the Dispatch consumer: a deferred key's listed status is
+		// still the freshest thing the daemon holds about it, and the sequence fence keeps an
+		// event already applied from being written back over.
+		if err := blockers.Reconcile(scoped, tx, w.records, w.dispatchProject, issues); err != nil {
+			return err
 		}
 		return w.admission.Reconcile(scoped, tx, issues, target, position)
 	}); err != nil {
@@ -855,12 +871,6 @@ func (w *workflowRuntime) tickController(ctx context.Context) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	apply := func(at time.Time) {
-		eventID := fmt.Sprintf("controller-tick:%s:%s:%d", w.dispatchProject, w.bootID, at.UnixNano())
-		if _, err := intake.ApplyFact(ctx, w.pool, "controller", eventID, intake.ControllerTick{}, w.handlers...); err != nil {
-			w.log.Warn("apply the controller wake tick failed", "error", err)
-		}
-	}
 	delay := firstControllerTick
 	if w.controllerFirstWake > 0 {
 		delay = w.controllerFirstWake
@@ -871,7 +881,7 @@ func (w *workflowRuntime) tickController(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	case at := <-first.C:
-		apply(at)
+		w.applyControllerTick(ctx, at)
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -880,7 +890,7 @@ func (w *workflowRuntime) tickController(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case at := <-ticker.C:
-			apply(at)
+			w.applyControllerTick(ctx, at)
 		}
 	}
 }

@@ -15,7 +15,7 @@ import (
 // elementMeasurer counts the elements of the renderings rooms publish for the room budget, which
 // charges a room by them (roomCharge), off every room's update observer. The count is a whole
 // goldmark parse of the rendering (pmdoc.MeasureDocument): run in the observer, whose turn every
-// browser in the room waits behind before ygo relays the keystroke (AGENTS.md:527-530), it cost
+// browser in the room waits behind before ygo relays the keystroke (AGENTS.md:556-559), it cost
 // about 89 ms of every keystroke that changed a 524 KiB rendering and raised the keystroke's p50 by
 // 29 to 36 per cent (BenchmarkKeystrokeBesideReads). The rendering's bytes are a len the observer
 // publishes itself (renderedReplica.publishSize), which is all the peer update hook weighs; only

@@ -7,6 +7,112 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
+  `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
+  decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
+  a person's words), and a section on checking a thing itself before calling work blocked. The
+  Legion copy links each reference as `skill://leading-a-work-stream/references/<file>.md`, removes
+  names, a private benchmark name, a private tool path and the dotfiles path in the timer, names
+  the skills Legion does not ship without `skill://`, and keeps each accepted request and wait in
+  the issue's `open-items.md` artifact, never its spec, since a spec edit after approval closes the
+  design gate. It keeps two Legion additions: the workflow-and-role sequence and the rule that a
+  lead proves its stream facts with a command and its output. The dotfiles copy goes once a release
+  carries this one.
+
+- `STRATEGY.md` at the repository root holds Legion's and Dispatch's strategy: purpose, users, key
+  metrics, tracks, principles, and the boundaries that need the owner's decision. It replaces
+  `docs/design-principles.md`. `legion-architect` and the planner's role prompt
+  (`roles/core/planner.md`) say to read the repository's `STRATEGY.md` when it has one before a
+  spec or plan, and to check before any question to a person, in order: what that file answers,
+  then a standard best-practice solution, and only then an ask with one recommendation, when the
+  answer changes what the tree delivers. A design that crosses a Boundary in that file goes to its
+  owner before it is built. A finding outside the tree, and a to-do only a person can do, is always
+  an ask.
+- `legion-architect`: before it requests approval of the root spec, an architect checks every
+  factual claim in the spec against the code, the docs or a command, resolves each finding of the
+  fresh-reader check, and requests approval once. `dispatch-writing-specs`, "Approval", says the
+  same for every spec.
+- `legion-controller`'s daily report names each issue by its `dispatch://` link and what it does for
+  the reader, as `dispatch-writing-specs` now says, in place of its key and title.
+
+- An architect's questions about its own tree follow `dispatch-writing-specs`, "Questions". When
+  the issue already says to do a thing, it does not ask whether. It asks about an open point only
+  when that point changes what the tree delivers, carries a cost or risk the person would weigh,
+  or needs what only that person can provide. A finding outside the tree is always an ask. A cost
+  or risk the person would weigh is now also a reason for a new version of an approved spec. The
+  deployment's owner said Legion's architects asked him too many questions that did not need him.
+
+- Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
+  shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
+  and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
+  waiting to start, each `{issue, blockedBy}` with the keys it waits on that are not done, and
+  `release_children` answers `started` and `held` beside `released`: the children it started,
+  and each child it left held with the issues it waits on. All three required, so a plugin built
+  before it refuses the state and the release answer. Install this release with a `legion` built
+  from the same commit.
+- The skills this plugin ships carry that rule (INFRA-225). The `legion-architect` skill links
+  children that depend on one another with `dispatch issue-update --blocked-by`, releases a child
+  Legion holds all the same, and says a never-started child that still waits is handed over from
+  a finished tree as a root carrying no run; its wake routing's `child-status` row says what
+  cleared a held child's hold. The `legion-controller` skill names the tick's `blocked` waits in
+  the day's report and counts the free slots without the waiting roots in `admission.blocked`,
+  which take none, and its admission reference reads a root both waiting and blocked.
+- Daemon API contract 37 (INFRA-80): under the Kubernetes runtime an issue's disk is a generic
+  ephemeral volume its own pod owns, created with the pod and deleted with it, so an issue pod's
+  `workspace-init provision` container is no longer told `LEGION_EXPECT_ISSUE_VOLUME`, and the
+  lost-disk machinery that variable drove is gone with it: `workspace-init`'s exit code 3 for a
+  volume holding neither the clone nor a retained session, the recovery marker a relaunch after
+  that loss wrote, the probe for an issue's retained sessions, and `legion sessions mark-lost`.
+  `runtime.kubernetes.session_store` must name a store that keeps sessions in a database,
+  `postgres` or `cloudsql-iam` (`pvc` and an omitted key are refused), since a session kept as a
+  file on that disk would die with the pod. Install this release with a `legion` built from the
+  same commit.
+- The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
+  agents write Dispatch specs:
+  - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
+    questions of the INFRA-140 labels, and prints the share of comments that complain about
+    writing. It reads production Dispatch with GET only.
+  - `fetch-spec-sources.ts` reads an issue's or a project document's input from Dispatch into a
+    work directory outside the checkout.
+  - `rig.sh batch spec-writing` and `spec-rewrite` seed a scratch issue with that input and let a
+    fresh agent design the change with a person stand-in that answers its asks and approves its
+    spec.
+  - `rig.sh judge` runs ten judge prompts over each run, and `rig.sh score` scores the spec's
+    outline, checks, refusals, plan, questions, quoting and self-naming.
+- `rig.sh profile` takes the key-file model route (`LEGION_E2E_MODEL_ROUTE=key-file` with
+  `LEGION_E2E_ANTHROPIC_KEY_FILE`). It refuses a work directory with a `.omp` in it or above it,
+  because Oh My Pi would load that directory's plugins and not the label's.
+- `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
+  directory. On the gateway route, the gateway's key command runs on the host once for each judge,
+  and the container gets only its token, which is removed when the judge ends.
+- The `legion-architect` skill this plugin ships says a project may import its architecture
+  model from several source repositories: a root's `.dispatch/architecture/<id>.md` file goes in
+  the branch of the source whose repository holds it, `parent` and `depends_on` name components of
+  that same source, an id must be one no other source of the project uses, and
+  `dispatch architecture-sync --repo <owner/name>` imports one source alone (INFRA-391).
+- Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
+  `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
+  is refused while an issue beneath it is still in the workflow and a merged root's close waits
+  for the rest of its tree, so a root stands in `awaiting_merge` for days and an operator reads
+  the merge here rather than guessing at it. Always emitted, so a plugin built before it refuses
+  the state. Install this release with a `legion` built from the same commit.
+- The `legion-controller` skill this plugin ships reorders a project's board with
+  `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
+  stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by
+  board rank alone, so board rank alone carries the weekly plan's order. The controller still sets
+  the coarse priority, as the signal people and filters read and as the order by which an agent
+  takes its own next issue, but it changes no admission; the reference used to have the controller
+  set priority and rank together so that "highest priority, then board rank" produced the plan's
+  order (INFRA-188).
+- Daemon API contract 39 (INFRA-208): under the Kubernetes runtime an issue pod runs one
+  container, `roles`, whose PID 1 is one `legion launcher` in multi-role mode, each role's
+  generation in Linux namespaces of its own (`legion launcher role-init`), and
+  `runtime.kubernetes.resources` takes `issue` and `controller` alone, so `legion state`'s and the
+  controller's `read_state`'s `settings.runtime.kubernetes.resources` is `{issue, controller}` and
+  the `resource-limits` row names the issue pod and the controller's pod rather than roles. The
+  pod's launcher argv is the contract's surface, so a daemon at 39 refuses an image whose
+  `pi-legion` declares another contract: pin the worker image with the daemon release. Nothing this
+  plugin reads or writes moved; install this release with a `legion` built from the same commit.
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
@@ -66,6 +172,59 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion-architect`, `legion-worker` and `legion-controller` point to
+  `skill://dispatch-writing-specs` for a spec's outline, its questions, its approval and
+  the rules for text a person reads, and `legion-architect` drops its own copy of those rules. The
+  controller's board-order step names `dispatch issue-update --before`/`--after`. A
+  daemon role prompt now names `skill://dispatch-writing-specs`, so the daemon's boot gate refuses
+  a `@sjawhar/pi-envoy` released before it: install the pi-envoy of the same release.
+- `legion-architect`: after approval, a corrected citation, a better sentence, a measurement that
+  confirms the spec or a renamed file makes no new version of the root spec. It goes in the plan, a
+  comment on the issue or the next handoff, and every change that needs approval goes into one
+  version, so the person approves the spec again only when scope, acceptance or their decision
+  changes.
+- The Legion skills this plugin ships are rewritten to the minimum text that carries their
+  instructions (INFRA-353): `legion-architect`, `legion-controller`, `legion-worker`,
+  `legion-retro`, `legion-oracle`, `thermonuclear-code-quality` and `thermonuclear-deep-review`,
+  from about 141,000 bytes of SKILL.md to 50,000. Every rule now carries its reason beside it,
+  detail that only some tasks need moved whole to `references/` files named at the step that
+  needs it, and each skill opens by saying the code and a command's `--help` win over its text.
+  `legion-controller` was 39,275 bytes and is now 7,975, so an agent that keeps only a skill's
+  first 8,000 bytes reads all of it. Each old instruction is kept, moved, or dropped with a
+  recorded reason (most drops repeat a rule the role prompt already gives); the per-skill counts
+  are in the pull request body. One rule is new in `legion-worker`: put back anything copied
+  into the workspace before completing a phase, checked with `jj status`.
+- The `legion-worker` skill's tools reference no longer tells a role to add a new image package to
+  the licence file by hand: the worker image lists every Debian package it carries in
+  `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg database (INFRA-255). The
+  Dockerfile's comments and its toolchain smoke step stay hand-kept.
+
+- The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
+  refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the
+  head's check runs or commit statuses. GitHub, under the base branch's own rules, decides whether
+  the merge happens, and one it has not completed within an hour of READY's acceptance tells the
+  issue's architect once (`merge-waiting`). The merger's role prompt and the Legion skills carry
+  the new catalogue, the pull request body has no `CI:` line, and every list read that decides
+  something is paginated (sjawhar/legion#2121).
+  A daemon rolled back to a release before this one refuses what this one writes on a `ready_merge`
+  row and in the notice it adds, as the entry below says of `armed` and `merge-removed`: the
+  payload's `warned` and `queued` fields, which its strict decoder refuses on every retry, and the
+  `merge-waiting` notice kind, which its reader refuses and which holds every waiting notice of the
+  project behind it. Before starting the older daemon, run against its database, with `<KEY>` the
+  Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'warned' - 'queued' where kind = 'ready_merge' and (payload ? 'warned' or payload ? 'queued') and split_part(issue, '-', 1) = '<KEY>';`
+  and
+  `delete from outbox where kind = 'notice' and payload->>'kind' = 'merge-waiting' and split_part(issue, '-', 1) = '<KEY>';`
+  The notice is deleted rather than rewritten to a kind the older daemon knows: it says only that a
+  merge is still waiting, and the nearest older kind, `merge-refused`, would tell an architect that
+  a merge ended when it has not. Dropping it loses one telling; the row goes on submitting.
+- The `legion-controller` skill and its `backlog-stewardship` reference name no person: a ruling is
+  a direct Dispatch message to this controller from a person rather than from one named individual,
+  and the duty list, the pass trigger and both definitions say so (dispatch://INFRA-227). The
+  daemon's `controller-root` role prompt and `packages/envoy/AGENTS.md` drop the same name, and the
+  root `AGENTS.md` now carries the standing rule that a skill, a role prompt and an `AGENTS.md`
+  name no person and write the role instead. The controller behaves as it did: a ruling still sets
+  off the full reconciliation pass and a weekly-plan record.
 - Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits
   touch (INFRA-149). Before, the `legion-worker` skill, the `legion-retro` skill and the daemon's
   worker and implementer prompts all decided the line by the paths a push changed, so a retro with
@@ -76,8 +235,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the absence of a workflow run to that line rather than to the paths; the daemon's own carry of a
   code head's verdict stays keyed to paths, since it classifies by path and reads no commit
   message. The `legion-retro` skill also gives a retro worker the cure for a head it has already
-  pushed with the line.
-
+  pushed with the line. The sentence has a fifth home here,
+  `legion-worker/references/skip-checks-trailer.md`, which the entry above moved the trailer's
+  contract into, and the skills guard counts it in all five.
 - No Legion role, and no subagent of one, files an issue for a problem it finds outside its own
   issue. It opens a `dispatch ask` on the controller's report issue instead, naming the issue it
   came from and where the fix belongs (and that it is not Legion's when it is not), with its
@@ -114,8 +274,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
-  request's remote CI and any `sleep` loop, and the `CI` line names each run's state as GitHub shows
-  it at the completion. Under the Go daemon, a required check that settled red while the issue was
+  request's remote CI and any `sleep` loop, and each role reads the head's CI on GitHub for itself
+  rather than from a line another role wrote (sjawhar/legion#2121 deletes that line). Under the Go
+  daemon, a required check that settled red while the issue was
   still in `implementing` now sends the work back the moment the implementer completes, with a
   `checks-red` naming it, instead of starting a tester round on that head; before, nothing acted on
   that red until a later settlement or a reviewer read it.
@@ -528,6 +689,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `legion.daemonApiVersion` is unchanged.
 
 ### Fixed
+
+- The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
+  reached an architect with its middle cut out; its Wake routing table moves unchanged to
+  `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and

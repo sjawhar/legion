@@ -13,7 +13,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.51.3-sami.2,
+// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.51.3-sami.5,
 // crdt/merge.go:24-81), unexported, reached here as the independent count the walk is checked
 // against: it decodes every struct of an update into an Item, in the update's order for each
 // client, through the same decodeItem the room's apply runs, and drops only skips. ygo exports
@@ -200,9 +200,10 @@ func TestTheUpdateWalkAcceptsEveryUpdateARoomTakes(t *testing.T) {
 }
 
 // A frame of valid structs ending in one bad byte is refused whole. ygo's apply refuses it too,
-// but only after it has integrated every struct before the bad byte (crdt/update.go:50-56: the
-// transaction it decodes in is never rolled back), which is the half-applied frame the hook's walk
-// keeps out of the room.
+// but only after it has integrated every struct before the bad byte (crdt/update.go:68-74: on a
+// document that sets no integrate-scan bound, as newDocumentCopy's does not, the transaction it
+// decodes in is never rolled back), which is the half-applied frame the hook's walk keeps out of
+// the room.
 func TestTheUpdateWalkRefusesValidStructsBeforeOneBadByte(t *testing.T) {
 	update := newV1Frame(1).group(4, 7, 0).gc(2).gc(2).gc(2).raw(0xff).done()
 	_, err := walkUpdate(update, fromPeer, nil)
@@ -361,9 +362,9 @@ func TestTheUpdateWalkHoldsYgosBoundsAtTheirEdges(t *testing.T) {
 
 // ContentJSON's two encodings are read where ygo's decoder reads them. A JSON text of 116 to 127
 // bytes starts with a byte that is also a lib0 Any tag; ygo tries JSON text for every value and
-// lib0 Any only when that fails (crdt/update.go:977-1008), and a walk that chose otherwise would end
-// the item somewhere else and misread every struct after it. Each case is followed by a struct the
-// walk must still read as ygo does.
+// lib0 Any only when that fails (crdt/update.go:1000-1031), and a walk that chose otherwise would
+// end the item somewhere else and misread every struct after it. Each case is followed by a struct
+// the walk must still read as ygo does.
 func TestTheUpdateWalkReadsJSONWhereYgoDoes(t *testing.T) {
 	type jsonCase struct {
 		name    string
@@ -607,7 +608,7 @@ func ygoMadeUpdates(tb testing.TB) []madeUpdate {
 	state("a GC run through ygo", gcDoc)
 
 	// Parked structs behind a skip: a document given a transaction's update without the one before
-	// it parks it, and its state carries the skip and the parked structs (crdt/update.go:69-91).
+	// it parks it, and its state carries the skip and the parked structs (crdt/update.go:87-109).
 	var steps [][]byte
 	writer := newDocumentCopy(crdt.WithClientID(27))
 	stopSteps := writer.OnUpdate(func(update []byte, _ any) { steps = append(steps, slices.Clone(update)) })
@@ -785,7 +786,7 @@ func gcFrame(n int) []byte {
 }
 
 // kindOfItem is the struct kind of an item ygo's decoder returned: a GC run decodes to deleted
-// content on an item already marked deleted, where deleted content is not (crdt/update.go:800-811).
+// content on an item already marked deleted, where deleted content is not (crdt/update.go:820-831).
 func kindOfItem(item *crdt.Item) structKind {
 	switch item.Content.(type) {
 	case *crdt.ContentDeleted:

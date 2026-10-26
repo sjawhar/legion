@@ -68,6 +68,15 @@ func (s stubs) lock() string {
 	return capabilitiestest.LockPath(s.home)
 }
 
+// onPATH is the detail a row that checks PATH alone renders for names, each under s.bin.
+func (s stubs) onPATH(names ...string) string {
+	paths := make([]string, len(names))
+	for i, name := range names {
+		paths[i] = filepath.Join(s.bin, name)
+	}
+	return "on PATH: " + strings.Join(paths, ", ")
+}
+
 func (s stubs) writeLock(content string) {
 	capabilitiestest.WriteLock(s.t, s.home, content)
 }
@@ -126,9 +135,9 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 	for name, want := range map[Name]string{
 		EvalPython:           "omp setup python --check reports available=true",
 		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
-		LSP:                  "on PATH: " + filepath.Join(s.bin, "gopls") + ", " + filepath.Join(s.bin, "typescript-language-server") + ", " + filepath.Join(s.bin, "pyright-langserver"),
+		LSP:                  s.onPATH("gopls", "typescript-language-server", "pyright-langserver"),
 		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
-		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + ", " + filepath.Join(s.bin, "kubectl") + ", " + filepath.Join(s.bin, "jq") + ", " + filepath.Join(s.bin, "ssh-keygen") + ", " + filepath.Join(s.bin, "flock") + "; go version go1.27.1 linux/amd64",
+		Toolchain:            s.onPATH("go", "gcc", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock", "psql", "redis-cli", "sqlite3", "nc", "dig") + "; go version go1.27.1 linux/amd64",
 		RepositoryExtensions: "each session reports it at start; `legion state` renders it: loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {

@@ -25,7 +25,7 @@ const rebuildUpdateItems = 100_000
 // where the first integrates and each later one parks whole behind the clock gap the earlier ones
 // leave, within ygo's pending cap of 100,000 items. Merged, they are one client's 1.1 million
 // items, which ygo refuses from that client's header before it integrates any (sjawhar/ygo
-// v1.51.3-sami.2, crdt/update.go:545-558 decodeAndPark), so the history cannot load and no load
+// v1.51.3-sami.5, crdt/update.go:565-578 decodeAndPark), so the history cannot load and no load
 // of it walks a million items first. Each paragraph is prepended because ygo finds an insert
 // position by walking the fragment's children from its start (crdt/yxml.go leftChildAt):
 // appending takes quadratic time, about 30 s for 100,000.

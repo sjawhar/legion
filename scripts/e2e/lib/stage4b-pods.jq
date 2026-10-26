@@ -1,20 +1,15 @@
 # Stage 4b's reads of the pods its pod watch recorded (stage4b-sandbox-tree.sh): one definition of
-# a Sandbox pod the run judges, of whether the scheduler placed a pod, of the address its role
-# launchers dial, of the worker stream the daemon served when the pod was created, and of the
-# reservation every container carries. Loaded with `jq -L scripts/e2e/lib` and
-# `include "stage4b-pods";`.
+# a Sandbox pod the run judges, of whether the scheduler placed a pod, of the address its launcher
+# dials, of the worker stream the daemon served when the pod was created, and of the reservation
+# every container carries. Loaded with `jq -L scripts/e2e/lib` and `include "stage4b-pods";`.
 
-# roles are an issue pod's six role containers, one per claim.Roles entry, each named for its role.
-def roles: ["architect", "planner", "implementer", "tester", "reviewer", "merger"];
-
-# ready_pod_event keeps a pod watch event whose pod is a Sandbox pod of the run (the image probe and
-# the run's controls aside) with all six of its role launchers ready.
+# ready_pod_event keeps a pod watch event whose pod is a Sandbox issue pod of the run (the image
+# probe and the run's controls aside) whose one container, `roles`, is ready.
 def ready_pod_event:
   select(.object.kind == "Pod"
     and .object.metadata.labels["legion.dev/probe"] == null
     and .object.metadata.labels["legion.dev/e2e-control"] == null)
-  | ([.object.status.containerStatuses[]? | select(.name as $name | roles | index($name))]) as $status
-  | select(($status | map(.name) | sort) == (roles | sort) and all($status[]; .ready));
+  | select(any(.object.status.containerStatuses[]?; .name == "roles" and .ready));
 
 # ready_pods is each such event's pod.
 def ready_pods: ready_pod_event | .object;
@@ -28,16 +23,11 @@ def unschedulable:
 def scheduled:
   (.spec.nodeName // "") != "" or any(.status.conditions[]?; .type == "PodScheduled" and .status == "True");
 
-# launcher_connects is, for each role container of a pod, its role and the address its launcher
-# dials: the argument after `--connect` in its command, or null with none.
-def launcher_connects:
-  [.spec.containers[]? | select(.name as $name | roles | index($name)) | .name as $role | (.command // []) as $c
-    | {role: $role, connect: ([range($c | length) | select($c[.] == "--connect") | $c[. + 1]] | first)}];
-
-# launcher_connect is the one address every role launcher of a pod dials, or null when they name
-# none or differ.
+# launcher_connect is the address the launcher of an issue pod's `roles` container dials, the
+# argument after `--connect` in its command, or null with no such container or no `--connect`.
 def launcher_connect:
-  launcher_connects | map(.connect) | unique | if length == 1 then .[0] else null end;
+  [.spec.containers[]? | select(.name == "roles") | (.command // []) as $c
+    | [range($c | length) | select($c[.] == "--connect") | $c[. + 1]] | first] | first;
 
 # served_stream(streams) is the worker stream the daemon served when the pod was created: the
 # stream of the last of STREAMS (record_stream's {since, stream} records, one per daemon start, in
@@ -58,19 +48,17 @@ def quantity:
       else (.n | tonumber) * {"": 1, k: 1e3, M: 1e6, G: 1e9, T: 1e12, Ki: 1024, Mi: 1048576, Gi: 1073741824, Ti: 1099511627776}[.u] end
   end;
 
-# reservation_problems($expected) prints each way a pod departs from the run's reservations, or
-# nothing. EXPECTED maps each role to its {cpu, memory, ephemeral_storage, ephemeral_storage_request},
-# the run's overrides and defaults settled as the daemon settles them (run_resources). Every
-# container, the init containers included, carries cpu and memory as both request and limit and
-# ephemeral-storage as a request no greater than its limit (the node-disk bound between pods of
-# unrelated trees, which QoS does not read); a container named for a role carries that role's
-# reservation, all four values; an init container, which the pod does not name a role for, carries
-# the reservation of one of the pod's roles, the role whose launch created the pod
-# (issuePod.initContainers, internal/runtime/sandbox/podkind.go); the pod is Guaranteed; and it
-# carries no affinity, since a Legion pod asks nothing of its placement beyond the pool.
+# reservation_problems($expected) prints each way an issue pod departs from the run's reservation,
+# or nothing. EXPECTED maps each pod the daemon builds, `issue` and `controller`, to its {cpu,
+# memory, ephemeral_storage, ephemeral_storage_request}, the run's overrides and defaults settled as
+# the daemon settles them (run_resources). Every container of an issue pod, the init containers
+# included, carries cpu and memory as both request and limit and ephemeral-storage as a request no
+# greater than its limit (the node-disk bound between pods of unrelated trees, which QoS does not
+# read), and all four values are the issue pod's one reservation (issuePod.resources,
+# internal/runtime/sandbox/podkind.go); the pod is Guaranteed; and it carries no affinity, since a
+# Legion pod asks nothing of its placement beyond the pool.
 def reservation_problems($expected):
-  .spec as $s
-  | [$s.containers[]? | .name | select($expected[.] != null)] as $pod_roles
+  .spec as $s | $expected.issue as $e
   | def same($a; $b): ($a | quantity) == ($b | quantity);
     def carried($req; $lim): "cpu \($req.cpu), memory \($req.memory), ephemeral-storage \($req["ephemeral-storage"]) of \($lim["ephemeral-storage"])";
     def expected_of($e): "cpu \($e.cpu), memory \($e.memory), ephemeral-storage \($e.ephemeral_storage_request) of \($e.ephemeral_storage)";
@@ -86,10 +74,8 @@ def reservation_problems($expected):
         then "container \($c.name) requests \($req | tojson) but is limited to \($lim | tojson); this run configures request = limit"
         elif ($req["ephemeral-storage"] | quantity) > ($lim["ephemeral-storage"] | quantity)
         then "container \($c.name) requests ephemeral-storage \($req["ephemeral-storage"]) past its limit \($lim["ephemeral-storage"]); the request may not exceed the limit"
-        elif $expected[$c.name] != null and (matches($expected[$c.name]; $req; $lim) | not)
-        then "the \($c.name) container reserves \(carried($req; $lim)), not the run's \(expected_of($expected[$c.name])) for its role"
-        elif $expected[$c.name] == null and ([$pod_roles[] | $expected[.] | select(matches(.; $req; $lim))] | length) == 0
-        then "init container \($c.name) reserves \(carried($req; $lim)), the reservation of no role of the pod"
+        elif matches($e; $req; $lim) | not
+        then "container \($c.name) reserves \(carried($req; $lim)), not the run's \(expected_of($e)) for the issue pod"
         else empty end),
     (if .status.qosClass != "Guaranteed" then "qosClass \(.status.qosClass // "unset"), want Guaranteed" else empty end),
     (if $s.affinity != null then "affinity \($s.affinity | tojson): a Legion pod asks nothing of its placement beyond the pool" else empty end);

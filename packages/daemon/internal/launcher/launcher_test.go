@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
+	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,14 +20,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const launcherChildEnv = "LEGION_LAUNCHER_TEST_CHILD"
 
 // TestLauncherChild is the worker-shim stand-in the launcher starts: it records what its
-// credential pointer reads, starts a descendant in its process group, and waits.
+// credential pointer reads and whether its generation's session socket was already bound when it
+// ran, starts a descendant in its process group, and waits.
 func TestLauncherChild(t *testing.T) {
 	if os.Getenv(launcherChildEnv) != "1" {
 		return
@@ -36,11 +42,15 @@ func TestLauncherChild(t *testing.T) {
 	if body, err := os.ReadFile(os.Getenv("ENVOY_TOKEN_FILE")); err == nil {
 		seen = string(body)
 	}
+	socket := "unbound"
+	if _, err := os.Stat(os.Getenv("LEGION_LAUNCHER_SOCKET")); err == nil {
+		socket = "bound"
+	}
 	child := exec.Command("/bin/sh", "-c", "exec sleep 600")
 	if err := child.Start(); err != nil {
 		os.Exit(3)
 	}
-	if err := os.WriteFile(marker, []byte(strconv.Itoa(child.Process.Pid)+" "+seen), 0o600); err != nil {
+	if err := os.WriteFile(marker, []byte(strconv.Itoa(child.Process.Pid)+" "+socket+" "+seen), 0o600); err != nil {
 		os.Exit(4)
 	}
 	// Wait on the descendant rather than block in select{}: a goroutine parked forever with nothing
@@ -49,20 +59,28 @@ func TestLauncherChild(t *testing.T) {
 	os.Exit(0)
 }
 
-// rig is one launcher under test and the daemon end of its connection.
+// rig is one single-role launcher under test and the daemon end of its connection.
 type rig struct {
 	t        *testing.T
 	listener net.Listener
-	conn     net.Conn
-	reader   *bufio.Reader
-	writer   *shimwire.Writer
 	private  string
 	cancel   context.CancelFunc
 	result   chan error
-	hello    shimwire.LauncherHello
-	latest   shimwire.LauncherState
+	// roleConn is the daemon end of the role's current connection, which accept replaces.
+	*roleConn
 	// stderr is what the launcher and its children wrote to Config.Stderr.
 	stderr *lockedBuffer
+}
+
+// roleConn is the daemon end of one role's launcher connection: the frames it reads, the hello
+// that opened it and the last state the role reported on it.
+type roleConn struct {
+	t      *testing.T
+	conn   net.Conn
+	reader *bufio.Reader
+	writer *shimwire.Writer
+	hello  shimwire.LauncherHello
+	latest shimwire.LauncherState
 }
 
 // lockedBuffer is a bytes.Buffer the launcher and its children can write while a test reads it.
@@ -85,18 +103,42 @@ func (b *lockedBuffer) String() string {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
+	return newSessionRig(t, Config{})
+}
+
+// shortTempDir is a temporary directory of its own for a test that binds a unix socket under it:
+// such a path has barely a hundred bytes, where t.TempDir()'s carries the whole of the test's name
+// (docs/testing.md). It is made under /tmp rather than under TMPDIR, which os.MkdirTemp("") would
+// read and which is itself long on a dev box whose temporary directory is on a data disk; a system
+// with no writable /tmp falls back to TMPDIR, where only the longest of these paths would not fit.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "lch")
+	if err != nil {
+		if dir, err = os.MkdirTemp("", "lch"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// newSessionRig runs a launcher that carries cfg's session database and dialer, the fake standing
+// in for the Cloud SQL connector, besides the fields every rig's launcher is given.
+func newSessionRig(t *testing.T, cfg Config) *rig {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
+	private := shortTempDir(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &rig{t: t, listener: listener, private: t.TempDir(), cancel: cancel, result: make(chan error, 1), stderr: &lockedBuffer{}}
+	g := &rig{t: t, listener: listener, private: private, cancel: cancel, result: make(chan error, 1), stderr: &lockedBuffer{}}
+	cfg.Connect, cfg.Token, cfg.Sandbox = "tcp://"+listener.Addr().String(), "launcher-token", "legion-legion-legion-208"
+	cfg.Role, cfg.PodUID, cfg.PrivateDir, cfg.Stderr = "tester", "pod-1", g.private, g.stderr
 	go func() {
-		g.result <- Run(ctx, Config{
-			Connect: "tcp://" + listener.Addr().String(), Token: "launcher-token", Sandbox: "legion-legion-legion-208",
-			Role: "tester", PodUID: "pod-1", PrivateDir: g.private, Stderr: g.stderr,
-		})
+		g.result <- Run(ctx, cfg)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -113,20 +155,47 @@ func newRig(t *testing.T) *rig {
 // accept takes the launcher's next connection through its hello, acknowledgement and state.
 func (g *rig) accept() shimwire.LauncherState {
 	g.t.Helper()
-	conn, err := g.listener.Accept()
+	hello := shimwire.LauncherHello{}
+	if g.roleConn != nil {
+		hello = g.hello
+	}
+	conn := acceptRole(g.t, g.listener)
+	if conn.hello.Token != "launcher-token" || conn.hello.Role != "tester" || conn.hello.PodUID != "pod-1" {
+		g.t.Fatalf("hello = %#v", conn.hello)
+	}
+	if hello.LauncherID != "" && conn.hello.LauncherID != hello.LauncherID {
+		g.t.Fatalf("reconnect hello is launcher %s, want %s again", conn.hello.LauncherID, hello.LauncherID)
+	}
+	g.roleConn = conn
+	return conn.acknowledge()
+}
+
+// acceptRole takes one launcher connection up to its hello: the daemon end of the role that
+// hello names, which has not been acknowledged yet.
+func acceptRole(t *testing.T, listener net.Listener) *roleConn {
+	t.Helper()
+	if tcp, ok := listener.(*net.TCPListener); ok {
+		if err := tcp.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conn, err := listener.Accept()
 	if err != nil {
-		g.t.Fatal(err)
+		t.Fatal(err)
 	}
-	g.t.Cleanup(func() { _ = conn.Close() })
-	g.conn, g.reader, g.writer = conn, bufio.NewReader(conn), shimwire.NewWriter(conn)
-	hello, ok := g.next().(shimwire.LauncherHello)
-	if !ok || hello.Token != "launcher-token" || hello.Role != "tester" || hello.PodUID != "pod-1" || hello.LauncherID == "" {
-		g.t.Fatalf("hello = %#v", hello)
+	t.Cleanup(func() { _ = conn.Close() })
+	c := &roleConn{t: t, conn: conn, reader: bufio.NewReader(conn), writer: shimwire.NewWriter(conn)}
+	hello, ok := c.next().(shimwire.LauncherHello)
+	if !ok || hello.Role == "" || hello.LauncherID == "" {
+		t.Fatalf("hello = %#v", hello)
 	}
-	if g.hello.LauncherID != "" && hello.LauncherID != g.hello.LauncherID {
-		g.t.Fatalf("reconnect hello is launcher %s, want %s again", hello.LauncherID, g.hello.LauncherID)
-	}
-	g.hello = hello
+	c.hello = hello
+	return c
+}
+
+// acknowledge admits the connection's hello and reads the launcher's first state on it.
+func (g *roleConn) acknowledge() shimwire.LauncherState {
+	g.t.Helper()
 	g.send(shimwire.LauncherHelloAck{})
 	state, ok := g.next().(shimwire.LauncherState)
 	if !ok {
@@ -135,7 +204,7 @@ func (g *rig) accept() shimwire.LauncherState {
 	return state
 }
 
-func (g *rig) next() shimwire.Frame {
+func (g *roleConn) next() shimwire.Frame {
 	g.t.Helper()
 	if err := g.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		g.t.Fatal(err)
@@ -154,7 +223,7 @@ func (g *rig) next() shimwire.Frame {
 	return frame
 }
 
-func (g *rig) send(frame shimwire.Frame) {
+func (g *roleConn) send(frame shimwire.Frame) {
 	g.t.Helper()
 	if err := g.writer.WriteFrame(frame); err != nil {
 		g.t.Fatal(err)
@@ -162,9 +231,15 @@ func (g *rig) send(frame shimwire.Frame) {
 }
 
 // answer sends command and returns its answer, skipping state frames.
-func (g *rig) answer(command shimwire.Frame) shimwire.Frame {
+func (g *roleConn) answer(command shimwire.Frame) shimwire.Frame {
 	g.t.Helper()
 	g.send(command)
+	return g.reply()
+}
+
+// reply is the next answer the launcher sends, skipping state frames.
+func (g *roleConn) reply() shimwire.Frame {
+	g.t.Helper()
 	for {
 		frame := g.next()
 		if _, state := frame.(shimwire.LauncherState); !state {
@@ -173,7 +248,7 @@ func (g *rig) answer(command shimwire.Frame) shimwire.Frame {
 	}
 }
 
-func (g *rig) start(command shimwire.LauncherStart) shimwire.LauncherStartResult {
+func (g *roleConn) start(command shimwire.LauncherStart) shimwire.LauncherStartResult {
 	g.t.Helper()
 	result, ok := g.answer(command).(shimwire.LauncherStartResult)
 	if !ok {
@@ -182,7 +257,7 @@ func (g *rig) start(command shimwire.LauncherStart) shimwire.LauncherStartResult
 	return result
 }
 
-func (g *rig) stop(generation uint64) {
+func (g *roleConn) stop(generation uint64) {
 	g.t.Helper()
 	id := "stop-" + strconv.FormatUint(generation, 10)
 	if got, ok := g.answer(shimwire.LauncherStop{ID: id, Generation: generation, GraceMs: 1000}).(shimwire.LauncherStopResult); !ok || !got.OK || got.ID != id {
@@ -190,32 +265,49 @@ func (g *rig) stop(generation uint64) {
 	}
 }
 
+// generationDir is where the launcher keeps generation's credentials and binds its session socket.
+func (g *rig) generationDir(generation uint64) string {
+	return generationDir(g.private, generation)
+}
+
 // childStart is a start of the stand-in child for generation, reading its Envoy credential
-// through the pointer the daemon names, and publishing its descendant's pid to marker.
+// through the pointer the daemon names, looking for its generation's session socket where the
+// launcher binds it, and publishing both to marker.
 func (g *rig) childStart(generation uint64, marker string, files map[string]string) shimwire.LauncherStart {
 	g.t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		g.t.Fatal(err)
 	}
-	dir := filepath.Join(g.private, "g"+strconv.FormatUint(generation, 10))
+	dir := g.generationDir(generation)
 	return shimwire.LauncherStart{
 		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
-		Argv:  []string{self, "-test.run=^TestLauncherChild$"},
-		Env:   []string{launcherChildEnv + "=1", "LEGION_LAUNCHER_MARKER=" + marker, "ENVOY_TOKEN_FILE=" + filepath.Join(dir, "ENVOY_TOKEN")},
+		Argv: []string{self, "-test.run=^TestLauncherChild$"},
+		Env: []string{launcherChildEnv + "=1", "LEGION_LAUNCHER_MARKER=" + marker,
+			"ENVOY_TOKEN_FILE=" + filepath.Join(dir, "ENVOY_TOKEN"),
+			"LEGION_LAUNCHER_SOCKET=" + filepath.Join(dir, ompsessions.SocketName)},
 		Files: files,
 	}
 }
 
-// published waits for the child's marker: its descendant's pid and what its credential read.
+// observed is what the stand-in child saw when it ran: the pid of the descendant it started,
+// whether its generation's session socket was already bound, and what its credential pointer read.
+type observed struct {
+	descendant int
+	socket     string
+	credential string
+}
+
+// published waits for a marker of the form `<pid> <rest>` and returns the pid and the rest,
+// verbatim. The stand-in child and the namespace tests' shell scripts both write such markers.
 func published(t *testing.T, marker string) (int, string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if body, err := os.ReadFile(marker); err == nil {
-			pid, seen, _ := strings.Cut(string(body), " ")
+			pid, rest, _ := strings.Cut(string(body), " ")
 			if n, err := strconv.Atoi(pid); err == nil {
-				return n, seen
+				return n, rest
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -224,15 +316,42 @@ func published(t *testing.T, marker string) (int, string) {
 	return 0, ""
 }
 
+// publishedAll waits for the stand-in child's `<pid> <socket> <credential>` marker and reports
+// the whole of it.
+func publishedAll(t *testing.T, marker string) observed {
+	t.Helper()
+	descendant, rest := published(t, marker)
+	socket, credential, _ := strings.Cut(rest, " ")
+	return observed{descendant: descendant, socket: socket, credential: credential}
+}
+
+// gone says whether a process has ended. A process whose parent never reaps it stays a zombie,
+// which still takes a signal, so the state its /proc entry reports decides: in a container whose
+// PID 1 is the test's own stand-in rather than a reaping init — the probe pod runs `sleep` —
+// every ended descendant the launcher killed is a zombie until the container exits.
 func gone(pid int) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			return true
 		}
+		if zombie(pid) {
+			return true
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+// zombie says whether pid has ended and is only waiting to be reaped: the third field of
+// /proc/<pid>/stat, after the command in parentheses, which may itself hold spaces.
+func zombie(pid int) bool {
+	body, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	_, after, ok := strings.Cut(string(body), ") ")
+	return ok && strings.HasPrefix(after, "Z")
 }
 
 // A started generation's credentials are written owner-only into its own fresh directory, its
@@ -245,9 +364,10 @@ func TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild(t *testing.T) {
 	if got := g.start(g.childStart(7, marker, files)); !got.OK || got.RunningGeneration != 7 {
 		t.Fatalf("start result = %#v", got)
 	}
-	descendant, seen := published(t, marker)
-	if seen != "envoy-7" {
-		t.Fatalf("the child read %q through ENVOY_TOKEN_FILE, want its generation's credential", seen)
+	child := publishedAll(t, marker)
+	descendant := child.descendant
+	if child.credential != "envoy-7" {
+		t.Fatalf("the child read %q through ENVOY_TOKEN_FILE, want its generation's credential", child.credential)
 	}
 	dir := filepath.Join(g.private, "g7")
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
@@ -393,44 +513,6 @@ func TestStartsAreIdempotentAndRefusedBeforeWriting(t *testing.T) {
 	}
 }
 
-// A resume naming a session file the tree volume no longer holds is refused before anything
-// starts: no child runs and no generation directory is written, so a missing retained session
-// never becomes a fresh agent (LEGION-462). A later generation naming a session file that exists
-// starts normally in the same launcher.
-func TestStartRefusesAMissingResumeFile(t *testing.T) {
-	g := newRig(t)
-	marker := filepath.Join(t.TempDir(), "marker")
-	absent := filepath.Join(t.TempDir(), "sessions", "absent.marker")
-	refused := g.childStart(7, marker, nil)
-	refused.ResumeFile = absent
-	got := g.start(refused)
-	if got.OK {
-		t.Fatalf("start result = %#v, want a refusal: a missing resume file must never become a fresh agent", got)
-	}
-	want := "resume session file " + absent + ": stat " + absent
-	if !strings.Contains(got.Error, want) {
-		t.Fatalf("refusal = %q, want it to quote the missing session file %q", got.Error, want)
-	}
-	if _, err := os.Lstat(filepath.Join(g.private, "g7")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a refused resume wrote its generation directory: %v", err)
-	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("a refused resume started the child: its marker was published")
-	}
-
-	resumeFile := filepath.Join(t.TempDir(), "session")
-	if err := os.WriteFile(resumeFile, []byte("session"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fixed := g.childStart(8, marker, nil)
-	fixed.ResumeFile = resumeFile
-	if got := g.start(fixed); !got.OK || got.RunningGeneration != 8 {
-		t.Fatalf("start with an existing resume file = %#v, want generation 8 to run", got)
-	}
-	published(t, marker)
-	g.stop(8)
-}
-
 // toldRecreated starts generation with env (resuming resume, "" for none), returns the
 // WorkspaceRecreatedVariable value its child was started with, and stops it.
 func (g *rig) toldRecreated(generation uint64, env []string, resume string) string {
@@ -467,59 +549,978 @@ func newWorkspace(t *testing.T) string {
 	return dir
 }
 
-// A resumed generation is told whether its workspace (LEGION_WORKSPACE) was recreated since its
-// session was last written, which the Legion plugin tells the agent on its first turn: "true" once
-// provisioning's creation record is later than the session file's last write, "false" when it is
-// earlier or there is none. A fresh generation resumes nothing and is told "false", and so is every
-// generation whatever the container's own environment says, so no other value reaches the child. A
-// record that is empty or not an instant, which an init container killed mid-write can leave, only
-// decides the notice: the resume starts, told "false", and the launcher logs the record.
-func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten(t *testing.T) {
-	t.Setenv(WorkspaceRecreatedVariable, "true")
-	g := newRig(t)
-	session := filepath.Join(t.TempDir(), "session.jsonl")
-	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	written := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(session, written, written); err != nil {
-		t.Fatal(err)
-	}
-	dir := newWorkspace(t)
-	env := []string{"LEGION_WORKSPACE=" + dir}
+// roleToken is the launcher token a roles directory holds for role.
+func roleToken(role string) string { return "launcher-token-" + role }
 
-	if got := g.toldRecreated(1, env, session); got != "false" {
-		t.Errorf("a resume in a workspace with no creation record was told %q, want false", got)
-	}
-	if err := workspace.RecordCreated(dir, written.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if got := g.toldRecreated(2, env, session); got != "false" {
-		t.Errorf("a resume in a workspace created before its session's last write was told %q, want false", got)
-	}
-	if err := workspace.RecordCreated(dir, written.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if got := g.toldRecreated(3, env, session); got != "true" {
-		t.Errorf("a resume in a workspace created after its session's last write was told %q, want true", got)
-	}
-	if got := g.toldRecreated(4, env, ""); got != "false" {
-		t.Errorf("a fresh generation was told %q, want false", got)
-	}
-	if got := g.toldRecreated(5, nil, session); got != "false" {
-		t.Errorf("a resume with no workspace was told %q, want false", got)
-	}
+// fleet is one multi-role launcher under test — an issue pod's one container, which serves every
+// resident role — and the daemon end of every role's connection.
+type fleet struct {
+	t        *testing.T
+	listener net.Listener
+	// rolesDir is the container-level per-role root, home the directory each role's own home
+	// overlay covers, and fixed the root its own directories are bound back under.
+	rolesDir, home, fixed string
+	cancel                context.CancelFunc
+	result                chan error
+	stderr                *lockedBuffer
+	conns                 map[string]*roleConn
+}
 
-	for i, record := range []string{"soon\n", ""} {
-		if err := os.WriteFile(filepath.Join(dir, ".jj", "legion-created"), []byte(record), 0o644); err != nil {
+// newFleet starts a launcher over a roles directory shaped as an issue pod's one container gives
+// it — every role's launcher token, gh bundle, private, state and agent-secrets directory — and
+// takes every role's connection through its hello, acknowledgement and state. A generation of
+// such a launcher runs in namespaces of its own, so a test that starts one calls
+// requireRoleNamespaces first.
+func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
+	t.Helper()
+	scratch := namespaceScratch(t)
+	f := &fleet{
+		t: t, rolesDir: filepath.Join(scratch, "roles"), home: filepath.Join(scratch, "home"),
+		fixed: filepath.Join(scratch, "fixed"), result: make(chan error, 1), stderr: &lockedBuffer{},
+		conns: map[string]*roleConn{},
+	}
+	for _, name := range []string{RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
+		if err := os.MkdirAll(filepath.Join(f.fixed, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got := g.toldRecreated(uint64(6+i), env, session); got != "false" {
-			t.Errorf("a resume in a workspace whose creation record is %q was told %q, want false", record, got)
+	}
+	for _, dir := range []string{f.home, filepath.Join(scratch, "home-mounts")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if logged := g.stderr.String(); !strings.Contains(logged, filepath.Join(dir, ".jj", "legion-created")) ||
-		!strings.Contains(logged, "the workspace is taken as not recreated") {
-		t.Errorf("the launcher logged %q, want the unreadable creation record named", logged)
+	for _, role := range roles {
+		for _, name := range []string{RoleLauncherDir, RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
+			if err := os.MkdirAll(filepath.Join(f.rolesDir, role, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(f.rolesDir, role, RoleLauncherDir, LauncherTokenFile), []byte(roleToken(role)+"\n"), 0o400); err != nil {
+			t.Fatal(err)
+		}
 	}
+	useRoleLayout(t, f.home, filepath.Join(scratch, "home-mounts"), f.fixed)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.listener = listener
+	t.Cleanup(func() { _ = listener.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	f.cancel = cancel
+	go func() {
+		f.result <- Run(ctx, Config{
+			Connect: "tcp://" + listener.Addr().String(), Sandbox: "legion-legion-legion-208", PodUID: "pod-1",
+			RolesDir: f.rolesDir, Roles: roles, Stdout: f.stderr, Stderr: f.stderr, StopGrace: grace,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-f.result:
+		case <-time.After(30 * time.Second):
+			t.Errorf("the launcher did not leave after its context ended; its log: %s", f.stderr.String())
+		}
+	})
+	for range roles {
+		conn := acceptRole(t, listener)
+		if _, seen := f.conns[conn.hello.Role]; seen {
+			t.Fatalf("role %s opened two connections", conn.hello.Role)
+		}
+		f.conns[conn.hello.Role] = conn
+	}
+	for _, conn := range f.conns {
+		conn.acknowledge()
+	}
+	return f
+}
+
+// role is the daemon end of role's connection.
+func (f *fleet) role(name string) *roleConn {
+	f.t.Helper()
+	conn, ok := f.conns[name]
+	if !ok {
+		f.t.Fatalf("role %s never connected", name)
+	}
+	return conn
+}
+
+// roleTmp is what the role wrote at /tmp/<name> inside its namespaces, as the container sees it:
+// its own temporary directory on the roles directory's disk volume.
+func (f *fleet) roleTmp(role, name string) string {
+	return filepath.Join(f.rolesDir, RoleHomesDir, role, "tmp", name)
+}
+
+// awaitExit reads frames until the role reports generation's exit.
+func (g *roleConn) awaitExit(generation uint64) shimwire.LauncherExit {
+	g.t.Helper()
+	for g.latest.LastExit == nil || g.latest.LastExit.Generation != generation {
+		g.next()
+	}
+	return *g.latest.LastExit
+}
+
+// waitForRoleFile is path's content once the role writes it, naming the launcher's log — every
+// role's output, role-init's refusals among it — when it never does.
+func (f *fleet) waitForRoleFile(path string) string {
+	f.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if body, err := os.ReadFile(path); err == nil && len(body) > 0 {
+			return string(body)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.t.Fatalf("%s was never written; the launcher's log: %s", path, f.stderr.String())
+	return ""
+}
+
+// An issue pod's one container holds one authenticated connection per resident role, each with
+// that role's own launcher token read from that role's own directory, so the daemon tells the
+// roles apart on the worker stream exactly as one container per role did. Each role is its own
+// launcher: its id is its own and outlives its own reconnects, and one role's lost connection
+// leaves every other role serving.
+func TestAMultiRoleLauncherConnectsOncePerRoleWithThatRolesToken(t *testing.T) {
+	f := newFleet(t, 2*time.Second, "tester", "reviewer")
+	for _, role := range []string{"tester", "reviewer"} {
+		hello := f.role(role).hello
+		if hello.Token != roleToken(role) || hello.Sandbox != "legion-legion-legion-208" || hello.PodUID != "pod-1" {
+			t.Fatalf("role %s hello = %#v, want its own token for this sandbox and pod", role, hello)
+		}
+	}
+	if f.role("tester").hello.LauncherID == f.role("reviewer").hello.LauncherID {
+		t.Fatal("the two roles claimed one launcher id; each role's connection is its own launcher")
+	}
+
+	first := f.role("tester").hello.LauncherID
+	_ = f.role("tester").conn.Close()
+	again := acceptRole(t, f.listener)
+	if again.hello.Role != "tester" || again.hello.LauncherID != first || again.hello.Token != roleToken("tester") {
+		t.Fatalf("the reconnect hello is %#v, want tester as launcher %s again", again.hello, first)
+	}
+	again.acknowledge()
+	f.conns["tester"] = again
+	// The reviewer's connection carried on through the tester's: it still answers.
+	f.role("reviewer").stop(1)
+}
+
+// A stop reaches the role it names and nothing else: the stopped role's processes end, and every
+// other role's child keeps running in its own namespaces.
+func TestAStopOfOneRolesGenerationLeavesTheOtherRoleRunning(t *testing.T) {
+	requireRoleNamespaces(t)
+	f := newFleet(t, 10*time.Second, "tester", "reviewer")
+	const beating = `while :; do /bin/date +%s%N > /tmp/beat.tmp && /bin/mv /tmp/beat.tmp /tmp/beat; /bin/sleep 0.05; done`
+	for i, role := range []string{"tester", "reviewer"} {
+		got := f.role(role).start(shimwire.LauncherStart{
+			ID: "start-" + role, Generation: uint64(i + 1), Argv: []string{"/bin/sh", "-c", beating},
+		})
+		if !got.OK {
+			t.Fatalf("start of %s = %#v; the launcher's log: %s", role, got, f.stderr.String())
+		}
+		f.waitForRoleFile(f.roleTmp(role, "beat"))
+	}
+
+	f.role("tester").stop(1)
+	stopped := f.waitForRoleFile(f.roleTmp("tester", "beat"))
+	running := f.waitForRoleFile(f.roleTmp("reviewer", "beat"))
+	time.Sleep(500 * time.Millisecond)
+	if again := f.waitForRoleFile(f.roleTmp("tester", "beat")); again != stopped {
+		t.Fatalf("the tester's processes outlived its stop: its beat moved from %s to %s", stopped, again)
+	}
+	if again := f.waitForRoleFile(f.roleTmp("reviewer", "beat")); again == running {
+		t.Fatalf("the tester's stop ended the reviewer's child too: its beat stayed at %s", running)
+	}
+	f.role("reviewer").stop(2)
+}
+
+// A role's exit is the shim's own, not its namespace init's: the init reports the status it
+// waited on, so an exit code and a kill both reach the daemon as the role's.
+func TestARolesExitIsReportedWithTheShimsOwnStatus(t *testing.T) {
+	requireRoleNamespaces(t)
+	f := newFleet(t, 10*time.Second, "tester", "reviewer")
+	if got := f.role("tester").start(shimwire.LauncherStart{
+		ID: "start-tester", Generation: 1, Argv: []string{"/bin/sh", "-c", "exit 9"},
+	}); !got.OK {
+		t.Fatalf("start = %#v; the launcher's log: %s", got, f.stderr.String())
+	}
+	if exit := f.role("tester").awaitExit(1); exit.Code != 9 || exit.Signal != "" {
+		t.Fatalf("the tester's exit = %#v, want the shim's own code 9 and no signal; the launcher's log: %s", exit, f.stderr.String())
+	}
+	if got := f.role("reviewer").start(shimwire.LauncherStart{
+		ID: "start-reviewer", Generation: 1, Argv: []string{"/bin/sh", "-c", "kill -9 $$"},
+	}); !got.OK {
+		t.Fatalf("start = %#v; the launcher's log: %s", got, f.stderr.String())
+	}
+	if exit := f.role("reviewer").awaitExit(1); exit.Signal != "killed" {
+		t.Fatalf("the reviewer's exit = %#v, want the shim's own kill", exit)
+	}
+}
+
+// The container's SIGTERM stops every role at once, each given the whole stop grace its own
+// container had: both roles' handlers run to the end, and the launcher leaves in one grace rather
+// than one per role.
+func TestTheContainersStopEndsEveryRoleWithinOneStopGrace(t *testing.T) {
+	requireRoleNamespaces(t)
+	f := newFleet(t, 6*time.Second, "tester", "reviewer")
+	const handler = `trap '/bin/sleep 1.5; printf done > /tmp/finished; exit 0' TERM
+printf ready > /tmp/ready
+while :; do /bin/sleep 600 & wait; done
+`
+	for i, role := range []string{"tester", "reviewer"} {
+		got := f.role(role).start(shimwire.LauncherStart{
+			ID: "start-" + role, Generation: uint64(i + 1), Argv: []string{"/bin/sh", "-c", handler},
+		})
+		if !got.OK {
+			t.Fatalf("start of %s = %#v; the launcher's log: %s", role, got, f.stderr.String())
+		}
+		f.waitForRoleFile(f.roleTmp(role, "ready"))
+	}
+
+	started := time.Now()
+	f.cancel()
+	err := <-f.result
+	f.result <- err
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the launcher returned %v, want its context's end", err)
+	}
+	for _, role := range []string{"tester", "reviewer"} {
+		if body, readErr := os.ReadFile(f.roleTmp(role, "finished")); readErr != nil || string(body) != "done" {
+			t.Fatalf("role %s was cut short at the container's stop: %q, %v; the launcher's log: %s", role, body, readErr, f.stderr.String())
+		}
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("the container's stop took %s for two roles whose handlers take 1.5s each: the roles are stopped one after another, not together", elapsed)
+	}
+}
+
+// The container's log holds every line whole and behind its own role's prefix: the launcher's own
+// line for a role never glues onto a line that role's child has not finished, and a generation
+// that exits mid-line has that line written out on its own once it is gone, so the next
+// generation's first line starts a line of its own rather than finishing it (`fatalready`).
+func TestTheContainersLogKeepsEveryLineWholeAcrossGenerations(t *testing.T) {
+	out := &lockedBuffer{}
+	log := &roleLog{stdout: out, stderr: out}
+	_, own := log.writers("tester")
+	first, _ := log.writers("tester")
+	_, _ = first.Write([]byte("downloading 42%"))
+	_, _ = fmt.Fprintf(own, "launcher: daemon connection: EOF; reconnecting\n")
+	_, _ = first.Write([]byte("\rdownloading 99%\nfatal"))
+	first.(*prefixWriter).flush()
+	second, _ := log.writers("tester")
+	_, _ = second.Write([]byte("ready\n"))
+	second.(*prefixWriter).flush()
+	log.linef("launcher: reap orphans: list role namespace processes: permission denied")
+
+	want := "tester: launcher: daemon connection: EOF; reconnecting\n" +
+		"tester: downloading 42%\rdownloading 99%\n" +
+		"tester: fatal\n" +
+		"tester: ready\n" +
+		"launcher: reap orphans: list role namespace processes: permission denied\n"
+	if got := out.String(); got != want {
+		t.Fatalf("the container's log is\n%q\nwant\n%q", got, want)
+	}
+}
+
+// An issue pod role's generation whose role-init exits RoleInitSetupFailedExit without reporting a
+// shim status failed before its shim ran, and is reported as shimwire.LauncherExitSetupFailed,
+// never as a code the shim itself could have exited with. A role-init that exits any other way
+// with no report — a panic's 2 after its shim started, say — is reported as that exit, never as a
+// setup failure it was not. One whose role-init reported the shim's status is reported with that
+// status, its exit code 1 included. Either way the last line the generation left unfinished
+// reaches the log once it is gone.
+func TestARoleInitThatFailsBeforeItsShimIsReportedAsASetupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		exit   int
+		report string
+		want   shimwire.LauncherExit
+	}{
+		{"role-init failed setting up", RoleInitSetupFailedExit, "", shimwire.LauncherExit{Generation: 4, Code: shimwire.LauncherExitSetupFailed}},
+		{"role-init panicked after its shim started", 2, "", shimwire.LauncherExit{Generation: 4, Code: 2}},
+		{"the shim exited 1", 0, strconv.Itoa(1 << 8), shimwire.LauncherExit{Generation: 4, Code: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &lockedBuffer{}
+			m := &manager{role: "tester", namespaced: true, log: &roleLog{stdout: out, stderr: out}, requests: map[string]request{}}
+			_, m.stderr = m.log.writers("tester")
+			stdout, stderr := m.log.writers("tester")
+			cmd := exec.Command("/bin/sh", "-c", fmt.Sprintf("printf 'role-init: the role'\"'\"'s gh directory: no such file'; exit %d", tc.exit))
+			cmd.Stdout, cmd.Stderr = stdout, stderr
+			read, write, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if tc.report != "" {
+				_, _ = write.WriteString(tc.report)
+			}
+			_ = write.Close()
+			active := &child{generation: 4, pid: cmd.Process.Pid, process: cmd.Process, dir: t.TempDir(), status: read, output: []io.Writer{stdout, stderr}, done: make(chan struct{})}
+			m.child = active
+			m.wait(cmd, active)
+			if m.lastExit == nil || *m.lastExit != tc.want {
+				t.Fatalf("the generation's exit = %+v, want %+v; the log: %s", m.lastExit, tc.want, out.String())
+			}
+			if !strings.Contains(out.String(), "tester: role-init: the role's gh directory: no such file\n") {
+				t.Fatalf("the generation's unfinished last line never reached the log whole: %q", out.String())
+			}
+			if setup := strings.Contains(out.String(), "failed before it started the shim"); setup != (tc.want.Code == shimwire.LauncherExitSetupFailed) {
+				t.Fatalf("the launcher's line naming a setup failure is there: %v, want %v; the log: %s", setup, !setup, out.String())
+			}
+		})
+	}
+}
+
+// A stop that reaches a generation its wait has already reaped signals nothing: the launcher
+// signals the role-init it started through that process's own handle, never by a number the
+// kernel may have handed to another role's role-init since. The reaped generation's number here
+// names a live process, as a reused one would: a stop sent by number would end it.
+func TestAStopOfAReapedGenerationSignalsNothing(t *testing.T) {
+	reaped := exec.Command("/bin/true")
+	if err := reaped.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reaped.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	reuser := exec.Command("/bin/sleep", "60")
+	if err := reuser.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan error, 1)
+	go func() { ended <- reuser.Wait() }()
+	t.Cleanup(func() { _ = reuser.Process.Kill(); <-ended })
+	m := &manager{role: "tester", namespaced: true}
+	if err := m.signalChild(&child{pid: reuser.Process.Pid, process: reaped.Process}, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal a reaped generation = %v, want nothing to signal and no error", err)
+	}
+	select {
+	case err := <-ended:
+		ended <- err
+		t.Fatalf("the process now holding the reaped generation's number ended (%v): the stop was sent by number", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A start that reaches a role once the container is stopping is refused, and no generation runs:
+// it would otherwise begin after the container's SIGTERM, be given the whole stop grace from then,
+// and outlast the pod's own.
+func TestAStartAfterTheContainersStopIsRefused(t *testing.T) {
+	m := &manager{role: "controller", private: t.TempDir(), requests: map[string]request{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := m.start(ctx, shimwire.LauncherStart{ID: "start-1", Generation: 1, Argv: []string{"/bin/sh", "-c", "exit 0"}})
+	if got.OK || !strings.Contains(got.Error, "stopping") {
+		t.Fatalf("start after the container's stop = %#v, want a refusal", got)
+	}
+	if m.child != nil {
+		t.Fatalf("a generation runs after the container's stop: %+v", m.child)
+	}
+	if entries, err := os.ReadDir(m.private); err != nil || len(entries) != 0 {
+		t.Fatalf("the refused start left credentials behind: %v, %v", entries, err)
+	}
+}
+
+// PID 1's reaper reaps every exited process of its namespace but the generations its managers
+// run, whatever the number of managers: an orphan a `kubectl exec` left in an issue pod's roles
+// container is reaped, and each role's own generation is left to its manager's wait, which still
+// reads that generation's own exit status.
+func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
+	start := func(script string) *exec.Cmd {
+		cmd := exec.Command("/bin/sh", "-c", script)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return cmd
+	}
+	tester, reviewer := start("exit 7"), start("exit 9")
+	orphan := start("exit 0")
+	managers := []*manager{
+		{role: "tester", namespaced: true, log: &roleLog{}, child: &child{pid: tester.Process.Pid}},
+		{role: "reviewer", namespaced: true, log: &roleLog{}, child: &child{pid: reviewer.Process.Pid}},
+	}
+	// Every one has exited and waits as a zombie for whoever reaps it.
+	for _, cmd := range []*exec.Cmd{tester, reviewer, orphan} {
+		deadline := time.Now().Add(5 * time.Second)
+		for !zombie(cmd.Process.Pid) {
+			if time.Now().After(deadline) {
+				t.Fatalf("process %d never exited", cmd.Process.Pid)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	go func() { reapOrphans(ctx, signals, managers); close(done) }()
+	signals <- syscall.SIGCHLD
+	// A reaped process is gone from the process table; a zombie still takes signal 0.
+	deadline := time.Now().Add(5 * time.Second)
+	for !errors.Is(syscall.Kill(orphan.Process.Pid, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			t.Fatal("the reaper left the orphan unreaped")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	for cmd, want := range map[*exec.Cmd]int{tester: 7, reviewer: 9} {
+		if err := cmd.Wait(); cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != want {
+			t.Errorf("a manager's generation reads %v (%v), want its own exit %d: the reaper took it", cmd.ProcessState, err, want)
+		}
+	}
+}
+
+// testInstance is the Cloud SQL instance a test's session database sits in. This repository is
+// public, so it is a placeholder, as is every login and database name beside it.
+const testInstance = "example-project:us-central1:example-instance"
+
+// testDatabase is the session database a launcher under test proxies its generations to.
+var testDatabase = ompsessions.Database{Instance: testInstance, Name: "legion_sessions", User: "legion-sessions@example-project.iam"}
+
+// sessionDialer stands in for the Cloud SQL connector: every connection is a fresh dial of addr,
+// which the test owns, and check is the credential work the connector does before each of them, so
+// a test can refuse one dial and allow the next. While stalling (stallAt), every dial reaches a
+// silent upstream instead and stalls in a real TLS handshake, which, like the connector's own, ends
+// only when the dial's context does.
+type sessionDialer struct {
+	addr  string
+	check func() error
+
+	mu     sync.Mutex
+	dials  []string
+	silent string
+}
+
+func (d *sessionDialer) Dial(ctx context.Context, instance string) (net.Conn, error) {
+	d.mu.Lock()
+	d.dials = append(d.dials, instance)
+	silent := d.silent
+	d.mu.Unlock()
+	if silent != "" {
+		return stalledDial(ctx, silent)
+	}
+	if d.check != nil {
+		if err := d.check(); err != nil {
+			return nil, err
+		}
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, "tcp", d.addr)
+}
+
+// stallAt makes every dial from now on stall against the silent upstream at addr; "" ends that.
+func (d *sessionDialer) stallAt(addr string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.silent = addr
+}
+
+func (d *sessionDialer) Close() error { return nil }
+
+// build is the Config.SessionDialer a test passes: every generation of its launcher dials through
+// this very fake.
+func (d *sessionDialer) build(context.Context) (sessionproxy.Dialer, error) { return d, nil }
+
+// stalledDial opens a real connection to addr, a silent upstream, and runs a real TLS handshake
+// over it, which nothing ever answers, so it ends only when ctx does.
+func stalledDial(ctx context.Context, addr string) (net.Conn, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	client := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, ServerName: "x"})
+	if err := client.HandshakeContext(ctx); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+// silentUpstream is an instance that never answers: a listener that accepts every connection and
+// never writes to it, holding each one open until the test ends.
+func silentUpstream(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return listener.Addr().String()
+}
+
+// idleUpstream is a listener that accepts a connection and closes it, which is all a proof dial
+// and a bound-socket check need: no Postgres speaks over it.
+func idleUpstream(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+// A session database named only in part is refused before the launcher does anything at all, and
+// the refusal names each flag that is missing: all three open the database, and a pod that proxied
+// to half of one would run an agent against nothing.
+func TestAPartlyNamedSessionDatabaseIsRefusedBeforeTheLauncherStarts(t *testing.T) {
+	for name, tc := range map[string]struct {
+		database ompsessions.Database
+		want     string
+	}{
+		"the instance alone": {ompsessions.Database{Instance: testInstance},
+			"launcher: the session database is named in part: no --session-database, no --session-user"},
+		"no login": {ompsessions.Database{Instance: testInstance, Name: testDatabase.Name},
+			"launcher: the session database is named in part: no --session-user"},
+		"no instance": {ompsessions.Database{Name: testDatabase.Name, User: testDatabase.User},
+			"launcher: the session database is named in part: no --session-instance"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The connect address is one nothing listens on: a refused configuration must answer
+			// before the launcher dials anything.
+			err := Run(context.Background(), Config{
+				Connect: "tcp://127.0.0.1:1", Token: "launcher-token", Sandbox: "legion-legion-legion-208",
+				Role: "tester", PodUID: "pod-1", PrivateDir: t.TempDir(), SessionDatabase: tc.database,
+			})
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Run = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The child of a generation with a session database finds its socket already bound: the proxy is
+// up, and has proven one connection to the instance, before anything the agent runs can ask Oh My
+// Pi for its session (INFRA-271).
+func TestAChildFindsItsGenerationsSessionSocketAlreadyBound(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(4, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	if seen := publishedAll(t, marker); seen.socket != "bound" {
+		t.Fatalf("the child found its session socket %s, want it already bound", seen.socket)
+	}
+	g.stop(4)
+}
+
+// A generation whose session database cannot be reached fails loudly rather than running an agent
+// against something else: the refusal names the generation and the instance, no child runs, the
+// generation's directory is gone, and nothing is left listening where its socket would have been.
+func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t), check: func() error { return errors.New("the instance refused the login") }}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	marker := filepath.Join(t.TempDir(), "marker")
+	got := g.start(g.childStart(5, marker, nil))
+	if got.OK || !strings.Contains(got.Error, "generation 5") || !strings.Contains(got.Error, testInstance) {
+		t.Fatalf("start result = %#v, want a refusal naming generation 5 and %s", got, testInstance)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a generation whose session database refused it started its child")
+	}
+	dir := g.generationDir(5)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused generation's directory survived: %v", err)
+	}
+	if conn, err := net.Dial("unix", filepath.Join(dir, ompsessions.SocketName)); err == nil {
+		_ = conn.Close()
+		t.Fatal("something is still listening at the refused generation's session socket")
+	}
+}
+
+// A generation whose session database never answers is refused while the daemon still waits: the
+// proof dial ends at half the launcher's stop grace, which the daemon's wait on a start always
+// outlasts, and the refusal names the generation, the instance and the bound, with nothing of the
+// generation left on disk or bound. The command loop is free again: the Stop the daemon sends after
+// a start it gave up on, already queued behind that start, is read and obeyed, and the next
+// generation, once the instance answers, starts and is served.
+func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	dialer.stallAt(silentUpstream(t))
+	const grace = 400 * time.Millisecond
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	began := time.Now()
+	g.send(g.childStart(1, marker, nil))
+	stop := shimwire.LauncherStop{ID: "stop-1", Generation: 1, GraceMs: 1000}
+	g.send(stop)
+	got, ok := g.reply().(shimwire.LauncherStartResult)
+	if waited := time.Since(began); waited >= grace {
+		t.Fatalf("the start was answered %s after it was sent, past the %s stop grace", waited, grace)
+	}
+	if !ok || got.OK || !strings.Contains(got.Error, "generation 1") || !strings.Contains(got.Error, testInstance) ||
+		!strings.Contains(got.Error, "no answer within 200ms") {
+		t.Fatalf("start result = %#v, want a refusal naming generation 1, %s and its 200ms bound", got, testInstance)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a generation whose session database never answered started its child")
+	}
+	dir := g.generationDir(1)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused generation's directory survived: %v", err)
+	}
+	if conn, err := net.Dial("unix", filepath.Join(dir, ompsessions.SocketName)); err == nil {
+		_ = conn.Close()
+		t.Fatal("something is still listening at the refused generation's session socket")
+	}
+	if stopped, ok := g.reply().(shimwire.LauncherStopResult); !ok || !stopped.OK || stopped.ID != stop.ID {
+		t.Fatalf("stop result = %#v, want the queued stop obeyed", stopped)
+	}
+
+	dialer.stallAt("")
+	next := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(2, next, nil)); !got.OK {
+		t.Fatalf("start of generation 2 = %#v", got)
+	}
+	if seen := publishedAll(t, next); seen.socket != "bound" {
+		t.Fatalf("generation 2's child found its session socket %s, want it already bound", seen.socket)
+	}
+	conn, err := net.Dial("unix", filepath.Join(g.generationDir(2), ompsessions.SocketName))
+	if err != nil {
+		t.Fatalf("dial generation 2's session socket: %v", err)
+	}
+	_ = conn.Close()
+	g.stop(2)
+}
+
+// A session database is held for exactly one generation and nothing between: while the generation
+// runs its socket is served and its connection file sits owner-only in its own directory, and once
+// its child is gone both are too and that address is dead. The generation after it gets a
+// directory, a socket and a file of its own.
+func TestASessionDatabaseIsHeldForItsGenerationAndNothingBetween(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	running := func(generation uint64) (socket, file string) {
+		t.Helper()
+		marker := filepath.Join(t.TempDir(), "marker")
+		if got := g.start(g.childStart(generation, marker, nil)); !got.OK {
+			t.Fatalf("start of generation %d = %#v", generation, got)
+		}
+		publishedAll(t, marker)
+		dir := g.generationDir(generation)
+		socket, file = filepath.Join(dir, ompsessions.SocketName), filepath.Join(dir, ompsessions.DSNFileName)
+		conn, err := net.Dial("unix", socket)
+		if err != nil {
+			t.Fatalf("dial generation %d's session socket: %v", generation, err)
+		}
+		_ = conn.Close()
+		info, err := os.Lstat(file)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatalf("generation %d's connection file: %v, %v; want an owner-only regular file", generation, info, err)
+		}
+		return socket, file
+	}
+	ended := func(generation uint64, socket, file string) {
+		t.Helper()
+		if conn, err := net.Dial("unix", socket); err == nil {
+			_ = conn.Close()
+			t.Fatalf("generation %d's session socket is still served after it ended", generation)
+		}
+		if _, err := os.Lstat(file); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generation %d's connection file outlived it: %v", generation, err)
+		}
+	}
+
+	first, firstFile := running(6)
+	g.stop(6)
+	ended(6, first, firstFile)
+	second, secondFile := running(7)
+	g.stop(7)
+	ended(7, second, secondFile)
+}
+
+// On the container's shutdown a generation's session database outlives its child and no longer: a
+// wedged agent that ignores SIGTERM is still served through its stop grace, is killed at the grace,
+// and only then is its proxy closed and its directory removed, before Run returns. The proxy's
+// lifetime is the child's plus the generation's own cleanup, bounded by the grace, never the
+// container's context.
+func TestOnTheContainersShutdownASessionDatabaseEndsOnceItsWedgedChildIsKilled(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	const grace = 500 * time.Millisecond
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
+	ready := filepath.Join(t.TempDir(), "ready")
+	// An ignored signal stays ignored across fork and exec, so neither the shell nor its sleeps
+	// answer SIGTERM: only the SIGKILL at the grace ends the generation.
+	start := shimwire.LauncherStart{
+		ID: "start-1", Generation: 1,
+		Argv: []string{"/bin/sh", "-c", `trap '' TERM; printf '%s ' "$$" > "$READY.tmp" && mv "$READY.tmp" "$READY"; while :; do sleep 0.05; done`},
+		Env:  []string{"READY=" + ready},
+	}
+	if got := g.start(start); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	pid, _ := published(t, ready)
+	dir := g.generationDir(1)
+	socket := filepath.Join(dir, ompsessions.SocketName)
+	upstreamDials := func() int {
+		dialer.mu.Lock()
+		defer dialer.mu.Unlock()
+		return len(dialer.dials)
+	}
+	before := upstreamDials()
+
+	g.cancel()
+	stopped := time.Now()
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("the session socket refused a dial during the wedged child's stop grace: %v", err)
+	}
+	_ = conn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for upstreamDials() == before {
+		if time.Now().After(deadline) {
+			t.Fatal("the proxy accepted a connection during the stop grace but never dialed the upstream for it")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case err := <-g.result:
+		// The rig's cleanup reads the result too.
+		g.result <- err
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want the container's shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the wedged child's stop grace")
+	}
+	if waited := time.Since(stopped); waited < grace {
+		t.Fatalf("Run returned %s after the shutdown, inside the %s grace a child ignoring SIGTERM is owed", waited, grace)
+	}
+	if !gone(pid) {
+		t.Fatalf("the wedged child %d outlived its stop grace", pid)
+	}
+	if conn, err := net.Dial("unix", socket); err == nil {
+		_ = conn.Close()
+		t.Fatal("the session socket is still served after Run returned")
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the generation's directory outlived Run: %v", err)
+	}
+}
+
+// echoUpstream is an instance that answers every connection by echoing it back, and holds it open
+// until its far end closes it or the test ends, as a database holds an idle session.
+func echoUpstream(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+			go func() {
+				_, _ = io.Copy(conn, conn)
+				_ = conn.Close()
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return listener.Addr().String()
+}
+
+// holdSessionSocket connects the test process itself to a generation's session socket, a holder
+// outside the generation's process group as a setsid'd psql would be, shows by a round trip that
+// the connection reaches the upstream, and returns it held open.
+func holdSessionSocket(t *testing.T, socket string) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("dial the generation's session socket: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write through the session socket: %v", err)
+	}
+	echoed := make([]byte, len("ping"))
+	if _, err := io.ReadFull(conn, echoed); err != nil || string(echoed) != "ping" {
+		t.Fatalf("the upstream echoed %q, %v; want ping", echoed, err)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+// expectHeldClosed fails unless the proxy has closed a held connection: a read on it ends with no
+// bytes, within a bound and not for want of time.
+func expectHeldClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	n, err := conn.Read(buf)
+	var timeout net.Error
+	if n != 0 || err == nil || errors.As(err, &timeout) && timeout.Timeout() {
+		t.Fatalf("the held connection read %q, %v; want it closed", buf[:n], err)
+	}
+}
+
+// A socket holder outside the generation's process group cannot hold the generation open on the
+// container's shutdown. Off PID 1 the launcher's signals reach only the child's process group and
+// nothing reaps the rest, so the holder outlives the child; the proxy closes its connection once
+// sessionDrain is over, and Run returns within the stop grace and the drain, with the socket no
+// longer served, the generation's directory gone and the holder's connection closed under it.
+func TestASocketHolderOutsideTheGenerationCannotHoldItOpenOnTheContainersShutdown(t *testing.T) {
+	dialer := &sessionDialer{addr: echoUpstream(t)}
+	const grace = 300 * time.Millisecond
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(1, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	publishedAll(t, marker)
+	dir := g.generationDir(1)
+	socket := filepath.Join(dir, ompsessions.SocketName)
+	held := holdSessionSocket(t, socket)
+
+	g.cancel()
+	bound := grace + sessionDrain + 3*time.Second
+	select {
+	case err := <-g.result:
+		// The rig's cleanup reads the result too.
+		g.result <- err
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want the container's shutdown", err)
+		}
+	case <-time.After(bound):
+		t.Fatalf("Run did not return within %s of the shutdown while a holder outside the generation kept its session socket open", bound)
+	}
+	if conn, err := net.Dial("unix", socket); err == nil {
+		_ = conn.Close()
+		t.Fatal("the session socket is still served after Run returned")
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the generation's directory outlived Run: %v", err)
+	}
+	expectHeldClosed(t, held)
+	if logged := g.stderr.String(); !strings.Contains(logged, "still open after "+sessionDrain.String()) {
+		t.Fatalf("the launcher logged %q, want the connection closed after the drain named", logged)
+	}
+}
+
+// A socket holder outside the generation's process group cannot hold up the daemon's stop either:
+// the stop is answered within its grace and the drain, the holder's connection is closed under it,
+// and the next generation starts and is served.
+func TestASocketHolderOutsideTheGenerationCannotHoldUpTheDaemonsStop(t *testing.T) {
+	dialer := &sessionDialer{addr: echoUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: 300 * time.Millisecond})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(1, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	publishedAll(t, marker)
+	dir := g.generationDir(1)
+	held := holdSessionSocket(t, filepath.Join(dir, ompsessions.SocketName))
+
+	began := time.Now()
+	// g.stop sends the stop with a one-second grace.
+	g.stop(1)
+	if waited, bound := time.Since(began), time.Second+sessionDrain+3*time.Second; waited > bound {
+		t.Fatalf("the stop was answered %s after it was sent, past %s", waited, bound)
+	}
+	expectHeldClosed(t, held)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stopped generation's directory survived: %v", err)
+	}
+
+	next := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(2, next, nil)); !got.OK {
+		t.Fatalf("start of generation 2 = %#v", got)
+	}
+	if seen := publishedAll(t, next); seen.socket != "bound" {
+		t.Fatalf("generation 2's child found its session socket %s, want it already bound", seen.socket)
+	}
+	// Generation 2's socket carries a round trip to the upstream: the proxy serves it.
+	_ = holdSessionSocket(t, filepath.Join(g.generationDir(2), ompsessions.SocketName)).Close()
+	g.stop(2)
+}
+
+// The connection file a generation's agent reads is the agent's own spelling of that generation's
+// endpoint — the socket as the URL's path, where the launcher's own client names its directory —
+// and carries no password at all: the login travels in the proxy's certificate exchange.
+func TestTheSessionConnectionFileIsTheAgentsSpellingAndCarriesNoPassword(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(3, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	publishedAll(t, marker)
+	dir := g.generationDir(3)
+	body, err := os.ReadFile(filepath.Join(dir, ompsessions.DSNFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ompsessions.Endpoint{SocketDir: dir, Database: testDatabase.Name, User: testDatabase.User}.AgentURL()
+	if string(body) != want {
+		t.Fatalf("the connection file holds %q, want %q", body, want)
+	}
+	parsed, err := url.Parse(string(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if password, held := parsed.User.Password(); held {
+		t.Fatalf("the connection file carries a password: %q", password)
+	}
+	if parsed.User.Username() != testDatabase.User {
+		t.Fatalf("the connection file signs in as %q, want %q", parsed.User.Username(), testDatabase.User)
+	}
+	g.stop(3)
 }

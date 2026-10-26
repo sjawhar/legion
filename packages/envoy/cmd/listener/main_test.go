@@ -2144,7 +2144,7 @@ func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
 		if err := client.JS().DeleteConsumer(bus.Stream, consumer); err != nil {
 			t.Fatalf("rebuild %d: lose the durable consumer: %v", rebuild, err)
 		}
-		if err := rebuildListenerDependencies(client, nil, durableProbe, consumer, handler); err != nil {
+		if err := rebuildListenerDependencies(context.Background(), client, nil, durableProbe, consumer, handler); err != nil {
 			t.Fatalf("rebuild %d: %v", rebuild, err)
 		}
 		if got := client.Conn.NumSubscriptions(); got != subscriptions {
@@ -4391,6 +4391,56 @@ func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.
 	}
 }
 
+// TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError is the shutdown that cancels the monitor
+// while a rebuild is rebinding the durable consumer: the rebuild runs under the monitor's context,
+// so the cancel cuts it with context.Canceled. That error is the shutdown, not a failed rebuild, and
+// an ordered shutdown writes no ERROR, so the monitor returns without logging it, probing again or
+// terminating.
+func TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError(t *testing.T) {
+	stuck := errors.New("durable consumer not found")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var logs bytes.Buffer
+	rebuild := func() error {
+		cancel()
+		return fmt.Errorf("rebind durable consumer: %w", context.Canceled)
+	}
+	var terminates atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.NewWithWriter("test", &logs),
+			func() error { return stuck },
+			func(error) bool { return true },
+			func() bool { return true },
+			rebuild,
+			func() { terminates.Add(1) },
+			time.Millisecond,
+			3,
+		)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the monitor did not return after the shutdown cut its rebuild")
+	}
+	if got := terminates.Load(); got != 0 {
+		t.Fatalf("terminate calls = %d, want 0: a shutdown is not a failure to restart from", got)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line %q is not JSON: %v", line, err)
+		}
+		if record.Level == "ERROR" || strings.HasPrefix(record.Msg, "self-health rebuild failed") {
+			t.Fatalf("the shutdown-cut rebuild logged %q: an ordered shutdown writes no ERROR", line)
+		}
+	}
+}
+
 // TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket deletes envoy_roles, the one listener
 // bucket no watcher reads. A rebuild opens a bucket and never creates one, so every rebuild fails
 // and the listener terminates; the next start's store Open creates the bucket again. Without that,
@@ -4494,7 +4544,7 @@ func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Durati
 	<-done
 }
 
-// setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
+// setupTestNATS starts a NATS server dedicated to this test, which ends with it.
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
 	_, uri := testnats.Start(t)
@@ -4557,7 +4607,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		},
 		client.Connected,
 		func() error {
-			return rebuildListenerDependencies(client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
+			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
 		},
 	)
 
@@ -4625,6 +4675,113 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	code, body := get()
 	if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || !strings.Contains(fmt.Sprint(body["error"]), "interest KV watcher") {
 		t.Fatalf("with the interest watcher dead: /healthz = %d %v, want 503 unhealthy naming the interest KV watcher", code, body)
+	}
+}
+
+// healthzWithLiveLane is a listener's /healthz over a bound durable and both registries, as main
+// publishes them once the durable binds, with the live topics lane on when lane is set: a client of
+// its own subscribed as main's openLiveTopics subscribes it. It returns the live client and the
+// subscription it holds (nil without the lane) and a get() that serves one /healthz request.
+func healthzWithLiveLane(t *testing.T, consumer string, lane bool) (*bus.Client, *natsgo.Subscription, func() (int, map[string]any)) {
+	t.Helper()
+	client := setupTestNATS(t)
+	t.Cleanup(client.Close)
+	durable, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err != nil {
+		t.Fatalf("bind the durable: %v", err)
+	}
+	t.Cleanup(func() { _ = durable.Unsubscribe() })
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open interest registry: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err := registry.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for interest cache: %v", err)
+	}
+	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for session cache: %v", err)
+	}
+	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, consumer: consumer}
+	var live *bus.Client
+	var liveSub *natsgo.Subscription
+	if lane {
+		live, err = bus.Connect([]string{client.Conn.ConnectedUrl()}, bus.WithName("healthz-live-topics"))
+		if err != nil {
+			t.Fatalf("connect the live client: %v", err)
+		}
+		t.Cleanup(live.Close)
+		if liveSub, err = live.SubscribeCore(liveTopicsSubject, func(*natsgo.Msg) {}, bus.ListenerLiveQueue("healthz")); err != nil {
+			t.Fatalf("subscribe the live lane: %v", err)
+		}
+		if err := live.Conn.Flush(); err != nil {
+			t.Fatalf("flush the live subscription: %v", err)
+		}
+		deps.live = live
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(deps)
+	return live, liveSub, func() (int, map[string]any) {
+		recorder := httptest.NewRecorder()
+		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var body map[string]any
+		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+		return recorder.Code, body
+	}
+}
+
+// /healthz says whether the live topics lane is on: "not_applicable" when ENVOY_SUBSCRIBE_ALL_TOPICS
+// leaves it off, "subscribed" while it holds its subscription.
+func TestHealthzNamesTheLiveTopicsLane(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lane bool
+		want string
+	}{
+		{name: "off", want: "not_applicable"},
+		{name: "on", lane: true, want: "subscribed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, get := healthzWithLiveLane(t, "listener-healthz-live-"+tc.name, tc.lane)
+			if code, body := get(); code != http.StatusOK || body["status"] != "healthy" || body["live_topics"] != tc.want {
+				t.Fatalf("/healthz = %d %v, want 200 healthy with live_topics %q", code, body, tc.want)
+			}
+		})
+	}
+}
+
+// With the live topics lane on, /healthz answers 503 once the lane's subscription or its client's
+// connection is gone: every topic the stream does not store then reaches no session on this
+// machine, while the rest of the listener answers as healthy as before.
+func TestHealthzAnswersUnhealthyWithoutTheLiveSubscription(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lose func(t *testing.T, live *bus.Client, sub *natsgo.Subscription)
+	}{
+		{name: "subscription ended", lose: func(t *testing.T, _ *bus.Client, sub *natsgo.Subscription) {
+			if err := sub.Unsubscribe(); err != nil {
+				t.Fatalf("unsubscribe the live lane: %v", err)
+			}
+		}},
+		{name: "connection closed", lose: func(_ *testing.T, live *bus.Client, _ *natsgo.Subscription) { live.Close() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live, sub, get := healthzWithLiveLane(t, "listener-healthz-live-lost", true)
+			if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
+				t.Fatalf("before the live lane is lost: /healthz = %d %v, want 200 healthy", code, body)
+			}
+			tc.lose(t, live, sub)
+			if code, body := get(); code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["error"] != "live subscription inactive" {
+				t.Fatalf("with the live lane lost: /healthz = %d %v, want 503 unhealthy with error \"live subscription inactive\"", code, body)
+			}
+		})
 	}
 }
 

@@ -93,7 +93,7 @@ func TestTheMeasurerCountsARenderingAnUpdatePublishes(t *testing.T) {
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	replica := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	rendering := headings(1)
 	replica.publishSize(&rendering)
 	if bytes, _, measured := replica.size(); !measured || bytes != int64(len(rendering)) {
@@ -119,7 +119,7 @@ func TestARoomsLoadMeasuresItsRenderingAtOnce(t *testing.T) {
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	rendering := headings(1)
-	replica := service.keepReplica(newDocumentCopy(), &rendering)
+	replica := service.keepReplica(newDocumentCopy(), nil, &rendering)
 	if _, elements, measured := replica.size(); !measured || elements != countElements(rendering) {
 		t.Fatalf("the loaded room published %d elements (measured %t), want %d", elements, measured, countElements(rendering))
 	}
@@ -137,7 +137,7 @@ func TestASmallRenderingIsCountedToo(t *testing.T) {
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	replica := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	if _, elements, _ := replica.size(); elements != countElements(loaded) || elements == 0 {
 		t.Fatalf("the loaded room published %d elements, want its count %d", elements, countElements(loaded))
 	}
@@ -159,7 +159,7 @@ func TestTheMeasurerCountsARoomsLatestRenderingRatherThanEach(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	replica := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	first, second, third := headings(1), headings(2), headings(3)
 	replica.publishSize(&first)
 	<-recorder.started
@@ -189,7 +189,7 @@ func TestTheMeasurerCountsARoomAtMostOncePerInterval(t *testing.T) {
 	close(recorder.release)
 	loaded := "# Title\n"
 	start := time.Now()
-	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	replica := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	first, second, third := headings(1), headings(2), headings(3)
 	replica.publishSize(&first)
 	if bytes, _, _ := replica.size(); bytes != int64(len(first)) {
@@ -223,8 +223,8 @@ func TestAnUnreadableRenderingPublishesNoMeasurement(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	counting := service.keepReplica(newDocumentCopy(), &loaded)
-	waiting := service.keepReplica(newDocumentCopy(), &loaded)
+	counting := service.keepReplica(newDocumentCopy(), nil, &loaded)
+	waiting := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	first, second := headings(1), headings(2)
 	counting.publishSize(&first)
 	<-recorder.started
@@ -255,7 +255,7 @@ func TestTheMeasurerKeepsNoRetiredRoomsReplica(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	counting := service.keepReplica(newDocumentCopy(), &loaded)
+	counting := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	first := headings(1)
 	counting.publishSize(&first)
 	<-recorder.started
@@ -294,7 +294,7 @@ func TestTheMeasurerKeepsNoRetiredRoomsReplicaWaitingOutTheInterval(t *testing.T
 // every reference to the room but a weak one to its replica.
 func queueRetiredRoom(service *Service, rendering string) weak.Pointer[renderedReplica] {
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	replica := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	replica.publishSize(&rendering)
 	return weak.Make(replica)
 }
@@ -306,7 +306,7 @@ func TestTheMeasurerStopsWithTheService(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	replica := service.keepReplica(newDocumentCopy(), nil, &loaded)
 	first := headings(1)
 	replica.publishSize(&first)
 	<-recorder.started

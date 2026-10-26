@@ -16,17 +16,23 @@ import (
 // Heartbeat is the pi-envoy plugin's registration heartbeat (`DEFAULT_HEARTBEAT_MS`,
 // packages/envoy-client/src/envoy-settings.ts): what refreshes a session's `last_seen` in the Envoy
 // listener's role lookup.
-const Heartbeat = 120 * time.Second
+const Heartbeat = 90 * time.Second
 
 // probeTimeout bounds one role lookup, so a hung listener answers Unknown rather than holding the
 // caller.
 const probeTimeout = 10 * time.Second
 
 // LivenessWindow is how stale the controller holder's `last_seen` may be before the controller
-// counts as gone: two heartbeats at least, since one would flap on every tick, and never less than
-// the boot timeout — 240 s at the defaults.
+// counts as gone: four heartbeats at least, since one would flap on every tick, and never less
+// than the boot timeout — 360 s at the defaults.
+//
+// Four rather than three: three heartbeats is 270 s, short of the 300 s a live holder's
+// `last_seen` can reach, since that is the listener's own session record lifetime
+// (OpenSessionRegistry's default ttl, packages/envoy/internal/session/registry.go). Four is 360 s,
+// still wider than the 240 s this replaced, so a pane that has not restarted and still refreshes
+// every 120 s stays live and no release ordering is forced.
 func LivenessWindow(bootTimeout time.Duration) time.Duration {
-	return max(bootTimeout, 2*Heartbeat)
+	return max(bootTimeout, 4*Heartbeat)
 }
 
 // Liveness is what the Envoy listener says of the registered controller session.

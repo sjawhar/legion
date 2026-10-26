@@ -22,6 +22,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.23.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/nats-io/nats-server/v2 v2.10.29
 	github.com/nats-io/nats.go v1.50.0
 	github.com/nats-io/nkeys v0.4.15
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
@@ -92,6 +93,7 @@ require (
 	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
+	github.com/minio/highwayhash v1.0.3 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.3.0 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
@@ -100,6 +102,7 @@ require (
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/moby/term v0.5.2 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
+	github.com/nats-io/jwt/v2 v2.7.4 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
@@ -129,9 +132,9 @@ require (
 )
 
 // The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #304; the fork
-// carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested
-// reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
+// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #304, #331, #332;
+// the fork carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and
+// nested reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
 // transactional GC range search; a whole document state resolves its own dependencies before the
 // pending cap, through a dependency worklist rather than a re-scan per step; items merge only when
 // their right origins match, so a re-encoded document keeps its text order; the bundled stores
@@ -139,8 +142,15 @@ require (
 // stores' check rather than refusing it past a pending cap; Apply stamps a room with no peer idle
 // when it returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed
 // connection is answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's
-// provider learns which of its edits the room took; and Server.OnPeerUpdate runs in place of the
-// room's own apply of a read-write peer's SyncStep2 or Update, so the server can refuse one
-// before it reaches the room or any other peer, or hold a lock of its own across the apply. A
-// merged update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.2
+// provider learns which of its edits the room took; Server.OnPeerUpdate (#304) runs in place of
+// the room's own apply of a read-write peer's SyncStep2 or Update, so the server can refuse one
+// before it reaches the room or any other peer, or hold a lock of its own across the apply;
+// CloseRoom (#331) closes a browser that connects while it runs, which it used to leave on the
+// room it removed, where no later edit reached it; Doc.OpenUpdateLog (#332) logs each committed
+// transaction's update in commit order under the document's own lock, so the room's update
+// observer measures each update against the room the commit before it left; and a document can
+// bound the items one remote update's integration scans (SetMaxIntegrateScan), refusing an update
+// that scans past it with ErrIntegrateScanBudget and leaving the document as it was, while split
+// runs of one item merge back in one linear pass rather than a pass per run. A merged update's
+// skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.5

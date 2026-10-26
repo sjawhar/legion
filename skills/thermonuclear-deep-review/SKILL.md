@@ -6,33 +6,44 @@ disable-model-invocation: true
 
 # Thermonuclear Deep Review
 
-As a security reviewer, audit the changes of the checked-out branch for bugs, regressions and security vulnerabilities. Be rigorous. Report only what the evidence supports.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
+## Verdict
+
+The first line of the report is the verdict, in exactly this form, because a PR gate reads only that line:
+
+- `Verdict: CHANGES at <sha>` when the report has a Medium or High finding.
+- `Verdict: APPROVE at <sha>` when it has none. Minor findings do not block.
+
+Priority: trace each finding end to end first. Minor changes no behavior, hides no error and breaks no gate; any other finding is Medium, or High when the report holds its trace, because developers who get false High findings stop listening.
+
+`<sha>`: `git rev-parse --short=8 HEAD` at the head you reviewed, or the sha your brief names when you have no shell.
 
 ## Scope
 
-Report only issues in code that the PR adds or modifies. Exception: unchanged code that consumes behavior the diff changes (check 2). A broken consumer is a defect of this diff, but the diff never shows it.
+Audit the checked-out branch. Report issues in code its diff adds or modifies, in the unchanged consumers check 2 finds, and in the PR body's claims (check 6), because the author fixes only this diff and the diff never shows them.
 
 ## Checks
 
-1. **Breakage.** Trace each change through its callers and contracts, across packages and modules.
-2. **Consumers.** For each behavior the diff changes, name its consumers and show that each one still works. Behaviors: log level, status code, exception type, metric or field name, payload shape, identity or uniqueness key, timing, retry, default. Tracing callers does not find consumers, and many are outside the diff, the package or the repository:
+1. **Breakage.** Trace each change through its callers and contracts, across packages and modules, because breaks show outside the changed lines.
+2. **Consumers.** For each behavior the diff changes, name its consumers and show that each one still works. Behaviors: log level, status code, exception type, metric or field name, payload shape, identity or uniqueness key, timing, retry, default. Tracing callers misses consumers, many outside the diff, the package or the repository:
    - alert and monitor predicates (a monitor on `status:error` stops when a line goes down to WARNING)
    - log-level contracts, structured-log field names, log-derived metric filters
    - status codes and error-type strings in request logs, webhooks and audit records
-   - identity or uniqueness keys that a persistence layer arbitrates on (a new id for an existing row collides with a constraint)
+   - identity or uniqueness keys that a persistence layer arbitrates on
    - dashboards, SLOs, saved queries, downstream parsers
 
-   If you cannot find a consumer, say so. Never assume that none exists. A change that removes its own alarm is the highest severity here, because it also removes the signal that would catch it.
-3. **Developer experience.** Find changes to how developers run or build the code locally. Examples: where or how the code reads secrets, new or renamed environment variables, remapped ports or networking. A new script that must run for a feature to keep working is also a change. Not a break: a new alternative way to run or build, or a new package-manager dependency. Exception: a dependency that needs a step outside the usual workflow, such as a manual install from a website or app store, is a break.
-4. **Feature leaks.** Trace each feature flag or internal-only check and its callers. Do not let a gated feature leak.
-5. **Intended breakage.** An intended, well-constrained high-risk effect is not a defect. Report it when its scope or consequences are unclear, or when it removes a safeguard or feature gate.
-6. **PR body claims.** Attack each safety or correctness claim in the PR body, not only the diff. Only a reviewer told to attack a claim finds a wrong one. Attack these first:
+   If you cannot find a consumer, say so, because an assumed-away consumer breaks silently. A change that removes its own alarm is High, because it also removes the signal that would catch it.
+3. **Developer experience.** Find changes to how developers run or build the code locally, because no test catches them. Examples: where or how the code reads secrets, new or renamed environment variables, remapped ports or networking, a new script that must run for a feature to keep working. Not a break: a new alternative way to run or build, or a new package-manager dependency, unless it needs a step the README or AGENTS.md does not list, such as a manual install from a website or app store.
+4. **Feature leaks.** Trace each feature flag or internal-only check and its callers, because a leak ships a feature to users a gate excludes.
+5. **Intended breakage.** A high-risk effect the PR body names and bounds (who it affects, how to undo it) is not a defect, because the author chose it. Report one it does not, or one that removes a safeguard or feature gate.
+6. **PR body claims.** Attack each safety or correctness claim in the PR body, because the diff does not show whether a claim in prose is true. Attack these first:
    - Order, not coverage: after a pipeline sanitizes, can any later pass create or recreate what the sanitizer neutralized?
-   - A severity that relies on a third party's formatting is a dependency, not a mitigation. Rate it as that bet, and fix it, do not only disclose it.
+   - An input called safe because another program escapes it depends on that program: rate the finding as if it did not.
 
 ## Security Guidelines
 
-For each row whose surface the diff touches, answer with a file:line citation.
+For each row whose surface the diff touches, answer with a file:line citation, because an answer without one cannot be checked.
 
 | Tag | If the diff touches… | Answer, with file:line |
 | --- | --- | --- |
@@ -42,33 +53,23 @@ For each row whose surface the diff touches, answer with a file:line citation.
 | `prompt` | a prompt that embeds untrusted text into an agent's instructions | what delimits the untrusted region, and what the agent may do if it obeys that text (OWASP LLM01 prompt injection, LLM06 excessive agency) |
 | `supply-chain` | a dependency, lockfile, base image, or GitHub Action | the version, the pin (a digest or a SHA checked against its tag), and the permissions the workflow runs with |
 | `sandbox` | a sandbox or pod manifest, a capability, or a network policy | which isolation property changed, and against whom |
-| `agent-def` | an agent definition, skill, role prompt, `.omp/` config, or `AGENTS.md` | whether this diff can steer its own reviewers, and why this edit is trustworthy anyway |
-| `transport` | TLS or certificate verification, a signature, an HMAC, a randomness source, or a read or write that untrusted input sizes with no bound | what changed, the check or bound it relies on, and the ASVS V11 or V12 identifier it maps to |
+| `agent-def` | an agent definition, skill, role prompt, `.omp/` config, or `AGENTS.md` | whether this diff can steer its own reviewers, and, if so, what a reviewer must check by hand |
+| `transport` | TLS or certificate verification, a signature, an HMAC, a randomness source, or a read or write that untrusted input sizes with no bound | what changed, the check or bound it relies on, and the ASVS identifier it maps to |
 
-- Cite an OWASP ASVS v5.0.0 identifier where one applies (`v5.0.0-1.2.5` style).
-- A security finding with no stated exploit path is not a finding. Call it hardening and rank it Minor. A security finding that states an exploit path is always its own finding at its real priority. Never put it in the hardening items.
-- Report at most two hardening items, ranked. Put the rest in one hardening paragraph.
+- Cite an OWASP ASVS v5.0.0 identifier where one applies (`v5.0.0-1.2.5` style), so the author can find it.
+- A security finding with no stated exploit path is hardening, ranked Minor. One that states an exploit path is its own finding at its real priority, so no exploit is filed as optional.
+- Report at most two hardening items, ranked, and put the rest in one paragraph, so they do not bury findings.
 - Start each security finding with its row's tag, `Security[<tag>]:`, so readers can count findings by row.
-- End the report with one `Security:` line: each touched row's tag and its answer with file:line, or `Security: no sensitive surface in this diff.` when the diff touches none.
+- End the report with one `Security:` line, because the Legion reviewer copies it: each touched row's tag and its answer with file:line, or `Security: no sensitive surface in this diff.` when the diff touches none.
 
 ## Findings
 
-- Never misreport priority. Developers who get false High findings stop listening. Trace each issue end to end.
-- Never report a finding with research still open. If you can read the code that settles it, read it. Not: "the client has issue X, but if the backend handles it, this is ok."
-
-## Verdict
-
-Make the first line of the report the verdict, in exactly this form, with the short sha of the head commit you reviewed (`git rev-parse --short=8 HEAD`):
-
-- `Verdict: CHANGES at <sha>` when the report has a finding that the author must fix before merge.
-- `Verdict: APPROVE at <sha>` when it has none. Hardening items alone do not block.
-
-A PR gate can read the verdict from the first line of a posted report, and it reads only that line. Put nothing before the verdict.
+- Never report a finding whose open question you can settle by reading code, because the author cannot act on a guess. When you cannot settle it, say what you searched and where.
 
 ## PR discussion
 
-Only after your independent audit, and only when you have Medium-to-High findings and the branch has a PR:
+Only after your own audit, so others' findings do not steer it, and only with a Medium or High finding on a branch that has a PR:
 
-1. Read the PR/MR discussion with `gh` or `glab` for comments from BugBot or others.
-2. Check their findings. Include the valid ones you missed, and add what is useful from the ones you share.
-3. Mark each finding that came from that discussion.
+1. Read the PR/MR's comments and review comments, bots' included, with `gh` or `glab`.
+2. Check their findings in the code: a comment is not evidence. Include the valid ones you missed; for one you share, add their evidence if yours lacks it.
+3. Mark each finding that came from that discussion, so readers can tell it from yours.

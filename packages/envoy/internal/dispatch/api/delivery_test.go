@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestGetDeliveryTimelineWithoutSettingsIs404(t *testing.T) {
@@ -398,19 +398,22 @@ func TestGetDeliveryTimelineCreditsAMergeQueueMergeToTheDeployCreatedAfterIt(t *
 }
 
 // seedDeliveryIssueFacts seeds what the timeline joins a pull request's issue against: project
-// ACME, its component tree (platform > api, and docs), ACME-1 (P0, attached to api), its child
-// ACME-2 (P2, attaching nothing of its own, so it inherits api), and ACME-3 (no priority, attached
-// to none with a reason).
+// ACME, its component tree from two sources (platform > api from acme/arch, and docs from
+// acme/docs), ACME-1 (P0, attached to api), its child ACME-2 (P2, attaching nothing of its own,
+// so it inherits api), and ACME-3 (no priority, attached to none with a reason).
 func seedDeliveryIssueFacts(t *testing.T, database *store.Store) {
 	t.Helper()
 	ctx := t.Context()
 	for _, statement := range []string{
 		`insert into projects (key, name) values ('ACME', 'Acme') on conflict do nothing`,
-		`insert into architecture_snapshots (id, project_key, commit, files) values (900, 'ACME', 'c1', '{}')`,
-		`insert into components (project_key, id, title, prose, parent, snapshot_id) values
-			('ACME', 'platform', 'The platform', '', null, 900),
-			('ACME', 'api', 'Public API', '', 'platform', 900),
-			('ACME', 'docs', 'Documentation', '', null, 900)`,
+		`insert into architecture_sources (project_key, id, repo, branch, installation_id, created_by) values
+			('ACME', 1, 'acme/arch', 'main', 1, '{"kind":"system","id":"test"}'),
+			('ACME', 2, 'acme/docs', 'main', 1, '{"kind":"system","id":"test"}')`,
+		`insert into architecture_snapshots (id, project_key, commit, files) values (900, 'ACME', 'c1', '{}'), (901, 'ACME', 'd1', '{}')`,
+		`insert into components (project_key, id, title, prose, parent, snapshot_id, source_id) values
+			('ACME', 'platform', 'The platform', '', null, 900, 1),
+			('ACME', 'api', 'Public API', '', 'platform', 900, 1),
+			('ACME', 'docs', 'Documentation', '', null, 901, 2)`,
 		`insert into issues (key, project_key, number, title, status, priority, created_by, rank) values
 			('ACME-1', 'ACME', 1, 'Ship widgets', 'todo', 0, '{"kind":"system","id":"test"}', 'U'),
 			('ACME-3', 'ACME', 3, 'Tidy docs', 'todo', null, '{"kind":"system","id":"test"}', 'W')`,
@@ -564,6 +567,63 @@ func TestGetDeliveryTimelineJoinsIssueFactsAndCountsFacets(t *testing.T) {
 	}
 }
 
+// TestGetDeliveryTimelineFacetsComponentsOfEverySource proves the component facet names a
+// project's components whichever of its sources defines them: a pull request on an issue attached
+// to acme/arch's api and one on an issue attached to acme/docs' docs each carry their component,
+// both are counted, and selecting the second source's component selects its pull request.
+func TestGetDeliveryTimelineFacetsComponentsOfEverySource(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := t.Context()
+	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
+		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
+		ProductionJobNames: []string{"release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		PopulationAuthors: []string{"octocat"},
+	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	seedDeliveryIssueFacts(t, database)
+	for _, statement := range []string{
+		`update issue_components set mode = 'explicit', reason = null where issue_key = 'ACME-3'`,
+		`insert into issue_component_members (issue_key, project_key, component_id) values ('ACME-3', 'ACME', 'docs')`,
+	} {
+		if _, err := database.Pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("attach ACME-3 to docs: %v\n%s", err, statement)
+		}
+	}
+	merged := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	key := func(k string) *string { return &k }
+	for _, pr := range []delivery.DeliveryPullRequest{
+		{Repo: "acme/widgets", Number: 1, Title: "feat: ship the api", Author: "octocat", IssueKey: key("ACME-1")},
+		{Repo: "acme/widgets", Number: 3, Title: "docs: tidy", Author: "octocat", IssueKey: key("ACME-3")},
+	} {
+		pr.URL = "https://github.com/" + pr.Repo + "/pull/" + strconv.Itoa(pr.Number)
+		at := merged.Add(time.Duration(pr.Number) * time.Minute)
+		pr.MergedAt, pr.CreatedAt = &at, &at
+		if err := delivery.UpsertPullRequest(ctx, database.Pool, pr); err != nil {
+			t.Fatalf("seed PR %s#%d: %v", pr.Repo, pr.Number, err)
+		}
+	}
+	window := "from=" + merged.Add(-time.Hour).Format(time.RFC3339) + "&to=" + merged.Add(time.Hour).Format(time.RFC3339)
+
+	body := getDeliveryTimeline(t, handler, window)
+	components := map[string][]string{}
+	for _, pr := range body.PRs {
+		components[pr.ID] = pr.Components
+	}
+	if want := map[string][]string{"acme/widgets#1": {"ACME/api"}, "acme/widgets#3": {"ACME/docs"}}; !reflect.DeepEqual(components, want) {
+		t.Fatalf("pull request components = %v, want %v", components, want)
+	}
+	if got, want := body.FacetCounts["component"], map[string]int{"ACME/api": 1, "ACME/docs": 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("facet_counts.component = %v, want %v", got, want)
+	}
+	if _, ok := body.Components["ACME/docs"]; !ok {
+		t.Fatalf("components = %+v, want acme/docs' docs among them", body.Components)
+	}
+	if got := deliveryPRIDs(getDeliveryTimeline(t, handler, window+"&component=ACME/docs").PRs); !slices.Equal(got, []string{"acme/widgets#3"}) {
+		t.Fatalf("component=ACME/docs: prs = %v, want acme/widgets#3", got)
+	}
+}
+
 // TestGetDeliveryRunListsEveryJob proves GET /api/v1/delivery/runs/{id} answers one deploy
 // repository run with every job it ran, by start (a job that never started last), and refuses a
 // run id that is not a positive integer or names no run.
@@ -683,8 +743,8 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 	}
 
 	previous := slog.Default()
-	var logs bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	logs := &storetest.LockedLog{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	const window = "from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"

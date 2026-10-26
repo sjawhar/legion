@@ -1,5 +1,6 @@
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
+  DEFAULT_ISSUE_READ_EVENTS,
   ISSUE_TITLE_MAX,
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
@@ -47,6 +48,9 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 const ISSUE_REFERENCE =
   "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 
+const BOARD_NEIGHBOUR_REFUSAL =
+  "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
+
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
@@ -89,9 +93,10 @@ function documentOwnerValidation(
   };
 }
 
+const documentEditOwner = documentOwnerValidation(true);
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
-    if (!documentOwnerValidation(true, true).check(value)) return false;
+    if (!documentEditOwner.check(value)) return false;
     const input = value as { readonly precondition?: unknown };
     if (input.precondition === undefined) return true;
     if (typeof input.precondition !== "object" || input.precondition === null) return false;
@@ -101,8 +106,7 @@ const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
     };
     return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
   },
-  message:
-    "Exactly one of issue and project is required; artifact or ref must name the document. A precondition selects exactly one of document or blocks.",
+  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
@@ -119,7 +123,7 @@ const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
 };
 
 const ISSUE_UPDATE_FIELDS_RULE =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 const ISSUE_UPDATE_DONE_RULE =
   "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
 const ISSUE_UPDATE_REASON_RULE = "reason goes only with status done";
@@ -142,6 +146,8 @@ function issueUpdateProblem(value: unknown): string | undefined {
     readonly blocked_by?: unknown;
     readonly components?: unknown;
     readonly repo?: unknown;
+    readonly before?: unknown;
+    readonly after?: unknown;
   };
   if (input.status === "done") {
     if (typeof input.reason !== "string" || input.reason.trim() === "") {
@@ -163,7 +169,9 @@ function issueUpdateProblem(value: unknown): string | undefined {
     typeof input.parent === "string" ||
     Array.isArray(input.blocked_by) ||
     (typeof input.components === "object" && input.components !== null) ||
-    typeof input.repo === "string";
+    typeof input.repo === "string" ||
+    typeof input.before === "string" ||
+    typeof input.after === "string";
   return changesAField ? undefined : ISSUE_UPDATE_FIELDS_RULE;
 }
 
@@ -235,8 +243,7 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
     );
 }
 
-const SPEC_WRITING_POINTER =
-  'Write a spec as the "Writing a spec" section of skill://dispatch says.';
+const SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
 
 /**
  * The `images` argument of the three tools that write text a person reads: local picture files,
@@ -300,6 +307,12 @@ export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 export const PROJECT_KEY_RULE =
   "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE";
 
+/** A GitHub repository as `owner/name`, as `dispatch architecture-sync --repo` sends it in the
+ *  path of `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync`. A name of `.` or
+ *  `..` would resolve away as a path segment, so it is refused here rather than sent; the server
+ *  holds the rest of GitHub's rule (`parseSourceRepo`). */
+const ARCHITECTURE_SOURCE_REPO_PATTERN = /^[A-Za-z0-9-]+\/(?!\.\.?$)[A-Za-z0-9._-]+$/;
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -340,6 +353,7 @@ export const dispatchToolSpecs = [
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " +
       "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " +
       "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
+      "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -375,7 +389,7 @@ export const dispatchToolSpecs = [
       assignee: z
         .string()
         .describe(
-          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned."
+          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else the project's default assignee when it still names a person who has signed in, else unassigned. Set it only when a person said who owns the issue."
         )
         .optional(),
       components: componentsArgument(z).optional(),
@@ -391,14 +405,15 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue_update",
     example: {
       issue: "DSP-1",
-      status: "done",
-      reason: "Shipped in owner/repo#7; verified on the production dashboard.",
+      priority: 1,
+      before: "DSP-2",
     },
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
       "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
       "route, set or clear its parent, replace the issues it is blocked by, attach it to " +
-      "architecture components, or set the repository it targets. Status is one of " +
+      "architecture components, set the repository it targets, or move it on its project's " +
+      "board. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. A non-empty external_links is " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
@@ -406,12 +421,16 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only rank, components, " +
+      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
       "included, waits for the reopen. " +
-      "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
-      "settable here. At least one " +
+      "priority is yours to set and a human overrides it. before and after move the issue on " +
+      "its project's board: before puts it above that issue, after below, and both together " +
+      "land it between them. A project's board order is one agent's to keep; in a Legion " +
+      "deployment that is the controller. Never reassign an issue a person holds to get a " +
+      "faster answer: who holds it is their call. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -468,6 +487,18 @@ export const dispatchToolSpecs = [
           "The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again."
         )
         .optional(),
+      before: z
+        .string()
+        .describe(
+          `Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
+        )
+        .optional(),
+      after: z
+        .string()
+        .describe(
+          `Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
+        )
+        .optional(),
     }),
     validation: {
       check: (value) => issueUpdateProblem(value) === undefined,
@@ -491,8 +522,9 @@ export const dispatchToolSpecs = [
       "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " +
       "the issue and decide again. A claim whose session is no longer running may be " +
       "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
-      "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
-      "dispatch issue-update when you start. A claim is released by its holder or any human, and by " +
+      "issue's status — claiming moves nothing, and the result names who moves the status: you, with " +
+      "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " +
+      "else is undone. A claim is released by its holder or any human, and by " +
       "any agent once the holder's session is no longer running. " +
       ISSUE_REFERENCE,
     arguments: (z) => ({
@@ -529,13 +561,17 @@ export const dispatchToolSpecs = [
       "end of the section it concerns), at every phase, approved spec or not; the block reaches " +
       "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " +
       "document is approved through dispatch request-approval. Do not use this tool for a status " +
-      "update or discussion; use dispatch message instead. " +
+      "update or discussion; use dispatch message instead. Never create an issue to park a " +
+      "question: the question is an ask on the issue it concerns. " +
       ASK_QUESTION_CONTRACT +
       " " +
       ASK_OPTIONS_CONTRACT +
       " For an action only a human can perform, state what it changes and risks as constraints. " +
       "Anything that requires a human to do, including a credential or grant renewal, is an ask, " +
-      "never a message. " +
+      "never a message. Measure what you can first, and put the measurement and the size of the " +
+      "population it covers in the question; drop an option that cannot fix most of that " +
+      "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " +
+      "when your work halts on the answer, and keep working on everything else. " +
       "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
       `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` +
@@ -671,7 +707,9 @@ export const dispatchToolSpecs = [
       "Retract an open question that is moot or resolve one after finding the answer. This closes " +
       "the question without answering it. An ask that lives as an `ask` block in a document is " +
       'closed in the document too. A reason beginning "removed from the document in version" is ' +
-      "refused: that marks a retraction the document's own settlement wrote.",
+      "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " +
+      "a newer one replaces or the design made moot, resolved for one whose answer you found; an " +
+      "answered ask cannot be resolved, and resolving records no decision by a person.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -728,7 +766,7 @@ export const dispatchToolSpecs = [
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+      `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -824,7 +862,10 @@ export const dispatchToolSpecs = [
       "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " +
       "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
       "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " +
-      "that conversation back. Every other message names its issue. " +
+      "that conversation back. " +
+      "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " +
+      "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " +
+      "arrives as a user message: answer in the conversation, with no dispatch message. " +
       `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z
@@ -873,13 +914,16 @@ export const dispatchToolSpecs = [
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
-      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+      "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " +
+      `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Project document artifact id, slug, or filename; optional when ref names it.")
+        .describe(
+          "Optional project document artifact id, slug, or filename; primary document by default for an issue."
+        )
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z
@@ -1068,7 +1112,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      "dispatch doc-edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,
@@ -1118,6 +1162,8 @@ export const dispatchToolSpecs = [
       "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
       "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
       "when it has any (`Progress: none` otherwise). " +
+      `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` +
+      "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
@@ -1134,12 +1180,32 @@ export const dispatchToolSpecs = [
           "Document artifact id, slug, or filename: one of the issue's, or a project document."
         )
         .optional(),
-      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      ref: z
+        .string()
+        .describe(
+          "Optional dispatch:// reference: dispatch://KEY, dispatch://KEY/spec, " +
+            "dispatch://KEY/artifact/<slug>[@vN], dispatch://KEY/ask/<id>, dispatch://KEY/comment/<id>, " +
+            "dispatch://KEY/message/<id>, dispatch://PROJECT/artifact/<slug>[@vN], and its " +
+            "/ask/<id> and /comment/<id>; or the dashboard URL of one."
+        )
+        .optional(),
       message: z
         .string()
         .describe(
           "A message id (uuid): reads the conversation it belongs to, the root message and every " +
             "reply. Name nothing else with it."
+        )
+        .optional(),
+      events: z
+        .number({ int: true, min: 1 })
+        .describe(
+          `How many of the issue's newest events an issue read or its dispatch://KEY/log lists, oldest first; default ${DEFAULT_ISSUE_READ_EVENTS}. Name no --all-events with it.`
+        )
+        .optional(),
+      all_events: z
+        .boolean()
+        .describe(
+          `List every one of the issue's events, oldest first, on an issue read or its dispatch://KEY/log, in place of the last ${DEFAULT_ISSUE_READ_EVENTS}. Name no --events with it.`
         )
         .optional(),
     }),
@@ -1205,7 +1271,10 @@ export const dispatchToolSpecs = [
       "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
       "walk every matching issue. A walk is exact only while the list does not change: an issue " +
       "that enters or leaves what the filters match, or whose status or rank changes, between two " +
-      "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+      "pages shifts rows across a page boundary, so one issue can come back twice and another never. " +
+      "all takes the whole filtered list in one read instead, for a caller that must not miss or " +
+      "repeat a row while other writers change the list, and especially for one whose own writes " +
+      "move issues out of what it filtered on.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -1237,6 +1306,13 @@ export const dispatchToolSpecs = [
       offset: z
         .number({ int: true, min: 0 })
         .describe("Rows to skip before the page; nonnegative integer; default 0.")
+        .optional(),
+      all: z
+        .boolean()
+        .describe(
+          "Take every matching issue in one unpaged read, so no row is missed or repeated while " +
+            "the list changes. Refused with limit or offset."
+        )
         .optional(),
     }),
   },
@@ -1273,15 +1349,36 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_architecture_sync",
-    example: { project: "CORE" },
+    example: { project: "CORE", repo: "acme/infra" },
     description:
-      "Import a project's architecture model from its configured source repository now, instead of " +
-      "waiting for the server's five-minute schedule. Returns the imported commit and component " +
-      "count, or the recorded error when the model was rejected (the previous model stays up). " +
-      "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",
+      "Import a project's architecture model from its source repositories now, instead of waiting " +
+      "for the server's five-minute schedule. A project may have several sources, one per " +
+      "repository, and its model is every source's components together. Without repo every " +
+      "source imports and each answers on its own line; with repo only that source does. Each " +
+      "line names the imported commit, or the recorded error when that source's model was " +
+      "rejected (its previous components stay up, and every other source is untouched). A failed " +
+      "line also says what of that source still shows (its commit, its component count when it " +
+      "was saved again on another branch and has not imported from it yet, or that it never " +
+      "imported), and a credential or branch problem is that source's failed line, or with repo " +
+      "the error 409 SOURCE_ACCESS. Sources " +
+      "are saved in Settings or with PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}; " +
+      "404 SOURCE_NOT_FOUND when the project has none, or none for that repository.",
     arguments: (z) => ({
-      project: z.string().describe("Project key whose architecture source to sync, such as CORE."),
+      project: z.string().describe("Project key whose architecture sources to sync, such as CORE."),
+      repo: z
+        .string()
+        .describe(
+          "One source repository of the project to sync alone, owner/name; omit it to sync every source."
+        )
+        .optional(),
     }),
+    validation: {
+      check: (value) => {
+        const { repo } = value as { readonly repo?: unknown };
+        return typeof repo !== "string" || ARCHITECTURE_SOURCE_REPO_PATTERN.test(repo);
+      },
+      message: "repo is not a repository: give it as owner/name, such as acme/infra.",
+    },
     strict: true,
   },
   {
@@ -1306,7 +1403,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_whoami",
     example: {},
     description:
-      "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
+      "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
     strict: true,
   },

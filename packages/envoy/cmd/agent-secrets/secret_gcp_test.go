@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -68,9 +69,23 @@ type fakeSecretManager struct {
 	// refuseAnnotationUpdates, when set, makes UpdateSecret refuse an annotations-field-mask
 	// request with PermissionDenied, as IAM refuses a person changing a shared secret's tags.
 	refuseAnnotationUpdates bool
+	// race, when set, runs once on the secret named by the first GetSecret or UpdateSecret after the
+	// first GetSecret, before that call is answered, as another writer's update landing between a
+	// read and the next call does; gets counts GetSecret calls.
+	race  func(*fakeSecret)
+	gets  int
+	raced bool
 	// authorizations is the authorization metadata each call carried, in order: the sign-in it
 	// ran under (recordAuthorization).
 	authorizations []string
+}
+
+// raceOnce runs f.race on entry once, on a call after the first GetSecret.
+func (f *fakeSecretManager) raceOnce(entry *fakeSecret) {
+	if f.race != nil && !f.raced && f.gets > 0 {
+		f.raced = true
+		f.race(entry)
+	}
 }
 
 // recordAuthorization notes the authorization metadata each call carries before the fake answers
@@ -126,6 +141,10 @@ func (f *fakeSecretManager) GetSecret(_ context.Context, req *secretmanagerpb.Ge
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	entry, ok := f.secrets[req.GetName()]
+	if ok {
+		f.raceOnce(entry)
+	}
+	f.gets++
 	if !ok {
 		return nil, status.Error(codes.NotFound, "not found")
 	}
@@ -147,6 +166,7 @@ func (f *fakeSecretManager) UpdateSecret(_ context.Context, req *secretmanagerpb
 	if !ok {
 		return nil, status.Error(codes.NotFound, "not found")
 	}
+	f.raceOnce(entry)
 	if etag := req.GetSecret().GetEtag(); etag != "" && etag != entry.secret.GetEtag() {
 		return nil, status.Error(codes.FailedPrecondition, "etag mismatch")
 	}
@@ -283,7 +303,7 @@ func gcpServedBy(f *fakeSecretManager, settings Settings) func(name string) Rere
 		case len(entry.versions) == 0:
 			return Reread{Name: name, Reason: policy.ReasonNoCurrentValue}
 		}
-		return Reread{Name: name, Served: true}
+		return Reread{Name: name, Served: true, Kind: entry.secret.GetAnnotations()[policy.TagKind]}
 	}
 }
 
@@ -500,7 +520,9 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("create: exit %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stdout, "created SCRATCH_TEST (owner=ada@example.com, tier=agent)") {
+	// Each line names the store it wrote to, so an answer of this CLI's is never read as
+	// another secrets CLI's (source.go).
+	if !strings.Contains(stdout, "created SCRATCH_TEST in GCP Secret Manager project ") || !strings.Contains(stdout, "(owner=ada@example.com, tier=agent)") {
 		t.Fatalf("create stdout: %q", stdout)
 	}
 
@@ -525,7 +547,7 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("retag: exit %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stdout, "retagged SCRATCH_TEST (owner=ada@example.com, tier=human)") {
+	if !strings.Contains(stdout, "retagged SCRATCH_TEST in GCP Secret Manager project ") || !strings.Contains(stdout, "(owner=ada@example.com, tier=human)") {
 		t.Fatalf("retag stdout: %q", stdout)
 	}
 
@@ -533,7 +555,7 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("delete: exit %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stdout, "deleted SCRATCH_TEST") {
+	if !strings.Contains(stdout, "deleted SCRATCH_TEST in GCP Secret Manager project ") {
 		t.Fatalf("delete stdout: %q", stdout)
 	}
 
@@ -629,6 +651,51 @@ func TestGCPSecretWriteUnderAMachineIdentityUsesThePersonsGcloudLogin(t *testing
 			if rereads, answers := broker.recorded(); !slices.Equal(rereads, []string{"SCRATCH_TEST"}) || !answers[0].Served {
 				t.Fatalf("rereads %v answered %v, want SCRATCH_TEST served", rereads, answers)
 			}
+		})
+	}
+}
+
+// TestGCPSecretRetagUnderAMachineIdentityUsesThePersonsGcloudLogin: retag's read of the tags and
+// its etag-bound write run under the person's gcloud login too, like every write: every Secret
+// Manager call carries the token gcloud lends that login. A retag another writer races between its
+// read and its write is refused (errTagsChanged) under that same login, and writes nothing.
+func TestGCPSecretRetagUnderAMachineIdentityUsesThePersonsGcloudLogin(t *testing.T) {
+	for _, raced := range []bool{false, true} {
+		t.Run(map[bool]string{false: "alone", true: "raced"}[raced], func(t *testing.T) {
+			fake := newFakeSecretManager()
+			startFakeSecretManager(t, fake)
+			useGCPIdentity(t, "external_account", machineEmail)
+			gcloud := useGcloud(t, machineEmail, "ada@example.com")
+			startSecretBrokerWith(t, gcpTestSettings(), gcpServedBy(fake, gcpTestSettings()))
+			id := testGCPPrefix + "scratch-test"
+			held := map[string]string{policy.TagOwner: "ada@example.com", policy.TagTier: policy.TierAgent}
+			fake.secrets[id] = &fakeSecret{
+				secret:      &secretmanagerpb.Secret{Name: id, Annotations: maps.Clone(held), Etag: "1"},
+				versions:    []*secretmanagerpb.SecretVersion{{Name: id + "/versions/1", State: secretmanagerpb.SecretVersion_ENABLED}},
+				etagCounter: 1,
+			}
+			if raced {
+				fake.race = func(entry *fakeSecret) {
+					entry.secret.Annotations = map[string]string{policy.TagOwner: "ada@example.com", policy.TagTier: policy.TierHuman}
+					entry.etagCounter++
+					entry.secret.Etag = "2"
+				}
+			}
+			_, stderr, code := runSecret("retag", "SCRATCH_TEST", "--max-grant", "1h")
+			fake.mu.Lock()
+			annotations := maps.Clone(fake.secrets[id].secret.GetAnnotations())
+			fake.mu.Unlock()
+			if raced {
+				if code != 1 || !strings.Contains(stderr, "another write changed the secret after this retag read it") {
+					t.Fatalf("raced retag: exit %d stderr %q; want 1 naming the change", code, stderr)
+				}
+				if _, ok := annotations[policy.TagMaxGrant]; ok {
+					t.Fatalf("annotations after a refused retag = %v; want the other writer's, with no max-grant", annotations)
+				}
+			} else if code != 0 || annotations[policy.TagMaxGrant] != "1h" {
+				t.Fatalf("retag: exit %d stderr %q, annotations %v; want max-grant 1h", code, stderr, annotations)
+			}
+			requireRunUnder(t, fake, gcloud, "ada@example.com")
 		})
 	}
 }

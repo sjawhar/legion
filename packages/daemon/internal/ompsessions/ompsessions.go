@@ -1,5 +1,7 @@
-// Package ompsessions is Oh My Pi's SQL session table as Legion uses it, under
-// runtime.kubernetes.session_store postgres. The table is Oh My Pi's own (sql-session-storage.ts at
+// Package ompsessions is Oh My Pi's SQL session table as Legion uses it, and the settled
+// runtime.kubernetes.session_store the daemon reads it under (store.go: the union, the file name
+// DSNFileVariable points at, libpq's own name for a unix socket, and the two URL spellings of one
+// unix-socket endpoint). The table is Oh My Pi's own (sql-session-storage.ts at
 // the release .omp-pin names): it creates and migrates omp_session_files and
 // omp_session_files_parts when it starts, keys a session by the path its file would have had (the
 // session file a claim records), and reads a session as the row's content followed by its parts in
@@ -48,9 +50,10 @@ var createTables = []string{
 // undefinedTable is Postgres's SQLSTATE for a relation that does not exist.
 const undefinedTable = "42P01"
 
-// ReadDSN is the connection URL a DSN file holds, trimmed as Oh My Pi trims it: the session
-// database's, or the daemon's own for `legion sessions mark-lost`, whose callers say which. Its
-// refusals name the file, never what it holds.
+// ReadDSN is the connection URL a DSN file holds, trimmed as Oh My Pi trims it. Every caller reads
+// the session database's: Connect, which opens it, and the launcher's own resume lookup
+// (launcher.sessionWritten), which reads the file afresh before each attempt so a URL rewritten
+// under it is picked up. Its refusals name the file, never what it holds.
 func ReadDSN(file string) (string, error) {
 	body, err := os.ReadFile(file)
 	if err != nil {

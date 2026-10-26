@@ -249,7 +249,7 @@ func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 //
 // Replaced blocks that stand apart are not linear. ygo's Delete and Insert walk the fragment from
 // its start to the index each is given (crdt/yxml.go leftChildAt, deleteChildRange, in the pinned
-// sjawhar/ygo v1.51.3-sami.2), and a replaced block between two kept ones is a run of its own, so a
+// sjawhar/ygo v1.51.3-sami.5), and a replaced block between two kept ones is a run of its own, so a
 // document whose every other block changes type costs a walk per replaced block, as it did before
 // runs were batched. That shape is held to ygo's own walks instead: Update may take no more than
 // alternatingAllowance times what a Delete and an Insert at each replaced index take on the same

@@ -8,9 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,27 +21,50 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
+// MintFailedMessage is logged, at ERROR, each time a kind secret's minter fails a release,
+// followed by name=<the secret's name>, kind=<its kind>, class=<secrets.MintErrorClass of the
+// error> and error=<the minter's message>, which never holds the stored value or a token. The
+// session's answer is 502 MINT_FAILED; this line is the operator's.
+const MintFailedMessage = "broker: mint failed"
+
+// NarrowingRefusedMessage is logged, at WARN, each time a release's narrowing of its GitHub App
+// tokens is refused for what it names: an account a github-app secret of the grant does not list
+// (403 NARROWING_OWNER_NOT_LISTED, before any minter runs), or GitHub's 422 to the narrowed token
+// (422 NARROWING_REFUSED). It is followed by grant=, enrollment=, name=<the secret's name> and
+// error=, which never holds a value or a token. A refused authorization the caller fixes, not a
+// mint failure the operator acts on.
+const NarrowingRefusedMessage = "broker: narrowing refused"
+
 // Values releases the values of a live grant to its own enrollment, and when the grant expires:
 // nil for a grant that lasts until its session ends. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
 // the policy has changed since the grant's request was decided, or any granted name is a service's
-// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
-// current policy still allows the session, with the names its operator withheld from it, every
-// granted name under the login that decided it (stillAllowed). Each value is read from the secret
-// the request froze, or, for a minted secret, minted for the service account its source names,
-// lasting the shorter of MaxMintLifetime and what is left of the grant.
-// It holds no pooled connection across a Secrets Manager read: the grant's names are read into
-// memory before the first value is fetched.
-func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, *time.Time, error) {
+// (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
+// prove) — that the current policy still allows the session, with the names its operator withheld
+// from it, every granted name under the login that decided it (stillAllowed), and that no granted
+// name's max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
+// stored secret releases its frozen source. A kind secret reads that same stored source and
+// passes its value to the kind's minter. Once every value is read, each stored one is checked
+// against the policy as it stands then (recheckStoredSources), so a retag that lands during the
+// reads never releases what the secret stores once it is a kind. It holds no pooled connection
+// across a Secrets Manager read: the grant's names are read into memory before the first value is
+// fetched. A non-nil narrowing is this release's alone: it reaches the github-app minter of every
+// github-app name the grant holds, and the grant records nothing of it, so its next release
+// without one is owner-wide again. A grant that holds no github-app name refuses a narrowing
+// (ErrNarrowingNotApplicable), and so does one whose github-app name does not list the
+// narrowing's owner in the snapshot the release mints from (ErrNarrowingOwnerNotListed); each
+// releases nothing and runs no minter.
+func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
+	var lifetime *int
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and e.lease_expires_at > now(),
-		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.kind, e.operator, e.subject, c.service
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrGrantNotLive
 	}
@@ -61,23 +84,49 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err != nil {
 		return nil, nil, err
 	}
-	if set := m.Policy.Get(); policyVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
+	// One snapshot of the policy serves both the re-check and the minters' inputs, so a release
+	// mints for the github-owners the grant was just checked against, never a later read's.
+	set := m.Policy.Get()
+	if policyVersion != set.Version || anyServiceOwned(set, granted) {
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, g := range granted {
 			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
+				// A grant whose frozen source is not the one the name is served from now (its kind
+				// was changed or removed) ends for good: setting the kind back serves the same
+				// source again, and the grant must not come back with it.
+				if errors.Is(err, errSourceMoved) {
+					return nil, nil, m.endGrant(ctx, grantID, err)
+				}
 				return nil, nil, err
 			}
+			// A max-grant added or lowered since the request was decided ends this grant for
+			// good, as a raise later must not bring it back: the version covers the tag, so this
+			// runs whenever it moved.
+			if limit, over := overMaxGrant(set, g.name, lifetime); over {
+				return nil, nil, m.endGrant(ctx, grantID, fmt.Errorf("%w: %w: %s now allows grants of at most %s", ErrGrantNotLive, ErrGrantRequiresLifetime, g.name, limit))
+			}
+		}
+	}
+	if narrowing != nil {
+		if name, err := narrowingRefusal(set, granted, narrowing); err != nil {
+			if errors.Is(err, ErrNarrowingOwnerNotListed) {
+				slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", name, "error", err)
+			}
+			return nil, nil, err
 		}
 	}
 	values := map[string]string{}
 	released := []string{}
 	for _, g := range granted {
-		value, err := m.release(ctx, g, expires)
+		value, err := m.release(ctx, g, secrets.MintRequest{GitHubOwners: set.Secrets[g.name].GitHubOwnerLogins(), GitHubNarrowing: narrowing})
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
+		}
+		if errors.Is(err, secrets.ErrMintNarrowingRefused) {
+			slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", g.name, "error", err)
 		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("read %s: %w", g.name, err)
@@ -85,39 +134,151 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		values[g.name] = value
 		released = append(released, g.name)
 	}
+	if err := m.recheckStoredSources(ctx, grantID, granted); err != nil {
+		return nil, nil, err
+	}
+	detail := auditDetail{"names": released}
+	if narrowing != nil {
+		detail["github_app"] = auditDetail{"owner": narrowing.Owner, "repositories": narrowing.Repositories, "read_only": narrowing.ReadOnly}
+	}
 	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
-		enrollmentID, requestID, grantID, "session:"+enrollmentID, auditDetail{"names": released}); err != nil {
+		enrollmentID, requestID, grantID, "session:"+enrollmentID, detail); err != nil {
 		return nil, nil, err
 	}
 	return values, expires, nil
 }
 
-// release is one granted name's value: read from its frozen source, or minted when the source is
-// a minted secret's (policy.MintSourcePrefix), for at most MaxMintLifetime and never past expires,
-// once the store still serves that name as that minted secret (policy.Current.StillMinted), so a
-// secret deleted or retagged since mints nothing more.
-func (m *Machine) release(ctx context.Context, g requestedSecret, expires *time.Time) (string, error) {
-	sa, minted := strings.CutPrefix(g.source, policy.MintSourcePrefix)
+// narrowingRefusal is why narrowing cannot reach granted, with the name it refuses for: the grant
+// holds no github-app secret (ErrNarrowingNotApplicable), or a github-app secret of it does not
+// list the narrowing's owner in its github-owners tag in set, the snapshot the release mints from
+// (ErrNarrowingOwnerNotListed). GitHubApp.Mint refuses that owner too, as a second barrier.
+func narrowingRefusal(set *policy.Set, granted []requestedSecret, narrowing *secrets.GitHubNarrowing) (string, error) {
+	held := false
+	for _, g := range granted {
+		if kind, _, minted, err := policy.ParseKindSource(g.source); err != nil || !minted || kind != policy.KindGitHubApp {
+			continue
+		}
+		held = true
+		if !slices.Contains(set.Secrets[g.name].GitHubOwnerLogins(), narrowing.Owner) {
+			return g.name, fmt.Errorf("%w: %s's github-owners tag does not list %s", ErrNarrowingOwnerNotListed, g.name, narrowing.Owner)
+		}
+	}
+	if !held {
+		return "", ErrNarrowingNotApplicable
+	}
+	return "", nil
+}
+
+// recheckStoredSources checks every name of grantID that releases its stored value (a source no
+// kind froze) against the policy as it stands after Values read the store, since the policy Values
+// checked before its reads can be replaced while they run: a retag to a kind, reread as a read
+// starts, makes the read return what the secret stores as that kind (a GitHub App key, or a Google
+// refresh token stored once the reread served the kind). A name now served from another source,
+// a kind's included, ends the grant for good (endGrant), as it does before the reads; a name the
+// policy no longer serves pauses it, as before the reads. Either way Values releases none of the
+// values it read. A minted name needs no such check: its minter returns only a token.
+func (m *Machine) recheckStoredSources(ctx context.Context, grantID string, granted []requestedSecret) error {
+	now := m.Policy.Get()
+	for _, g := range granted {
+		if _, _, minted, _ := policy.ParseKindSource(g.source); minted {
+			continue
+		}
+		current, served := now.Secrets[g.name]
+		if !served {
+			return noLongerServed(g.name)
+		}
+		if current.Source != g.source {
+			return m.endGrant(ctx, grantID, sourceMoved(g.name))
+		}
+	}
+	return nil
+}
+
+// noLongerServed is the refusal of a granted name the current policy does not serve: a pause,
+// since a value stored later serves it again.
+func noLongerServed(name string) error {
+	return fmt.Errorf("%w: %s is no longer an agent secret", ErrGrantNotLive, name)
+}
+
+// sourceMoved is the refusal of a granted name the current policy serves from another source than
+// its grant froze, which ends the grant for good (errSourceMoved).
+func sourceMoved(name string) error {
+	return fmt.Errorf("%w: %w: %s is now served from another source than this grant's", ErrGrantNotLive, errSourceMoved, name)
+}
+
+// GrantEndedActor is what a grant the broker itself ended at release records as having ended it,
+// as revoked_by and as its grant.revoked audit row's actor.
+const GrantEndedActor = "broker:release-recheck"
+
+// endGrant ends grantID for good in one transaction, revoking it and writing a grant.revoked audit
+// row naming GrantEndedActor and why (reason's text), then answers reason, an ErrGrantNotLive. A
+// release ends a grant this way when what it was granted cannot come back: its frozen source is
+// not the one served now (a kind change), or its lifetime is longer than the secret's max-grant
+// now. A secret the policy merely stops serving (no value, a malformed tag) pauses its grants
+// instead, which release again once it is served. A grant another writer revoked first is left as
+// it is, with no second audit row.
+func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) error {
+	tx, err := m.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var enrollmentID, requestID string
+	err = tx.QueryRow(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null returning enrollment_id, request_id`, grantID, GrantEndedActor).
+		Scan(&enrollmentID, &requestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return reason
+	}
+	if err != nil {
+		return err
+	}
+	if err := audit(ctx, tx, "grant.revoked", enrollmentID, requestID, &grantID, GrantEndedActor, auditDetail{"reason": reason.Error()}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return reason
+}
+
+// release is one granted name's value. A stored secret reads its frozen source and ignores req. A
+// kind source reads its frozen store source the same way, through the store's own Read (on Secret
+// Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value in
+// req to the kind's minter and returns only what the minter makes. req.GitHubOwners is the name's
+// github-owners in the policy snapshot Values checked the grant against, so a list narrowed after
+// a grant holds at the grant's next release, and a name that snapshot does not serve gets none,
+// which the github-app minter refuses. Only the github-app minter reads req.GitHubNarrowing. A
+// minter's refusal of the narrowing itself (secrets.ErrMintNarrowingRefused) is returned as it is,
+// for Values to log as a refused narrowing, and is no mint failure. A deleted secret stops
+// releasing once the policy drops it: `agent-secrets secret delete` rereads the name at once.
+func (m *Machine) release(ctx context.Context, g requestedSecret, req secrets.MintRequest) (string, error) {
+	kind, source, minted, err := policy.ParseKindSource(g.source)
+	if err != nil {
+		return "", fmt.Errorf("secret %s: %w", g.name, err)
+	}
 	if !minted {
-		return m.Secrets.Read(ctx, g.source)
+		return m.Secrets.Read(ctx, source)
 	}
-	if m.MintToken == nil {
-		return "", fmt.Errorf("secret %s is a minted kind, but this broker has no token minter", g.name)
+	mint := m.Minters[kind]
+	if mint == nil {
+		return "", fmt.Errorf("secret %s is a minted kind %q, but this broker has no token minter for it", g.name, kind)
 	}
-	still, err := m.Policy.StillMinted(ctx, g.name, g.source)
+	value, err := m.Secrets.Read(ctx, source)
 	if err != nil {
 		return "", err
 	}
-	if !still {
-		return "", fmt.Errorf("%w: %s is no longer served as this grant's minted secret", ErrGrantNotLive, g.name)
+	req.Value = value
+	token, err := mint(ctx, req)
+	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
+		return "", err
 	}
-	life := MaxMintLifetime
-	if expires != nil {
-		if left := time.Until(*expires); left < life {
-			life = left
-		}
+	if err != nil {
+		// The minter's error names its class and why, never the stored value or a token, so the
+		// line is safe to log; the session sees the same words as MINT_FAILED.
+		slog.Error(MintFailedMessage, "name", g.name, "kind", kind, "class", secrets.MintErrorClass(err), "error", err)
+		return "", fmt.Errorf("%w: %w", ErrMintFailed, err)
 	}
-	return m.MintToken(ctx, sa, life)
+	return token, nil
 }
 
 // requestedSecret is one name a request asked for that the policy did not deny when the request
@@ -164,13 +325,13 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
-		return fmt.Errorf("%w: %s is no longer an agent secret", ErrGrantNotLive, name)
+		return noLongerServed(name)
 	}
 	if err != nil {
 		return err
 	}
 	if set.Secrets[name].Source != frozenSource {
-		return fmt.Errorf("%w: %s is now served from another source than this grant's", ErrGrantNotLive, name)
+		return sourceMoved(name)
 	}
 	switch {
 	case d.Outcome == policy.Deny:
@@ -184,6 +345,11 @@ func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy
 	}
 	return nil
 }
+
+// errSourceMoved is stillAllowed's refusal of a name served from another source than its grant
+// froze: a kind changed or removed, a secret replaced on AWS, the broker moved between stores.
+// Values ends such a grant for good (endGrant).
+var errSourceMoved = errors.New("source moved")
 
 // Get reads one request by id. Its Approver is the approver column of its credential-request
 // record, the column PendingForApprover lists the record by, so the request names exactly the
@@ -385,11 +551,12 @@ func writtenBeforeMigration13(alias string) string {
 // migration 0013: writtenBeforeMigration13), against a still-live grant (not revoked, not expired)
 // under this enrollment is returned as-is, with no new request row and no new record, as long as
 // the policy it was decided under is still current and no granted name is a service's
-// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts), or the current
-// policy still allows it to the session (stillAllowed, the check Values makes), and its whole
-// approval chain still verifies (VerifyChain, the same check Values makes). A caller that already
-// holds a live grant for these exact names never re-asks a human who already approved it, a policy
-// tightened since then is never bypassed by reuse, and neither is a chain that no longer verifies.
+// (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
+// prove), or the current policy still allows it to the session (stillAllowed, the check Values
+// makes), and its whole approval chain still verifies (VerifyChain, the same check Values
+// makes). A caller that already holds a live grant for these exact names never re-asks a human
+// who already approved it, a policy tightened since then is never bypassed by reuse, and neither
+// is a chain that no longer verifies.
 // No live grant holds a withheld name nobody approved: the withhold ended each one (withhold).
 func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, lifetime *int, set *policy.Set) (Request, bool, error) {
 	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
@@ -411,7 +578,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
 		if err != nil {
 			return Request{}, false, err
 		}

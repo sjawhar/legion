@@ -5,9 +5,10 @@ sidebar:
   order: 3
 ---
 
-The broker is one stateless HTTP process. Everything it knows lives in Postgres; it reads who may
-have which secret, and the secrets' values, from its secret store, AWS Secrets Manager or Google
-Cloud Secret Manager, and it starts nothing else.
+The broker is a stateless HTTP process, and a deployment may run more than one of them behind one
+address ([Running more than one pod](#running-more-than-one-pod)). Everything it knows lives in
+Postgres; it reads who may have which secret, and the secrets' values, from its secret store, AWS
+Secrets Manager or Google Cloud Secret Manager, and it starts nothing else.
 
 ## What to run
 
@@ -31,11 +32,20 @@ BROKER_LISTEN_ADDR=0.0.0.0:13380
 BROKER_PUBLIC_URL=https://secrets.internal.example
 BROKER_MACHINE_LOGIN_URL=https://dispatch.internal.example/credentials/machine
 BROKER_DATABASE_URL='postgres://broker:<password>@db.internal.example:5432/broker'
-BROKER_UI_TOKEN_FILE=/run/secrets/broker-ui-token
+BROKER_K8S_OIDC_ISSUER=https://<cluster issuer>
+BROKER_K8S_OIDC_AUDIENCE=legion-broker
+BROKER_API_ACCOUNTS=dispatch=system:serviceaccount:example-ns:example-dispatch
 BROKER_SECRETS_PREFIX=production/agent-secrets/
 BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
 AWS_REGION=<region>
 ```
+
+`BROKER_API_ACCOUNTS` lists the callers of the broker's approval routes, here Dispatch's server as
+the caller `dispatch`, each by its own Kubernetes ServiceAccount: a caller presents its projected
+token for `BROKER_K8S_OIDC_AUDIENCE`, which the broker verifies against `BROKER_K8S_OIDC_ISSUER`,
+so the list needs that pair. No secret is shared between the broker and Dispatch. A token that
+lives longer than an hour from its issue is refused, and an account the list does not name is
+answered `403 ACCOUNT_NOT_LISTED`.
 
 `BROKER_SECRETS_STORE` picks the secret store: `aws-secrets-manager`, the default when it is unset,
 as above, or `gcp-secret-manager`, which takes the Google Cloud forms of the namespace and the key
@@ -68,15 +78,17 @@ database variable: a password goes in the URL itself, URL-escaped, and on Amazon
 needs none ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)).
 
 A secret owned by a service rather than a person needs that service registered.
-`BROKER_SERVICES` lists each service with the Kubernetes service account its pods run as,
+`BROKER_SERVICES` lists each service with the Kubernetes service accounts its pods run as,
 whitespace-separated `name=<service account>` entries, for example
 `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for the Legion daemon's
-worker pods.
+worker pods. A service whose pods run as several accounts gets one entry for each, for example
+`legion-daemon=system:serviceaccount:legion:legion-worker legion-daemon=system:serviceaccount:legion:legion-controller`.
 
 A pod gets the service's agent-tier secrets at once when two things hold: a machine login for the
-listed service enrolled it, and its projected token proved that service account. Every other
-session is denied them. For the same reason each account is bound to one service: the broker
-refuses to start, naming both services, if `BROKER_SERVICES` binds one account to two of them.
+listed service enrolled it, and its projected token proved one of that service's accounts. Every
+other session is denied them. For the same reason each account is bound to one service: the broker
+refuses to start, naming both services, if `BROKER_SERVICES` binds one account to two of them. It
+also refuses, naming the account, an account given twice for the same service.
 
 The account must be one the service's pods name. The broker refuses to start, naming the entry,
 if `BROKER_SERVICES` binds a namespace's `default` account
@@ -178,13 +190,14 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 
 | Dependency | What the broker needs from it |
 | --- | --- |
-| Postgres | A database the broker owns (`BROKER_DATABASE_URL`). The broker applies its own migrations at startup; they only move forward, so never run an older broker against a database a newer one has migrated. On Amazon RDS it can sign in by IAM token instead of a password ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)). |
-| The secret store | The agent secrets: every secret whose name starts with `BROKER_SECRETS_PREFIX`, carrying `owner` and `tier` (AWS tags, or Secret Manager annotations), encrypted with the agent-secrets key, and holding a non-empty string (a minted secret, below, holds none). [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) describes the two, the name each secret is asked for by, and how often the broker rereads them. `BROKER_SECRETS_STORE` names which store, and the two rows below say what each needs. |
+| Postgres | A database the broker owns (`BROKER_DATABASE_URL`). The broker applies its own migrations at startup; they only move forward, so never run an older broker against a database a newer one has migrated. Each process also holds one connection outside its pool, for as long as it runs, to hear what the other processes reread ([Running more than one pod](#running-more-than-one-pod)). On Amazon RDS it can sign in by IAM token instead of a password ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)). |
+| Rolling back | Roll forward past a broker that serves kind secrets, never back. A broker before kinds reads no `kind` tag and would serve a kind secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes `mint-service-account: kind-secret` beside every kind, which every broker from legion-envoy-v13.19.0 to the release before kinds refuses as `mint-target-malformed`; a broker older than legion-envoy-v13.19.0 reads no such tag and serves the value. A kind secret written without the guard (by hand, or by a deployment that does not set it) is served by every earlier broker. To go back anyway, first disable every kind secret's versions. |
+| The secret store | The agent secrets: every secret whose name starts with `BROKER_SECRETS_PREFIX`, carrying `owner` and `tier` (AWS tags, or Secret Manager annotations), encrypted with the agent-secrets key, and holding a current value. A `kind` tag makes the broker mint a release from that value. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) describes the tags, the name each secret is asked for by, and how often the broker rereads them. `BROKER_SECRETS_STORE` names which store, and the two rows below say what each needs. |
 | AWS Secrets Manager (`aws-secrets-manager`) | The broker calls AWS with the SDK's default credential chain (environment, shared config, or the workload's role), in a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs `secretsmanager:ListSecrets` (which takes no resource, so on `*`), `secretsmanager:DescribeSecret` (to reread one secret) and `secretsmanager:GetSecretValue` on the namespace's secrets, `kms:Decrypt` on the agent-secrets key (`BROKER_SECRETS_KMS_KEY_ARN`), `kms:ListAliases` (on `*`, called only when a secret names its key by an alias), and, when it signs in to RDS by IAM token, `rds-db:connect` on its database user; nothing else. |
-| Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, capped at one a second across all callers (at most 120 a minute); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), and each minted secret's release reread, two per name per 30 seconds, since the broker trusts its last check of a secret, readable or not, for that long (so a delete stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
-| Minted secrets (`BROKER_MINT_TARGETS`, Secret Manager only) | A minted secret holds no version, unlike the rows above: it is served only as `BROKER_MINT_TARGETS` lists it ([minted secrets](/legion/broker/concepts/)), and each release mints a token rather than reading a value. The broker's principal also needs `roles/iam.serviceAccountTokenCreator` on each listed account and on nothing else, and the IAM Credentials API (`iamcredentials.googleapis.com`) enabled in that account's project. Each release first rereads the secret (`secretmanager.secrets.get`, `secretmanager.versions.get`), at most once per name per 30 seconds. Create one with `gcloud secrets create <prefix><slug> --replication-policy=automatic --kms-key-name=<agent-secrets key> --set-annotations=owner=<listed owner>,tier=human,mint-service-account=<listed account>`, adding no version. |
+| Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, capped at one reread every 4 seconds across all callers of **each process** (at two processes that is the same 120 metadata reads a minute for the fleet, which is what the per-process figure is derived from — see [Running more than one pod](#running-more-than-one-pod)); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, a kind secret's among them, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), since the broker trusts its last check of a secret, readable or not, for that long (so a delete made outside `agent-secrets secret` stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent; `agent-secrets secret delete` rereads the name, and the broker then releases nothing more). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
+| Kind secrets | A `github-app` secret needs outbound HTTPS access to `api.github.com`, and a `github-owners` tag naming the GitHub accounts it mints for, which the deployment sets when it creates the secret. A `google-login` secret needs outbound HTTPS access to `oauth2.googleapis.com`. The broker reads the stored value for each release, as it reads any secret, and returns only the minted token. It needs no IAM permission to mint these values. A mint GitHub or Google refuses answers the session `502 MINT_FAILED`, naming their reason, and logs `broker: mint failed` (below). A narrowing the secret cannot serve, an account its tag does not list or one GitHub refuses, answers `403 NARROWING_OWNER_NOT_LISTED` or `422 NARROWING_REFUSED` instead and logs `broker: narrowing refused`. |
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
-| Dispatch | Dispatch's server calls the broker's approval routes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_TOKEN` (or `DISPATCH_AGENT_SECRETS_TOKEN_FILE`) to the same value as the broker's `BROKER_UI_TOKEN`. Without them, Dispatch hides its credential pages. |
+| Dispatch | Dispatch's server calls the broker's approval routes as its own ServiceAccount. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
 
@@ -198,35 +211,77 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   terminate TLS without setting `X-Forwarded-Proto`, and a client that sends those headers itself
   changes nothing. That holds for the machine login's token endpoint (`POST /v1/oauth/token`)
   too, whose DPoP proofs name `BROKER_PUBLIC_URL/v1/oauth/token`.
-- The UI token is an approval credential: whoever holds it can approve as anyone. Give it to
-  Dispatch's server and nothing else, and never to an agent.
+- A listed caller's ServiceAccount token is an approval credential: the broker records whichever
+  approver its caller names, so whoever holds a listed account's token can approve as anyone.
+  List Dispatch's own account and nothing else, never one an agent's pod runs as.
 - Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint
   and secret-reread rate limiters see each caller's address rather than the proxy's. The token
-  endpoint (`POST /v1/oauth/token`) has its own per-address bucket, a burst of 60 refilled at two a
-  second, far above a machine's poll every five seconds and refresh about once a day; a refused
-  request is `429` `invalid_request` (`RATE_LIMITED: …`) with `Retry-After`.
+  endpoint (`POST /v1/oauth/token`) has its own per-address bucket in each process, a burst of 60
+  refilled at two a second, far above a machine's poll every five seconds and refresh about once a
+  day; a refused request is `429` `invalid_request` (`RATE_LIMITED: …`) with `Retry-After`.
 - The settings and reread routes take no credential. `GET /v1/settings` answers the store, the
   namespace prefix and, per store, the agent-secrets key's ARN with its AWS account and region, or
   the Cloud KMS key's name with the project number.
   `POST /v1/secrets/{name}/reread` makes the broker read one secret from the store at once,
-  and answers whether it now serves it and, if not, why. Neither releases a value. What a reread
-  does tell any caller who can reach the broker is whether a name under the namespace exists and,
-  when the broker leaves it out, which of its reasons applies — `absent`, or a refusal such as
-  `owner-tag-missing` or `not-on-agent-secrets-key`. That is more than `UNKNOWN_SECRET`, which says
+  and answers whether it now serves it, as which kind (`kind`: `github-app` or `google-login`,
+  absent for a stored secret) and, if not, why. Neither releases a value. What a reread
+  does tell any caller who can reach the broker is whether a name under the namespace exists, the
+  kind it is served as, and, when the broker leaves it out, which of its reasons applies — `absent`,
+  or a refusal such as `owner-tag-missing` or `not-on-agent-secrets-key`. That is more than
+  `UNKNOWN_SECRET`, which says
   only that no agent secret has the name, says it only to an enrolled session, and never separates a
   secret that does not exist from one the broker refuses; it is what anyone allowed to list the
   namespace reads from the secrets' own names and tags (or annotations).
-  Rereads are limited twice, by fixed limits rather than settings (`DefaultRereadLimit` and
-  `DefaultRereadOverallLimit` in `packages/envoy/internal/broker/api/limits.go`): each source
-  address gets a burst of 30, refilled one every 2 seconds, and the broker as a whole takes 4 a
-  second, burst 10, however many addresses the rereads come from — each one takes the policy's
-  writer lock while it reads the secret, so that lock, not the caller, is what the second limit
-  bounds. A reread counts against either limit only when both let it run, so one address flooding
-  past its own limit leaves the broker-wide one to everyone else. Past either, the broker answers
-  `429 RATE_LIMITED` with a `Retry-After` header naming the limit that refused.
+  Rereads are limited twice, by fixed limits rather than settings (`RereadLimitFor`,
+  `DefaultRereadOverallLimit` and `GCPRereadOverallLimit` in
+  `packages/envoy/internal/broker/api/limits.go`): each source address gets a burst of 30,
+  refilled one every twice the broker-wide bucket this process mounts — 2 seconds on the default
+  store — and the broker as a whole takes one a second, burst 10, however
+  many addresses the rereads come from — each one takes the policy's writer lock while it reads
+  the secret, so that lock, not the caller, is what the second limit bounds. On Google Secret
+  Manager, where a reread spends two reads of the project's shared metadata quota, that
+  broker-wide limit is one reread every 4 seconds, burst 10, and an address's own is one every 8
+  seconds there. A reread counts against either limit
+  only when both let it run, so one address flooding past its own limit leaves the broker-wide
+  one to everyone else. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After`
+  header naming the limit that refused: 1 second for the broker-wide limit, 4 seconds for Secret
+  Manager's, and for an address's own twice whichever of those this process mounted — 2 seconds on
+  the default store, 8 under Secret Manager.
+  Each of these buckets is one process's, and the broker-wide pair is sized from what the whole
+  fleet spends of the secret store, which is not the same as what it spends in HTTP rereads: one
+  reread the broker accepts costs the store **one read per pod**, because the pod that served it
+  rereads the secret and then tells every other pod to reread it too. So the fleet reads the
+  store `replicas × this rate × replicas` times a second, and each bucket is the fleet's whole
+  budget divided by the replica count **squared**. At two pods: `2 pods × 1 reread/s × 2 store
+  reads = 4 store reads a second`, which is what one pod alone was allowed, and on Secret
+  Manager `2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 a second`, the same 120
+  metadata reads a minute as before. Read those as the arithmetic rather than as the number two:
+  a third replica divides the fleet's budget by nine, not by four.
+  Their **burst** is not divided at all: it stays at the budget's ten. A burst is a depth and
+  what it has to admit is one person's write burst, a hard floor that the replica count does not
+  change, while what it guards — each pod's own transient, its own burst plus every peer's — is a
+  soft cost, latency rather than quota, spent once and re-bounded immediately by the rate.
+  Dividing it by the replica count put the depth at 3 for a three-pod fleet, under the floor of
+  four that `agent-secrets`' own end-to-end test measures, so ten now carries six tokens of
+  headroom at any fleet size. The **per-address** bucket is
+  derived from the bucket this process mounts rather than chosen: it refills at half that
+  bucket's rate, so it always takes at least two addresses to hold the fleet's budget at zero,
+  on either store and without tightening a deployment for a bucket it does not mount. That
+  ordering matters because the route takes no credential and a refusal costs a caller nothing,
+  so a caller that merely keeps succeeding at the shared refill rate would otherwise starve the
+  fan-out for everyone. All three are re-derived together when the replica count changes.
+  A reread one pod's notification drives on another spends nothing from either bucket, since the
+  pod that served the original call already paid for it — which is what makes the figures above
+  the whole of the fleet's store traffic rather than a floor under it
+  ([Running more than one pod](#running-more-than-one-pod)). Every other limiter is per process
+  and unchanged, so a fleet of N pods allows N times each: this per-address reread bucket, the
+  two machine-login buckets, the token endpoint's, and each enrollment's budget of rereads for
+  names it was not served.
   `agent-secrets secret` sends one reread after each write it makes, from the person's own
-  address. When a limit refuses it, the write stands in the secret store and the CLI exits 1 saying
-  so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
+  address, so writing more than ten secrets at once meets the broker-wide burst.
+  When a limit refuses it, the write stands in the secret store and the CLI exits 1 saying
+  so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write));
+  only the narrowing of who may read that secret waits for the next token.
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag (or annotate) a
   secret under the namespace decides who gets it, so that write access is part of the broker's too.
@@ -254,9 +309,9 @@ request carries that a policy's conditions can match.
 | every form | `sts:GetCallerIdentity`, which needs no permission | |
 | `list` | `secretsmanager:ListSecrets` (on `*`: it takes no resource) | |
 | `show` | `secretsmanager:DescribeSecret` | The secret's own tags (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`) |
-| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource`, since it tags the secret as it creates it; `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key | The new secret's name under the namespace (its ARN, and `secretsmanager:Name`); both request tags, `aws:RequestTag/owner` (the person's email, from `--owner me`, or `shared`) and `aws:RequestTag/tier` (`aws:TagKeys` is the two); the key, named by its ARN (`secretsmanager:KmsKeyArn`); the `TagResource` check made on the new secret sees the requested tags as its own (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`), so a policy that reserves a shared secret's tags for administrators still needs a statement that admits a shared create (request and resource owner both `shared`, the same tier). A secret created with `--owner shared` and `--tier agent` is served to every agent session without approval, so only a person whose access allows a shared create can create one. |
+| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource`, since it tags the secret as it creates it; `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key | The new secret's name under the namespace (its ARN, and `secretsmanager:Name`); the request tags: `aws:RequestTag/owner` (the person's email, from `--owner me`, or `shared`) and `aws:RequestTag/tier` always; `aws:RequestTag/kind` and `aws:RequestTag/mint-service-account` (the rollback guard, `kind-secret`, written beside every kind) with `--kind`; `aws:RequestTag/github-owners` (GitHub logins separated by spaces) with `--kind github-app`, which needs it; and `aws:RequestTag/max-grant` with `--max-grant` (`aws:TagKeys` is the tags sent, so a policy that limits it must allow `owner`, `tier`, `kind`, `mint-service-account`, `github-owners` and `max-grant`); the key, named by its ARN (`secretsmanager:KmsKeyArn`); the `TagResource` check made on the new secret sees the requested tags as its own (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`), so a policy that reserves a shared secret's tags for administrators still needs a statement that admits a shared create (request and resource owner both `shared`, the same tier). A secret created with `--owner shared` and `--tier agent` is served to every agent session without approval, so only a person whose access allows a shared create can create one. |
 | `set` | `secretsmanager:PutSecretValue`; `kms:GenerateDataKey` on the agent-secrets key | The secret's own tags (`aws:ResourceTag/owner`) |
-| `retag` | `secretsmanager:DescribeSecret` and `secretsmanager:TagResource` | Both request tags in every request, the unchanged one re-sent as the secret holds it, and the secret's own tags, so a policy can let a person tag their own secret (`aws:ResourceTag/owner` their email) to themselves or `shared`, and reserve a shared secret's tags for administrators |
+| `retag` | `secretsmanager:DescribeSecret`, and `secretsmanager:TagResource`, or `secretsmanager:UntagResource` for `--kind none`, `--github-owners none` or `--max-grant none`. A retag that finds another writer raced it needs both `secretsmanager:TagResource` and `secretsmanager:UntagResource`, whichever it sent, since the restore re-sends the tags it read and removes any the race added | A retag reads the secret's tags, sends one request, then reads them back. A tag request carries owner and tier, the unchanged one re-sent as the secret holds it, plus `kind` and `mint-service-account` (the rollback guard) when the command sets a kind, `github-owners` when it names owners, and `max-grant` when it sets one. An untag request's `aws:TagKeys` is the tags `none` removes: `--kind none` removes `kind` and `mint-service-account` together, `--github-owners none` removes `github-owners`, and `--max-grant none` removes `max-grant`; a retag that removes a tag changes nothing else, so a refused call leaves the secret as it was. A retag that would leave a `github-app` secret without `github-owners` is refused before any write. When the read-back finds another writer's change left a `github-app` secret without `github-owners`, the retag restores the tags it read: a tag request re-sending them, as the secret held them, and an untag request for any tag the race added; then it exits 1. The secret's own tags let a policy allow a person to tag their own secret (`aws:ResourceTag/owner` their email) to themselves or `shared`, and reserve a shared secret's tags for administrators |
 | `delete` | `secretsmanager:DeleteSecret` | The secret's own tags; `secretsmanager:RecoveryWindowInDays` is 30, and `secretsmanager:ForceDeleteWithoutRecovery` is never set |
 | `restore` | `secretsmanager:RestoreSecret` | The secret's own tags |
 
@@ -277,15 +332,15 @@ those two with `AccessDeniedException`.
 | `show` | `secretmanager.secrets.get` and `secretmanager.versions.list`, `secretmanager.versions.get` (for its versions and whether `versions/latest` is `ENABLED`) |
 | `create` | `secretmanager.secrets.create` and `secretmanager.versions.add`. Automatic replication encrypts with the CMEK key through Secret Manager's own service agent, not the person's identity: that service agent (`service-<project number>@gcp-sa-secretmanager.iam.gserviceaccount.com`) needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key, granted once at setup, not per person |
 | `set` | `secretmanager.versions.add` |
-| `retag` | `secretmanager.secrets.get` and `secretmanager.secrets.update` (both owner and tier annotations in one call, the unchanged one re-sent as the secret holds it) |
+| `retag` | `secretmanager.secrets.get` and `secretmanager.secrets.update`: owner and tier annotations in one call, plus `kind` and `mint-service-account` (the rollback guard) when the command sets a kind, `github-owners` when it names owners, and `max-grant` when it sets one; or, for `none`, the annotations it removes (`--kind none` removes `kind` and `mint-service-account` together), and nothing else |
 | `delete` | `secretmanager.secrets.update` (sets `expire_time` to 30 days out) |
 | `restore` | `secretmanager.secrets.update` (clears `expire_time`) |
 
 Unlike AWS's tags, a GCP IAM condition cannot test an annotation's value, so GCP has no per-secret
 counterpart to AWS's "a person may tag only their own secret" conditions above, and nothing stops
 a write from reaching another person's secret: whoever is granted `secretmanager.secrets.update`
-on the namespace can retag any secret under it to any owner or tier, shared secrets included, and
-whoever is granted `secretmanager.versions.add` can replace any secret's value under it. On
+on the namespace can retag any secret under it to any owner, tier or kind, shared secrets included,
+and whoever is granted `secretmanager.versions.add` can replace any secret's value under it. On
 Secret Manager, grant write under the namespace - `secrets.create`, `secrets.update` and
 `versions.add` alike - to administrators only, and let people ask an administrator to write on
 their behalf.
@@ -293,26 +348,118 @@ their behalf.
 ## Health and logs
 
 `GET /healthz` answers `200 {"status":"ok"}` while the broker can reach Postgres, and
-`503 DATABASE_UNAVAILABLE` when it cannot. Use it for liveness and readiness.
+`503 DATABASE_UNAVAILABLE` when it cannot. From the signal that stops it, it answers
+`503 SHUTTING_DOWN` instead, for the whole drain, while every other route goes on being served
+exactly as before. Use it as a readiness probe and never as a liveness probe: a liveness probe
+reads a draining pod as a dead one, so the kubelet would kill the container in the middle of the
+drain and drop the requests the drain exists to finish
+([Running more than one pod](#running-more-than-one-pod)).
 
 The broker logs text lines to stderr. The ones worth alerting or searching on:
 
 | Log line | Meaning |
 | --- | --- |
+| `broker stop budget drain=<drain> shutdown=60s total=<their sum>` | The first line of the run, before the database or the secret store is reached for: the whole budget a stop spends, `BROKER_DRAIN_SECONDS` and the 60 seconds in-flight requests get after it. `total` is what a deployment's `terminationGracePeriodSeconds` has to cover, and with the defaults the line reads `drain=5s shutdown=60s total=65s` ([Running more than one pod](#running-more-than-one-pod)). |
 | `database sign-in method=<method>` | At startup, before the broker reaches for AWS or its database: `rds-iam` when each connection signs in with an RDS IAM token the broker mints, `password` when it signs in as `BROKER_DATABASE_URL` and libpq's defaults say (a password in the URL, `PGPASSWORD`, a passfile, or none for a server that trusts it). |
 | `secret store store=<store> credentials=<source>` | At startup, once the store is built: `aws-secrets-manager` under the AWS SDK's credential chain (`aws-sdk`), `gcp-secret-manager` under Application Default Credentials (`application-default`), or either name over `BROKER_FAKE_SECRETS_FILE` (`fake secrets file`). |
 | `broker listening addr=<host:port>` | Startup finished: configuration, migrations and the first read of the namespace all succeeded, and the address is bound. |
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
-| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every read of the namespace, once for each secret the broker leaves out, and on every reread of one secret it leaves out: `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key` or `no-current-value` (no version carries `AWSCURRENT`, or Secret Manager's `versions/latest` is not `ENABLED`: the secret was created without a value; once its value is put it is served at its next reread, or within about ten minutes on AWS, as the broker rereads the namespace every five and Secrets Manager's listing can lag a change by up to five more; on Google Secret Manager usually as soon, though Google bounds its listing's lag only at a few hours). A secret with no value and another fault is logged for the other fault. `name` is the secret's whole Secrets Manager name. Every other secret is still served. Two things make this line more frequent than one per refused secret per five minutes, and an alarm on it has to allow for both: a refused secret that was reread in the last five minutes is logged twice by each read of the namespace, once from the listing and once from the reread of that one name the read makes; and any caller who can reach the broker writes one by asking for a reread of a refused name, at up to the rate the reread route allows (above). |
-| `agent secret policy refused name=<secret name> reason=mint-target-malformed`, `reason=mint-target-not-listed` or `reason=minted-has-value` | At ERROR, for a secret carrying `mint-service-account`: the tag is not a service account's email; `BROKER_MINT_TARGETS` does not list this name with this account and owner, or the secret is not human-tier; or the secret has a current value, which a minted secret never holds. |
+| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every namespace read and each refused reread. Reasons include `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key`, `no-current-value`, `kind-unknown`, `github-owners-missing`, `github-owners-malformed` and `max-grant-malformed`. |
 | `agent secret policy load failed; previous policy kept error=…` | At ERROR: a reread of the namespace failed (the secret store out of reach, or refusing the broker; a Secret Manager failure names its gRPC status code alone, never the status message), and the broker keeps serving the policy from its last good read; or, with `name=<NAME>` (the name a request asked for), the request named a secret the broker did not serve and the broker's reread of that one secret failed, so the request is refused `UNKNOWN_SECRET`. A reread of the namespace in flight when the broker shuts down is not one of these and logs nothing. |
 | `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. A reread whose own request ended before it finished - its caller went away, or it reached the 45-second bound - is not one of these: it answers `503 REQUEST_ENDED` and logs nothing, since anyone can end a request. |
+| `broker: mint failed name=<NAME> kind=<kind> class=<class> error=…` | At ERROR, for each release of a kind secret its minter could not make. `class` says whose fix it is: `stored-value`, the secret's value is not a key or login the kind takes, so its owner stores a new one; `refused`, GitHub or Google answered and refused, such as a Google login that needs a new sign-in or a GitHub App with no installation on a listed account, so its owner signs in again or fixes the App; `upstream`, GitHub or Google could not be asked, answered no usable reply or rate limited the call, or answered a narrowed GitHub token holding more than the narrowing asked, which the broker revokes at GitHub, so check the broker's egress and the upstream's status. A narrowing the caller got wrong is never this line: see `broker: narrowing refused`. The error never holds the stored value, a token or a value from GitHub's answer. The session is answered `502 MINT_FAILED` with the same error. |
+| `broker: GitHub did not revoke a narrowed token it minted wider than asked; it lapses at its expiry app=… installation=… expires_at=… error=…` | At WARN, beside a `mint failed … class=upstream` line: GitHub answered a narrowed token holding more than asked, the broker refused it, and GitHub did not confirm the revoke the broker then sent. No caller got the token; GitHub honours it until `expires_at`, at most an hour. Check the broker's route to GitHub, as for the line it follows. |
+| `broker: narrowing refused grant=… enrollment=… name=<NAME> error=…` | At WARN, for each release whose narrowing of its GitHub App tokens names what the secret cannot serve: an account its `github-owners` tag does not list, refused before any minter runs (`403 NARROWING_OWNER_NOT_LISTED`), or a narrowing GitHub answered 422, such as a repository the installation does not reach (`422 NARROWING_REFUSED`); a 422 that says it is a rate limit is an upstream `mint failed` instead. Nothing was released. The caller fixes its narrowing; the App and the secret are not at fault, so this line needs no action unless one session repeats it. |
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped); the sweep ended it, revoking its grants and cancelling its pending requests. |
 | `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, end the login that made the line's enrollment, which ends every enrollment it made, once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check) gives the query and both ways to end it); never pick a machine-login row by its machine name. |
 | `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. One cause is someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, renewing outside the cluster. The other is an old-image pod refused because someone else marked its UID first: whoever holds an unexpired copy of an old-image pod's token and a launcher credential that enrolls pods can enroll a key of their own on that UID and renew it with the copy, which marks the UID, and from then on the real old-image pod, whose renewer sends no token, is refused here until its lease lapses. That is weaker than what the copy already allowed, which was to enroll and renew as the pod. The refused enrollment's pod UID names the pod: list pod images (below). If that pod runs an older image, the copy's rows are the marked rows of that pod UID: end each one's login once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check)), never picking a machine-login row by its machine name, and replace the pod with a current image. Otherwise the copy is the line's own enrollment, as that section says. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
-| `broker shutting down` | SIGTERM or SIGINT: in-flight requests get 10 seconds to finish. |
+| `broker draining drain=<drain>` | SIGTERM or SIGINT: from here on `GET /healthz` answers `503 SHUTTING_DOWN` while every other route is served and the listener stays open, for `BROKER_DRAIN_SECONDS`. A second signal ends the wait at once, logged as `broker: a second signal ended the drain early`. |
+| `broker shutting down` | The drain is over: the broker stops accepting, and the requests still in flight get 60 seconds to finish. That is the server's own `WriteTimeout` — the 45-second request deadline plus the 15 seconds a handler needs to write its answer — because it is the longest exchange the broker allows a request past its headers: one admitted in the drain's last instant still gets its whole deadline. Shutdown closes idle connections at once, and one that has gone five seconds without sending its headers counts as idle, so the budget covers the requests in flight rather than every connection open. |
+| `broker: listening for the other pods' secret rereads channel=…` | The reread fan-out's receiving half has its `LISTEN` connection. The boot waits up to five seconds for this line before it binds, so on a healthy pod it comes just before `broker listening`; after that it reappears on every redial. |
+| `broker: a Postgres listener has no connection; redialing channels=… error=… attempt=… wait_ms=…` | At WARN, from `pglisten`: this pod has lost its `LISTEN` connection and is redialing with a backoff that reaches thirty seconds. **A pod logging this is outside the fan-out for every name** — losing the `LISTEN` does not by itself fail readiness, so the pod can go on passing `/healthz` and serving the whole time while a retag another pod rereads does not reach it until its own five-minute reload. It often does fail readiness at the same time, since `/healthz` pings Postgres and a database the pod cannot reach is the commonest reason the `LISTEN` went: a 200 beside this line is the case to worry about, not the normal one. It is not the only way a pod falls outside: the three rows below leave one behind for at least one name, and of the four only `the other pods were not told to reread a secret` and `a notification's reread of a secret did not run` can be matched to a secret. Repeating lines mean the database is not carrying `LISTEN` sessions for this pod; one or two around a failover are expected. |
+| `broker: binding before the reread listener has had an answer waited=5s` | At WARN: the boot's five-second wait for that `LISTEN` ran out, so this pod began serving before it could hear its peers. It serves normally and the listener keeps redialing; what it loses is the notifications sent in the gap, with its own five-minute reload as the backstop. A pod that logs this takes no catch-up load either, there being no subscription to order a read after. |
+| `broker: serving without the boot's catch-up policy load, so a retag another pod served while this one was starting may not be in force here until its five-minute reload error=…` | At WARN: once its `LISTEN` is in place a booting pod reads the namespace a second time, so that a retag a peer served while it was still loading is in force before it binds. That read failed. The pod serves what its first load gave it and catches up at its five-minute reload; the first load succeeded, so this is never a pod with no policy at all. |
+| `broker: the other pods were not told to reread a secret secret=… error=…` | At WARN, **not a failed request**: the reread this pod was asked for succeeded and answered 200, and only the Postgres `NOTIFY` that tells the other pods failed. The retag is in force here and reaches the others at their own next reload. |
+| `broker: a notification's reread of a secret did not run secret=… sender=… error=…` | At WARN, on no request at all: another pod told this one to reread a secret and the reread failed. This pod goes on serving the tags it last read until its own five-minute reload. |
+| `broker: a second signal arrived while the broker was still starting up, so it is stopping without a drain: it had not begun serving when that signal was read` | At ERROR: two signals reached a process that had not finished booting, so it exited non-zero without draining. The line says what was true when the second signal was read, which is what the process can observe; a boot that bound its socket in the two statements after that read logs it too. The lines above it say how far the boot got. Expected only when someone or something stopped a pod twice during startup. |
+| `broker: signalled while starting up, before it had bound anything stage=…` | One signal reached the process before it bound its socket, so it finished the stage it was in and stopped cleanly, serving nothing and running no drain. `stage` is `the first policy load` or `the catch-up policy load`. |
 
 Each request is bounded to 45 seconds. Request bodies are JSON of at most 1 MiB.
+
+## Running more than one pod
+
+Nothing in a broker process is private to it but its cache of the policy and its rate-limit
+buckets, so a deployment may run several identical pods behind one address. What it has to set,
+and what it gets:
+
+**The stop budget its grace period must cover.** On SIGTERM the broker drains for
+`BROKER_DRAIN_SECONDS` (5 by default, 0 to 120; a second signal ends the wait at once): it answers
+`GET /healthz` with `503 SHUTTING_DOWN` while serving every other route exactly as before, and
+keeps its listener open, because a pod is removed from its Service's EndpointSlice concurrently
+with the kubelet beginning termination rather than before it, so for a while after the signal new
+connections are still routed to it. Only then does it stop accepting and give the requests still
+in flight 60 seconds. Those 60 are the server's own `WriteTimeout`, the 45-second request deadline
+plus the 15 seconds a handler needs to write its answer, because that is the longest exchange the
+broker itself allows a request past its headers: one admitted in the drain's last instant still
+gets its whole deadline. A connection that has sent no headers for five seconds is closed as
+idle rather than waited for; its header read has its own ten-second `ReadHeaderTimeout`. So `terminationGracePeriodSeconds` must be at least any preStop pause, plus
+`BROKER_DRAIN_SECONDS`, plus 60 seconds — 65 seconds with the defaults and no pause. A preStop
+pause and the drain do the same job and are both paid out of the one grace period, so size the
+period for their sum, or set the pause to 0 and let the drain do it alone. Past the grace period
+the kubelet kills the container whatever the broker still believes it is allowed, and the
+in-flight requests the budget exists for are dropped anyway. The broker logs the whole figure at
+boot, so nobody adds it up by hand: `broker stop budget drain=5s shutdown=60s total=65s`.
+
+**`/healthz` as the readiness probe, and as nothing else.** A liveness probe on it has the kubelet
+kill the container in the middle of the drain, which is what the drain exists to prevent
+([Health and logs](#health-and-logs)).
+
+**One more Postgres connection per pod, on a session-mode path.** The fan-out below listens on a
+connection of its own, held for as long as the process runs and outside whatever `pool_max_conns`
+sizes, since a `LISTEN` ends when a pooled connection is recycled. Count one extra connection per
+pod against the database's connection limit, and give the broker a session-mode path to Postgres:
+a transaction pooler (pgbouncer in transaction mode, RDS Proxy) hands each transaction whichever
+backend is free and carries no long-lived `LISTEN`. A pod that cannot hold the connection still
+boots and still serves; its listener redials for as long as it runs.
+
+**A reread that reaches every pod, draining ones included.** `POST /v1/secrets/{name}/reread`
+rereads the secret on the pod the load balancer picked and then, on its `200` answer alone, tells
+every other pod serving the same database to reread the same name, over Postgres `LISTEN`/`NOTIFY`
+on a channel of its own. So one call puts a retag in force across the fleet within seconds rather
+than at each pod's own next five-minute reload, and it needs no infrastructure beyond the database
+the broker already has. A pod that is draining is still one of those pods: it goes on being sent
+requests for the whole drain, so its listener and its five-minute reload both run until the
+shutdown has answered the last request or spent its 60 seconds, not until the signal. A pod waits for its first successful `LISTEN`
+before it binds, up to five seconds, so an address the load balancer can reach is normally an
+address a retag can reach; a pod whose `LISTEN` has not succeeded by then logs a warning and
+serves anyway, its listener still redialing.
+The exception, plainly: while a pod's listener is redialing it hears nothing, and nothing is
+caught up when it reconnects, so that pod goes on serving what it last read until its own
+five-minute reload. The promise is therefore "within seconds, except while a pod's listener is
+redialing, where the next five-minute reload is the backstop". A reread a notification drives
+spends no rate-limit token: the pod that served the original call already paid for it.
+
+**The reread limits are three numbers derived from one budget, not one number halved.** One
+reread the broker accepts costs the secret store one read on every pod — the pod that served it,
+and each peer the fan-out tells — so the fleet's store traffic is `replicas² × the per-pod rate`,
+and the two broker-wide buckets' **rate** is the fleet's whole budget divided by that: at two pods
+one reread a second, or one every 4 seconds against Google Secret Manager, which leaves the store
+exactly the 4 reads a second, and Secret Manager the 120 metadata reads a minute, that one pod
+alone was allowed. Their **burst** is not divided at all and stays at ten, because a burst is a
+depth and what it admits is one person's write burst, which the replica count does not change,
+while what it guards is a transient on each pod's own writer lock — latency, spent once, and
+re-bounded by the rate. A burst momentarily lets the fleet accept `replicas × burst` rereads and
+each costs a read on every pod, so the store sees `replicas² × burst`: 40, 90 and 160 reads at
+two, three and four pods, twice that in metadata reads under Secret Manager (80, 180, 320), which
+is 8, 18 and 32 seconds of its 600 a minute — transients, re-bounded immediately by the rate.
+That cost grows with the square of the replica count while the rate is already divided by it, so
+a fleet much larger than two re-derives the burst against the quota rather than carrying ten
+forward unexamined. The **per-address** bucket is derived from them in turn — it refills at half
+the rate of the bucket this process mounts, 2 seconds on the default store and 8 under Secret
+Manager — so no single address can hold the
+fleet's budget at zero on a route that takes no credential. Every other limiter is per process, so
+a fleet of N pods allows N times each ([Network and trust](#network-and-trust)). All three are
+re-derived together when the replica count changes.
 
 ## The renew token check
 
@@ -381,8 +528,8 @@ broker records the signed-in person as who revoked it. Never pick the row by its
 login's host is the name its machine reported.
 
 A line whose own enrollment's `subject` is a daemon's account names an enrollment made under that
-daemon's one credential: by the daemon itself, renewed by someone holding the enrollment's key from
-that pod's role container, or by someone holding a token for the daemon's ServiceAccount. Each
+daemon's one credential: by the daemon itself, renewed by someone holding the enrollment's key in
+that pod (the role whose namespace holds it), or by someone holding a token for the daemon's ServiceAccount. Each
 login under the account is in the audit table, with the pod the token was bound to; the daemon's
 own token is bound to the daemon's own pod, so a login whose `pod_uid` is another pod's, or none
 (a token `kubectl create token` minted), did not use the daemon's own token unless you ran the

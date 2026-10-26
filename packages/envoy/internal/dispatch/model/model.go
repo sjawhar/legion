@@ -92,13 +92,19 @@ type RepoProject struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ArchitectureSource names the repository and branch a project's architecture
-// documents are imported from. InstallationID caches the GitHub App
+// ArchitectureSource names a repository and branch a project's architecture
+// documents are imported from; a project has one per repository, and its
+// component model is every source's components together. ID names the source
+// within its project (the first source of a project before sources were per
+// repository is 0) and is a server detail kept out of the JSON shape, as the
+// repository already addresses a source. InstallationID caches the GitHub App
 // installation the access check resolved — the importer re-resolves it on
-// sync — and is a server detail kept out of the JSON shape. The sync
-// bookkeeping fields stay null until the importer runs.
+// sync — and is kept out of the JSON shape too. The sync bookkeeping fields
+// stay null until the importer runs; Components is how many components the
+// source currently projects.
 type ArchitectureSource struct {
 	Project        string     `json:"project"`
+	ID             int64      `json:"-"`
 	Repo           string     `json:"repo"`
 	Branch         string     `json:"branch"`
 	Enabled        bool       `json:"enabled"`
@@ -112,6 +118,7 @@ type ArchitectureSource struct {
 	// successful import: importer bookkeeping for the unchanged-model
 	// short-circuit, kept out of the JSON shape.
 	LastTreeSha *string `json:"-"`
+	Components  int     `json:"components"`
 }
 
 // ExternalLink connects a native issue to an external tracker item.
@@ -318,10 +325,45 @@ type SearchResponse struct {
 	Offset    int   `json:"offset"`
 	TookMS    int64 `json:"took_ms"`
 	// Degraded names why search fell back to keyword-only ranking this request - today only
-	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no Bedrock
-	// credentials configured, the query's own embedding timed out, or Bedrock answered an error) -
-	// and is empty when meaning search ran normally.
+	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no
+	// embedder configured, the query's own embedding timed out, or the model service answered an
+	// error) - and is empty when meaning search ran normally.
 	Degraded string `json:"degraded,omitempty"`
+}
+
+// SearchCoverage is how much of what meaning search covers has a current vector from the
+// configured embedder (INFRA-393, GET /api/v1/search/coverage). Identity is the embedder's
+// identity (embed.Embedder.Identity), Place ("bedrock" or "azure") and Model are read from it;
+// all three are null when no embedder is configured, and then nothing is current.
+type SearchCoverage struct {
+	Identity *string              `json:"identity"`
+	Place    *string              `json:"place"`
+	Model    *string              `json:"model"`
+	Total    SearchCoverageCounts `json:"total"`
+	Kinds    SearchCoverageKinds  `json:"kinds"`
+}
+
+// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks.
+type SearchCoverageKinds struct {
+	Issue    SearchCoverageCounts `json:"issue"`
+	Document SearchCoverageCounts `json:"document"`
+	Comment  SearchCoverageCounts `json:"comment"`
+	Ask      SearchCoverageCounts `json:"ask"`
+	Message  SearchCoverageCounts `json:"message"`
+}
+
+// SearchCoverageCounts splits Items, the searchable items of a kind (or of all of them), into
+// Current (embedded at the item's current text by the configured identity), Failed (dead and not
+// current) and Lacking (the rest). An item whose text is empty or only white space is not
+// searchable by meaning and is in none of them: it needs no vector. OldestLackingSeconds is how
+// long the longest-waiting lacking item has waited for its vector, counted from when its row last
+// became pending or from when the item was written, whichever is later; null when nothing lacks.
+type SearchCoverageCounts struct {
+	Items                int64  `json:"items"`
+	Current              int64  `json:"current"`
+	Lacking              int64  `json:"lacking"`
+	Failed               int64  `json:"failed"`
+	OldestLackingSeconds *int64 `json:"oldest_lacking_seconds"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.
@@ -373,7 +415,8 @@ type IssueChild struct {
 }
 
 // ArchitectureTree is GET /api/v1/projects/{key}/architecture: the project's
-// component model with the work attached to it. Counting rule: a component
+// component model — every source's components together — with the work
+// attached to it. Counting rule: a component
 // counts every distinct issue whose effective set names it or any component it
 // contains (transitively over parent), parents and icebox included, each once;
 // Own* restricts that to issues whose effective set names this component
@@ -381,7 +424,7 @@ type IssueChild struct {
 // those resolving to a `none` row; RetiredLinks those whose effective set names
 // a component a re-import retired.
 type ArchitectureTree struct {
-	Source           ArchitectureTreeSource      `json:"source"`
+	Sources          []ArchitectureTreeSource    `json:"sources"`
 	Totals           ArchitectureTreeTotals      `json:"totals"`
 	Components       []ArchitectureTreeComponent `json:"components"`
 	Unassigned       []ArchitectureTreeIssueRef  `json:"unassigned"`
@@ -389,7 +432,8 @@ type ArchitectureTree struct {
 	RetiredLinks     []ArchitectureTreeRetired   `json:"retired_links"`
 }
 
-// ArchitectureTreeSource is the source row's sync bookkeeping.
+// ArchitectureTreeSource is one source row's sync bookkeeping; the tree lists
+// them in the order the project added its sources.
 type ArchitectureTreeSource struct {
 	Repo       string     `json:"repo"`
 	Branch     string     `json:"branch"`
@@ -411,9 +455,11 @@ type ArchitectureTreeTotals struct {
 }
 
 // ArchitectureTreeComponent is one component with its counts and the issues
-// counted, each saying how it qualified.
+// counted, each saying how it qualified. Source is the repository of the
+// source whose files define it.
 type ArchitectureTreeComponent struct {
 	ID        string                  `json:"id"`
+	Source    string                  `json:"source"`
 	Title     string                  `json:"title"`
 	Parent    *string                 `json:"parent"`
 	DependsOn []string                `json:"depends_on"`
@@ -1396,9 +1442,14 @@ type Route struct {
 	ID   string
 }
 
+// IssueStatusTriage is the status every issue is created in: nobody has decided yet whether the
+// work is wanted. It is named because a write's advice reads it (api.computeWriteAdvice resolves
+// who owns the status only there), and one spelling is better than two.
+const IssueStatusTriage = "triage"
+
 // IssueStatuses is the canonical Legion issue lifecycle.
 var IssueStatuses = []string{
-	"triage",
+	IssueStatusTriage,
 	"icebox",
 	"backlog",
 	"todo",

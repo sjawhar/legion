@@ -213,15 +213,18 @@ func TestBroadcastKeysAreScopedToTheSender(t *testing.T) {
 
 // A retry racing its original: two requests carrying one key, both past the replay check before
 // either writes. The key's primary key makes the second wait for the first and roll back, so one
-// broadcast is written and each recipient is handed one frame.
+// broadcast is written and its recipient is handed one frame. The send names one session, so
+// each create resolves it with exactly one read and the barrier below holds precisely the two
+// creates.
 func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 	var reads atomic.Int32
 	var both sync.WaitGroup
 	both.Add(2)
 	listener, sends := newBroadcastListener(t, broadcastSessions, func(_ http.ResponseWriter, r *http.Request) bool {
-		// Only the two creates meet here: each recipient's delivery reads the registry again
+		// Only the two creates meet here: each create resolves its one selected session with
+		// one read of that session's own record, each recipient's delivery reads it again
 		// after the 201 (envoy_resolve.go), and a third Done would drive the group negative.
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/sessions" && reads.Add(1) <= 2 {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/registry/planner" && reads.Add(1) <= 2 {
 			both.Done()
 			both.Wait()
 		}
@@ -233,7 +236,7 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 	for range 2 {
 		go func() {
 			responses <- postBroadcast(t, handler, map[string]any{
-				"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"}, "idempotency_key": "race",
+				"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "race",
 			}, "alice")
 		}()
 	}
@@ -262,13 +265,13 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 	if listed := broadcastCount(t, handler); listed != 1 {
 		t.Fatalf("the broadcast list holds %d broadcasts, want one", listed)
 	}
-	if messages := countMessages(t, database); messages != 2 {
+	if messages := countMessages(t, database); messages != 1 {
 		t.Fatalf("the database holds %d messages, want one per recipient", messages)
 	}
 	for id := range ids {
 		awaitBroadcastDeliveries(t, handler, id)
 	}
-	if got := sends.targets(); !equalStrings(got, []string{"planner", "tester"}) {
+	if got := sends.targets(); !equalStrings(got, []string{"planner"}) {
 		t.Fatalf("listener sends = %v, want one frame per recipient", got)
 	}
 }

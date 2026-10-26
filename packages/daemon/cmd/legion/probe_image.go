@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -60,7 +61,13 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // names a NATS nkey seed (a probe pod's NATS_NKEY_SEED_FILE, the providers Secret's key), that seed
 // is read as the daemon reads its own (natsauth.Seed) and must be a user's, and the line before the
 // OK line names that user's public key (bootprobe.NATSUserLine), never the seed, for the daemon to
-// compare with its own.
+// compare with its own. With --role-namespaces, which the probe Sandbox passes and the image build
+// does not (a build's container may not make the namespaces), it first runs one role generation as
+// an issue pod's launcher runs every role, its own `legion version` as the shim, over a layout of
+// its own in that directory (launcher.CheckRoleNamespaces), and refuses, exit 1, when the
+// namespaces, a mount role-init makes or the shim fails there. That layout's home is an empty
+// directory on the probe's volume carrying no mount, so the check does not make the overlay over
+// the image's own home, bind a home's volume back, or copy a config home.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> --envoy-plugin-root <dir> [flags]", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -72,6 +79,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
+	roleNamespaces := flags.String("role-namespaces", "", "run one role generation's namespaces (legion launcher role-init) over a layout of its own in this directory, on a volume of its own, and refuse when it fails; its home is an empty directory there, not the image's (the probe Sandbox passes it)")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -86,6 +94,16 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if *envoyPluginRoot == "" {
 		fmt.Fprintln(stderr, "legion probe-image: --envoy-plugin-root is required: the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way")
 		return 2
+	}
+	if *roleNamespaces != "" {
+		self, err := os.Executable()
+		if err == nil {
+			err = launcher.CheckRoleNamespaces(*roleNamespaces, self, "version")
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
 	}
 	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
 	// ones this binary embeds.

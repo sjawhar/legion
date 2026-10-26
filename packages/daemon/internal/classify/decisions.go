@@ -16,12 +16,14 @@ import (
 // (SettlementFor). The pushes it keeps are keptPushes'.
 //
 // HeadCounted names the head the count last counted, and the attempt it marks runs on through every
-// head pushed on top of it until one is pushed onto a green verdict, which clears it: a push onto a
-// head CI has not judged yet, or onto a red that counts nothing, is the same attempt, not a new
-// one. Only a counted head is ever named, so ApplyPush's take-back never undoes a count it did not
-// make. A count keeps the mark it replaces (HeadCountedBefore), which the take-back restores: a
-// head whose push has not arrived is counted, and when that push proves handoff-only or the review
-// App's, the attempt is left as it would have been had the push arrived first.
+// head pushed on top of it until one is pushed onto a green verdict, or onto a settled head whose
+// base branch requires no check and no workflow (nothingRequired), which clears it: CI sent nothing
+// back from either, so the push is a fresh start. A push onto a head CI has not judged yet, or onto
+// a red that counts nothing, is the same attempt, not a new one. Only a counted head is ever named, so
+// ApplyPush's take-back never undoes a count it did not make. A count keeps the mark it replaces
+// (HeadCountedBefore), which the take-back restores: a head whose push has not arrived is counted,
+// and when that push proves handoff-only or the review App's, the attempt is left as it would have
+// been had the push arrived first.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Pushes = keptPushes(pr.Pushes, headSHA)
@@ -29,7 +31,7 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 	case verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)):
 		pr.FixAttempts++
 		pr.HeadCountedBefore, pr.HeadCounted = pr.HeadCounted, headSHA
-	case verdict == "green":
+	case verdict == "green" || nothingRequired(pr):
 		pr.HeadCounted, pr.HeadCountedBefore = "", ""
 	}
 	if pending != nil && !pending.HandoffOnly {
@@ -285,13 +287,17 @@ func RedSendsBack(pr record.PullRequest) bool {
 // RedWithdrawsReady says whether the verdict that stands for the pull request's head is red against
 // a READY, in awaiting_merge: the pull request is open, and CI is red at the head by its own
 // settlement and its own workflow runs (HeadVerdict, with the settlement of the head itself). The
-// merger's READY found the head's own checks and runs green on GitHub, which is what GitHub merges
-// by, so a red carried to it from the head a .legion/-only push replaced (SettlementFor) contradicts
-// that and sends nothing back; the head's own red - a required check failing on a rerun, a newly
-// required one, a required workflow re-run red - keeps GitHub from merging it. As with RedSendsBack
+// daemon has submitted the merge of that head, so what takes the submission back is a red of the
+// head's own - a required check failing on a rerun, a newly required one, a required workflow
+// re-run red - which the implementer's next push replaces, and the submission names the commit
+// about to be replaced: Legion withdraws its own request, rather than refusing a merge the
+// repository's rules allow. A red carried to the head from the one a .legion/-only push replaced
+// (SettlementFor) stood before the READY and says nothing new about that commit, so it sends
+// nothing back. As with RedSendsBack
 // before READY, a head a .legion/-only push reached is no exception: every worker is suspended in
 // awaiting_merge, and only the implementer can change the red. PlannedRed is a red the tester's own
-// tests planned for the review round, and READY found the head green since, so it is not read. The
+// tests planned for a review round the approval and the acceptance have ended since, so it is not
+// read here. The
 // caller decides when such a red is read: a red only required workflows make (RedOnlyByWorkflows)
 // withdraws the READY on a read of their runs, never on a CI settlement, which reads no run and
 // would judge them by a read up to one pass old (workflow's decideChecks).
@@ -315,13 +321,14 @@ func ConflictWithdrawsReady(pr record.PullRequest) bool {
 // FixAttemptCapHolds says whether the red verdict standing for the head is one the fix-attempt cap
 // holds: the pull request's fix attempts are at cap, and the head belongs to the attempt the count
 // last counted (HeadCounted): the counted head itself, or a head pushed on top of it before any
-// push landed on a green verdict (AdvancePullRequestHead). That attempt is the loop the cap bounds,
-// so its red no longer sends the work back from testing, reviewing, retro or merging by itself,
-// however often it returns - a re-run failing again, a red after the head read green, a second push
-// before CI settled - and the architect decides what follows (workflow's standingRed). A head
-// pushed onto a green verdict is not that loop: it raised no count and left the attempt, so its red
-// is new. A head a handoff-only push left is in the attempt of the code head it replaced, as its
-// red is that head's (RedSendsBack). A green head is the fix that worked.
+// push landed on a green verdict or on a settled head whose base branch requires nothing
+// (AdvancePullRequestHead). That attempt is the loop the cap bounds, so its red no longer sends the
+// work back from testing, reviewing, retro or merging by itself, however often it returns - a
+// re-run failing again, a red after the head read green, a second push before CI settled - and the
+// architect decides what follows (workflow's standingRed). A head pushed onto a green verdict, or
+// onto a settled head whose base requires nothing, is not that loop: it raised no count and left
+// the attempt, so its red is new. A head a handoff-only push left is in the attempt of the code
+// head it replaced, as its red is that head's (RedSendsBack). A green head is the fix that worked.
 func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
 	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && HeadVerdict(pr) == "red"
 }

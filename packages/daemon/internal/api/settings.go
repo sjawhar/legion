@@ -84,21 +84,24 @@ type RuntimeSettings struct {
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
-// (`kubeconfig`, `context`), its credential source (`session_dsn_secret`) and the operator's `pod`
+// (`kubeconfig`, `context`), the session store's own fields (`session_dsn_secret`, the credential
+// source, and `session_database`, the instance and login behind it) and the operator's `pod`
 // pieces, which every pod reads from its own spec.
 type KubernetesSettings struct {
-	Namespace    string                           `json:"namespace"`
-	Image        string                           `json:"image"`
-	StorageClass string                           `json:"storage_class"`
-	IssueVolume  string                           `json:"issue_volume"`
-	Scheduling   SchedulingSettings               `json:"scheduling"`
-	Resources    map[string]RoleResourcesSettings `json:"resources"`
-	// SessionStore is "postgres" when the file names a session DSN secret, else "pvc".
+	Namespace    string               `json:"namespace"`
+	Image        string               `json:"image"`
+	StorageClass string               `json:"storage_class"`
+	IssueVolume  string               `json:"issue_volume"`
+	Scheduling   SchedulingSettings   `json:"scheduling"`
+	Resources    PodResourcesSettings `json:"resources"`
+	// SessionStore is the settled store's kind and nothing else of it: always one that keeps
+	// sessions in a database (ompsessions.Store.InDatabase), since `runtime: kubernetes` refuses
+	// "pvc" (readSessionStore).
 	SessionStore string                `json:"session_store"`
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
 	// Plugins is the settled pair, whatever its source, absent while the daemon knows none.
 	Plugins *PluginsSettings `json:"plugins,omitempty"`
-	// Setup is the argv every role container runs before each start of its Oh My Pi, `[]` while the
+	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
 	Setup           []string                `json:"setup"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
@@ -120,8 +123,15 @@ type TolerationSettings struct {
 	Effect   string `json:"effect"`
 }
 
-// RoleResourcesSettings is one role's settled reservation, every field filled.
-type RoleResourcesSettings struct {
+// PodResourcesSettings is the settled reservations of the two pods the daemon builds: every issue
+// pod's, whose one container runs all six workflow roles, and the controller's pod's.
+type PodResourcesSettings struct {
+	Issue      ReservationSettings `json:"issue"`
+	Controller ReservationSettings `json:"controller"`
+}
+
+// ReservationSettings is one settled reservation, every field filled.
+type ReservationSettings struct {
 	CPU                     string `json:"cpu"`
 	CPURequest              string `json:"cpu_request"`
 	Memory                  string `json:"memory"`
@@ -132,12 +142,12 @@ type RoleResourcesSettings struct {
 
 // RepositoryCacheSettings is the settled `runtime.kubernetes.repository_cache`: each repository
 // cache's volume, its fetch period, how long an unmapped repository's cache is kept, and its one
-// container's reservation in a role's shape.
+// container's reservation in a pod's shape.
 type RepositoryCacheSettings struct {
-	Volume         string                `json:"volume"`
-	RefreshMinutes int                   `json:"refresh_minutes"`
-	RetainHours    int                   `json:"retain_hours"`
-	Resources      RoleResourcesSettings `json:"resources"`
+	Volume         string              `json:"volume"`
+	RefreshMinutes int                 `json:"refresh_minutes"`
+	RetainHours    int                 `json:"retain_hours"`
+	Resources      ReservationSettings `json:"resources"`
 }
 
 // AgentSecretsSettings is `runtime.kubernetes.agent_secrets` without `token_file`, the path of the
@@ -157,9 +167,18 @@ type PluginsSettings struct {
 // ProjectSettings is one `projects.<KEY>` entry; its repositories are Dispatch's mapping, which
 // the state's `repositories` shows, never this file's.
 type ProjectSettings struct {
-	MergeQueueRole string        `json:"merge_queue_role,omitempty"`
-	Merge          MergeSettings `json:"merge"`
-	SlackChannels  []string      `json:"slack_channels"`
+	MergeQueueRole string           `json:"merge_queue_role,omitempty"`
+	Merge          MergeSettings    `json:"merge"`
+	SlackChannels  []string         `json:"slack_channels"`
+	Deploys        []DeploySettings `json:"deploys"`
+}
+
+// DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
+// `<owner>/<name>`, the workflow's path and the step whose success is a deploy.
+type DeploySettings struct {
+	Repo     string `json:"repo"`
+	Workflow string `json:"workflow"`
+	Step     string `json:"step"`
 }
 
 // MergeSettings is a project's `merge` policy: the by-hand expressions as written, never compiled.
@@ -248,9 +267,13 @@ func SettingsOf(cfg config.Config) Settings {
 			MergeQueueRole: project.MergeQueueRole,
 			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
 			SlackChannels:  stringsOf(project.SlackChannels),
+			Deploys:        make([]DeploySettings, len(project.Deploys)),
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression
+		}
+		for i, deploy := range project.Deploys {
+			entry.Deploys[i] = DeploySettings{Repo: deploy.Repo.String(), Workflow: deploy.Workflow, Step: deploy.Step}
 		}
 		settings.Projects[key] = entry
 	}
@@ -281,25 +304,22 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			Tolerations:   make([]TolerationSettings, len(block.Scheduling.Tolerations)),
 			PriorityClass: block.Scheduling.PriorityClass,
 		},
-		Resources:    make(map[string]RoleResourcesSettings, len(block.Resources)),
-		SessionStore: "pvc",
+		Resources: PodResourcesSettings{
+			Issue:      reservationSettingsOf(block.Resources.Issue),
+			Controller: reservationSettingsOf(block.Resources.Controller),
+		},
+		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
 			RetainHours:    block.RepositoryCache.RetainHours,
-			Resources:      roleResourcesSettingsOf(block.RepositoryCache.Resources),
+			Resources:      reservationSettingsOf(block.RepositoryCache.Resources),
 		},
 	}
 	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)
 	for i, toleration := range block.Scheduling.Tolerations {
 		settings.Scheduling.Tolerations[i] = TolerationSettings{Key: toleration.Key, Operator: toleration.Operator, Value: toleration.Value, Effect: toleration.Effect}
-	}
-	for role, reservation := range block.Resources {
-		settings.Resources[string(role)] = roleResourcesSettingsOf(reservation)
-	}
-	if block.SessionDSNSecret != "" {
-		settings.SessionStore = "postgres"
 	}
 	if broker := block.AgentSecrets; broker != nil {
 		settings.AgentSecrets = &AgentSecretsSettings{URL: broker.URL, Audience: broker.Audience, TokenExpirySeconds: broker.TokenExpirySeconds}
@@ -310,9 +330,9 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	return settings
 }
 
-// roleResourcesSettingsOf is one settled reservation as the state shows it.
-func roleResourcesSettingsOf(reservation config.RoleResources) RoleResourcesSettings {
-	return RoleResourcesSettings{
+// reservationSettingsOf is one settled reservation as the state shows it.
+func reservationSettingsOf(reservation config.Reservation) ReservationSettings {
+	return ReservationSettings{
 		CPU: reservation.CPU, CPURequest: reservation.CPURequest,
 		Memory: reservation.Memory, MemoryRequest: reservation.MemoryRequest,
 		EphemeralStorage: reservation.EphemeralStorage, EphemeralStorageRequest: reservation.EphemeralStorageRequest,

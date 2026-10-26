@@ -10,6 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // createRequestBody is POST /v1/requests's exact shape: a signed
@@ -71,10 +72,9 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
-	case errors.Is(err, requests.ErrMintRequiresLifetime):
-		// A minted secret's grant must sign lifetime_seconds of at most an hour, the life of the
-		// token it releases.
-		writeError(w, http.StatusBadRequest, "MINT_REQUIRES_LIFETIME", err.Error())
+	case errors.Is(err, requests.ErrGrantRequiresLifetime):
+		// A secret's max-grant tag bounds the lifetime its request may sign.
+		writeError(w, http.StatusBadRequest, "GRANT_REQUIRES_LIFETIME", err.Error())
 		return
 	case errors.Is(err, requests.ErrRequestPending):
 		writeError(w, http.StatusConflict, "REQUEST_PENDING", err.Error())
@@ -142,6 +142,33 @@ type requestStatusResponse struct {
 	Decision *requestDecision `json:"decision"`
 }
 
+// grantValuesBody is POST /v1/grants/{id}/values's optional body: no body at all, or one with no
+// github_app, releases every value as the grant holds it.
+type grantValuesBody struct {
+	// Optional: narrows the token of every github-app secret the grant holds to one account's
+	// installation and, within it, to named repositories, to read access, or to both. A grant
+	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE), and one whose
+	// github-app secret does not list the account refuses it (NARROWING_OWNER_NOT_LISTED). It
+	// narrows this release alone: the grant's next release without it is owner-wide.
+	GitHubApp *githubNarrowing `json:"github_app"`
+}
+
+// githubNarrowing is one release's narrowing of its GitHub App tokens: as the request names it,
+// and as the answer names what the broker applied.
+type githubNarrowing struct {
+	// The one GitHub account whose installation the token is minted for: a login the secret's
+	// github-owners lists, compared without regard to case. The answer names it lowercased.
+	Owner string `json:"owner"`
+	// Optional: names of the account's repositories, without the account, at least one and at most
+	// 100: the token reaches those repositories alone, but keeps every permission the App holds, its
+	// organization permissions among them, unless read_only is set too. The answer names them
+	// sorted, each once.
+	Repositories []string `json:"repositories,omitempty"`
+	// Optional: true limits the token to contents: read and metadata: read. A machine that must
+	// only read needs it, with or without repositories.
+	ReadOnly bool `json:"read_only,omitempty"`
+}
+
 // grantValuesResponse is POST /v1/grants/{id}/values's answer.
 type grantValuesResponse struct {
 	// When the grant expires; the session can read the values again until then. Null for a grant
@@ -149,6 +176,10 @@ type grantValuesResponse struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 	// Each granted name's value, read fresh from the secret store.
 	Values map[string]string `json:"values"`
+	// The narrowing this release applied to its GitHub App tokens, absent when it applied none. A
+	// client that asked for one and finds none here is answered by a broker from before
+	// narrowing, which released the owner-wide tokens.
+	GitHubApp *githubNarrowing `json:"github_app,omitempty"`
 }
 
 func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
@@ -211,7 +242,22 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if !ok {
 		return
 	}
-	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID)
+	var body grantValuesBody
+	if r.ContentLength != 0 && !readJSON(w, r, &body, "INVALID_NARROWING") {
+		return
+	}
+	var narrowing *secrets.GitHubNarrowing
+	var applied *githubNarrowing
+	if body.GitHubApp != nil {
+		n, refusal := policy.ParseGitHubNarrowing(body.GitHubApp.Owner, body.GitHubApp.Repositories, body.GitHubApp.ReadOnly)
+		if refusal != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", "github_app."+refusal.Field+" "+refusal.Reason)
+			return
+		}
+		narrowing = &n
+		applied = &githubNarrowing{Owner: n.Owner, Repositories: n.Repositories, ReadOnly: n.ReadOnly}
+	}
+	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID, narrowing)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -225,6 +271,26 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	case errors.Is(err, requests.ErrSecretNotInStore):
 		writeError(w, http.StatusNotFound, "SECRET_NOT_IN_STORE", err.Error())
 		return
+	case errors.Is(err, requests.ErrNarrowingNotApplicable):
+		writeError(w, http.StatusBadRequest, "NARROWING_NOT_APPLICABLE", err.Error())
+		return
+	case errors.Is(err, requests.ErrNarrowingOwnerNotListed):
+		// The narrowing names an account a github-app secret of the grant does not list; no minter
+		// ran and GitHub was not asked. The caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusForbidden, "NARROWING_OWNER_NOT_LISTED", err.Error())
+		return
+	case errors.Is(err, secrets.ErrMintNarrowingRefused):
+		// GitHub refused the narrowed token (a repository the installation does not reach, or a
+		// permission the App does not hold); its message names the narrowing's likely mistake. The
+		// caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusUnprocessableEntity, "NARROWING_REFUSED", err.Error())
+		return
+	case errors.Is(err, requests.ErrMintFailed):
+		// The kind's upstream (GitHub or Google) refused or failed a mint the narrowing, if any, is
+		// not at fault: an App with no installation, a Google login that needs a new sign-in, an
+		// upstream that could not be asked. Its message says why and never holds the stored value.
+		writeError(w, http.StatusBadGateway, "MINT_FAILED", err.Error())
+		return
 	case err != nil:
 		writeInternal(w, "read grant values", err)
 		return
@@ -232,7 +298,7 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if values == nil {
 		values = map[string]string{}
 	}
-	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values})
+	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values, GitHubApp: applied})
 }
 
 // revokeGrant ends a grant for the session that holds it — session proof only, per the shared

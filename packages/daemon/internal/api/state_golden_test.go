@@ -70,6 +70,8 @@ dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
   LEGION:
     slack_channels: [C0123ABCD, C0123ABCE]
+    deploys:
+      - {repo: sjawhar/legion, workflow: .github/workflows/release.yaml, step: Apply}
   WIDGETS:
     merge_queue_role: merge-queue
     merge:
@@ -117,7 +119,7 @@ runtime:
         - {key: spot, operator: Exists, effect: NoExecute}
       priority_class: legion-workers
     resources:
-      implementer: {cpu: 1500m, memory: 8Gi}
+      issue: {cpu: 4, memory: 24Gi}
       controller: {cpu: 2, cpu_request: 1, memory: 6Gi, memory_request: 4Gi}
     pod:
       env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, OPERATOR_FIXTURE_FLAG: operator-fixture-value}
@@ -194,6 +196,14 @@ func populatedState(t *testing.T) State {
 			Cap:     2,
 			Active:  []string{"LEGION-208", "LEGION-210"},
 			Waiting: []string{"LEGION-211"},
+			// LEGION-211 is the waiting root admission skips, so it is in `waiting` too;
+			// LEGION-209 is a child of LEGION-208's tree the workflow holds at `admitted`, which
+			// no waiting line carries. Both are listed, by issue key, with what each waits on —
+			// LEGION-213 among them a key the daemon has no record of, which counts as unfinished.
+			Blocked: []BlockedIssue{
+				{Issue: "LEGION-209", BlockedBy: []string{"LEGION-210", "LEGION-213"}},
+				{Issue: "LEGION-211", BlockedBy: []string{"LEGION-210"}},
+			},
 		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
@@ -224,7 +234,7 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "planner", Generation: 2,
+									Container: "roles", Generation: 2,
 								},
 							},
 						},
@@ -241,7 +251,7 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "implementer", Generation: 5,
+									Container: "roles", Generation: 5,
 								},
 							},
 							// The session's capability report (LEGION-663), from the process the locator
@@ -261,6 +271,7 @@ func populatedState(t *testing.T) State {
 					Repo:           "acme/widgets",
 					Number:         1247,
 					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
+					State:          "open",
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
 					FixAttempts:    1,
@@ -303,6 +314,7 @@ func populatedState(t *testing.T) State {
 					Repo:           "acme/widgets",
 					Number:         1239,
 					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+					State:          "merged",
 					ReviewDecision: "approved",
 				},
 				Check: &CheckView{
@@ -337,8 +349,8 @@ func populatedState(t *testing.T) State {
 		// stale.
 		Capabilities: CapabilityStatesOf(capabilities.Deployment{
 			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
-			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
-			RolesWithoutResources: []claim.Role{claim.RoleTester},
+			Decided:        map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
+			UnreservedPods: []capabilities.Pod{capabilities.PodIssue},
 		}.Report()),
 		// The project maps three repositories of two owners; the review App is not installed on one,
 		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
@@ -658,7 +670,7 @@ func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "grant.json", GrantResponse{
 		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
 	})
-	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: `no check is required on "main" of acme/widgets, so READY was published without reading the head's checks`})
+	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: "pull request #312 is already merged, so READY was published without reading its head's handoffs"})
 	golden(t, "issue-status.json", IssueStatusResponse{})
 	golden(t, "gate-register.json", GateRegisterResponse{})
 	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})

@@ -117,7 +117,7 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 // hold deleted: the room's delete set at its load is listed (deletedRuns.seed), and so is every
 // range of every update the hook admits. So a browser's whole-state handoff of a document edited
 // into 2,000 deleted runs, and a keystroke from a client that encodes the whole delete set with
-// each transaction as ygo does (crdt/doc.go:459-465), are charged nothing for the runs: the
+// each transaction as ygo does (crdt/doc.go:501-516), are charged nothing for the runs: the
 // keystroke is charged its one struct alone. A new deletion is charged its range's two splits,
 // and the same update sent again nothing.
 func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
@@ -170,7 +170,7 @@ func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
 // The room's update observer charges the content each transaction adds, whoever wrote it - here
 // the server's own writes - to the uncounted part, at the densest price at both copies, and never
 // the transaction's bytes: ygo's update for a transaction carries the room's whole delete set
-// every time (crdt/doc.go:459-465), so a keystroke into a document of 2,000 deleted runs is a
+// every time (crdt/doc.go:501-516), so a keystroke into a document of 2,000 deleted runs is a
 // frame of thousands of bytes that adds two. A transaction that only deletes adds nothing, and a
 // whole-state handoff of the document the room holds adds nothing. A count re-bases the uncounted
 // part, here one the measurer makes early, as the content passes earlyCountCharge.
@@ -266,7 +266,7 @@ func TestTheMeasurerCountsARoomEarlyOnceItsUncountedPartPassesTheThresholdAndNev
 	service.measurer.beforeCount = func(markdown string) { counted <- markdown }
 	loaded := headings(1)
 	live := newDocumentCopy()
-	replica := service.keepReplica(live, &loaded)
+	replica := service.keepReplica(live, nil, &loaded)
 	charge := service.chargeLoadedRoom("room", live, replica)
 	early := int64(earlyCountCharge/(bytesOfHeapAByteAtTheDensest*roomCopies)) + 1
 
@@ -641,18 +641,18 @@ func TestTheRoomBudgetClosesARoomTheServerOpenedOverItOnceUnusedAndNeverABrowser
 	ids := createDocuments(t, database, 2)
 	opened, joined := ids[0], ids[1]
 	// The server's work in each room outlasts the Apply that opens it, as a settlement or a write's
-	// append does: a latest edit source no settlement has read yet.
+	// append does: a latest edit source no settlement has read yet, recorded inside the Apply, once
+	// the room's load has taken the edit source its store row names (onLoadDocument, which clears
+	// one a row does not name).
 	hold := func(room string, unsettled bool) {
 		state := service.lockState(room)
 		state.unsettled = unsettled
 		service.unlockState(room, state)
 	}
-	hold(opened, true)
-	hold(joined, true)
 
 	service.SetRoomBudgetForTest(1)
 	for _, room := range []string{opened, joined} {
-		if err := service.srv.Apply(ctx, room, func(*crdt.Doc, func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		if err := service.srv.Apply(ctx, room, func(*crdt.Doc, func(func(*crdt.Transaction))) { hold(room, true) }); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 			t.Fatal(err)
 		}
 		if !service.budget.isMarked(room) {
@@ -746,7 +746,7 @@ func TestTheRoomBudgetAdmitsDeletesUnderPressureWithinTheReserveAndRefusesThemPa
 // browserTreeEdit is the update a browser holding a copy of room sends for change to its Proof
 // tree, written by the tree diff the editor's writes come to (pmdoc.Update), as ygo's update
 // observer encodes it: the transaction's structs and the copy's whole delete set
-// (crdt/doc.go:459-465). browser is the copy, made from room when nil, so successive edits build on
+// (crdt/doc.go:501-516). browser is the copy, made from room when nil, so successive edits build on
 // each other as one browser's do.
 func browserTreeEdit(t *testing.T, room, browser *crdt.Doc, change func(tree *pmdoc.Node)) (*crdt.Doc, []byte) {
 	t.Helper()

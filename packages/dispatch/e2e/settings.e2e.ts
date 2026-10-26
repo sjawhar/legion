@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject, getIssue, putRepoProject } from "./api";
+import {
+  createIssue,
+  createProject,
+  getIssue,
+  listProjectDefaultAssignees,
+  putProjectDefaultAssignee,
+  putRepoProject,
+} from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -66,7 +73,8 @@ test("a project's default repository moves with its Default radio, and a mapping
 
   try {
     await page.goto("/settings");
-    await expect(page.getByRole("columnheader", { name: "Default" })).toBeVisible();
+    // Exact: the Projects table above carries a "Default assignee" header of its own.
+    await expect(page.getByRole("columnheader", { exact: true, name: "Default" })).toBeVisible();
     await expect(radio("acme/widgets")).toBeChecked();
     await expect(radio("acme/gadgets")).not.toBeChecked();
 
@@ -222,7 +230,7 @@ test("an architecture source saves after the GitHub App access check, fails inli
     const sourceSaved = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/Legion/Arch") &&
         response.ok()
     );
     await page.getByRole("button", { name: "Add source" }).click();
@@ -230,6 +238,21 @@ test("an architecture source saves after the GitHub App access check, fails inli
     await expect(page.getByRole("cell", { exact: true, name: "legion/arch" })).toBeVisible();
     await expect(page.getByRole("cell", { exact: true, name: "main" })).toBeVisible();
     await expect(page.getByRole("cell", { exact: true, name: "Access verified" })).toBeVisible();
+
+    // A branch the repository does not have is refused inline with the server's 409, and the
+    // stored source keeps its branch.
+    await page.getByLabel("Source project").selectOption("CORE");
+    await page.getByLabel("Source repository").fill("legion/arch");
+    await page.getByLabel("Branch", { exact: true }).fill("no-such-branch");
+    await page.getByRole("button", { name: "Add source" }).click();
+    await expect(
+      page
+        .getByRole("alert")
+        .filter({ hasText: "the branch does not exist: no-such-branch on legion/arch" })
+    ).toBeVisible();
+    await expect(page.getByRole("cell", { exact: true, name: "main" })).toBeVisible();
+    await expect(page.getByRole("cell", { exact: true, name: "no-such-branch" })).toHaveCount(0);
+    await page.getByLabel("Branch", { exact: true }).fill("main");
 
     // The App gets uninstalled; re-saving fails its access check inline and the
     // stored source survives.
@@ -246,7 +269,9 @@ test("an architecture source saves after the GitHub App access check, fails inli
       fullPage: true,
     });
 
-    await page.getByRole("button", { name: "Delete architecture source for CORE" }).click();
+    await page
+      .getByRole("button", { name: "Delete architecture source legion/arch for CORE" })
+      .click();
     await expect(page.getByText("No architecture sources yet.")).toBeVisible();
     await expect(page.getByRole("cell", { exact: true, name: "legion/arch" })).not.toBeVisible();
   } finally {
@@ -276,7 +301,7 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
     const sourceSaved = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/legion/arch") &&
         response.ok()
     );
     await page.getByRole("button", { name: "Add source" }).click();
@@ -285,12 +310,14 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
     const synced = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source/sync") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/legion/arch/sync") &&
         response.ok()
     );
-    await page.getByRole("button", { name: "Refresh architecture source for CORE" }).click();
+    await page
+      .getByRole("button", { name: "Refresh architecture source legion/arch for CORE" })
+      .click();
     await synced;
-    await expect(page.getByText(`Synced ${commit.slice(0, 12)}`)).toBeVisible();
+    await expect(page.getByText(`Synced ${commit.slice(0, 12)} · 2 components`)).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("architecture-source-synced.png"),
       fullPage: true,
@@ -309,13 +336,17 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
     const rejected = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        response.url().endsWith("/api/v1/projects/CORE/architecture-source/sync") &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-sources/legion/arch/sync") &&
         response.ok()
     );
-    await page.getByRole("button", { name: "Refresh architecture source for CORE" }).click();
+    await page
+      .getByRole("button", { name: "Refresh architecture source legion/arch for CORE" })
+      .click();
     await rejected;
     await expect(page.getByText(/duplicate component id/)).toBeVisible();
-    await expect(page.getByText(`Previous model stays up at ${commit.slice(0, 12)}`)).toBeVisible();
+    await expect(
+      page.getByText(`Previous model stays up at ${commit.slice(0, 12)} · 2 components`)
+    ).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("architecture-source-sync-rejected.png"),
       fullPage: true,
@@ -349,5 +380,370 @@ test("Settings stays inside the viewport", async ({ browser }, testInfo) => {
     expect(measured.scroll).toBeLessThanOrEqual(measured.client);
   } finally {
     await alice.close();
+  }
+});
+
+test("a person sets, changes and clears a project's default assignee, and a project with none reads Unassigned", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // OPS is the negative control: it never gets a default. Creating it as bob also makes him a
+  // person who has signed in, so he is an option in the control.
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    const ops = page.getByRole("combobox", { exact: true, name: "Default assignee of OPS" });
+    await expect(core).toBeVisible();
+    // The sentence beside the control: an issue from an unmapped repository lands in the default
+    // project, so a default set there catches all of them.
+    await expect(page.getByText("no project mapping")).toBeVisible();
+    await expect(ops).toBeEnabled();
+    await expect(ops).toHaveValue("");
+
+    // Who has signed in is read only once the reader reaches for the control.
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
+
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
+    );
+    await core.selectOption("bob");
+    expect((await saved).ok()).toBe(true);
+
+    await page.reload();
+    await expect(core).toHaveValue("bob");
+    await page.screenshot({
+      path: testInfo.outputPath("project-default-assignee-settings.png"),
+      fullPage: true,
+    });
+
+    const changed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
+    );
+    await core.focus();
+    await core.selectOption("alice");
+    expect((await changed).ok()).toBe(true);
+    await page.reload();
+    await expect(core).toHaveValue("alice");
+    await expect(ops).toBeEnabled();
+    await expect(ops).toHaveValue("");
+
+    const cleared = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
+    );
+    await core.selectOption({ label: "Unassigned" });
+    expect((await cleared).ok()).toBe(true);
+    await page.reload();
+    await expect(core).toHaveValue("");
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => row.project)).not.toContain("CORE");
+    expect(defaults.map((row) => row.project)).not.toContain("OPS");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a default assignee picked while the last pick is saving waits its turn, and the last pick is the one kept", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
+  await createProject({ key: "CORE", name: "Core" });
+  // Creating OPS as bob makes him a person who has signed in, so he is an option in the control.
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    // The first PUT waits until the test lets it through, so the second pick lands while it is
+    // still on the wire. `wire` records each PUT as it reaches the network and the first's answer.
+    const held = Promise.withResolvers<void>();
+    const wire: string[] = [];
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const { assignee } = route.request().postDataJSON() as { assignee: string | null };
+      const first = wire.length === 0;
+      wire.push(`sent ${assignee}`);
+      if (!first) return route.fallback();
+      await held.promise;
+      const response = await route.fetch();
+      wire.push(`answered ${assignee}`);
+      return route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("");
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
+
+    // The pick shows at once, while its save is still held.
+    await core.selectOption("bob");
+    await expect(core).toHaveValue("bob");
+    await expect.poll(() => wire).toEqual(["sent bob"]);
+
+    await core.selectOption("alice");
+    await expect(core).toHaveValue("alice");
+    // One at a time: the second pick has not left the browser while the first is unanswered.
+    expect(wire).toEqual(["sent bob"]);
+
+    const second = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee" &&
+        response.request().postDataJSON()?.assignee === "alice"
+    );
+    held.resolve();
+    expect((await second).ok()).toBe(true);
+    expect(wire).toEqual(["sent bob", "answered bob", "sent alice"]);
+    await expect(core).toHaveValue("alice");
+
+    await page.reload();
+    await expect(core).toHaveValue("alice");
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => [row.project, row.assignee])).toEqual([["CORE", "alice"]]);
+  } finally {
+    await context.close();
+  }
+});
+
+// The saves still out when the reader leaves Settings belong to the app, not to the page: on
+// the way back the row's next pick waits behind the held save and supersedes the pick queued
+// before leaving, so it is the only one sent after the held save and the one the server keeps.
+test("default assignee picks made when Settings is left and reopened supersede the pick queued before leaving, and the newest is the one sent after the held save", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue across a remount");
+  await createProject({ key: "CORE", name: "Core" });
+  // Creating OPS as bob and QA as carol makes each a person who has signed in, so both are
+  // options in the control.
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await createProject({ key: "QA", name: "Quality" }, "carol");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    // The first PUT waits until the test lets it through. `wire` records each PUT as it reaches
+    // the network and as its answer comes back.
+    const held = Promise.withResolvers<void>();
+    const wire: string[] = [];
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const { assignee } = route.request().postDataJSON() as { assignee: string | null };
+      const first = wire.length === 0;
+      wire.push(`sent ${assignee}`);
+      if (first) await held.promise;
+      const response = await route.fetch();
+      wire.push(`answered ${assignee}`);
+      return route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("");
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob", "carol"]);
+
+    await core.selectOption("bob");
+    await expect(core).toHaveValue("bob");
+    await expect.poll(() => wire).toEqual(["sent bob"]);
+    await core.selectOption("carol");
+    await expect(core).toHaveValue("carol");
+
+    // Away and back inside the app: Settings unmounts and mounts again, the app stays loaded.
+    const navigation = page.getByRole("navigation", { name: "Navigation" });
+    await navigation.getByRole("link", { name: "Inbox" }).click();
+    await expect(core).toHaveCount(0);
+    await navigation.getByRole("link", { name: "Settings" }).click();
+    await expect(core).toBeEnabled();
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob", "carol"]);
+    await core.selectOption("alice");
+    await expect(core).toHaveValue("alice");
+
+    held.resolve();
+    await expect.poll(() => wire.includes("answered alice")).toBe(true);
+    await expect(core).toHaveValue("alice");
+
+    await page.reload();
+    await expect(core).toHaveValue("alice");
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => [row.project, row.assignee])).toEqual([["CORE", "alice"]]);
+    expect(wire).toEqual(["sent bob", "answered bob", "sent alice", "answered alice"]);
+  } finally {
+    await context.close();
+  }
+});
+
+// A person who changes their mind while a save is out is choosing, not saving each choice: the
+// picks made in between are superseded before they leave the browser, as the issue's own
+// assignee picker does (useIssueFieldWrite). Each pick the server stores is a default an issue
+// created in that moment is assigned to for good, so a person arrowing through the list must not
+// walk the project's default through everyone they passed.
+test("default assignee picks made while a save is out are superseded by the newest, so only it follows the save", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await createProject({ key: "QA", name: "Quality" }, "carol");
+  await createProject({ key: "ENG", name: "Engineering" }, "dave");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    const held = Promise.withResolvers<void>();
+    const wire: string[] = [];
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const { assignee } = route.request().postDataJSON() as { assignee: string | null };
+      const first = wire.length === 0;
+      wire.push(`sent ${assignee}`);
+      if (first) await held.promise;
+      const response = await route.fetch();
+      wire.push(`answered ${assignee}`);
+      return route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await core.focus();
+    await expect(core.locator("option")).toHaveText([
+      "Unassigned",
+      "alice",
+      "bob",
+      "carol",
+      "dave",
+    ]);
+
+    await core.selectOption("bob");
+    await expect.poll(() => wire).toEqual(["sent bob"]);
+    for (const pick of ["carol", "dave", "alice"]) {
+      await core.selectOption(pick);
+      await expect(core).toHaveValue(pick);
+    }
+
+    held.resolve();
+    // Wait for the newest pick's answer, then read every PUT that left the browser before it.
+    await expect.poll(() => wire.includes("answered alice")).toBe(true);
+    await expect(core).toHaveValue("alice");
+    expect(wire).toEqual(["sent bob", "answered bob", "sent alice", "answered alice"]);
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => [row.project, row.assignee])).toEqual([["CORE", "alice"]]);
+  } finally {
+    await context.close();
+  }
+});
+
+// A save refused while the reader is away from Settings is still theirs to hear about: on the way
+// back the row says its last save was refused, beside the stored value it fell back to, rather
+// than showing the old default as if nothing had been asked.
+test("a default assignee save refused while Settings is left says so when Settings is reopened", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the remount");
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await putProjectDefaultAssignee("CORE", { assignee: "alice" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    const held = Promise.withResolvers<void>();
+    let answered = false;
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      await held.promise;
+      answered = true;
+      return route.fulfill({
+        json: { code: "INTERNAL", error: "the default assignee save was refused" },
+        status: 500,
+      });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
+    await core.selectOption("bob");
+
+    const navigation = page.getByRole("navigation", { name: "Navigation" });
+    await navigation.getByRole("link", { name: "Inbox" }).click();
+    await expect(core).toHaveCount(0);
+    held.resolve();
+    await expect.poll(() => answered).toBe(true);
+
+    await navigation.getByRole("link", { name: "Settings" }).click();
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("alice");
+    await expect(
+      page.getByRole("alert").filter({ hasText: "the default assignee save was refused" })
+    ).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a default assignee the page has not read yet is never shown as Unassigned", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the read states");
+  await createProject({ key: "CORE", name: "Core" });
+  await putProjectDefaultAssignee("CORE", { assignee: "alice" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    // Each read of the defaults is answered as `read` says when it arrives: held until the test
+    // lets it go, refused, or passed through to the server.
+    let read: "hold" | "fail" | "pass" = "hold";
+    const held = Promise.withResolvers<void>();
+    await page.route("**/api/v1/settings/project-default-assignees", async (route) => {
+      if (read === "hold") {
+        await held.promise;
+        // The page this read was for may be gone by now.
+        return route.abort().catch(() => {});
+      }
+      if (read === "fail") {
+        return route.fulfill({ json: { code: "INTERNAL", error: "boom" }, status: 500 });
+      }
+      return route.fallback();
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeVisible();
+    // Not read yet: the control says so and takes no pick.
+    await expect(core).toBeDisabled();
+    await expect(core).not.toHaveValue("");
+    await expect(core).not.toHaveText(/Unassigned/);
+    await expect(core).toHaveText("Loading…");
+
+    read = "fail";
+    held.resolve();
+    await page.reload();
+    const loadError = page
+      .getByRole("alert")
+      .filter({ hasText: "Couldn't load the default assignees." });
+    await expect(loadError).toBeVisible();
+    await expect(core).toBeDisabled();
+    await expect(core).not.toHaveValue("");
+    await expect(core).toHaveText("Unavailable");
+
+    read = "pass";
+    await loadError.getByRole("button", { name: "Retry" }).click();
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("alice");
+    await expect(loadError).toHaveCount(0);
+  } finally {
+    await context.close();
   }
 });

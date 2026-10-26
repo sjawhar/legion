@@ -16,10 +16,10 @@ import (
 
 // BenchmarkLiveDocumentRead measures what a read of a resident room costs by each way it can be
 // taken: walking the live tree with no lock (walk, which races the room's peers), through a copy
-// taken under the document's lock (copy), and through the update observer's replica brought up to
-// date under that lock (replica: idle when the observer has already taken every update, keystroke
-// when one typed character is still to catch up). lock is how long each holds the live document's
-// lock, which every peer's update waits for.
+// taken under the document's lock (copy), and through the update observer's replica once it holds
+// every committed update (replica). lock is how long a copy holds the live document's lock, which
+// every peer's update waits for; the replica takes no document lock, since ygo hands the room's
+// update log each update under the lock its commit already holds.
 func BenchmarkLiveDocumentRead(b *testing.B) {
 	for _, size := range []int{51 << 10, 524 << 10} {
 		live := benchmarkLiveDocument(b, size)
@@ -56,51 +56,24 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 					}
 				}
 			})
-			for _, typed := range []bool{false, true} {
-				variant := "idle"
-				if typed {
-					variant = "keystroke"
-				}
-				b.Run(name+"/"+read.name+"/replica-"+variant, func(b *testing.B) {
-					replica := &renderedReplica{}
-					replica.catchUp("bench", live)
-					for b.Loop() {
-						if typed {
-							b.StopTimer()
-							typeOneCharacter(b, live)
-							b.StartTimer()
-						}
-						doc := replica.hold("bench", live)
-						if doc == nil {
-							b.Fatal("the replica has nothing to read")
-						}
-						_, readErr := read.read(doc)
-						replica.mu.Unlock()
-						if readErr != nil {
-							b.Fatal(readErr)
-						}
+			b.Run(name+"/"+read.name+"/replica", func(b *testing.B) {
+				replica := observedReplica(b, &Service{}, live, nil)
+				for b.Loop() {
+					doc := replica.hold()
+					if doc == nil {
+						b.Fatal("the replica has nothing to read")
 					}
-				})
-			}
+					_, readErr := read.read(doc)
+					replica.mu.Unlock()
+					if readErr != nil {
+						b.Fatal(readErr)
+					}
+				}
+			})
 		}
 		b.Run(name+"/lock/copy", func(b *testing.B) {
 			for b.Loop() {
 				crdt.EncodeStateAsUpdateV1(live, nil)
-			}
-		})
-		b.Run(name+"/lock/replica-keystroke", func(b *testing.B) {
-			replica := &renderedReplica{}
-			replica.catchUp("bench", live)
-			for b.Loop() {
-				b.StopTimer()
-				typeOneCharacter(b, live)
-				b.StartTimer()
-				update := crdt.EncodeStateAsUpdateV1(live, replica.doc.StateVector())
-				b.StopTimer()
-				if err := crdt.ApplyUpdateV1(replica.doc, update, nil); err != nil {
-					b.Fatal(err)
-				}
-				b.StartTimer()
 			}
 		})
 	}
@@ -113,11 +86,12 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 // is everything the peer's read loop runs for it before that broadcast: the peer update hook
 // (Service.weighPeerUpdate, ygo's Server.OnPeerUpdate), the apply the hook is handed, which is
 // ygo's own, crdt.ApplyUpdateV1 of the update into the room's document (sjawhar/ygo
-// v1.51.3-sami.2, provider/websocket/peer_update.go:84-94), and the observer's whole turn with the
+// v1.51.3-sami.5, provider/websocket/peer_update.go:84-94), and the observer's whole turn with the
 // replica (renderedReplica.observe), which ygo fires inside that apply once its transaction
-// commits (crdt/doc.go:647-652): the catch-up under the replica's lock and the render
-// (renderDocumentForUpdate), which skips pmdoc.Read's copy since the tree it renders never
-// outlives the call. 120 keystrokes 20 ms apart on a 524 KiB document; each run reports the
+// commits (crdt/doc.go:698-703): the drain of the room's update log, the content each drained
+// update added charged to the room budget (chargeAdded), the update applied to the replica, and
+// the render (renderDocumentForUpdate), which skips pmdoc.Read's copy since the tree it renders
+// never outlives the call. 120 keystrokes 20 ms apart on a 524 KiB document; each run reports the
 // latencies' percentiles in milliseconds.
 //
 // Each keystroke reaches the room as a browser's does: typed on the browser's own copy of the room,
@@ -184,9 +158,8 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 					b.Fatal(err)
 				}
 				service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
-				replica := service.keepReplica(live, &rendering)
+				replica := observedReplica(b, service, live, &rendering)
 				service.chargeLoadedRoom("bench", live, replica)
-				replica.observe("bench", live, nil)
 				for b.Loop() {
 					stop := make(chan struct{})
 					var reading sync.WaitGroup
@@ -212,7 +185,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 							if err := crdt.ApplyUpdateV1(info.Doc, info.Update, info.Origin); err != nil {
 								return err
 							}
-							replica.observe("bench", live, nil)
+							replica.observe("bench", nil)
 							return nil
 						})
 						latencies = append(latencies, time.Since(start))
@@ -261,7 +234,7 @@ func BenchmarkPeerUpdateWeighing(b *testing.B) {
 		b.Fatal(err)
 	}
 	service := &Service{}
-	replica := service.keepReplica(live, &rendering)
+	replica := service.keepReplica(live, nil, &rendering)
 	update := benchmarkKeystrokeUpdate(b, live)
 	published, _, measured := replica.size()
 	if !measured || published+int64(len(update)) >= pmdoc.MaxDocumentBytes {
@@ -316,6 +289,25 @@ func benchmarkKeystrokeUpdate(b *testing.B, live *crdt.Doc) []byte {
 	return crdt.EncodeStateAsUpdateV1(browser, live.StateVector())
 }
 
+// observedReplica is live's replica as a room's update observer keeps it (keepReplica), published
+// from markdown, live's rendering, as a room's load publishes it (nil publishes none until the
+// replica's first rendering), and holding every update live has committed: an empty transaction
+// gives its update log the base it starts from. The log is closed when the test or benchmark ends,
+// so live does not go on logging for it.
+func observedReplica(tb testing.TB, service *Service, live *crdt.Doc, markdown *string) *renderedReplica {
+	tb.Helper()
+	log := live.OpenUpdateLog()
+	tb.Cleanup(log.Close)
+	replica := service.keepReplica(live, log, markdown)
+	live.Transact(func(*crdt.Transaction) {})
+	replica.observe("bench", nil)
+	if replica.hold() == nil {
+		tb.Fatal("the replica holds no document after its first drain")
+	}
+	replica.mu.Unlock()
+	return replica
+}
+
 // benchmarkLiveDocument is a live document holding about size bytes of a spec's markdown - headings,
 // marked paragraphs, lists, tables and code - after 2,000 keystrokes typed and deleted across it,
 // so its delete set is a document's that people have edited.
@@ -359,16 +351,6 @@ func benchmarkLiveDocument(tb testing.TB, size int) *crdt.Doc {
 		live.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 0, 1) })
 	}
 	return live
-}
-
-// typeOneCharacter types one character into live's first paragraph, as a peer's keystroke does.
-func typeOneCharacter(b *testing.B, live *crdt.Doc) {
-	b.Helper()
-	texts := paragraphTexts(live)
-	if len(texts) == 0 {
-		b.Fatal("the document holds no paragraph text")
-	}
-	live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
 }
 
 func paragraphTexts(live *crdt.Doc) []*crdt.YXmlText {

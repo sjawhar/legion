@@ -84,7 +84,7 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
  * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
- * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * pod: the Sandbox's name, the pod's uid, the container (`roles` for an issue pod) and the process generation; the
  * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [
@@ -148,12 +148,14 @@ const legionPhaseView = z.strictObject({
  * when the reviewer completes. It shows from the review that decided it until the next round
  * opens or a new generation clears it, so a request for changes stays through implementing and
  * testing, and an approval through retro and every phase after it; absent until a review in a
- * round decides. */
+ * round decides. `state` is always present: a recorded pull request is open, merged or closed. */
 const legionPullRequestView = z.strictObject({
   /** The repository (`owner/name`) the pull request is in, its issue's (contract 31). */
   repo: nonEmptyString,
   number: z.number().int().positive(),
   head: nonEmptyString,
+  /** `open`, `merged` or `closed` (contract 36), `record.PullRequestState`'s values. */
+  state: z.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: z.number().int().nonnegative(),
@@ -175,8 +177,9 @@ const legionSlotView = z.strictObject({
 });
 
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
- * (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
- * `detail` the cause's own detail (the run and its completion, or the build's commit), `at` when. */
+ * (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or
+ * `bound`), `detail` the cause's own detail (the run and its completion, the deploy workflow's run,
+ * attempt, job and step success, or the build's commit), `at` when. */
 const legionCheckWakeView = z.strictObject({
   kind: nonEmptyString,
   detail: z.string(),
@@ -275,12 +278,25 @@ const daemonInfo = z.strictObject({
   startedAt: timestamp,
 });
 
+/** `api.BlockedIssue` (`record.BlockedIssue`, and `api.HeldChild` on a wave release) — one issue
+ * Legion is waiting to start and the issues it waits on that are not done, in the order Dispatch
+ * lists them. A blocker the daemon has not yet observed as an issue of its own counts as
+ * unfinished, so `blockedBy` can name a key the state's `issues` does not. */
+const legionBlockedIssue = z.strictObject({
+  issue: issueKey,
+  blockedBy: z.array(issueKey),
+});
+
 /** `api.Admission` — the issue cap and the issues under it, in Dispatch rank order. Concurrency
- * is capped on issues, never on workers: there is no worker queue on this wire. */
+ * is capped on issues, never on workers: there is no worker queue on this wire. `blocked` is
+ * every root and every child Legion is waiting to start behind a Dispatch issue nobody has
+ * finished, by issue key; `waiting` stays the roots' waiting line, so a blocked root is in both.
+ * The controller names them in the day's report and takes nothing for them. */
 const legionAdmission = z.strictObject({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),
   waiting: z.array(nonEmptyString),
+  blocked: z.array(legionBlockedIssue),
   free: z.number().int().nonnegative().optional(),
 });
 
@@ -554,14 +570,22 @@ export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
-/** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published
- * without reading the head's checks (the pull request already merged, or its base requiring none);
- * every other completion answers none. */
+/** `api.HandoffCompleteResponse`: `note` is what READY answers when it has something to say about
+ * the merge it publishes - the pull request was already merged, so its head's handoffs went
+ * unread, or a person merges this one (`MANUAL_MERGE_REQUIRED:`); every other completion answers
+ * none. */
 export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });
+/** `api.WaveReleaseResponse`. A release is accepted whatever the children's links say, so
+ * `released` is every issue the request named, unchanged, and the architect is never asked to
+ * send the request again; `started` and `held` then say what the release did with each of them.
+ * A child neither started nor held — one the daemon does not record, or one still admitted that
+ * waits on nothing — is in neither list. */
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
+  started: z.array(issueKey),
+  held: z.array(legionBlockedIssue),
 });
 
 /** `api.GrantRequest`, the session form that mints one short-lived credential grant: it serves every
@@ -646,7 +670,9 @@ export const LegionEscalateRequest = z.strictObject({
 });
 
 /** `api.SignOffRequest`, the owning architect's acceptance of an issue in `accepting`, which moves
- * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). */
+ * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`), and
+ * refuses it 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one — its children,
+ * their children — is still in the workflow, naming each of them. */
 export const LegionSignOffRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,

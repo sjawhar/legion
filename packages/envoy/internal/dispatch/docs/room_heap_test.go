@@ -15,12 +15,12 @@ import (
 // What one open document costs the pod is the figure the room budget charges a room by
 // (bytesOfHeapAnElement), and it was first read off a benchmark of a read's second replica rather
 // than measured of a room: about 120 bytes of heap for every byte of markdown for one copy, and
-// two copies for a room under edit (AGENTS.md:556-557). This measures the room itself: the live
+// two copies for a room under edit (AGENTS.md:587-588). This measures the room itself: the live
 // document alone, which is all a room that is only read holds, and the live document beside the
-// rendered replica the update observer takes on the room's first update and keeps while the room
-// is resident (keepReplica, renderedReplica.observe), which is what a room under edit holds. A room
-// under edit measures about twice a room that is only read, which is the two copies, and the
-// second is the whole of the difference.
+// rendered replica the update observer takes on the room's first transaction and keeps while the
+// room is resident (keepReplica, renderedReplica.observe), which is what a room under edit holds.
+// A room under edit measures about twice a room that is only read, which is the two copies, and
+// the second is the whole of the difference.
 //
 // Both are weighed against the room's rendering, the markdown its stored version holds. A byte of
 // markdown is not what the heap follows, though: what it follows is the elements that markdown
@@ -107,8 +107,8 @@ func heldByResidentRoom(t *testing.T, state []byte, edited bool) int64 {
 
 // buildResidentRoom loads state as a room's cold load decodes it (newDocumentCopy) and, for a room
 // that has had an update, takes the replica its observer takes: keepReplica, as the room's load
-// does, and one observe, which copies the document and renders it, as the room's first update
-// does.
+// does, and one drain of the room's update log, which copies the document from the log's base and
+// renders it, as the room's first transaction does (observedReplica).
 func buildResidentRoom(t *testing.T, state []byte, edited bool) *residentRoom {
 	t.Helper()
 	live := newDocumentCopy()
@@ -120,8 +120,7 @@ func buildResidentRoom(t *testing.T, state []byte, edited bool) *residentRoom {
 		return room
 	}
 	room.service = &Service{}
-	room.replica = room.service.keepReplica(live, nil)
-	room.replica.observe("heap", live, nil)
+	room.replica = observedReplica(t, room.service, live, nil)
 	if _, _, measured := room.replica.size(); !measured {
 		t.Fatal("the room's observer published no measurement, so it rendered no markdown and the replica this weighs is not a room's")
 	}

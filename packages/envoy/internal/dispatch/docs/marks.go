@@ -900,7 +900,7 @@ func unmarkFound(txn *crdt.Transaction, fragment *crdt.YXmlFragment, expired []p
 // unmarkRunStructs is the most structs unmarking one run of text adds to a document. pmdoc.Unmark
 // formats each run of the text's delta that carries the mark (pmdoc/find.go:1046-1064), and ygo's
 // Format of one key over a run writes at most two format items - the mark's end where the run
-// begins (insertAttributes, crdt/ytext.go:1070-1081 in sjawhar/ygo v1.51.3-sami.2) and its value
+// begins (insertAttributes, crdt/ytext.go:1070-1081 in sjawhar/ygo v1.51.3-sami.5) and its value
 // restored where the run ends (insertNegatedAttributes, :1087-1107) - and splits at most two
 // items, the one holding the run's start (findTextPos, :1007-1029) and the one holding its end
 // (:868-871). The format items it meets inside the run it deletes, which adds no struct.

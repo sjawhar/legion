@@ -107,16 +107,18 @@ func (r *liveRig) revoke(c *liveClaim) error {
 	return nil
 }
 
-// agentSecrets runs `agent-secrets <args>` in c's worker container as the agent would, with the
-// pod's own AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR, and returns stdout, the exit code, and
-// stderr. kubectl exec answers exit 1 for any non-zero code, so the command's own code is echoed.
+// agentSecrets runs `agent-secrets <args>` in c's role as the agent would, under the agent's own
+// environment (asAgent), so with the AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR the launch told
+// it, and returns stdout, the exit code, and stderr. kubectl exec answers exit 1 for any non-zero
+// code, so the command's own code is echoed.
 func (r *liveRig) agentSecrets(c *liveClaim, args ...string) (stdout string, code int, stderr string, err error) {
 	script := "/opt/legion/bin/agent-secrets " + shellJoin(args) + " 2>/tmp/agent-secrets.err; code=$?; printf '\\n---exit %d---\\n' $code; cat /tmp/agent-secrets.err"
-	out, err := r.exec(c, "sh", "-c", script)
+	out, err := r.asAgent(c, script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return "", -1, "", err
 	}
-	head, tail, _ := strings.Cut(out, "\n---exit ")
+	// exec trims the output, so with nothing on stdout it begins with the marker itself.
+	head, tail, _ := strings.Cut("\n"+out, "\n---exit ")
 	codeText, rest, _ := strings.Cut(tail, "---\n")
 	fmt.Sscanf(codeText, "%d", &code)
 	return strings.TrimSpace(head), code, strings.TrimSpace(rest), nil
@@ -236,12 +238,13 @@ func (r *liveRig) checkSecretsAutomaticGrant() error {
 func (r *liveRig) checkSecretsCrossPodNegative() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	for _, attempt := range [][]string{{"status", r.requests[root.token]}, {"revoke", r.grants[root.token]}} {
-		_, code, stderr, err := r.agentSecrets(worker, attempt...)
+		out, code, stderr, err := r.agentSecrets(worker, attempt...)
 		if err != nil {
 			return err
 		}
 		if code == 0 || !strings.Contains(stderr, "NOT_YOURS") {
-			return fmt.Errorf("the worker's agent-secrets %s %s: exit %d: %s; want NOT_YOURS", attempt[0], attempt[1], code, stderr)
+			return fmt.Errorf("the worker's agent-secrets %s %s (the root's; root enrollment %s, worker enrollment %s): exit %d, stdout %q, stderr %q; want NOT_YOURS",
+				attempt[0], attempt[1], r.enrollments[root.token].id, r.enrollments[worker.token].id, code, out, stderr)
 		}
 		note("runtime", "worker: agent-secrets %s <root's> → exit %d NOT_YOURS", attempt[0], code)
 	}
@@ -251,7 +254,7 @@ func (r *liveRig) checkSecretsCrossPodNegative() error {
 	note("runtime", "root: its grant still works after the worker's attempts")
 	rootID := r.enrollments[root.token].id
 	script := fmt.Sprintf("mkdir -p /tmp/swapped && cp %s/key.pem /tmp/swapped/ && printf '%%s\\n' %s >/tmp/swapped/enrollment && AGENT_SECRETS_KEY_DIR=/tmp/swapped /opt/legion/bin/agent-secrets self 2>&1; echo \"---exit $?---\"", AgentSecretsKeyDir, rootID)
-	out, err := r.exec(worker, "sh", "-c", script)
+	out, err := r.asAgent(worker, script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
 	}
@@ -286,8 +289,8 @@ func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 // daemon's launcher-proof path, so the CLI refuses before it could present a credential.
 func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 	root := r.claim("root")
-	script := `mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" 2>&1; echo "---exit $?---"`
-	out, err := r.exec(root, "sh", "-c", script)
+	script := `mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --runtime-id "$POD_UID" --thumbprint "$tp" 2>&1; echo "---exit $?---"`
+	out, err := r.asAgent(root, script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
 	}
@@ -359,10 +362,17 @@ func (r *liveRig) checkSecretsApprovalAsk() error {
 
 // secrets-old-uid-negative and secrets-revoke-on-death: a separate issue pod is deleted and its
 // claim resumed with a new pod UID. The old pod's enrollment is revoked; a key copied before its
-// deletion then fails, and a new pod's identity cannot enroll under the old UID.
+// deletion then fails, and a new pod's identity cannot enroll under the old UID. The deleted pod
+// took its disk with it, so the replacement pod's is a claim of its own under the same name, with
+// a new uid and the new pod as its owner, and the claim comes back from the session the table
+// holds (recordSession) rather than from anything that pod's disk kept.
 func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 	worker := r.claim("orphan")
 	if err := r.ensureRunning(worker); err != nil {
+		return err
+	}
+	oldDisk, err := r.assertPodOwnedDisk(worker)
+	if err != nil {
 		return err
 	}
 	current, err := r.ensureEnrolled(worker)
@@ -411,7 +421,7 @@ func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 	note("harness", "devbox: the same copied key after DELETE /v1/enrollments → PROOF_INVALID")
 	worker.state = stateDead
 	since := time.Now()
-	loc, err := r.resume(worker, worker.marker)
+	loc, err := r.resume(worker, worker.session)
 	if err != nil {
 		return err
 	}
@@ -433,11 +443,19 @@ func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 	if _, err := r.enroll(worker, reg); err != nil {
 		return err
 	}
+	newDisk, err := r.assertPodOwnedDisk(worker)
+	if err != nil {
+		return err
+	}
+	if newDisk.uid == oldDisk.uid {
+		return fmt.Errorf("the replacement pod's disk %s is the deleted pod's own uid %s: a pod's disk goes with the pod", newDisk.name, oldDisk.uid)
+	}
 	out, code, stderr, err := r.agentSecrets(worker, "LEGION_E2E_AUTO", "--", "sh", "-c", `printf %s "$LEGION_E2E_AUTO" | sha256sum | cut -d' ' -f1`)
 	if err != nil || code != 0 || out != r.env.agentSecretsAutoSHA {
 		return fmt.Errorf("the resumed worker (pod uid %s) could not use its new enrollment: exit %d %s %s (%v)", short(loc.Sandbox.PodUID), code, out, stderr, err)
 	}
-	note("runtime", "the resumed worker (pod uid %s) is enrolled anew and gets the automatic secret", short(loc.Sandbox.PodUID))
+	note("runtime", "the resumed worker (pod uid %s), resumed from its recorded session %s, is enrolled anew and gets the automatic secret", short(loc.Sandbox.PodUID), worker.session)
+	note("operator", "the disk %s is uid %s after the replacement, not the deleted pod's %s, and is owned by %s", newDisk.name, short(newDisk.uid), short(oldDisk.uid), newDisk.owner)
 	return nil
 }
 

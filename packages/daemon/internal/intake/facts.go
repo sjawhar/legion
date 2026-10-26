@@ -44,6 +44,10 @@ type DispatchIssue struct {
 	// own, else its nearest ancestor's, else its project's default; empty when it resolves to none.
 	// The workflow takes it when it first records the issue, and never after.
 	ResolvedRepo string
+	// Blockers is the keys of the issues the event says this issue waits on, in Dispatch's own
+	// order. An event retained from a Dispatch that did not yet send them carries none, as an issue
+	// waiting on nothing does: no reader needs to tell those two apart.
+	Blockers []string
 	// ResolvedRepoMissing is an event JetStream retained from before Dispatch resolved an issue's
 	// repository: its payload has no resolved_repo, so ResolvedRepo says nothing. The consumer's
 	// PrepareRepository fills ResolvedRepo from the issue's record, or from Dispatch for an issue
@@ -72,7 +76,7 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Observed: true}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy, Observed: true}
 }
 
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
@@ -83,7 +87,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -153,11 +157,33 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 	return p.AckFloorStream >= target || p.Idle
 }
 
+// IssueStatus is one issue of the daemon's project as Dispatch shows it now: its key, its status,
+// the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
+// turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
+// same sequence-fenced write an event's own row takes, so a view older than an event already
+// applied changes nothing.
+type IssueStatus struct {
+	Key      string
+	Status   string
+	Blockers []string
+	Seq      int64
+}
+
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
 // synthetic fact every `controller_wake_interval_seconds` and never decoded from an event.
 // Admission is the only handler that acts on it; when it wakes the controller is admission's rule
 // (admit.Admission.wakeController and its callers).
-type ControllerTick struct{}
+type ControllerTick struct {
+	// Observed is what the turn's own re-read of Dispatch saw: the issues anything is currently
+	// waiting on, as Dispatch answers for them now (workflowRuntime.tickController reads them
+	// before the fact is applied, since no handler may perform I/O). The mirror handler writes
+	// them, ahead of the handlers that judge from the mirror in this same transaction, so a
+	// blocker whose closing event never arrived is caught here — at the cost of one wake interval
+	// rather than standing until the next boot's listing. Empty is the tick as it always was: an
+	// ordinary wake that writes nothing, which is almost every turn, and also what a failed read
+	// leaves.
+	Observed []IssueStatus
+}
 
 func (ControllerTick) isFact() {}
 
@@ -373,6 +399,23 @@ type Push struct {
 
 func (Push) isFact() {}
 
+// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope: attempt Attempt of GitHub
+// Actions run RunID of the workflow file Path (GitHub's `workflow_run.path`, the run's top-level
+// `.github/workflows/` file) in Repo finished on HeadBranch, whatever its conclusion.
+// Envoy publishes none for a run of a pull request. The workflow compares it with the project's
+// deploy workflows (config.Project.Deploys) and queues a GitHub read of the run for each open
+// production check it may wake; the envelope is anyone's who holds an Envoy bearer, so nothing in
+// it is trusted beyond choosing what to read.
+type WorkflowRunCompleted struct {
+	Repo       string
+	Path       string
+	RunID      int64
+	Attempt    int
+	HeadBranch string
+}
+
+func (WorkflowRunCompleted) isFact() {}
+
 // HandoffComplete is an API-originated phase-completion fact.
 type HandoffComplete struct {
 	Issue string
@@ -548,13 +591,15 @@ type ServerStarted struct {
 
 func (ServerStarted) isFact() {}
 
-// CheckWake is a build compare that found the merge of issue Issue's production check in the
-// build (the check_compare outbox row's GitHub read): Look is the look the compare was queued for,
-// Cause what asked for it (`daemon boot`, `dispatch start` or `dispatch build`) and Detail the
-// build's commit. OpenedAt is the check the executor read the merge from (its OpenedAt, the check
-// instance's identity): the workflow ignores a wake of a check a later merge has replaced, and a
-// zero OpenedAt names none. The workflow wakes the check by the one wake rule, or keeps the cause
-// for the next look while one is open.
+// CheckWake is a compare that found a reason to wake issue Issue's production check (the
+// check_compare outbox row's GitHub read): a build that carries the check's merge, or a deploy
+// workflow's job whose named step succeeded after the pull request merged. Look is the look the
+// compare was queued for, Cause what asked for it (`daemon boot`, `dispatch start`, `dispatch
+// build` or `deploy run`) and Detail the build's commit or the deploy run and its job. OpenedAt is
+// the check the executor read the merge from (its OpenedAt, the check instance's identity): the
+// workflow ignores a wake of a check a later merge has replaced, and a zero OpenedAt names none.
+// The workflow wakes the check by the one wake rule, or keeps the cause for the next look while
+// one is open.
 type CheckWake struct {
 	Issue    string
 	Look     int

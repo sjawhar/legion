@@ -87,13 +87,42 @@ a {
 
   /* An anchor inside a sentence keeps its line box: a 44px control box there is blank space in
      the middle of a line. Vertical padding grows its hit box instead, at no layout cost,
-     because padding on an inline element does not move the line. The two values are the two
-     line pitches: a body's links sit on 24px lines, where 3px is the most that does not reach
-     the text of a link on the line above, and Dispatch's own inline links (`view`, a
-     components line, a backlink) sit on their own row at 12px, where 6px is what reaches the
-     24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in any case. */
+     because padding on an inline element does not move the line. Dispatch's own inline links
+     (`view`, a components line, a backlink) sit on their own row at 12px, where 6px is what
+     reaches the 24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in
+     any case.
+
+     A markdown link's padding is sized from its own line pitch, since a `.dispatch-markdown`
+     inherits its text size and line height from its call site. `1lh` is the link's computed
+     line height and `1.2em` stands for the height of its font's text box (ascent plus
+     descent): half of what that leaves of the line goes above and below the link, and its
+     padded box then stops at least as far short of the text of the line above as the padding
+     itself, for any font whose text box is at most 1.2em. A pitch tighter than 1.2em (a large
+     heading) gets no padding, since `calc()` clamps a negative padding to 0: its lines leave
+     no gap to fill.
+
+     Measured in Chromium at 390px with DejaVu Sans, whose text box is 19px at 16px, 18px at
+     15px and 14px at 12px (padding / clearance from the lower link's padded box to the upper
+     link's text): a message turn, 16px on 24px lines, 2.4px / 2.6px; an Inbox ask card
+     (`AskCard.tsx`), 15px on 24.375px, 3.2px / 3.2px; an agent-view message body (`text-sm`),
+     14px on 20px, 1.6px / 2.4px; a document in the editor (`.milkdown p` in proof-editor's
+     `lib.css`, line height 1.6), 16px on 25.6px, 3.2px / 3.4px; an agent turn's reasoning
+     (`AgentThread.tsx`, `text-xs`), 12px on 16px, 0.8px / 1.2px. A fixed 3px there measured
+     -1px, reaching into the letters of the line above, and a fixed 4px on a message turn
+     measured a clearance of 1px (INFRA-95).
+
+     No fallback declaration: Tailwind v4's browser floor supports `lh`, and a browser
+     without it drops the declaration and gives the link no padding, which never overlaps.
+     A font whose text box is r em tall leaves a clearance of
+     (line-height - (2r - 1.2) * font-size) / 2, so it reaches into the line above wherever
+     (2r - 1.2) * font-size > line-height. Segoe UI (`system-ui` on Windows, in a window
+     narrower than 1280px) has r = 1.33 by its published metrics, ascent 2210 plus descent 514
+     of 2048 units per em, not measured here; at each pitch above that gives: reasoning,
+     12px on 16px, -0.76px (overlaps); an agent-view message body, 14px on 20px, -0.22px
+     (overlaps); a message turn, 16px on 24px, 0.32px; a document, 16px on 25.6px, 1.12px; an
+     Inbox ask card, 15px on 24.375px, 1.24px. */
   .prose a {
-    padding-block: 3px;
+    padding-block: calc((1lh - 1.2em) / 2);
   }
 
   .dispatch-inline-link {

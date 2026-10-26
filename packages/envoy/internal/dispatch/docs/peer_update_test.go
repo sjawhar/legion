@@ -24,7 +24,7 @@ import (
 
 // The hook is driven here at its own level, as ygo drives it: the room's document, the update's
 // bytes, and an apply that applies the update to that document exactly as the room's own does
-// (sjawhar/ygo v1.51.3-sami.2, provider/websocket/peer_update.go:75-84). What a real browser meets
+// (sjawhar/ygo v1.51.3-sami.5, provider/websocket/peer_update.go:75-84). What a real browser meets
 // over a real socket is the real-process drive; what these rows pin is the rule itself.
 func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 	atTheBound := proseAtLeast(pmdoc.MaxDocumentBytes)
@@ -251,7 +251,7 @@ func peerUpdateRoom(t *testing.T, markdown string, leastBytes int) (*Service, *c
 		t.Fatal(err)
 	}
 	service := &Service{}
-	replica := service.keepReplica(room, &rendering)
+	replica := service.keepReplica(room, nil, &rendering)
 	bytes, elements, measured := replica.size()
 	if !measured || bytes < int64(leastBytes) {
 		t.Fatalf("the room published %d bytes and %d elements, want at least %d bytes", bytes, elements, leastBytes)
@@ -334,7 +334,7 @@ func peerDocument(t *testing.T, room *crdt.Doc) (*crdt.Doc, *crdt.YXmlText) {
 }
 
 // firstText is the first text in node's document order, however deep it is nested. ygo's own node
-// interface is unexported (sjawhar/ygo v1.51.3-sami.2, crdt/yxml.go:16), so the walk takes each
+// interface is unexported (sjawhar/ygo v1.51.3-sami.5, crdt/yxml.go:16), so the walk takes each
 // child as it comes.
 func firstText(node any) *crdt.YXmlText {
 	var children []any
@@ -498,7 +498,7 @@ func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing
 	}
 	serverWritten := len(crdt.EncodeStateAsUpdateV1(room, nil))
 	service := &Service{}
-	replica := service.keepReplica(room, &rendering)
+	replica := service.keepReplica(room, nil, &rendering)
 	// A client id of five bytes, the most a lib0 varint of one takes, which most random ids are:
 	// every origin of every struct the browser writes names it, so a smaller one would measure a
 	// lighter frame than most browsers send.
@@ -721,8 +721,8 @@ func deleteRangesFrom(client uint64, n int) []byte {
 // An update the walk refuses is never applied: the hook answers the walk's error, which ygo answers
 // with SyncStatus(0) and no close, and the room is as it was. Applied, a frame of valid structs
 // ending in one bad byte would have left those structs in the room, since ygo integrates each
-// struct as it decodes it and never rolls the transaction back (sjawhar/ygo v1.51.3-sami.2,
-// crdt/update.go:50-56).
+// struct as it decodes it and never rolls the transaction back on a document that sets no
+// integrate-scan bound, which no room does yet (sjawhar/ygo v1.51.3-sami.5, crdt/update.go:68-74).
 func TestAPeerUpdateTheWalkRefusesIsNeverApplied(t *testing.T) {
 	for _, row := range []struct {
 		name   string
@@ -989,7 +989,7 @@ func TestTheStructTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing.T) 
 	}
 	service := &Service{}
 	rendering := "# Title\n\nOne paragraph of ordinary prose.\n"
-	replica := service.keepReplica(room, &rendering)
+	replica := service.keepReplica(room, nil, &rendering)
 	want := walked.structs + splitsAStructCanCause*uint64(pending.Items+pending.DeleteRanges)
 	if total, stale := replica.structs.running(); total != want || stale {
 		t.Fatalf("the load counted a total of %d (stale %t), want the walk's %d structs and the splits of %d parked structs and %d parked ranges, %d",
@@ -1225,9 +1225,9 @@ func chainedCharacters(n int) []byte {
 // applyAllocation is what ygo's apply of update into a document into makes allocates, the least of
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
-// observer, as every room does (ygo's own, and the room's, websocket.go:497), so the apply
-// encodes the update its transaction made for the observers (sjawhar/ygo v1.51.3-sami.2,
-// crdt/doc.go:463-465) as a room's does. Two collections before each run empty the pool ygo's
+// observer, as every room does (ygo's own, and the room's, websocket.go:527), so the apply
+// encodes the update its transaction made for the observers (sjawhar/ygo v1.51.3-sami.5,
+// crdt/doc.go:510-516) as a room's does. Two collections before each run empty the pool ygo's
 // encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,
 // so the encode grows its buffer from nothing, as it does in a pod whose pool a collection emptied.
 func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte) uint64 {

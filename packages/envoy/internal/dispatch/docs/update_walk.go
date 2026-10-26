@@ -14,7 +14,7 @@ import (
 // parent is named, and for each range of the delete set its client, clock and length, and it
 // allocates nothing per struct. It exists because ygo exports no count of the structs an update
 // carries. crdt.ContentIDsFromUpdateV1 returns clock runs that IDSet.Add coalesces as it goes
-// (sjawhar/ygo v1.51.3-sami.2, crdt/idset.go:83, merging at :21-28), so two structs and one
+// (sjawhar/ygo v1.51.3-sami.5, crdt/idset.go:83, merging at :21-28), so two structs and one
 // struct of the same clocks are the same answer; and the decoder under it, decodeStructsV1, is
 // unexported and allocates an Item, its content and its decoded values for every struct
 // (crdt/merge.go:24-81), up to 1,048,576 of them for one frame. This repository cannot change
@@ -23,10 +23,10 @@ import (
 // It is ported from two places in ygo. The header, the struct loop and the delete set follow
 // ygo's own allocation-free header scanner, pendingScanner (crdt/pending_budget.go:239-566),
 // which walks the caller's buffer without materialising a value; each struct's fields and each
-// content reference follow decodeItem (crdt/update.go:794-966), decodeContent (:968-1110) and
-// decodeTypeContent (:1112-1177), which are what ygo's apply actually runs, so that the two read
+// content reference follow decodeItem (crdt/update.go:814-989), decodeContent (:991-1133) and
+// decodeTypeContent (:1135-1200), which are what ygo's apply actually runs, so that the two read
 // every byte the same way. That includes ContentJSON's rule (decodeContent's wireJSON case,
-// :977-1008): a JSON item whose first value starts with a byte from 116 to 127, which is both a
+// :1000-1031): a JSON item whose first value starts with a byte from 116 to 127, which is both a
 // JSON text of that many bytes and a lib0 Any tag, is read as JSON text for every value when
 // that succeeds and as lib0 Any for every value otherwise, so the walk ends that item where ygo
 // does and cannot drift out of step with it. An Any value is skipped as
@@ -34,12 +34,12 @@ import (
 //
 // It refuses, with an *updateRefusal wrapping one of two sentinels:
 //
-//   - errUpdateUndecodable, what ygo's V1 apply refuses (applyV1Txn, crdt/update.go:483-531): a
-//     header of more clients than half the frame's bytes or than maxUpdateItems (:503); more
+//   - errUpdateUndecodable, what ygo's V1 apply refuses (applyV1Txn, crdt/update.go:501-551): a
+//     header of more clients than half the frame's bytes or than maxUpdateItems (:523); more
 //     than maxUpdateItems structs in total, counted after each client's header as decodeAndPark
-//     (:550-558) and decodeStructsV1 (crdt/merge.go:30-46) count them; a delete set of more than
-//     maxUpdateItems clients, or of more than maxUpdateItems ranges for one client (:1185,
-//     :1197); a varint past 53 bits or a length past the end of the frame, wherever it is; a
+//     (:570-578) and decodeStructsV1 (crdt/merge.go:30-46) count them; a delete set of more than
+//     maxUpdateItems clients, or of more than maxUpdateItems ranges for one client (:1208,
+//     :1220); a varint past 53 bits or a length past the end of the frame, wherever it is; a
 //     string, a root name or a map key that is not UTF-8; JSON that encoding/json would not
 //     unmarshal into a float64-numbered value; an Any value anycodec would not read; and a
 //     content reference ygo does not know.
@@ -56,7 +56,7 @@ import (
 //     packages/dispatch/web or packages/proof-editor names a root or makes a subdocument); a
 //     struct or a delete range ending past 2^53, which no JavaScript clock reaches, so that a
 //     caller adding the walk's clocks cannot wrap where ygo's decodeAndPark adds lengths
-//     unchecked (crdt/update.go:582-587); and bytes after the delete set, which no Yjs encoder
+//     unchecked (crdt/update.go:602-607); and bytes after the delete set, which no Yjs encoder
 //     writes and ygo's apply ignores.
 //
 // Refusing is safe in both directions, and the tests hold it as a set relation over generated
@@ -65,13 +65,14 @@ import (
 // overflow) without error, because the walk refuses every byte sequence ygo's decoder refuses; so
 // the refusal closes the case where a frame of valid structs ending in one bad byte is
 // half-applied (ApplyUpdateV1 integrates each struct as it decodes it, inside a transaction it
-// never rolls back, crdt/update.go:50-56 and :561-669). And every update ygo applies without error
-// that carries nothing the editor never sends, the walk accepts, so a browser running the editor
-// is never refused by it.
+// never rolls back on a document that sets no integrate-scan bound, which no room does yet,
+// crdt/update.go:68-74 and :581-689). And every update ygo applies without error that carries
+// nothing the editor never sends, the walk accepts, so a browser running the editor is never
+// refused by it.
 //
 // A walk of the room's own state (fromRoom: crdt.EncodeStateAsUpdateV1 of the live document,
 // which carries parked structs, the skips before them and parked delete ranges, crdt/update.go:
-// 69-91) refuses only what ygo's decoder refuses: what a stored document already holds, whatever
+// 87-109) refuses only what ygo's decoder refuses: what a stored document already holds, whatever
 // wrote it, is counted rather than turned away.
 //
 // The visitor sees each struct and delete range as it is read, so a walk that ends in a refusal
@@ -212,7 +213,7 @@ type updateTally struct {
 	// deleteClients is the number of clients the delete set declares.
 	deleteClients uint64
 	// deleteRanges is the number of ranges the delete set carries, as encoded: ygo sorts and merges
-	// each client's ranges when it decodes them (crdt/update.go:1214-1216), so a decoded delete set
+	// each client's ranges when it decodes them (crdt/update.go:1237-1239), so a decoded delete set
 	// can hold fewer.
 	deleteRanges uint64
 	// deletesAt is where in the update its delete set starts, for a second look at the delete set
@@ -235,7 +236,7 @@ type updateStruct struct {
 	// keyed is whether the struct names a map key (parentSub): a map entry, or an attribute of an
 	// XML element, and key is that key as encoded, length prefix included. A later entry for the
 	// same key carries an origin instead and names neither its parent nor its key (Yjs typeMapSet;
-	// ygo's YMap.Set, crdt/ymap.go:220-225; crdt/update.go:909-922), so it reads as unkeyed here.
+	// ygo's YMap.Set, crdt/ymap.go:220-225; crdt/update.go:929-942), so it reads as unkeyed here.
 	keyed bool
 	key   []byte
 	// content is the encoded content after the struct's header, length prefix included, which is
@@ -269,7 +270,7 @@ const (
 	// parentUnnamed is a GC run or a skip, which have no parent.
 	parentUnnamed structParent = iota
 	// parentOfNeighbour is an item with an origin or a right origin, whose parent is its
-	// neighbour's, so the wire does not name it (crdt/update.go:835-858, :939-960).
+	// neighbour's, so the wire does not name it (crdt/update.go:855-878, :962-983).
 	parentOfNeighbour
 	// parentItem is an item inside a nested type, named by the ID of the item holding that type.
 	// Which root it belongs to is the parent chain's, which the walk does not resolve.
@@ -342,7 +343,7 @@ func (w *updateWalker) notFromEditor(reason string) {
 	}
 }
 
-// walkStruct reads one struct into walked, as decodeItem reads it (crdt/update.go:794-966).
+// walkStruct reads one struct into walked, as decodeItem reads it (crdt/update.go:814-989).
 func (w *updateWalker) walkStruct(walked *updateStruct) {
 	info := w.byte()
 	if w.refusal != nil {
@@ -415,7 +416,7 @@ func (w *updateWalker) namedRoot(walked *updateStruct) {
 }
 
 // content reads the content of an item of kind and returns its length, as decodeContent reads it
-// (crdt/update.go:968-1110).
+// (crdt/update.go:991-1133).
 func (w *updateWalker) content(kind structKind) uint64 {
 	switch kind {
 	case structDeleted:
@@ -578,7 +579,7 @@ func (w *updateWalker) str() uint64 {
 	return units
 }
 
-// skipJSONValues reads n JSON texts, as readJSONVals does (crdt/update.go:1311-1325), and reports
+// skipJSONValues reads n JSON texts, as readJSONVals does (crdt/update.go:1344-1358), and reports
 // whether every one would unmarshal. It records no refusal, since the legacy rule retries.
 func (w *updateWalker) skipJSONValues(n uint64) bool {
 	for range n {
@@ -590,7 +591,7 @@ func (w *updateWalker) skipJSONValues(n uint64) bool {
 }
 
 // skipJSON reads one JSON text and reports whether fmtValFromJSON would take it
-// (crdt/update.go:1296-1306), recording no refusal.
+// (crdt/update.go:1329-1339), recording no refusal.
 func (w *updateWalker) skipJSON() bool {
 	if w.refusal != nil {
 		return false
@@ -636,7 +637,7 @@ func jsonUnmarshals(raw []byte) bool {
 	return true
 }
 
-// isAnyTag reports whether b is a lib0 Any tag (crdt/update.go:1308).
+// isAnyTag reports whether b is a lib0 Any tag (crdt/update.go:1341).
 func isAnyTag(b byte) bool { return b >= 116 && b <= 127 }
 
 // skipAny reads one lib0 Any value at depth as anycodec's readAny skips it

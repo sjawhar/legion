@@ -85,11 +85,13 @@ type bootConfig struct {
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
 	OIDCAudience string
-	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's UI-bearer API; empty
-	// means the credential-request feature is off. AgentSecretsToken is the resolved UI bearer
-	// (required when AgentSecretsURL is set).
-	AgentSecretsURL   string
-	AgentSecretsToken string
+	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's API; empty means the
+	// credential-request feature is off. AgentSecretsTokenFile is
+	// DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE, the file holding Dispatch's own projected
+	// Kubernetes ServiceAccount token (required when AgentSecretsURL is set). The file is read
+	// by the broker client on each call, never here: a projected token rotates.
+	AgentSecretsURL       string
+	AgentSecretsTokenFile string
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
 	// Empty keeps them in Postgres.
 	FileStoreBucket string
@@ -111,12 +113,15 @@ type bootConfig struct {
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
 	EnvoyToken string
+	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
+	// checked whole; newEmbedder builds its client.
+	Embedder embedderConfig
 }
 
 // setGoMemoryLimit gives the Go runtime a soft memory limit of 90% of the container's, so the
 // collector works harder as the heap nears it rather than letting garbage pile up until the
-// container is killed at its limit (4 GiB in the GKE deployment, infra/gcp/dispatch_kube.go:459,
-// which resources() at :103-106 sets as a limit); nothing else tells the runtime that limit
+// container is killed at its limit (4 GiB in the GKE deployment, infra/gcp/dispatch_kube.go:498,
+// which resources() at :108-111 sets as a limit); nothing else tells the runtime that limit
 // exists. The ratio is automemlimit's default, 0.9: 3.6 GiB of 4 GiB. provider reads the
 // container's limit: main passes memlimit.FromCgroup, which reads memory.max under control group
 // v2 and memory.limit_in_bytes under v1, takes the smallest in the hierarchy and reports `max` as
@@ -321,14 +326,13 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
-	// embedder is nil (meaning search off, search answers keyword-only and says so) when no AWS
-	// region/credentials reach this process at boot - a CI job or a devbox with no AWS_REGION set
-	// - which embed.New reports as an error rather than a reason to refuse to boot.
-	var embedder embed.Embedder
-	if client, err := embed.New(ctx); err != nil {
-		slog.Warn("dispatch: meaning search unavailable", "error", err)
-	} else {
-		embedder = client
+	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
+	// the default place, finds no AWS region/credentials at boot - a CI job or a devbox with no
+	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
+	embedder, err := newEmbedder(ctx, boot.Embedder)
+	if err != nil {
+		slog.Error("dispatch: build the embedder", "error", err)
+		os.Exit(1)
 	}
 
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
@@ -397,17 +401,17 @@ func main() {
 			Leases:    leases,
 		})
 	}
-	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: a later
-	// deploy that grants Bedrock credentials needs no other wiring change to pick up meaning
-	// search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
+	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
+	// embedding queue keeps coverage itself, so a later deploy that gives meaning search a place
+	// to embed needs no other wiring change and no person-run step to cover existing content.
 	// It gets a rate-limited wrapper around the same client api.Deps holds unwrapped above
-	// (embedder, line 296's Embedder field): the write-time queue's poller and a backfill run are
-	// the only two embedqueue callers, and pacing only their calls - never a live search
-	// request's own query embedding, which always goes straight through the unwrapped client -
-	// is what keeps a saturating backfill from taking live search down with it (LEGION-549 round
-	// 5; embed.RateLimitedEmbedder's own doc comment has the AIMD mechanism and the headroom
-	// this leaves). A nil embedder (meaning search off) stays nil rather than becoming a non-nil
-	// wrapper around nothing, which embedqueue.Run's own nil check depends on.
+	// (embedder, BuildAppContext's Embedder option): the queue is the only embedqueue caller, and
+	// pacing only its calls - never a live search request's own query embedding, which always
+	// goes straight through the unwrapped client - is what keeps saturating background work from
+	// taking live search down with it (LEGION-549 round 5; embed.RateLimitedEmbedder's own doc
+	// comment has the AIMD mechanism and the headroom this leaves). A nil embedder (meaning
+	// search off) stays nil rather than becoming a non-nil wrapper around nothing, which
+	// embedqueue.Run's own nil check depends on.
 	var backgroundEmbedder embed.Embedder
 	if embedder != nil {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
@@ -693,13 +697,14 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
 		}
 		boot.AgentSecretsURL = agentSecretsURL
-		boot.AgentSecretsToken, err = agentSecretsToken(env)
-		if err != nil {
-			return bootConfig{}, err
+		boot.AgentSecretsTokenFile = strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"))
+		if boot.AgentSecretsTokenFile == "" {
+			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE is required when DISPATCH_AGENT_SECRETS_URL is set: Dispatch calls the broker with its own projected Kubernetes ServiceAccount token")
 		}
-		if boot.AgentSecretsToken == "" {
-			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_TOKEN_FILE or DISPATCH_AGENT_SECRETS_TOKEN is required when DISPATCH_AGENT_SECRETS_URL is set")
-		}
+	}
+	boot.Embedder, err = resolveEmbedder(env)
+	if err != nil {
+		return bootConfig{}, err
 	}
 
 	if devSignIn {
@@ -898,7 +903,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.EnvoyToken = boot.EnvoyToken
 	built.GitHubAPIBase = boot.GitHubAPIBase
 	built.AgentSecretsURL = boot.AgentSecretsURL
-	built.AgentSecretsToken = boot.AgentSecretsToken
+	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
 	built.DevSignIn = boot.DevSignIn
 	return built

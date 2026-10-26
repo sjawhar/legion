@@ -50,7 +50,7 @@ The broker refuses a decision that cannot stand, and Dispatch shows its message 
 
 | Message | Why |
 | --- | --- |
-| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names, or you approved it after the secret's tags named someone else to approve it ([what an owner change does](/legion/broker/concepts/#approvals)), or after the session's operator withheld one of its secrets, which only that secret's owner may then approve, and no one while the broker does not serve that secret to that session (it is out of the policy, or a service's); you can still deny a request that names you. A request whose approver is `anyone` is refused to the login `anyone`. |
+| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names, or you approved it after the secret's tags named someone else to approve it ([what an owner change does](/legion/broker/concepts/#approvals)), or after the session's operator withheld one of its secrets, which only that secret's owner may then approve, and no one while the broker does not serve that secret to that session (it is out of the policy, or a service's), or after the secret's `max-grant` became shorter than the lifetime the request asked for, which no one may then approve; you can still deny a request that names you. A request whose approver is `anyone` is refused to the login `anyone`. |
 | `request is already decided` (`RECORD_TERMINAL`) | Someone, or another tab, decided it first, or the agent's session ended and withdrew it. |
 | `request expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry. The agent asks again if it still needs the secret. |
 | `this grant's approval chain no longer verifies` (`GRANT_CHAIN_INVALID`) | The stored request no longer matches its own signature; nothing was granted. Tell whoever runs the broker. |
@@ -58,10 +58,11 @@ The broker refuses a decision that cannot stand, and Dispatch shows its message 
 ## Without Dispatch
 
 On the [local stack](/legion/broker/guides/run-locally/), `agent-secrets-devrelay` stands in for
-Dispatch: it calls the same broker routes, with the same UI token and an approver's login.
+Dispatch: it calls the same broker routes as a listed caller, presenting the ServiceAccount token
+the stack's issuer keeps in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, with an approver's login.
 
 ```console
-$ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/pending?approver=$AGENT_SECRETS_APPROVER" | jq .
+$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" "$AGENT_SECRETS_URL/v1/pending?approver=$AGENT_SECRETS_APPROVER" | jq .
 {
   "pending": [
     {

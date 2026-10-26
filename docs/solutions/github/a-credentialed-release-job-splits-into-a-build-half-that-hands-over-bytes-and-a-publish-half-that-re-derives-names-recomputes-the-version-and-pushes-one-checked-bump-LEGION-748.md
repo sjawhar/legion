@@ -42,9 +42,12 @@ related_issues:
    exactly those regular files (`release-push.sh handed`), writes `SHA256SUMS` itself after that
    check, and, where two runs could take one tag, recomputes the version inside its concurrency
    group and refuses on a mismatch (`release-push.sh version --expect`). Decide in the spec what
-   a mismatch means when the work is already done: this issue's `--expect` turns a benign race
-   (the version already released by an earlier run) into a red job that needs a whole-run
-   re-run, recorded on LEGION-772.
+   a mismatch means when the work is already done: this issue's `--expect` turned a benign race
+   (the version already released by an earlier run) into a red job that needed a whole-run
+   re-run, recorded on LEGION-772. dispatch://INFRA-281 later gave the two outcomes exit
+   statuses of their own: the listener's publish job ends green when nothing of its commit is
+   left to release or a later run still running holds it, and starts a new run on `main`
+   otherwise.
 3. **A push with the deploy key pushes exactly one checked commit.** `git push <url>
    HEAD:refs/heads/main` is a write path from whatever HEAD is — on a `workflow_dispatch` from
    branch X, X — and the trigger is no guard; the base's `git push origin main` refused there

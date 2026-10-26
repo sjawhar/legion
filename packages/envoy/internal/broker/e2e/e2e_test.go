@@ -20,7 +20,7 @@
 //  4. deny path on a second request                                    -> "4_..."
 //  5. revoke-by-approver kills the grant                                -> "5_..."
 //  6. forged grant row releases nothing                                -> "6_..."
-//  7. another login, or no UI bearer, decides nothing                   -> "7_..."
+//  7. another login, or no caller token, decides nothing                 -> "7_..."
 //  8. a secret whose owner tag is edited to no person is refused by the
 //     live reload, logged by name, and served again once fixed          -> "8_..."
 //  9. anyone signed in approves a shared human-tier secret              -> "9_..."
@@ -31,8 +31,6 @@ package e2e
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,10 +41,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -55,10 +57,17 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
-	testUIToken = "test-ui-token-e2e-0123456789abcdef"
+	// dispatchAccount is the ServiceAccount this broker's BROKER_API_ACCOUNTS names as the caller
+	// "dispatch": the identity that reaches the routes Dispatch's server calls.
+	dispatchAccount = "system:serviceaccount:example-ns:example-dispatch"
+	// dispatchAudience is the audience its projected token carries, the one the broker's verifier
+	// checks.
+	dispatchAudience = "agent-secrets"
 	// testApprover operates the box every request below comes from, owns every secret but the
 	// shared one, and so is every approval's approver but the shared one's; and the machine
 	// login's login_hint.
@@ -84,6 +93,9 @@ type e2eServer struct {
 	Store   *store.Store
 	Secrets *secrets.Local
 	Log     fmt.Stringer
+	// uiToken is dispatchAccount's own projected token, the credential the routes Dispatch's
+	// server calls take.
+	uiToken string
 }
 
 // newE2EServer holds e2eSecrets in a fake Secrets Manager and wires the full service graph —
@@ -117,20 +129,39 @@ func newE2EServer(t *testing.T) *e2eServer {
 		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
+	// The caller of the routes Dispatch's server calls presents its own projected ServiceAccount
+	// token, verified against a local OIDC issuer standing in for the cluster's, as the broker
+	// verifies one in production.
+	issuer := oidctest.New(t)
+	issuerKey := issuer.PublishKey(t, "signing-key")
+	accountTokens, err := oidc.New(context.Background(), issuer.URL(), dispatchAudience)
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+	provider := brokertest.NewOAuthProvider(t, st, issuer)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay,
+		OAuth: provider, Replay: enr.Replay,
 	}
 
 	api.Register(mux, api.Deps{
-		PublicURL: srv.URL, UIToken: testUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		PublicURL:     srv.URL,
+		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
+		AccountTokens: enroll.K8sPodVerifier{Verifier: accountTokens},
+		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
+		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
 
-	return &e2eServer{URL: srv.URL, Store: st, Secrets: local, Log: logged}
+	// The caller's token lives well inside the hour one may, as a projected token does.
+	callerClaims := issuer.Claims(dispatchAccount, dispatchAudience)
+	callerClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
+	return &e2eServer{
+		URL: srv.URL, Store: st, Secrets: local, Log: logged,
+		uiToken: issuer.Mint(t, issuerKey, callerClaims),
+	}
 }
 
 // e2eSecrets are the fake Secrets Manager's secrets. Every one testApprover owns is human-tier but
@@ -184,9 +215,11 @@ func (s *e2eServer) req(t *testing.T, method, path string, headers map[string]st
 	return resp.StatusCode, respBody
 }
 
+// ui is req as the listed caller of the routes Dispatch's server calls, presenting that
+// account's own projected ServiceAccount token.
 func (s *e2eServer) ui(t *testing.T, method, path string, body any) (int, []byte) {
 	t.Helper()
-	return s.req(t, method, path, map[string]string{"Authorization": "Bearer " + testUIToken}, body)
+	return s.req(t, method, path, map[string]string{"Authorization": "Bearer " + s.uiToken}, body)
 }
 
 func (s *e2eServer) session(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, method, path string, body any) (int, []byte) {
@@ -231,15 +264,6 @@ func decode[T any](t *testing.T, body []byte) T {
 		t.Fatalf("decode response: %v (body: %s)", err, body)
 	}
 	return v
-}
-
-func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	return key
 }
 
 // --- wire-shape mirrors of the shared broker contract, the fields this test actually reads ---
@@ -300,6 +324,36 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 	return compact
 }
 
+// deviceClient is the OAuth client a machine logs in with: the broker's device authorization and
+// token endpoints, its requests carrying DPoP proofs signed by key, as the helper's are.
+func (s *e2eServer) deviceClient(key *ecdsa.PrivateKey) (*oauth2.Config, context.Context) {
+	return &oauth2.Config{
+			ClientID: oauthwire.ClientID, Scopes: []string{oauthwire.Scope},
+			Endpoint: oauth2.Endpoint{
+				DeviceAuthURL: s.URL + "/v1/oauth/device_authorization",
+				TokenURL:      s.URL + "/v1/oauth/token",
+				AuthStyle:     oauth2.AuthStyleInParams,
+			},
+		},
+		context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)})
+}
+
+// deviceLogin asks for a device code for a machine of person on host, signed by key, as the
+// helper's `machine login` does, and answers the device authorization.
+func (s *e2eServer) deviceLogin(t *testing.T, key *ecdsa.PrivateKey, person, host string) *oauth2.DeviceAuthResponse {
+	t.Helper()
+	jkt, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	config, ctx := s.deviceClient(key)
+	da, err := config.DeviceAuth(ctx, oauth2.SetAuthURLParam("request", signMachineLoginRequest(t, key, s.URL, person, host)), oauth2.SetAuthURLParam("dpop_jkt", jkt))
+	if err != nil {
+		t.Fatalf("POST /v1/oauth/device_authorization (%s): %v", person, err)
+	}
+	return da
+}
+
 // --- the test ---
 
 func TestEndToEnd(t *testing.T) {
@@ -313,26 +367,17 @@ func TestEndToEnd(t *testing.T) {
 		grantID      string
 	)
 
-	// Step 1: machine login (request object -> code -> UI lookup by code -> approve by the
-	// operator's login with the code -> credential id), then prove the enrollment routes accept
-	// a launcher proof ("lid") signed by the machine's own key by creating the box enrollment the
-	// later steps reuse.
+	// Step 1: machine login through the device grant (device authorization -> user code -> UI
+	// lookup by code -> approve by the operator's login with the code -> credential id -> the
+	// machine's token poll and a refresh, each naming that credential), then prove the enrollment
+	// routes accept a launcher proof ("lid") signed by the machine's own key by creating the box
+	// enrollment the later steps reuse.
 	t.Run("1_MachineLoginMintsCredentialAcceptedByEnrollmentRoutes", func(t *testing.T) {
-		machineKey := newSigningKey(t)
-		compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "e2e-agents")
-		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-		if status != http.StatusAccepted {
-			t.Fatalf("POST /v1/launcher-credentials = %d, want 202: %s", status, body)
-		}
-		login := decode[struct {
-			PendingID string `json:"pending_id"`
-			Code      string `json:"code"`
-		}](t, body)
-		if login.PendingID == "" || login.Code == "" {
-			t.Fatalf("machine login response = %+v, want both fields set", login)
-		}
+		machineKey := brokertest.NewSigningKey(t)
+		da := ts.deviceLogin(t, machineKey, testApprover, "e2e-agents")
+		login := struct{ Code string }{da.UserCode}
 
-		status, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
+		status, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
 		if status != http.StatusOK {
 			t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
 		}
@@ -355,7 +400,26 @@ func TestEndToEnd(t *testing.T) {
 		}
 		launcherCredentialID := *approved.CredentialID
 
-		sessionKey = newSigningKey(t)
+		config, ctx := ts.deviceClient(machineKey)
+		da.Interval = 1
+		tok, err := config.DeviceAccessToken(ctx, da)
+		if err != nil {
+			t.Fatalf("POST /v1/oauth/token (device code): %v", err)
+		}
+		if got, _ := tok.Extra("credential_id").(string); got != launcherCredentialID || tok.RefreshToken == "" {
+			t.Fatalf("token = credential_id %v, refresh token %t; want %s and a refresh token", tok.Extra("credential_id"), tok.RefreshToken != "", launcherCredentialID)
+		}
+		stale := *tok
+		stale.Expiry = time.Now().Add(-time.Minute)
+		refreshed, err := config.TokenSource(ctx, &stale).Token()
+		if err != nil {
+			t.Fatalf("POST /v1/oauth/token (refresh): %v", err)
+		}
+		if got, _ := refreshed.Extra("credential_id").(string); got != launcherCredentialID || refreshed.RefreshToken == tok.RefreshToken {
+			t.Fatalf("refresh = credential_id %v, rotated %t; want %s and a new refresh token", refreshed.Extra("credential_id"), refreshed.RefreshToken != tok.RefreshToken, launcherCredentialID)
+		}
+
+		sessionKey = brokertest.NewSigningKey(t)
 		sessionThumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
 		if err != nil {
 			t.Fatalf("thumbprint: %v", err)
@@ -510,16 +574,16 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 7: only the record's approver decides it, and only through the UI bearer: the approver's
-	// own login sent without the bearer is 401, another login is 403 NOT_APPROVER, and the record
-	// is still pending for its approver, whose approval then releases the value.
-	t.Run("7_AnotherLoginOrNoBearerDecidesNothing", func(t *testing.T) {
+	// Step 7: only the record's approver decides it, and only from a listed caller: the approver's
+	// own login sent with no ServiceAccount token is 401, another login is 403 NOT_APPROVER, and
+	// the record is still pending for its approver, whose approval then releases the value.
+	t.Run("7_AnotherLoginOrNoCallerTokenDecidesNothing", func(t *testing.T) {
 		_, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e wrong login", "NOTION_API_KEY")
 
 		status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
 			map[string]any{"approver": testApprover})
-		if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "UI_INVALID" {
-			t.Fatalf("approve without the UI bearer = %d %s, want 401 UI_INVALID", status, body)
+		if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+			t.Fatalf("approve with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
 		}
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
 			map[string]any{"approver": "mallory"})
@@ -680,18 +744,11 @@ func (s *e2eServer) awaitValue(t *testing.T, key *ecdsa.PrivateKey, enrollmentID
 // enrolls a box session under it, as step 1 does for testApprover.
 func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
-	machineKey := newSigningKey(t)
-	status, body := s.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-		map[string]any{"request": signMachineLoginRequest(t, machineKey, s.URL, person, host)})
-	if status != http.StatusAccepted {
-		t.Fatalf("POST /v1/launcher-credentials (%s) = %d: %s", person, status, body)
-	}
-	code := decode[struct {
-		Code string `json:"code"`
-	}](t, body).Code
-	_, body = s.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	machineKey := brokertest.NewSigningKey(t)
+	code := s.deviceLogin(t, machineKey, person, host).UserCode
+	_, body := s.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
 	recordID := decode[wireRecord](t, body).RecordID
-	status, body = s.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+	status, body := s.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
 		map[string]any{"approver": person, "code": code})
 	if status != http.StatusOK {
 		t.Fatalf("approve %s's machine login = %d: %s", person, status, body)
@@ -699,7 +756,7 @@ func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *
 	credentialID := *decode[struct {
 		CredentialID *string `json:"credential_id"`
 	}](t, body).CredentialID
-	sessionKey := newSigningKey(t)
+	sessionKey := brokertest.NewSigningKey(t)
 	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
 	if err != nil {
 		t.Fatalf("thumbprint: %v", err)

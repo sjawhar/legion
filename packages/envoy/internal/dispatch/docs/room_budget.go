@@ -22,7 +22,7 @@ import (
 
 // roomBudgetBytes is the most heap the open rooms are charged together (roomCharge): 2 GiB of the
 // task's 4 GiB, under the 3.6 GiB Go memory limit the server takes from its container at boot
-// (cmd/dispatch/main.go:119-128). Open documents are the largest thing the pod holds; the rest is
+// (cmd/dispatch/main.go:124-133). Open documents are the largest thing the pod holds; the rest is
 // the request path's, the cold reads' cache's (documentReadBudget, 256 MiB, which this does not
 // count) and the slack that limit leaves the collector. At the measured cost of a room
 // (bytesOfHeapAnElement) it holds thirty-nine documents of a mebibyte of prose (57,600 elements,
@@ -156,7 +156,7 @@ const pressureReserveBytes = 256 << 20
 // once (settleLastPeer), or the one the settle delay after its last write arms - and the close
 // that follows flushes the room's updates to the store and compacts them before the room's charge
 // leaves (evictRoom). Eight seconds is over the 4.5 s one settlement of a mebibyte took on a loaded
-// pod (service_test.go:2290), with the flush beside it.
+// pod (service_test.go:2293), with the flush beside it.
 const admissionFlushAllowance = 8 * time.Second
 
 // errRoomBudgetFull is the refusal of a browser the open rooms leave no room for (reserveRoom). It
@@ -170,7 +170,7 @@ var errRoomBudgetFull = errors.New("the open documents fill their memory budget"
 // budget, and a measured weight per entry, here a room's (roomCharge) and each admission's
 // reservation before its room loads (roomReservation). It charges every room whoever opened it,
 // and refuses only a browser's socket at its admission (reserveRoom): never Server.Apply, so the
-// server's own work - an API write, which opens its room from the store (livewrite.go:303), the
+// server's own work - an API write, which opens its room from the store (livewrite.go:327), the
 // unrecorded-mark sweep, settlement's repair - opens its room over the budget, and a room so
 // opened is closed once nothing holds it (closeOnceUnused, Service.closeIfOpenedOverBudget).
 //
@@ -241,11 +241,11 @@ type budgetedRoom struct {
 //     document that shrinks is charged less.
 //   - the uncounted part: the content bytes the room's transactions have added since the rendering
 //     that count measured (contentAdded), each at the densest price at both copies, since what
-//     elements they make is unknown until a count. Every transaction is charged it whoever wrote
-//     it - a browser's update the peer hook admitted, the server's own write, an identity-closure
-//     repair - by the room's update observer (onLoadDocument). A count re-bases it: it clears the
-//     bytes added up to the rendering it measured, never those added since. A whole-state handoff
-//     of a document the room already holds integrates nothing and adds nothing here.
+//     elements they make is unknown until a count. Every transaction is charged it once, whoever
+//     wrote it - a browser's admitted update, the server's own write, an identity-closure repair -
+//     by the update observer whose drain of the room's update log hands it over (chargeAdded). A
+//     count re-bases it: it clears the bytes added up to the rendering it measured, never those
+//     added since. A whole-state handoff of a document the room already holds adds nothing here.
 //   - the structure part: what each update the peer hook admitted adds that a count of the
 //     rendering cannot see (peerWeighing.structureHeap) - each new struct with the splits its
 //     integration can cause, two splits for each delete range the room did not already hold
@@ -259,7 +259,7 @@ type budgetedRoom struct {
 // retirement a minute after its last use, and the compaction that folds its updates as it
 // closes, reclaim them. The structure part over-charges what merges back: ygo squashes a run of
 // typed characters into one item and re-merges a split nothing came between (sjawhar/ygo
-// v1.51.3-sami.2, crdt/transaction.go:21-29), while each struct is charged as one of its own with
+// v1.51.3-sami.5, crdt/transaction.go:23-31), while each struct is charged as one of its own with
 // both its splits; and it charges every struct at the heaviest kind's price, rendered or not, so
 // a rendered struct is charged here beside its count's price of the elements it makes.
 //
@@ -295,13 +295,13 @@ type roomCharge struct {
 // merged: the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), and every range of
 // every update the peer hook admitted since with the GC runs and deleted items it integrated
 // (record). A delete range it covers whole is one the room holds deleted already. ygo's apply
-// still splits the items at the range's two ends (sjawhar/ygo v1.51.3-sami.2,
+// still splits the items at the range's two ends (sjawhar/ygo v1.51.3-sami.5,
 // crdt/delete_set.go:169-171), but nothing comes between the halves, and the commit merges them
-// back (crdt/transaction.go:24-29, :340-347), so such a range adds no struct and the structure part
+// back (crdt/transaction.go:26-31, :355-383), so such a range adds no struct and the structure part
 // charges it nothing (peerWeighing.newDeletes). Without it the structure part, which no count
 // clears, would charge the room's whole delete set again on every browser's sync, whose whole-state
 // handoff carries it, and on every update of a client that encodes its whole delete set with each
-// transaction, as ygo's own update observer does (crdt/doc.go:459-465): an edited room held open
+// transaction, as ygo's own update observer does (crdt/doc.go:501-516): an edited room held open
 // across reconnects would grow its charge with nothing added to its heap.
 //
 // A range the server's own writes deleted is listed only once a browser's update carries it, so it
@@ -426,15 +426,17 @@ type roomReservation struct {
 // admission makes (storedRoomReservation) through its load (load) to its retirement (retire): its
 // live document and the rendered replica its update observer keeps (renderedReplica). A room only
 // read holds the first alone, and both are charged before the second exists, because the replica
-// is taken by the room's own update observer the first time anyone types (renderedReplica.catchUp),
-// inside ygo's apply of an update the peer hook has already admitted, and nothing at that point can
-// refuse it. Charged one copy until then, rooms only read would be admitted at half their price:
-// an admission of a mebibyte of prose reserves 54,144,000 bytes, its room would then be charged
-// 27,072,000, and an empty budget would admit seventy-eight of them rather than thirty-nine; once
-// they were typed into, each would take its replica with nothing able to refuse it, and the open
-// rooms would come to about twice the 2 GiB budget in a 4 GiB pod. Every part of a charge is at
-// both copies: the replica copies the live document's whole state (renderedReplica.catchUp), so
-// each struct, split and byte of content the live document takes, the replica takes too.
+// is taken by the room's own update observer at the room's first transaction since its load, from
+// the state its update log records just before it (renderedReplica.start), inside ygo's apply of
+// an update the peer hook has already admitted, and nothing at that point can refuse it. Charged
+// one copy until then, rooms only read would be admitted at half their price: an admission of a
+// mebibyte of prose reserves 54,144,000 bytes, its room would then be charged 27,072,000, and an
+// empty budget would admit seventy-eight of them rather than thirty-nine; once they were typed
+// into, each would take its replica with nothing able to refuse it, and the open rooms would come
+// to about twice the 2 GiB budget in a 4 GiB pod. Every part of a charge is at both copies: the
+// replica copies the live document's whole state and then takes every update the room commits
+// (renderedReplica.observe), so each struct, split and byte of content the live document takes,
+// the replica takes too.
 const roomCopies = 2
 
 // roomWeight is what a room is charged whose one copy's latest count is priced at heap (copyHeap),
@@ -610,7 +612,7 @@ func (b *roomBudget) release(reservation *roomReservation) {
 // admissions hold: the room's own document replaces its stored version at the same two copies, and
 // the two documents differ only by the updates stored since that version was cut. A room loaded
 // with no socket's reservation is the server's own work's - an API write's publish
-// (livewrite.go:303), settlement's repair and warm-up, the mark sweep, a mark's verification, a
+// (livewrite.go:327), settlement's repair and warm-up, the mark sweep, a mark's verification, a
 // snapshot read, a warm-up, a live tree's read, settlement resumed at boot: every opener of
 // Server.Apply - and where its charge leaves the budget over its limit it is marked
 // closeOnceUnused, to be closed once that work no longer holds it (Service.closeIfOpenedOverBudget)
@@ -925,7 +927,7 @@ func (b *roomBudget) reweighLocked(charge *roomCharge) {
 // contentAdded is the bytes of content update, one transaction's update as the room's update
 // observer is handed it, added that a rendering can show: the content of each struct it carries,
 // every one of them new to the room, since ygo encodes a transaction's update from the state
-// before it (sjawhar/ygo v1.51.3-sami.2, buildPhase2, crdt/doc.go:459-465), whoever wrote it - a
+// before it (sjawhar/ygo v1.51.3-sami.5, buildPhase2, crdt/doc.go:501-516), whoever wrote it - a
 // browser's update the peer hook admitted, or the server's own write. Its delete set, which ygo
 // fills with every deleted item of the room on every transaction, adds nothing and is not counted:
 // charging the update's bytes, as the budget did, charged a heavily edited room its whole delete
@@ -1183,8 +1185,8 @@ func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *rendere
 // update its persistence has not appended. A room still loading is not closed either: its load
 // has not returned, and the opener waiting on it would find it gone. The close's unload returns
 // the room's charge (releaseUnloadedRoom), and ygo's CloseRoom fires that unload before it returns
-// wherever it is the one that removed the room (sjawhar/ygo v1.51.3-sami.2,
-// provider/websocket/inject.go:604-634), so the next look at the budget sees the charge gone. Each
+// wherever it is the one that removed the room (sjawhar/ygo v1.51.3-sami.5,
+// provider/websocket/inject.go:611-643), so the next look at the budget sees the charge gone. Each
 // close is logged with the budget's own figures before and after it, which is how an operator, or
 // a test of the real process, tells a room the budget closed from one that retired on its own.
 //

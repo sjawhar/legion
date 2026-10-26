@@ -33,7 +33,7 @@ func withOAuth(t *testing.T, deviceLogin func(context.Context, url.Values, strin
 			t.Fatalf("Secret: %v", err)
 		}
 		provider, err := oauth.New(oauth.Config{
-			Secret: secret, DeviceLifetime: 15 * time.Minute, RefreshLifetime: time.Hour,
+			Secret: secret, DeviceLifetime: 15 * time.Minute, AccessLifetime: 15 * time.Minute, RefreshLifetime: time.Hour,
 			VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute,
 		}, store)
 		if err != nil {
@@ -74,7 +74,7 @@ func signedDeviceForm(t *testing.T, ts *testServer) url.Values {
 }
 
 func TestTheOAuthRoutesNeedTheProvider(t *testing.T) {
-	ts := newTestServer(t)
+	ts := newTestServerWith(t, func(d *api.Deps) { d.OAuth = nil })
 	for _, path := range []string{"/v1/oauth/device_authorization", "/v1/oauth/token"} {
 		if status, _, _ := postForm(t, ts.URL+path, deviceForm); status != http.StatusNotFound {
 			t.Errorf("POST %s without a provider = %d, want 404", path, status)
@@ -87,8 +87,9 @@ func TestTheOAuthRoutesNeedTheProvider(t *testing.T) {
 // it at wiring.
 func TestRegisterRefusesAProviderWithoutItsSteps(t *testing.T) {
 	provider, err := oauth.New(oauth.Config{
-		Secret: make([]byte, 32), DeviceLifetime: time.Minute, RefreshLifetime: time.Hour,
-		VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute,
+		Secret: make([]byte, 32), DeviceLifetime: time.Minute, AccessLifetime: 15 * time.Minute,
+		RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine",
+		ProofSkew: time.Minute,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

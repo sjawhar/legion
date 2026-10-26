@@ -20,8 +20,33 @@ export const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 // (`envoy.natsUrls` or `ENVOY_NATS_URL`), and any baked-in value silently misroutes every
 // deployment it doesn't match. An empty natsUrls means "inbound messaging not configured" -
 // consumers must degrade loudly instead of dialing an invented address.
-export const DEFAULT_HEARTBEAT_MS = 120_000;
-const MIN_HEARTBEAT_MS = 25;
+// The Envoy listener expires a session record 300 s after its last write
+// (`OpenSessionRegistry`'s default `ttl`, `packages/envoy/internal/session/registry.go`). The
+// interval is set so three refresh attempts plus one whole listener call's budget (10 250 ms: two
+// 5 000 ms attempts and the 250 ms retry delay between them, `transport.ts`) fit inside that
+// lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may fail and the third
+// still completes before the record is dropped. The previous 100 000 bought nothing: three
+// attempts landed on 300 000 ms exactly, the third had not yet paid for its round trip, and
+// `setInterval` only ever fires late, so what it really allowed was one failed refresh.
+export const DEFAULT_HEARTBEAT_MS = 90_000;
+/** The floor under a pass deadline when nothing names one and the heartbeat is shorter than it. */
+export const MIN_PASS_DEADLINE_MS = 30_000;
+const MIN_INTERVAL_MS = 25;
+// The ceiling over every resolved interval: the largest delay a host timer takes without
+// overflowing its 32-bit signed field. A larger one wraps and the timer fires *at once*, which
+// turns each setting into its opposite and logs nothing - a heartbeat that ticks continuously,
+// and a pass deadline that abandons every queued task the moment it is queued. It is about 24.8
+// days, far past any configuration anyone means.
+const MAX_INTERVAL_MS = 2_147_483_647;
+
+/** The interval `raw` names, when it names a usable one: a finite number above zero. Unusable is
+ * undefined, which each caller replaces with its own fallback. The number is as written, before
+ * the bounds a resolved interval is held to, so a notice about an adjustment names the value the
+ * operator set. */
+function namedInterval(raw: string | undefined): number | undefined {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
 export type EnvoyEnvironment = EnvoyConfigEnvironment & {
@@ -32,6 +57,7 @@ export type EnvoyEnvironment = EnvoyConfigEnvironment & {
   readonly NATS_NKEY_SEED?: string | undefined;
   readonly NATS_NKEY_SEED_FILE?: string | undefined;
   readonly ENVOY_HEARTBEAT_MS?: string | undefined;
+  readonly ENVOY_PASS_DEADLINE_MS?: string | undefined;
 };
 
 /** A NATS user's nkey seed, and where it came from, which an error about it names. */
@@ -84,6 +110,19 @@ export interface EnabledEnvoySettings {
    * listener and its bearer stand), and with `NO_NATS_CONNECTION` for a caller that opens none. */
   readonly inbound: EnvoyInbound;
   readonly heartbeatMs: number;
+  /** The bound on one task of the pi-envoy plugin's serial queues, so a task that never settles
+   * cannot hold the next heartbeat tick, session event or Legion claim behind it. The default
+   * never cuts a healthy pass short: the worst legitimate pass is about one 20 s NATS dial plus a
+   * few `AbortSignal.timeout(5000)` HTTP calls. Never shorter than `heartbeatMs`: an explicit
+   * `ENVOY_PASS_DEADLINE_MS` below it is raised to it, so a caller that wants a short deadline
+   * must shorten `ENVOY_HEARTBEAT_MS` with it. */
+  readonly passDeadlineMs: number;
+  /** The deadline `ENVOY_PASS_DEADLINE_MS` named when that raise happened: a usable value shorter
+   * than `heartbeatMs`, which `passDeadlineMs` is that interval in place of. undefined when the
+   * variable named nothing usable (the fallback was never the operator's deadline) and when what
+   * it named is used as given. It reports the raise to the heartbeat alone: the bounds every
+   * resolved interval is held inside are applied in silence and are not reported here. */
+  readonly passDeadlineRaisedFrom: number | undefined;
 }
 
 /** No Envoy: a `notice` says why, or an `error` names what could not be read or used. */
@@ -229,16 +268,35 @@ export function envoySettings(
       inbound = { off: messageFor(error) };
     }
   }
-  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs =
+    namedHeartbeatMs === undefined
+      ? DEFAULT_HEARTBEAT_MS
+      : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
+  // The pass deadline is never shorter than the heartbeat: a shorter one abandons every pass
+  // before the next tick, so the heartbeat's `healing` latch — and the registration backstop that
+  // runs under it (`ensureHeartbeat`, packages/pi-envoy/extensions/envoy.ts) — would be false at
+  // every tick, while a pass wedged before `registerSession` never registers at all. A caller that
+  // wants a short deadline must shorten `ENVOY_HEARTBEAT_MS` with it. `MIN_INTERVAL_MS` has
+  // nothing to do here: the result is at least `heartbeatMs`, which it is already floored by.
+  // `MAX_INTERVAL_MS` over the `max` is the whole ceiling: the other arm is already under it.
+  // The raise is reported as `passDeadlineRaisedFrom`, so the start notice reads the decision
+  // made here instead of making it again from the variable (`startNotice`, session-settings.ts).
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
     token,
     inbound,
-    heartbeatMs:
-      Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
-        ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
-        : DEFAULT_HEARTBEAT_MS,
+    heartbeatMs,
+    passDeadlineMs: Math.min(
+      Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs),
+      MAX_INTERVAL_MS
+    ),
+    passDeadlineRaisedFrom:
+      namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs
+        ? namedPassDeadlineMs
+        : undefined,
   };
 }
 

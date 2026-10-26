@@ -52,7 +52,7 @@ const (
 	maxPeerByteCreepForTest        = 64 << 10
 	maxMessageBytesForTest         = 37 << 20
 
-	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:466), the
+	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:476), the
 	// least time between two counts of one room's elements, which is how stale a room's charge
 	// can be. The drives that grow rooms send a round of growth no more often than this and two
 	// seconds, so each round's counts have landed before the next is sent, as they would under a
@@ -243,7 +243,7 @@ func TestABrowsersUpdateIsBoundedByTheDocumentBound(t *testing.T) {
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:438), so the refusals begin within one room of
+// (roomCopies, internal/dispatch/docs/room_budget.go:440), so the refusals begin within one room of
 // the budget divided by what one such room reserves - its stored version's elements at the price of
 // one, at both copies - computed here from the server's constants and held to the numbers the server
 // logs, both when the browsers come one after another and when fifty open at once.
@@ -671,7 +671,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	const growers, markID, commentMark = 4, "memory-unrecorded-mark", "proofComment"
 	// A hundred shrinks are one browser's four cuts of fifty bytes each, sent to twenty-five
 	// documents in the order it made them: ygo's update observer encodes a transaction's structs
-	// beside the document's whole delete set (sjawhar/ygo v1.51.3-sami.2, crdt/doc.go:459-465), so
+	// beside the document's whole delete set (sjawhar/ygo v1.51.3-sami.5, crdt/doc.go:501-516), so
 	// each carries the deletes of the cuts before it too, which a document that has taken them
 	// holds.
 	const shrunk, cutsEach, cutBytes = 25, 4, 50
@@ -1311,7 +1311,7 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
-// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:499-536).
+// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:501-538).
 var budgetRefusalLine = regexp.MustCompile(`the open documents fill their memory budget: (\d+) of (\d+) bytes are charged(?:, and this document needs (\d+))?`)
 
 // budgetRefusal is one refusal the server logged: what its rooms were charged, its budget, and
@@ -1353,7 +1353,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1201-1234).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1203-1236).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after

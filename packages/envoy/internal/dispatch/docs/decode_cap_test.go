@@ -54,7 +54,7 @@ func deliver(t *testing.T, room, browser *crdt.Doc, synced crdt.StateVector) {
 // typeAndDelete has browser type n characters one at a time at the front of text, in one edit,
 // and delete them all in another, and delivers both to room. Each character is a struct of its
 // own, in the browser and in the room, since ygo merges a struct only into the one on its left
-// with the clock before it (crdt/transaction.go:362-407), and the deletion leaves each where it
+// with the clock before it (crdt/transaction.go:447-492), and the deletion leaves each where it
 // is, so the room's struct total grows by n and its rendering is as it was. Each insert at the
 // front walks past the deleted characters already there, so a second call on one text walks the
 // first call's n characters for each of its own.
@@ -766,8 +766,8 @@ func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *tes
 // (typeAndDelete gives why), and then runs keystrokes typed one after another, each in a
 // transaction of its own, as keystrokes reach a room, a hundred into each of a run of texts so no
 // keystroke walks far to its place. The room keeps each keystroke a struct; a decode of its state
-// merges each text's hundred into one (squashRuns, crdt/transaction.go:134-289 in sjawhar/ygo
-// v1.51.3-sami.2).
+// merges each text's hundred into one (squashRuns, crdt/transaction.go:149-304 in sjawhar/ygo
+// v1.51.3-sami.5).
 func typedRoom(t *testing.T, structs, runs int) *crdt.Doc {
 	t.Helper()
 	const keystrokes = 100

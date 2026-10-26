@@ -458,8 +458,8 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 }
 
 // The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
-// which Dispatch's rooms speak (internal/dispatch/docs/service.go:571), puts the room's name before
-// each (sjawhar/ygo v1.51.3-sami.2, provider/websocket/server.go:66-80).
+// which Dispatch's rooms speak (internal/dispatch/docs/service.go:610), puts the room's name before
+// each (sjawhar/ygo v1.51.3-sami.5, provider/websocket/server.go:66-80).
 const (
 	frameSync       = 0
 	frameSyncStatus = 8
@@ -477,9 +477,9 @@ func documentFrame(room string, tag uint64, payload []byte) []byte {
 }
 
 // dialDocument connects to the document's room as a person's browser does: signed in, read-write
-// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:318-320).
+// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:330-332).
 // The server answers the upgrade only once it has admitted the browser and loaded the document
-// (Service.ServeHTTP, websocket.go:214-283), and a burst of browsers to documents at the bound
+// (Service.ServeHTTP, websocket.go:226-295), and a burst of browsers to documents at the bound
 // queues behind one count of a stored version at a time (storedCounts.counting) and loads sharing
 // two processors, so a browser waits for that answer as long as a browser does rather than the
 // 45 seconds gorilla's default dialer gives up after.
@@ -498,7 +498,7 @@ func (p *memoryServer) dialDocument(artifactID string) (*gws.Conn, error) {
 }
 
 // browserAnswerWithin is how long a browser waits for the room to answer what it sent: an update's
-// apply on a document at the bound, with its rendering and its replica's catch-up, takes about a
+// apply on a document at the bound, with its rendering and its replica's apply of it, takes about a
 // second here, and two of them share two processors with whatever else the drive has open.
 const browserAnswerWithin = 2 * time.Minute
 
@@ -541,11 +541,11 @@ func (p *memoryServer) openBrowser(t *testing.T, artifactID string) *browser {
 
 // tryOpenBrowser connects to the document's room and waits for the room's whole state, which ygo
 // sends a peer once the room has loaded and the peer is registered in it
-// (provider/websocket/server.go:2098-2104), then sends a Ping and waits for its Pong: a first frame
-// lifts ygo's handshake deadline (server.go:2112-2135), so a socket held open without an edit is
+// (provider/websocket/server.go:2101-2107), then sends a Ping and waits for its Pong: a first frame
+// lifts ygo's handshake deadline (server.go:2115-2138), so a socket held open without an edit is
 // not closed thirty seconds in. A socket the server closes before any of that - the room budget's
 // refusal, which completes the upgrade only to close it (refuseOverRoomBudget,
-// internal/dispatch/docs/websocket.go:185-188) - returns the *gws.CloseError it was closed with.
+// internal/dispatch/docs/websocket.go:197-200) - returns the *gws.CloseError it was closed with.
 func (p *memoryServer) tryOpenBrowser(artifactID string) (*browser, error) {
 	connection, err := p.dialDocument(artifactID)
 	if err != nil {

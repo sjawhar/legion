@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
@@ -118,7 +118,7 @@ function schemaFor(name: keyof typeof validCalls) {
 }
 
 const ISSUE_UPDATE_FIELDS_RULE =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 const ISSUE_UPDATE_DONE_RULE =
   "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts.";
 const reasonOnlyWithDone = (status: string): string =>
@@ -281,6 +281,47 @@ describe("dispatchToolSpecs", () => {
 
   test("dispatch_project's description gives the project-key rule", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
+  });
+
+  test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
+    const schema = schemaFor("dispatch_architecture_sync");
+
+    for (const repo of [
+      undefined,
+      "acme/infra",
+      "sjawhar/legion",
+      "Owner-1/repo.name_2",
+      "a/..b",
+    ]) {
+      expect(schema.safeParse({ project: "CORE", repo }).success, String(repo)).toBe(true);
+    }
+    for (const repo of [
+      "",
+      "acme",
+      "acme/",
+      "/infra",
+      "acme/infra/extra",
+      "acme/.",
+      "acme/..",
+      " acme/infra",
+      "acme/in fra",
+      "acme/infra\n",
+    ]) {
+      const refused = schema.safeParse({ project: "CORE", repo });
+      expect(
+        refused.error?.issues.map((issue) => issue.message),
+        JSON.stringify(repo)
+      ).toEqual(["repo is not a repository: give it as owner/name, such as acme/infra."]);
+    }
+  });
+
+  test("dispatch_architecture_sync says a project may have several sources and how one is saved", () => {
+    const { description } = specFor("dispatch_architecture_sync");
+
+    expect(description).toContain("A project may have several sources, one per repository");
+    expect(description).toContain("PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}");
+    expect(description).toContain("A failed line also says what of that source still shows");
+    expect(description).toContain("or with repo the error 409 SOURCE_ACCESS");
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
@@ -468,6 +509,11 @@ describe("dispatchToolSpecs", () => {
       { issue: "DSP-1", components: { mode: "none", reason: "hiring" } },
       { issue: "DSP-1", repo: "acme/widgets" },
       { issue: "DSP-1", repo: "" },
+      { issue: "DSP-1", before: "DSP-2" },
+      { issue: "DSP-1", after: "DSP-2" },
+      { issue: "DSP-1", before: "DSP-2", after: "DSP-3" },
+      // An empty value is still a field: the server, not the tool, refuses the neighbour.
+      { issue: "DSP-1", before: "" },
     ]) {
       expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(true);
     }
@@ -484,6 +530,7 @@ describe("dispatchToolSpecs", () => {
       ).toBe(false);
     }
     expect(schema.safeParse({ issue: "DSP-1", repo: 42 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", before: 42 }).success).toBe(false);
   });
 
   test("dispatch_issue_update accepts only Legion lifecycle statuses", () => {
@@ -541,8 +588,10 @@ describe("dispatchToolSpecs", () => {
   });
 
   // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
-  // rank stays the board's and is refused.
-  test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
+  // the board's order moves by neighbour, through before and after, never through a rank field.
+  // The refusal of { issue, rank } below is the guard for that: under `strict: true` the tool
+  // takes two flat arguments and no nested rank object.
+  test("dispatch_issue_update takes the four priority buckets and null, and refuses a rank field", () => {
     const schema = schemaFor("dispatch_issue_update");
 
     for (const priority of [0, 1, 2, 3, null]) {
@@ -896,7 +945,7 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  test("rejects dispatch_suggest and dispatch_doc_edit when neither artifact nor ref names the document", () => {
+  test("rejects dispatch_suggest without a document, and dispatch_doc_edit only on a project", () => {
     expect(
       schemaFor("dispatch_suggest").safeParse({
         issue: "CORE-1",
@@ -904,9 +953,16 @@ describe("dispatchToolSpecs", () => {
         replace_with: "final",
       }).success
     ).toBe(false);
+    // An issue's primary document is what doc-edit edits when no artifact names another.
     expect(
       schemaFor("dispatch_doc_edit").safeParse({
         issue: "CORE-1",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      }).success
+    ).toBe(true);
+    expect(
+      schemaFor("dispatch_doc_edit").safeParse({
+        project: "CORE",
         ops: [{ op: "replace", find: "draft", with: "final" }],
       }).success
     ).toBe(false);
@@ -969,23 +1025,108 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  test("points dispatch_issue's spec and dispatch_doc_edit at a section the Dispatch skill has", () => {
+  test("points dispatch_issue's spec and dispatch_doc_edit at the skill that writes specs", () => {
     const issue = dispatchToolSpecs.find((spec) => spec.name === "dispatch_issue");
     const documentEdit = dispatchToolSpecs.find((spec) => spec.name === "dispatch_doc_edit");
     if (!issue || !documentEdit) throw new Error("missing spec-writing tools");
     const issueArguments = issue.arguments(schemaApi) as unknown as {
       spec: z.ZodOptional<z.ZodString>;
     };
-    const headings = dispatchSkillHeadings();
+    const repoRoot = resolve(import.meta.dir, "../../..");
 
     for (const [tool, description] of [
       ["dispatch_issue spec", issueArguments.spec.unwrap().description ?? ""],
       ["dispatch_doc_edit", documentEdit.description],
     ] as const) {
-      const section = description.match(/the "([^"]+)" section of skill:\/\/dispatch/u)?.[1];
-      if (section === undefined) throw new Error(`${tool} names no section of skill://dispatch`);
-      expect(headings, tool).toContain(section);
+      const skills = [...description.matchAll(/skill:\/\/([a-z0-9-]+)/gu)].map(([, name]) => name);
+      expect(skills, tool).toEqual(["dispatch-writing-specs"]);
     }
+    expect(existsSync(resolve(repoRoot, "skills/dispatch-writing-specs/SKILL.md"))).toBe(true);
+  });
+
+  // The Dispatch skill keeps the headings code and other skills cite.
+  test("the Dispatch skill keeps every heading code and other skills cite", () => {
+    expect(dispatchSkillHeadings()).toEqual(
+      expect.arrayContaining([
+        "Asks and ask blocks",
+        "Issue status is yours to move",
+        "Choosing what to work on",
+        "Close what you opened",
+        "Structure over stream",
+        "Architecture components",
+        "References",
+        "Setup and the HTTP API",
+      ])
+    );
+  });
+
+  // Rules the Dispatch skill's references held move into the one command each is about, where
+  // `dispatch <command> --help` prints them.
+  test.each([
+    [
+      "dispatch_resolve_ask",
+      "Use retracted for an ask a newer one replaces or the design made moot, resolved for one whose answer you found; an answered ask cannot be resolved, and resolving records no decision by a person.",
+    ],
+    [
+      "dispatch_comment",
+      "A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask.",
+    ],
+    [
+      "dispatch_doc_edit",
+      "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards.",
+    ],
+    [
+      "dispatch_artifact",
+      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version.",
+    ],
+    [
+      "dispatch_ask",
+      "Measure what you can first, and put the measurement and the size of the population it covers in the question; drop an option that cannot fix most of that population, never offer it cut down, and keep an option not to act (Hold). Set urgency high when your work halts on the answer, and keep working on everything else.",
+    ],
+    [
+      "dispatch_issue_update",
+      "Never reassign an issue a person holds to get a faster answer: who holds it is their call.",
+    ],
+    [
+      "dispatch_message",
+      "keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside arrives as a user message: answer in the conversation, with no dispatch message.",
+    ],
+    [
+      "dispatch_ask",
+      "Never create an issue to park a question: the question is an ask on the issue it concerns.",
+    ],
+    [
+      "dispatch_doc_edit",
+      "The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own.",
+    ],
+    [
+      "dispatch_issue",
+      "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it.",
+    ],
+  ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
+    expect(specFor(name).description).toContain(rule);
+  });
+
+  test.each([
+    ["dispatch_issue", "assignee", "Set it only when a person said who owns the issue."],
+    [
+      "dispatch_issue",
+      "assignee",
+      "else the project's default assignee when it still names a person who has signed in, else unassigned.",
+    ],
+    [
+      "dispatch_read",
+      "ref",
+      "dispatch://PROJECT/artifact/<slug>[@vN], and its /ask/<id> and /comment/<id>; or the dashboard URL of one.",
+    ],
+  ])("%s's %s flag help holds the rule moved from the skill", (name, field, rule) => {
+    const fields = specFor(name).arguments(schemaApi) as unknown as Record<
+      string,
+      { description?: string; unwrap?: () => { description?: string } }
+    >;
+    const argument = fields[field];
+    const description = argument?.description ?? argument?.unwrap?.().description ?? "";
+    expect(description).toContain(rule);
   });
 
   test("dispatch_follow takes a full ask id and follow or unfollow, nothing else", () => {
