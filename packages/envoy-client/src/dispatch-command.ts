@@ -360,7 +360,8 @@ export function parseCommand(
       // `dispatch read ACME-12` names an issue as plainly as `--issue ACME-12` does, so a bare
       // key is that command's --issue, once, when the command takes one and nothing else set it.
       if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
-        if (claim("issue", "--issue", false)) args.issue = token;
+        // biome-ignore lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access on an index signature.
+        if (claim("issue", "--issue", false)) args["issue"] = token;
         continue;
       }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
