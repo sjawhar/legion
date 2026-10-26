@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-189",
+  "completed": "2026-10-26T15:04:00Z",
+  "headSha": "129234997bb493bc0a4e13b2cad78bde96e8a45a",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's commands on the tester's own lane (database dispatch_tester_e2e, ports 18777/1902x): a2a3.sh on a fresh bun run dispatch:local, 15 PASS 0 FAIL; a5.sh with the merge-base 84328810 build and this head on a fresh dispatch_tester_a5 (ports 18791/18792), 4 PASS 0 FAIL (schema 117 -> 123, both edges 1 s after the new build answered, the old build's edit re-indexed 29 s after it stopped); bun run e2e -- e2e/bare-references.e2e.ts e2e/reference-titles.e2e.ts e2e/reference-cards.e2e.ts, 32 passed (chromium + iphone). The red side (32 failed on the merge-base archive) was read from the implementer's log, every failure an assertion, none a timeout or setup."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A2, A3 (R1, R2): bare keys and #ids store references under their targets by the spec's boundary, existence and scope rules, beyond the shared table's rows",
+      "surface": "bun run dispatch:local built from the tree on a fresh Postgres 17 database, written through the dispatch CLI and the human API, read back from refs and dispatch read --ref",
+      "command": "PORT=18777 PGURL=postgres://postgres@127.0.0.1:5433/dispatch_tester_e2e bash adv.sh (script and output: https://github.com/sjawhar/legion/pull/2245#issuecomment-6419217144)",
+      "observed": "29 bare-key rows and 11 #id rows stored exactly as Design 1-3 say (possessive, parenthesis, code span, fenced code, table cell, strikethrough, quote, &#32;, comma, '?', markdown link destination: edge; lowercase, leading zero, decimal, /spec, letter suffix, after slash, #suffix, inside an http URL, double suffix, &amp;, email, after a letter, 11-letter key, Unicode hyphen: none); a key whose issue is created later is linked only by rebuild-refs, and a cross-project key once its issue exists is indexed; a human comment edited twice moves its edges and then drops them; an issue comment's #q9 is indexed by the scope drain once q9 is added to the spec and dropped once q9's block is removed; a 3000-key body stores one edge per existing issue in 435 ms; 20 concurrent comments each carry both edges; an ask's text is indexed; refs_owed drains to 0; rebuild-refs adds only the two edges the spec's Decisions predict.",
+      "headSha": "129234997bb493bc0a4e13b2cad78bde96e8a45a",
+      "negativeControl": "'blocked on CORE-1' written before CORE-1 exists: no edge at write and none after CORE-1 is created, until rebuild-refs; acme-2, ACME-02, ACME-2.5, ACME-2/spec, xACME-2, ACME-2@example.com, https://example.com/ACME-2, ##q2, issue#q2, #Q2, #q2abc and the :::ask{#q2} line: no edge. A human PATCH of an agent's comment is refused 403 NOT_AUTHOR."
+    },
+    {
+      "criterion": "A4 (R1, R2) and the spec Decision that a key links once its issue exists: the renderer and the live editor on surfaces and shapes the browser specs do not cover",
+      "surface": "chromium against bun run dispatch:local built from the tree: messages in ACME-1's Conversation and the live editor of ACME-1's spec",
+      "command": "bash probe.sh (seeds five messages) then a throwaway Playwright probe of the Conversation and the editor (results quoted in https://github.com/sjawhar/legion/pull/2245#issuecomment-6419217144)",
+      "observed": "A key inside an authored link's text leaves that one link to its own href with no nested anchor; ACME-2 reads 'ACME-2 The blocker' and opens /issues/ACME-2; a key in a list item and a heading links, #q2 reads as its question's text; a key naming the text's own issue links; ACME-3 written before it exists stays text, is asked about once and not again while idle, and links as 'ACME-3 Created later' with no reload once the issue is created; in the editor a typed bare key and #q2 draw titles, extending ACME-2 to ACME-29 drops the stale title and shows the text, and the stored document is exactly what was typed.",
+      "headSha": "129234997bb493bc0a4e13b2cad78bde96e8a45a",
+      "negativeControl": "UTF-8, SHA-256 and ISO-8601 in the same message render as text with no link, each asked about at most once (GET /api/v1/issues/UTF-8 once)."
+    }
+  ],
+  "ciRead": "At 129234997bb493bc0a4e13b2cad78bde96e8a45a, 2026-10-26T15:01Z: Tests 40335037114 lint success, typecheck success, test in progress; Legion Envoy and Contracts 40335037289 queued; Docs 40335036604 success; Worker Image 40335036743 in progress; PR Title 40340139745 queued. Cited, not waited for.",
+  "pr2210": "Re-checked at phase start: PR #2210 is OPEN, not merged (head a50fe967975ecf415f90c1d1149cb450bd1f676d); no merge-second work owed yet.",
+  "notes": [
+    "The implementer's harness Postgres on 127.0.0.1:5433 stopped mid-phase; bash /legion/harness/infra189/setup.sh restarted it on the same pgdata.",
+    "Throwaway probe files lived in packages/dispatch while running and were deleted before the handoff commit; nothing but this handoff is committed."
+  ]
+}
