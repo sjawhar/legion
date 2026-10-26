@@ -2,16 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-448",
-  "completed": "2026-10-26T20:32:02Z",
-  "round": 5,
-  "testedCodeHead": "05b29be5dd913cc247b7632092bf74775a91c456",
+  "completed": "2026-10-26T22:23:21Z",
+  "round": 6,
+  "testedCodeHead": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's proof was in-process tests; drove the same change on the real listener binary against a real nkey-authorized nats-server: SIGTERM during the background open (head vs the round-4 listener at 7912696a), and registry recovery across a config-reload grant, a NATS restart and a revoked-then-restored grant. Only cmd/listener/legion_agents.go and its test changed since round 4, so round 4's live runs at 7912696a stand for the other surfaces."
+    "how": "Full round after the INFRA-440 merge changed the fingerprint. Re-ran the implementer's browser specs in the tester's lane (plus agent-name, replies, broadcast, offline-edits and a chromium set), drove the merge's surface (a closed issue's comment Retry and thread Reply beside INFRA-440's agent names) with a throwaway probe, and re-ran C1 live, collaborators and C3."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "The INFRA-440 merge keeps a closed issue's Conversation posting: a comment mention's Retry and the comment thread's Reply, with INFRA-440's agent names; resolve and edit stay hidden",
+      "surface": "Dispatch browser suite harness, chromium and iphone, real Dispatch server and web build with the fake listener, the tester's own lane",
+      "command": "throwaway probe: Bob's comment mentioning session e2e-r6-tester (send 404), issue closed; open /issues/E2E-1/conversation; Retry with the session answering 200; Reply in the thread and Send",
+      "observed": "both projects pass: the comment turn shows the agent link 'tester', the failure line and guidance, Retry, no Resolve or Edit; Retry posts and deliveries read [[1,failed],[2,sent]]; the thread Reply posts 201 with reply_to the root",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "Resolve and Edit are absent on the closed issue's comment turn; earlier rounds: closed-issue-posting failed 10/10 at main bc307fb5"
+    },
+    {
+      "criterion": "C2 and the merged Conversation in the browser suite",
+      "surface": "Dispatch browser suite (packages/dispatch/e2e), the tester's own lane",
+      "command": "bun run e2e -- --project=chromium --project=iphone closed-issue-posting, agent-name, conversation, mention-composer, keyboard-agents-picker, phone-conversation, margin-composer-hold, replies, broadcast, offline-edits; playwright --project=chromium issue, agents, followers, delivery-groups, phone, margin, doc; agent-view on both projects",
+      "observed": "204 passed, 16 skipped (14.9m) with closed-issue-posting 14/14; 81 passed, 3 skipped (7.8m); agent-view and the probe 35 passed, 11 skipped",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "closed-issue-posting failed 10/10 at main bc307fb5 (round 1); :278 and :321 failed at adb397f9 (round 2)"
+    },
+    {
+      "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening still works",
+      "surface": "real Dispatch server, Envoy listener and nats-server built at the head, Postgres 17 + pgvector, driven with curl",
+      "command": "/legion/scratch/tmp/infra448-tester/c1.sh against :25777/:25020/:25222; PUT two reviewer entries; GET /api/v1/issues/TST-1/collaborators",
+      "observed": "201: person and agent comment and message, thread reply, reply to a resolved root (root reopened), reply on an open ask, reply on an anchored root, quote-anchored comment, anchored mention (attempt 1 sent), both retries, both agent replies; reopen 200 then ask 201; collaborators legion_registry ok with r-old replaced_by r-new",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit and named version 409 ISSUE_CLOSED with the spec unchanged"
+    },
+    {
+      "criterion": "C3: no remaining statement that a closed issue refuses comments or messages",
+      "surface": "the repository at the head",
+      "command": "bash /legion/scratch/tmp/infra448/c3.sh",
+      "observed": "only the five kept lines",
+      "headSha": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "negativeControl": "30 hits at base 135d22e0 (implementer's run)"
+    },
     {
       "criterion": "Review round 3: the drain hook does not wait for a registry open under way",
       "surface": "the real envoy-listener binary on a real nkey-authorized nats-server v2.10.29 whose user holds core.ListenerPermissions minus legion_agents",
@@ -43,35 +75,22 @@
       "observed": "half-a answers its new title with replaced_by half-c; half-b answers with replaced_by half-c; the retry completes both writes and the role listing reads c <- b <- a with a's new title (round 4 at 7912696a; unchanged surface since)",
       "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
       "negativeControl": "moving the half-written half-b to TST-32 is 409: its claim stands"
-    },
-    {
-      "criterion": "C1: on a closed issue a person's and an agent's new comment and message post; a new ask and a document edit stay 409 ISSUE_CLOSED; reopening still works",
-      "surface": "real Dispatch server, Envoy listener and nats-server built at the head, Postgres 17 + pgvector, driven with curl",
-      "command": "/legion/scratch/tmp/infra448-tester/c1.sh against :25777/:25020/:25222, database infra448_tester_live",
-      "observed": "201: person and agent comment and message, thread reply, reply to a resolved root (root reopened), reply on an open ask, reply on an anchored root, quote-anchored comment with occurrence, anchored mention (attempt 1 sent), both retries, both agent replies. 409 ISSUE_CLOSED: suggestion with and without a mention, new ask, comment edit, resolve, claim, document edit, named version; spec unchanged. Reopen 200 then ask 201 (round 4 at 7912696a; unchanged surface since)",
-      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
-      "negativeControl": "round 1: Dispatch at main bc307fb5 answered the same person and agent comment, message and anchored comment 409 ISSUE_CLOSED"
-    },
-    {
-      "criterion": "C2: on a closed issue, a comment, a message, Reply, Retry and a margin comment post from the browser, including a spec whose issue closed while open and a spec reopened from its page",
-      "surface": "Dispatch browser suite (packages/dispatch/e2e), chromium and iphone, the tester's own lane",
-      "command": "bun run e2e -- --project=chromium --project=iphone closed-issue-posting, mention-composer, keyboard-agents-picker, phone-conversation, margin-composer-hold, phone, offline-edits; playwright --project=chromium margin, margin-thread-reply, margin-kind-switch, doc, document, overlapping-marks, keyboard-document, anchors, failed-room, collab-cursor, issue, paste-recovery",
-      "observed": "159 passed, 7 skipped (8.7m), all 14 closed-issue-posting rows and 10 offline-edits rows green; 85 passed, 3 skipped (8.1m) (round 4 at 7912696a; unchanged surface since)",
-      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
-      "negativeControl": "closed-issue-posting failed 10/10 at main bc307fb5 (round 1); :278 and :321 failed at adb397f9 (round 2)"
-    },
-    {
-      "criterion": "C3: no remaining statement that a closed issue refuses comments or messages",
-      "surface": "the repository at the head",
-      "command": "bash /legion/scratch/tmp/infra448/c3.sh",
-      "observed": "only the five kept lines (repo field and document rebuild, the closed document room) (round 4 at 7912696a; unchanged surface since)",
-      "headSha": "7912696a2f26f91538f631c13f95fe07b3e84059",
-      "negativeControl": "30 hits at base 135d22e0 (implementer's run)"
     }
   ],
-  "ci": "At 05b29be5: Tests 40395674480, Legion Envoy and Contracts 40395674481, Docs 40395674611, Worker Image 40395674507 and PR Title queued. At 7912696a Worker Image 40387176721 failed and Tests was cancelled. Not re-run by the tester.",
+  "ci": "At 51c56482: Docs 40407947632 and PR Title 40408095369 success; Worker Image 40407947501 in progress; Tests 40407947325 and Legion Envoy and Contracts 40407947307 queued. Not re-run by the tester.",
   "observations": [
     "Until an ended write's retry, another session's derived replaced_by can name the wrong successor: with b's session key written and its role key not, a's Get answered replaced_by half-c rather than half-b; the retry corrects it. Display-only, transient.",
     "The Comment chord ($mod+Alt+m) runs only on an editable view; the bar's Comment button is the closed document's path (implement.json deviations)."
-  ]
+  ],
+  "fingerprint": {
+    "from": {
+      "head": "05b29be5dd913cc247b7632092bf74775a91c456",
+      "sha256": "b55d351697048920a88b0bc71775e03f41fa5173f9f791856c4ee4f329db163d"
+    },
+    "to": {
+      "head": "51c5648273dfe13c608da49c91ec9fcf8b15ff8f",
+      "sha256": "4d7c22aee3d372691f2be2953b82cd6cba673b6c226b0f164bf00071fc5932ec"
+    },
+    "verdict": "changed: only the two ConversationTab files (INFRA-440's agent code beside the removed closed gating) and the regenerated claude-envoy dist bundles; full round"
+  }
 }
