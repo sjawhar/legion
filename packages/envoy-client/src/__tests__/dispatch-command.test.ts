@@ -182,14 +182,52 @@ describe("the dispatch command surface", () => {
     expect(parseCommand(["isue"], noFiles)).toMatchObject({ kind: "refused" });
   });
 
-  test("a bare issue key is refused with the --issue form of the same command", () => {
+  test("a bare issue key is the --issue of a command that takes --issue", () => {
+    expect(parseCommand(["read", "ACME-12"], noFiles)).toEqual(
+      parseCommand(["read", "--issue", "ACME-12"], noFiles)
+    );
     expect(parseCommand(["read", "ACME-12"], noFiles)).toEqual({
+      kind: "call",
+      tool: "dispatch_read",
+      args: { issue: "ACME-12" },
+      dryRun: false,
+    });
+    expect(parseCommand(["message", "--body", "hi", "ACME-12"], noFiles)).toMatchObject({
+      kind: "call",
+      args: { issue: "ACME-12", body: "hi" },
+    });
+  });
+
+  test("a bare issue key is refused by a command without --issue", () => {
+    expect(parseCommand(["search", "--query", "q", "ACME-12"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_search",
+      problems: ["unexpected argument ACME-12: every value follows its flag"],
+    });
+  });
+
+  test("a bare issue key is refused when --issue is also given", () => {
+    expect(parseCommand(["read", "--issue", "ACME-1", "ACME-12"], noFiles)).toEqual({
       kind: "refused",
       tool: "dispatch_read",
-      problems: [
-        "unexpected argument ACME-12: use --issue <KEY>, as in: dispatch read --issue ACME-12",
-      ],
+      problems: ["unexpected argument ACME-12: every value follows its flag"],
     });
+    expect(parseCommand(["read", "ACME-12", "--issue", "ACME-1"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["--issue is given twice"],
+    });
+  });
+
+  test("a second bare issue key is refused", () => {
+    expect(parseCommand(["read", "ACME-12", "ACME-13"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: ["unexpected argument ACME-13: every value follows its flag"],
+    });
+  });
+
+  test("a bare value that is not an issue key is refused", () => {
     expect(parseCommand(["read", "hello"], noFiles)).toMatchObject({
       problems: ["unexpected argument hello: every value follows its flag"],
     });
