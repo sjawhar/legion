@@ -324,11 +324,15 @@ func TestALongEditsKeystrokesLeaveTheRoomWhatTheirUpdatesLeaveThroughTheHook(t *
 // TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor writes them - from a small
 // document until the hook's struct total refuses a single pair more. Updates start at 4,096 pairs,
 // and each refused one is tried again at half its pairs. It returns the room's state at the start
-// and at the end.
+// and at the end. What it measures is the frame a struct at the decode cap, so the room's totals
+// count no unrendered bytes: the unrendered bound (maxUnrenderedBytes) would refuse the shape at
+// about 22,000 pairs, long before the struct total does.
 func densestStructCapRoom(t *testing.T) (start, end []byte) {
 	t.Helper()
 	const pair = "- \n\n* \n\n"
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	replica.structs.count = func(doc *crdt.Doc) roomCount { return roomCount{structs: countRoomStructs(doc)} }
+	replica.structs.recount(room)
 	start = crdt.EncodeStateAsUpdateV1(room, nil)
 	var browser *crdt.Doc
 	var tree *pmdoc.Node

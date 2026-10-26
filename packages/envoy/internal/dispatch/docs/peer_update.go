@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -61,6 +62,16 @@ import (
 // and refuses with DocumentTooLargeCloseCode an update that would take it past the cap, whatever it
 // inserts or deletes (structTotal).
 //
+// The document has a third bound, which neither bytes nor structs see: what a room holds that is
+// not text, a value of any size in one clock and one struct. The server's own writes bound the
+// margin's records at maxMarginBytes and the anchor marks' ids at maxAnchorBytes (growth.go), and a
+// browser's update runs through neither: measured on 2026-10-26, eighty browser updates each
+// writing a million bytes into the margin were all admitted, and took the room's whole-state frame
+// from 264 bytes to 80,001,457 with its rendering at 42, past the message floor every browser of
+// the document then reconnects against. So the room keeps an unrendered total beside its struct
+// total, and the hook refuses with DocumentTooLargeCloseCode an update that adds unrendered bytes
+// past maxUnrenderedBytes (unrenderedBytes, structTotal).
+//
 // The hook has a third state, which is the room budget's rather than the document's: while the
 // open rooms are past their budget and nothing can be closed (roomBudget.full), an update that
 // inserts anything is refused in every room with the transient DocumentBusyCloseCode, and one that
@@ -91,6 +102,73 @@ const maxPeerInsertAtTheBound = 8 << 10
 // split and nothing can grow it further.
 const maxPeerByteCreep = 64 << 10
 
+// maxUnrenderedBytes is the most unrendered bytes (unrenderedBytes) a room may hold once an update
+// that adds any has applied: the server's own margin rule, maxMarginBytes, and anchor rule,
+// maxAnchorBytes, on the browser's path, with maxStructureBytes for what the walk counts beside
+// them. A walk cannot tell a margin record from an element's attribute (unrenderedBytes), so the
+// total counts the fragment's element names, attributes and mark values too, which every document
+// carries: a bound of the margin's and the anchors' two mebibytes alone would refuse a person
+// adding a paragraph to a document the server's own writes stored, whose margin and anchor marks
+// are full, since its elements alone hold up to 1,692,989 bytes of them (below). It is 9.5 MiB.
+const maxUnrenderedBytes = maxMarginBytes + maxAnchorBytes + maxStructureBytes
+
+// maxStructureBytes is the unrendered bytes the fragment's own elements and marks may hold beside
+// a full margin and full anchor marks: as much as the server's writes can store, and as much again
+// as a browser's creep past the byte bound adds, each with room to spare, so no document the
+// server stores and no browser's growth within the creep allowance is refused by the unrendered
+// bound. Measured on 2026-10-26 at the element bound, the densest shapes' elements hold 25.8
+// unrendered bytes each - 1,692,989 for 65,536 elements of empty list items, each with its node
+// name and block id - against 18.0 for headings and 14.8 for images; pmdoc.MaxDocumentElements at
+// 48 bytes, 3 MiB, also covers a document whose links run hrefs beside its elements. A browser's
+// creep (maxPeerByteCreep, and maxPeerInsertAtTheBound once more past it) in the densest markdown,
+// alternating empty bullet items with their minted ids, adds 448 unrendered bytes for each pair's
+// 8 rendered bytes, 56 a byte (TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor:
+// 3,361,925 to 6,297,669 bytes over 52,424 rendered), taken at 64 a byte, 4.5 MiB. The densest
+// shape grown far past the creep, in a document a browser built past the element bound, is
+// refused here before the struct total refuses it, at about 22,000 pairs where the decode cap
+// would take about 52,000: a document no server write would store.
+const maxStructureBytes = pmdoc.MaxDocumentElements*48 + (maxPeerByteCreep+maxPeerInsertAtTheBound)*64
+
+// unrenderedStaleMargin is how near maxUnrenderedBytes a stale unrendered total must be for the
+// hook to confirm it by an exact count before it admits an update that adds any (nearBounds): half
+// the bound, more than the 3,361,925 unrendered bytes of the heaviest document one server write
+// leaves (heaviestDocument), so the writes since a count would have to be several such documents
+// to use the margin up unseen, and each is weighed by the server's own rules.
+const unrenderedStaleMargin = maxUnrenderedBytes / 2
+
+// unrenderedRecheck is how many unrendered bytes the hook must have admitted since its last
+// confirmation before a running total past maxUnrenderedBytes is confirmed again: 1/64 of the
+// bound, as structTotalRecheck is of the cap.
+const unrenderedRecheck = maxUnrenderedBytes / 64
+
+// densestStateFrame and densestStateStructs are the whole-state frame and the struct total of the
+// densest document a browser builds, measured on 2026-10-26 (struct_cap_measure_test.go:35-40):
+// alternating empty bullet items, each list, item and paragraph with its minted block id, pasted
+// through the hook until the struct total refused one more pair, 32.28 frame bytes a struct. Each
+// struct's share holds its header and the content the shape gives it - a node name, a block id -
+// as well as the shape's 416,458 rendered bytes.
+const (
+	densestStateFrame   = 33_609_343
+	densestStateStructs = 1_041_050
+)
+
+// heaviestHandoffBound is F, the heaviest whole-state frame a browser can hand over under the
+// hook's three bounds, each term at its bound: maxUpdateItems structs at densestStateFrame's bytes
+// a struct, 33,852,313 rounded up; a rendering at the creep cap and one admitted insert past it,
+// pmdoc.MaxDocumentBytes + maxPeerByteCreep + maxPeerInsertAtTheBound, 1,122,304, each rendered
+// byte at most one frame byte of text; and maxUnrenderedBytes, 9,961,472. That is 44,936,089.
+// It overstates every document a browser can reach: the per-struct term already holds the
+// densest shape's node names and block ids, which the unrendered term counts again, and the
+// unrendered bound stops that shape well short of the decode cap.
+const heaviestHandoffBound = (maxUpdateItems*densestStateFrame+densestStateStructs-1)/densestStateStructs +
+	pmdoc.MaxDocumentBytes + maxPeerByteCreep + maxPeerInsertAtTheBound + maxUnrenderedBytes
+
+// serverStoredStateFrame is the heaviest whole-state frame the server's own writes store, measured
+// on 2026-10-26 (struct_cap_measure_test.go:41-45): a document of 16,384 headings an agent rewrote
+// whole through ReplaceText until the decode cap refused a write, 1,048,576 structs rendering
+// 1,048,575 bytes, against 5,360,879 for heaviestDocument at every bound with no history.
+const serverStoredStateFrame = 12_598_044
+
 // maxMessageBytes is the most one websocket message a browser sends may carry, ygo's
 // Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.51.3-sami.5,
 // provider/websocket/server.go:1020-1028). It is a floor against a client that is not the editor at
@@ -99,26 +177,19 @@ const maxPeerByteCreep = 64 << 10
 // this floor that the hook refuses costs the pod the frame itself and nothing proportional to the
 // structs it carries.
 //
-// The number is four times the largest frame the editor sends that this has measured, which is a
-// browser handing over a document's whole live state. The heaviest document the server's own writes
-// can leave - its markdown at pmdoc.MaxDocumentBytes making pmdoc.MaxDocumentElements, its margin
-// at maxMarginBytes and its anchor marks at maxAnchorBytes - is a frame of 5,360,879 bytes, the
-// markdown alone 3,160,622 of it, since a document at the element bound carries 16,384 blocks and
-// the block id of each. A browser can take that document further: the hook admits its inserts at
-// the bound until the room's rendering has crept maxPeerByteCreep past it, and the document already
-// renders 16,383 bytes into that, a blank line between blocks where its markdown had a line break.
-// Grown the rest of the way through the hook, in updates of the largest insert it admits at the
-// bound, of the densest markdown there is - empty items of alternating bullet lists, each list,
-// item and paragraph with the block id a browser's write mints, 20 structs and about 643 bytes of
-// frame for each 8 bytes rendered - its frame measured 9,577,606 bytes. Four times that,
-// 38,310,424, rounded up to the next mebibyte is 37 MiB, under the 64 MiB ygo allowed before, past
-// which this design would have had to come back to the architect.
-// TestTheHeaviestWholeStateFrameFitsTheMessageFloor and
-// TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor build the two documents and fail
-// once either frame passes a quarter of this floor, since a frame over the floor is closed by the
-// websocket library with a code the editor reconnects on, a loop the editor's handoff must never
-// enter.
-const maxMessageBytes = 37 << 20
+// The floor has to clear every whole-state frame an editor hands over, since a frame over it is
+// closed by the websocket library with a code the editor reconnects on, a loop the editor's
+// handoff must never enter. It is the larger of four times the heaviest frame the server's own
+// writes store, 4 x serverStoredStateFrame = 50,392,176, and a quarter more than F, the heaviest a
+// browser can hand over under the hook's bounds, 1.25 x heaviestHandoffBound = 56,170,112, rounded
+// up to the next mebibyte: 54 MiB, under the 64 MiB ygo allowed before, past which this design
+// would have had to come back to the architect. Measured frames sit well inside it: heaviestDocument
+// at 5,360,879 bytes, and that document grown through the creep allowance at 9,577,606
+// (TestTheHeaviestWholeStateFrameFitsTheMessageFloor,
+// TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor), and
+// TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor holds the floor over both of
+// its terms.
+const maxMessageBytes = 54 << 20
 
 // integrateScanBound is the most items the conflict scans of one remote update may pass in a
 // room's document, ygo's integrate-scan bound (sjawhar/ygo v1.51.3-sami.5, crdt/doc.go:116-142).
@@ -187,9 +258,27 @@ func boundRoomDocument(doc *crdt.Doc) *crdt.Doc {
 // pmdoc.MaxDocumentBytes, the bytes admit the update. At or over it, the update is admitted only
 // when what it carries that the room does not already hold - the walk's clocks beyond the room's
 // state vector (peerWeighing) - is under maxPeerInsertAtTheBound, or, past the creep cap, only when
-// it carries nothing new at all. Then the room's struct total admits it only while what it would
-// add keeps the total within maxUpdateItems (structTotal.admits). Each refusal of the three is the
-// document's own, DocumentTooLargeCloseCode.
+// it carries nothing new at all. Then the room's totals admit it only while what it would add keeps
+// its struct total within maxUpdateItems and, when it adds any, its unrendered bytes within
+// maxUnrenderedBytes (structTotal.admits). Each refusal of the four is the document's own,
+// DocumentTooLargeCloseCode.
+//
+// The unrendered bytes are what the byte and clock rules cannot see (unrenderedBytes): a value of
+// any size is one clock, and one in the margin or in an element's attributes renders nothing, so a
+// browser could otherwise add mebibytes of them in each update, under the bound and at it, and
+// carry the room's whole-state frame past the message floor (maxMessageBytes). An update that adds
+// none - typing, deleting, a whole-state message of what the room holds - is never refused by them.
+//
+// An update carrying a struct of the history a rebuild replaced - a client the rebuilt history
+// lists as retired, below the clock it had reached (retiredMapName) - comes from a browser that
+// held the document before the rebuild and still holds that history: its whole-state message
+// hands back every struct of it, since the rebuilt room holds none, and applied it would put the
+// old document beside the rebuilt one, every block twice, and carry the room back toward the cap
+// the rebuild trimmed. It is refused with DocumentTooLargeCloseCode before any other rule, so the
+// editor drops what it sent and builds its document afresh from the rebuilt room, and its saved
+// rows typed against the old history are dropped as rows of a rebuilt document are
+// (pending-sync.ts, addsParking). An update that writes an entry under the retired clients the
+// room does not hold is refused as the editor's never-sent content is: only a rebuild writes them.
 //
 // While the room budget is full (roomBudget.full), an update the document's bounds admit is then
 // refused with DocumentBusyCloseCode when it inserts anything (refusedUnderPressure), whatever it
@@ -220,8 +309,9 @@ func boundRoomDocument(doc *crdt.Doc) *crdt.Doc {
 // rather than all at once; typing never waits on it.
 //
 // A room with no measurement at all is a document that left the Proof schema while it was live,
-// which the socket path refuses to open in the first place (refuseOutsideSchema, websocket.go:187):
-// the document's byte bound admits its updates, and the room's next render settles what it holds.
+// which the socket path refuses to open in the first place (refuseOutsideSchema, websocket.go:187),
+// or one no load listed: the byte bound weighs its updates on their own bytes, as if the room
+// rendered nothing, and the creep cap, which needs a rendering to measure, never applies to it.
 //
 // An apply that fails leaves no trace. The room's bounded document takes every remote update it
 // refuses back out whole, whatever the error, and fires no observer for it (crdt/apply_rollback.go:
@@ -238,37 +328,50 @@ func boundRoomDocument(doc *crdt.Doc) *crdt.Doc {
 func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
 	replica := s.liveReplica(info.Doc)
 	charge := replica.roomCharge()
-	weighed := peerWeighing{held: info.Doc.StateVector(), known: charge.deletes()}
+	var structs *structTotal
+	if replica != nil {
+		structs = replica.structs
+	}
+	weighed := peerWeighing{held: info.Doc.StateVector(), known: charge.deletes(), retired: structs.retiredClients()}
 	tally, err := walkUpdate(info.Update, fromPeer, &weighed)
 	if err != nil {
 		return err
 	}
+	if weighed.forged {
+		return &updateRefusal{rule: errUpdateNotFromEditor, reason: "an entry under the retired clients the room does not hold"}
+	}
+	if weighed.former {
+		slog.Info("dispatch: refused a browser's update carrying the history its document's rebuild replaced",
+			"room", info.Room, "update_bytes", len(info.Update))
+		return documentTooLarge()
+	}
 	var bytes int64
 	measured := false
-	var structs *structTotal
 	if replica != nil {
 		bytes, _, measured = replica.size()
-		structs = replica.structs
+	}
+	if !measured {
+		bytes = 0
 	}
 	heap := weighed.applyHeap(len(info.Update), structs.roomStructs(info.Doc), structs.parkedCopyHeap(info.Doc))
 	if heap > applyHeapBound {
 		return fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets every apply hold at once",
 			errApplyTooHeavy, heap, uint64(applyHeapBound))
 	}
-	atTheBound := measured && bytes+int64(len(info.Update)) >= pmdoc.MaxDocumentBytes
+	atTheBound := bytes+int64(len(info.Update)) >= pmdoc.MaxDocumentBytes
 	crept := measured && bytes >= pmdoc.MaxDocumentBytes+maxPeerByteCreep
 	if atTheBound && (weighed.inserted >= maxPeerInsertAtTheBound || (crept && weighed.inserted > 0)) {
 		return documentTooLarge()
 	}
 	// A heavy update waits for its share of the bound before it reserves its addition to the
-	// room's struct total, so what the room admits on is weighed as it stands once the wait is
-	// over, and the room's other browsers are not weighed against a reservation that waits.
+	// room's totals, so what the room admits on is weighed as it stands once the wait is over,
+	// and the room's other browsers are not weighed against a reservation that waits.
 	if weighed.ownApplyHeap(len(info.Update)) > unweighedApplyHeapBytes {
 		defer s.applyHeaps.hold(heap)()
 	}
-	added := weighed.added()
+	added := weighed.addition()
 	// The reservation is what keeps two browsers of one room weighed at once from each passing
-	// the cap's check and together passing the cap: each counts the other's addition while it
+	// a bound's check and together passing the bound: each counts the other's addition while it
 	// is in flight (structTotal.reserve). No lock is held across the apply, so another browser
 	// of the room is weighed and applied while this apply runs, its observers included.
 	if !structs.reserve(info.Doc, added) {
@@ -390,9 +493,19 @@ type peerWeighing struct {
 	// content is the heap one copy of the room keeps for the content of the structs past its
 	// state that no rendering prices (unrenderedContentHeap).
 	content uint64
+	// unrendered is the unrendered bytes of the structs past the room's state (unrenderedBytes),
+	// what the update adds to the room's unrendered total.
+	unrendered uint64
 	// born is whether any struct past the room's state integrates deleted (bornDeleted), whose
 	// clocks the room's delete set holds from then on (deletedRuns.record).
 	born bool
+	// retired is the clients the room's history lists as retired by a rebuild, each with the clock
+	// it had reached (structTotal.retired), nil for a room never rebuilt or no load listed. former
+	// is whether the update carries a struct of one of them below that clock, which only a
+	// browser holding the replaced history sends; forged whether it carries an entry under the
+	// retired clients past the room's state, which no browser writes.
+	retired        map[crdt.ClientID]uint64
+	former, forged bool
 }
 
 func (w *peerWeighing) walkedStruct(walked updateStruct) {
@@ -400,6 +513,9 @@ func (w *peerWeighing) walkedStruct(walked updateStruct) {
 	w.decoded += cost.decode
 	if walked.kind == structSkip {
 		return
+	}
+	if limit, listed := w.retired[crdt.ClientID(walked.client)]; listed && walked.clock < limit {
+		w.former = true
 	}
 	known := w.held[crdt.ClientID(walked.client)]
 	end := walked.clock + walked.length
@@ -412,7 +528,9 @@ func (w *peerWeighing) walkedStruct(walked updateStruct) {
 	w.structs++
 	w.integrated += cost.integrate
 	w.content += unrenderedContentHeap(walked)
+	w.unrendered += unrenderedBytes(walked)
 	w.born = w.born || bornDeleted(walked)
+	w.forged = w.forged || walked.parent == parentRetired
 }
 
 func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
@@ -434,6 +552,12 @@ const splitsAStructCanCause = 2
 // splits its integration can cause, and the splits each delete range can cause.
 func (w *peerWeighing) added() uint64 {
 	return w.structs*(1+splitsAStructCanCause) + w.deletes*splitsAStructCanCause
+}
+
+// addition is what the walked update can add to the room's two totals (structTotal): its
+// structs (added) and its unrendered bytes.
+func (w *peerWeighing) addition() roomCount {
+	return roomCount{structs: w.added(), unrendered: w.unrendered}
 }
 
 // structureHeap is what the walked update adds to its room that a count of the rendering cannot
@@ -478,6 +602,57 @@ func unrenderedContentHeap(walked updateStruct) uint64 {
 	return heap
 }
 
+// unrenderedBytes is walked's unrendered bytes: the encoded bytes of its map key and of its
+// content that are not text, which are what the hook's byte and clock rules cannot see. A value
+// of an Any or JSON item, a binary, an embed or a format value, and an XML element's name, are one
+// clock each whatever their size, and a map key is no clock at all; none of them is weighed by the
+// rendering where it renders nothing - the margin's records, an element's attributes the schema
+// does not render. A text's characters are not counted: each is a clock, which the bound's rules
+// weigh where the room renders them (inserted, maxPeerInsertAtTheBound), and each renders where
+// the editor writes it. A deleted item's, a GC run's and a skip's content is a length, which
+// takes no bytes past its header; a deleted map entry's key stays in the state, and is counted.
+//
+// It is measured wherever the struct sits, because the walk cannot place a value whose parent is
+// an item or its neighbour's (parentItem, parentOfNeighbour): a later record for a margin key and a
+// later value for an element's attribute read alike. So it counts what the server's own margin
+// rule (maxMarginBytes) and anchor rule (maxAnchorBytes) weigh - each record's whole encoding,
+// keys and the server's own fields with its text, and each anchor mark's format value, written
+// again at each text it covers - and with them the names and attributes of the fragment's
+// elements and the values of its other marks, which the server weighs through its rendering and
+// element bounds. maxUnrenderedBytes bounds the sum of all of them.
+func unrenderedBytes(walked updateStruct) uint64 {
+	switch walked.kind {
+	case structString, structDeleted, structGC, structSkip:
+		return uint64(len(walked.key))
+	}
+	return uint64(len(walked.key) + len(walked.content))
+}
+
+// roomCount is a room's state as the hook's totals weigh it (structTotal): its structs, which the
+// decode cap bounds, and its unrendered bytes (unrenderedBytes), which maxUnrenderedBytes bounds.
+type roomCount struct {
+	structs, unrendered uint64
+}
+
+// fitsBounds reports whether a room holding held can take added within the decode cap and, when
+// added carries any unrendered bytes, within maxUnrenderedBytes. An update that adds none is never
+// refused by the unrendered bound, so a room past it - a stored document heavier than the bound,
+// or one a write the hook does not see took past it - can still be typed in, trimmed and handed
+// back whole.
+func fitsBounds(held, added roomCount) bool {
+	return held.structs+added.structs <= maxUpdateItems &&
+		(added.unrendered == 0 || held.unrendered+added.unrendered <= maxUnrenderedBytes)
+}
+
+// nearBounds reports whether held, a stale total, is near enough a bound that added would take it
+// past should the writes since the count have used up the margin: within structTotalStaleMargin
+// of the decode cap, or, for an addition of unrendered bytes, within unrenderedStaleMargin of
+// maxUnrenderedBytes.
+func nearBounds(held, added roomCount) bool {
+	return held.structs+added.structs > maxUpdateItems-structTotalStaleMargin ||
+		(added.unrendered > 0 && held.unrendered+added.unrendered > maxUnrenderedBytes-unrenderedStaleMargin)
+}
+
 // structTotalStaleMargin is how near the cap a stale struct total must be for the hook to confirm
 // it by an exact count before it admits on it: an eighth of the cap, about as many structs as the
 // heaviest document one upload admits encodes to (maxUpdateItems). The server's writes that leave
@@ -505,6 +680,14 @@ const structTotalRecheck = maxUpdateItems / 64
 // new structs, each with the two splits its integration can cause, and two for each delete range.
 // That is an upper bound, so the running total is never below what the room holds, short of a
 // write the hook does not see.
+//
+// Beside it the total keeps the room's unrendered bytes (unrenderedBytes), against which the hook
+// refuses an update that adds any past maxUnrenderedBytes, the same way: exact at each count, the
+// same walk of the same encode summing each struct's (countRoom), plus each admitted update's
+// (peerWeighing.unrendered), which is all of its new structs' and so never less than what they
+// add. A delete takes nothing off it until the next count, so the running total overstates a room
+// that deleted values since, and a refusal on it is confirmed by a count as one on the struct
+// total is. Its stale margin and its recheck are unrenderedStaleMargin and unrenderedRecheck.
 //
 // Those writes are every transaction on the room that is not a hook's apply: the server's own
 // writes (Server.Apply - an API write's publish, settlement and its repairs, the mark sweep, the
@@ -546,8 +729,12 @@ const structTotalRecheck = maxUpdateItems / 64
 // for writes, so a write that landed after a count's encode leaves the total stale.
 type structTotal struct {
 	live weak.Pointer[crdt.Doc]
-	// count is countRoomStructs, but for a test's, which counts the counts.
-	count func(doc *crdt.Doc) uint64
+	// count is countRoom, but for a test's, which counts the counts.
+	count func(doc *crdt.Doc) roomCount
+	// retired is the clients the room's history lists as retired by the rebuild that seeded it,
+	// each with the clock it had reached (retiredClientsOf), read once at the room's load: only a
+	// rebuild writes them, and a rebuild replaces a history no room holds (RebuildDocument).
+	retired map[crdt.ClientID]uint64
 
 	// admissions is held by the hook from its check of the total to its reservation (reserve),
 	// never across an apply, so two reservations are checked one after the other.
@@ -558,30 +745,76 @@ type structTotal struct {
 	originMu sync.Mutex
 	origins  map[any]int
 
-	// inflight is the sum of the additions the hook has reserved whose applies have not yet
-	// returned. admitted is the sum of every addition whose apply has returned, and writes the
-	// number of transactions the observer has seen that were not a hook's apply; both only grow.
-	inflight, admitted, writes atomic.Uint64
+	// inflight is the sum of the struct additions the hook has reserved whose applies have not yet
+	// returned, and inflightUnrendered of their unrendered bytes. admitted and admittedUnrendered
+	// are the same sums for every addition whose apply has returned, and writes the number of
+	// transactions the observer has seen that were not a hook's apply; those three only grow.
+	inflight, admitted, writes             atomic.Uint64
+	inflightUnrendered, admittedUnrendered atomic.Uint64
 
-	// mu guards the last count - counted, with admitted and writes as they were read before it,
-	// and the parked structs and parked delete ranges the room held then (parkedCopyHeap) - and
-	// the hook's last confirmation: whether one was taken and admitted when it was.
+	// mu guards the last count - counted, with the admissions and writes as they were read before
+	// it, and the parked structs and parked delete ranges the room held then (parkedCopyHeap) -
+	// and the hook's last confirmation: whether one was taken and the admissions when it was.
 	mu                   sync.Mutex
-	counted              uint64
-	countedAdmitted      uint64
+	counted              roomCount
+	countedAdmitted      roomCount
 	countedWrites        uint64
 	countedParkedStructs uint64
 	countedParkedRanges  uint64
 	confirmed            bool
-	confirmedAdmitted    uint64
+	confirmedAdmitted    roomCount
 }
 
-// newStructTotal is live's struct total, counted once now, at the room's load.
+// newStructTotal is live's totals, counted once now, at the room's load, with the clients live's
+// history lists as retired.
 func newStructTotal(live *crdt.Doc) *structTotal {
-	total := &structTotal{live: weak.Make(live), count: countRoomStructs}
+	total := &structTotal{live: weak.Make(live), count: countRoom, retired: retiredClientsOf(live)}
 	live.OnUpdate(total.observed)
 	total.recount(live)
 	return total
+}
+
+// retiredClientsOf is the clients doc's history lists under retiredMapName, each with the clock it
+// had reached when a rebuild replaced the history it belonged to (rebuiltSeed), or nil for a
+// history that lists none. An entry that does not read as a client and a clock is not the
+// rebuild's, and is skipped.
+func retiredClientsOf(doc *crdt.Doc) map[crdt.ClientID]uint64 {
+	var retired map[crdt.ClientID]uint64
+	doc.GetMap(retiredMapName).ForEach(func(key string, value any) {
+		client, err := strconv.ParseUint(key, 10, 64)
+		clock, isClock := retiredClock(value)
+		if err != nil || !isClock {
+			return
+		}
+		if retired == nil {
+			retired = make(map[crdt.ClientID]uint64)
+		}
+		retired[crdt.ClientID(client)] = clock
+	})
+	return retired
+}
+
+// retiredClock reads a retired client's clock as ygo decodes the int64 a rebuild wrote: lib0 Any
+// writes an integer within 32 bits as a varint, which decodes as an int64, and a larger one within
+// 2^53 as a float64 (sjawhar/ygo v1.51.3-sami.5, encoding/encoder.go:283-299,
+// internal/anycodec/decoder.go:276-296). A clock of zero retires nothing.
+func retiredClock(value any) (uint64, bool) {
+	switch value := value.(type) {
+	case int64:
+		return uint64(value), value >= 1 && value <= maxEditorClock
+	case float64:
+		return uint64(value), value >= 1 && value <= maxEditorClock
+	}
+	return 0, false
+}
+
+// retiredClients is the clients the room's history lists as retired (structTotal.retired), nil for
+// a total no load made.
+func (t *structTotal) retiredClients() map[crdt.ClientID]uint64 {
+	if t == nil {
+		return nil
+	}
+	return t.retired
 }
 
 // observed is the total's update observer: a transaction that is not one of the hook's applies
@@ -616,10 +849,10 @@ func (t *structTotal) applying(origin any, apply func() error) error {
 	return apply()
 }
 
-// reserve reports whether doc, the room's live document, can take added more structs within the
-// decode cap beside every reservation in flight (admits), and if it can, reserves added for an
-// apply the caller then makes and ends with landed, or abandons with unreserve.
-func (t *structTotal) reserve(doc *crdt.Doc, added uint64) bool {
+// reserve reports whether doc, the room's live document, can take added within the decode cap and
+// the unrendered bound beside every reservation in flight (admits), and if it can, reserves added
+// for an apply the caller then makes and ends with landed, or abandons with unreserve.
+func (t *structTotal) reserve(doc *crdt.Doc, added roomCount) bool {
 	if t == nil {
 		return t.admits(doc, added)
 	}
@@ -628,35 +861,55 @@ func (t *structTotal) reserve(doc *crdt.Doc, added uint64) bool {
 	if !t.admits(doc, added) {
 		return false
 	}
-	t.inflight.Add(added)
+	t.inflight.Add(added.structs)
+	t.inflightUnrendered.Add(added.unrendered)
 	return true
 }
 
 // landed moves added, a reservation whose apply has returned, from inflight to admitted: to
 // admitted first, so a running total read between the two never misses it.
-func (t *structTotal) landed(added uint64) {
+func (t *structTotal) landed(added roomCount) {
 	if t != nil {
-		t.admitted.Add(added)
-		t.inflight.Add(-added)
+		t.admitted.Add(added.structs)
+		t.admittedUnrendered.Add(added.unrendered)
+		t.inflight.Add(-added.structs)
+		t.inflightUnrendered.Add(-added.unrendered)
 	}
 }
 
 // unreserve gives back added, a reservation no apply followed or whose apply failed.
-func (t *structTotal) unreserve(added uint64) {
+func (t *structTotal) unreserve(added roomCount) {
 	if t != nil {
-		t.inflight.Add(-added)
+		t.inflight.Add(-added.structs)
+		t.inflightUnrendered.Add(-added.unrendered)
 	}
 }
 
-// running is the total as it stands - the last count, what the hook admitted since and what it
-// has in flight - and whether a write the hook did not see has landed since the count. inflight is
-// read before admitted (structTotal gives why).
+// running is the struct total as it stands - the last count, what the hook admitted since and
+// what it has in flight - and whether a write the hook did not see has landed since the count.
 func (t *structTotal) running() (total uint64, stale bool) {
+	totals, stale := t.runningTotals()
+	return totals.structs, stale
+}
+
+// runningUnrendered is the unrendered total as it stands, as running is the struct total.
+func (t *structTotal) runningUnrendered() (total uint64, stale bool) {
+	totals, stale := t.runningTotals()
+	return totals.unrendered, stale
+}
+
+// runningTotals is both totals as they stand, and whether a write the hook did not see has landed
+// since the count. Each inflight is read before its admitted (structTotal gives why).
+func (t *structTotal) runningTotals() (total roomCount, stale bool) {
 	t.mu.Lock()
 	counted, admitted, writes := t.counted, t.countedAdmitted, t.countedWrites
 	t.mu.Unlock()
-	inflight := t.inflight.Load()
-	return counted + inflight + t.admitted.Load() - admitted, t.writes.Load() != writes
+	inflight := roomCount{structs: t.inflight.Load(), unrendered: t.inflightUnrendered.Load()}
+	now := roomCount{structs: t.admitted.Load(), unrendered: t.admittedUnrendered.Load()}
+	return roomCount{
+		structs:    counted.structs + inflight.structs + now.structs - admitted.structs,
+		unrendered: counted.unrendered + inflight.unrendered + now.unrendered - admitted.unrendered,
+	}, t.writes.Load() != writes
 }
 
 // roomStructs is the room's struct total as it stands, which the apply heap's estimate takes as
@@ -685,21 +938,23 @@ func (t *structTotal) parkedCopyHeap(doc *crdt.Doc) uint64 {
 		return applyHeapPerParkedStruct*uint64(pending.Items) + applyHeapPerParkedDeleteRange*uint64(pending.DeleteRanges)
 	}
 	t.mu.Lock()
-	structs, ranges, countedAdmitted := t.countedParkedStructs, t.countedParkedRanges, t.countedAdmitted
+	structs, ranges, countedAdmitted := t.countedParkedStructs, t.countedParkedRanges, t.countedAdmitted.structs
 	t.mu.Unlock()
 	since := t.inflight.Load() + t.admitted.Load() - countedAdmitted
 	return applyHeapPerParkedStruct*structs + applyHeapPerParkedDeleteRange*ranges +
 		applyHeapPerParkedDeleteRange/splitsAStructCanCause*since
 }
 
-// admits reports whether doc, the room's live document, can take added more structs within the
-// decode cap, beside every reservation in flight, which the running total counts; reserve calls it
-// under the admissions lock. The running total answers when it is within the cap and either fresh
-// or more than structTotalStaleMargin short of it. A total past the cap is confirmed by an exact
-// count before it refuses, unless a confirmation was taken while the total was fresh and less than
-// structTotalRecheck has been admitted since, which answers on the running total instead; a stale
-// total near the cap is always confirmed. A confirmation re-bases the total and nothing else: the
-// reservations in flight stay counted beside it.
+// admits reports whether doc, the room's live document, can take added within the decode cap and,
+// when added carries unrendered bytes, within maxUnrenderedBytes (fitsBounds), beside every
+// reservation in flight, which the running totals count; reserve calls it under the admissions
+// lock. The running totals answer when they fit and are either fresh or short of both bounds by
+// more than their stale margins (nearBounds). Totals past a bound are confirmed by an exact count
+// before they refuse, unless a confirmation was taken while they were fresh and less than
+// structTotalRecheck structs and unrenderedRecheck unrendered bytes have been admitted since,
+// which answers on the running totals instead; stale totals near a bound are always confirmed. A
+// confirmation re-bases the totals and nothing else: the reservations in flight stay counted
+// beside them.
 //
 // The count runs on the browser's read loop, so that browser's next frame waits for it, and under
 // the admissions lock, so the room's other browsers' reservations wait for it too, though none of
@@ -711,35 +966,37 @@ func (t *structTotal) parkedCopyHeap(doc *crdt.Doc) uint64 {
 // decode.
 //
 // A nil total, a room no load listed, is counted afresh for each update.
-func (t *structTotal) admits(doc *crdt.Doc, added uint64) bool {
+func (t *structTotal) admits(doc *crdt.Doc, added roomCount) bool {
 	if t == nil {
-		return countRoomStructs(doc)+added <= maxUpdateItems
+		return fitsBounds(countRoom(doc), added)
 	}
-	total, stale := t.running()
+	total, stale := t.runningTotals()
 	switch {
-	case total+added > maxUpdateItems:
+	case !fitsBounds(total, added):
 		if t.confirmationHolds(stale) {
 			return false
 		}
-	case stale && total+added > maxUpdateItems-structTotalStaleMargin:
+	case stale && nearBounds(total, added):
 	default:
 		return true
 	}
 	t.confirm(doc)
-	total, _ = t.running()
-	return total+added <= maxUpdateItems
+	total, _ = t.runningTotals()
+	return fitsBounds(total, added)
 }
 
-// confirmationHolds reports whether the hook's last confirmation still answers for the total: it
+// confirmationHolds reports whether the hook's last confirmation still answers for the totals: it
 // was taken, nothing the hook did not see has landed since (stale), and the hook has admitted less
-// than structTotalRecheck since it.
+// than structTotalRecheck structs and unrenderedRecheck unrendered bytes since it.
 func (t *structTotal) confirmationHolds(stale bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return !stale && t.confirmed && t.admitted.Load()-t.confirmedAdmitted < structTotalRecheck
+	return !stale && t.confirmed &&
+		t.admitted.Load()-t.confirmedAdmitted.structs < structTotalRecheck &&
+		t.admittedUnrendered.Load()-t.confirmedAdmitted.unrendered < unrenderedRecheck
 }
 
-// confirm re-bases the total on an exact count of doc and records it as the hook's confirmation.
+// confirm re-bases the totals on an exact count of doc and records it as the hook's confirmation.
 func (t *structTotal) confirm(doc *crdt.Doc) {
 	admitted := t.recount(doc)
 	t.mu.Lock()
@@ -747,7 +1004,7 @@ func (t *structTotal) confirm(doc *crdt.Doc) {
 	t.mu.Unlock()
 }
 
-// recountLive re-bases the total on an exact count of the room's live document, if it is still
+// recountLive re-bases the totals on an exact count of the room's live document, if it is still
 // resident: the measurer's count, in its turn.
 func (t *structTotal) recountLive() {
 	if t == nil {
@@ -758,10 +1015,11 @@ func (t *structTotal) recountLive() {
 	}
 }
 
-// recount re-bases the total on an exact count of doc, and returns the admissions it was counted
+// recount re-bases the totals on an exact count of doc, and returns the admissions it was counted
 // against.
-func (t *structTotal) recount(doc *crdt.Doc) uint64 {
-	admitted, writes := t.admitted.Load(), t.writes.Load()
+func (t *structTotal) recount(doc *crdt.Doc) roomCount {
+	admitted := roomCount{structs: t.admitted.Load(), unrendered: t.admittedUnrendered.Load()}
+	writes := t.writes.Load()
 	pending := doc.PendingStats()
 	counted := t.count(doc)
 	t.mu.Lock()
@@ -770,6 +1028,23 @@ func (t *structTotal) recount(doc *crdt.Doc) uint64 {
 	t.mu.Unlock()
 	return admitted
 }
+
+// countRoom is the exact count of doc's two totals: its struct total (countRoomStructs) and the
+// unrendered bytes of every struct of its encoded state (unrenderedBytes), parked structs
+// included, from one encode and one walk.
+func countRoom(doc *crdt.Doc) roomCount {
+	pending := doc.PendingStats()
+	var held unrenderedTally
+	tally, err := walkUpdate(crdt.EncodeStateAsUpdateV1(doc, nil), fromRoom, &held)
+	return roomCount{structs: structTotalOf(tally, err, pending), unrendered: held.bytes}
+}
+
+// unrenderedTally is countRoom's visitor, summing each walked struct's unrendered bytes.
+type unrenderedTally struct{ bytes uint64 }
+
+func (u *unrenderedTally) walkedStruct(walked updateStruct) { u.bytes += unrenderedBytes(walked) }
+
+func (*unrenderedTally) walkedDelete(_, _, _ uint64) {}
 
 // countRoomStructs is the exact count of doc's struct total: the structs of its encoded state as
 // ygo would decode them on the next load (walkUpdate, fromRoom), parked structs included, plus the
@@ -783,6 +1058,12 @@ func (t *structTotal) recount(doc *crdt.Doc) uint64 {
 func countRoomStructs(doc *crdt.Doc) uint64 {
 	pending := doc.PendingStats()
 	tally, err := walkUpdate(crdt.EncodeStateAsUpdateV1(doc, nil), fromRoom, nil)
+	return structTotalOf(tally, err, pending)
+}
+
+// structTotalOf is the struct total of a room whose encoded state walked to tally, refused with
+// err or not, while it held pending (countRoomStructs).
+func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint64 {
 	if err != nil && tally.structs <= maxUpdateItems {
 		slog.Error("dispatch: count the structs of a room's own state", "error", err)
 		tally.structs = maxUpdateItems + 1

@@ -970,7 +970,7 @@ type renderedContent struct{ bytes int64 }
 
 func (c *renderedContent) walkedStruct(walked updateStruct) {
 	switch walked.parent {
-	case parentMargin, parentOtherRoot, parentUnnamed:
+	case parentMargin, parentRetired, parentOtherRoot, parentUnnamed:
 		return
 	}
 	switch walked.kind {

@@ -293,6 +293,8 @@ func TestTheUpdateWalkRefusesWhatTheEditorNeverSends(t *testing.T) {
 		{"another root", newV1Frame(1).group(1, 5, 0).rooted(4, "t", "").str("hi").noDeletes()},
 		{"a subdocument", newV1Frame(1).group(1, 5, 0).rooted(9, marksMapName, "sub").str("guid").any(map[string]any{"autoLoad": false}).noDeletes()},
 		{"a move", move},
+		{"binary content in the margin", newV1Frame(1).group(1, 5, 0).rooted(byte(structBinary), marksMapName, "bin").str("\x00\x01\xff").noDeletes()},
+		{"an embed in the fragment", newV1Frame(1).group(1, 5, 0).rooted(byte(structEmbed), fragmentName, "").str(`{"image":"x.png"}`).noDeletes()},
 		{"a struct ending past 2^53", newV1Frame(1).group(1, 5, maxEditorClock).gc(1).noDeletes()},
 		{"a delete range ending past 2^53", append(append([]byte{0, 1, 5, 1}, varuint(maxEditorClock)...), 1)},
 		{"a byte after the delete set", append(slices.Clone(keystroke), 0)},

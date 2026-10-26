@@ -48,16 +48,39 @@ import (
 //     each struct, crdt/content.go:382-397); a move (ContentMove, wire tag 11, which is ygo's own
 //     extension: Yjs has no content reference 11, its readItemContent indexing an eleven-entry
 //     table and calling what is not there, yjs 13.6.32 src/structs/Item.js:705-724, so relaying
-//     one would break every Yjs browser in the room); a struct whose parent is a named root other
-//     than the document's fragment (fragmentName) and its margin (marksMapName), the only two
-//     roots the editor writes (milkdown's CollabService.bindDoc takes
-//     doc.getXmlFragment("prosemirror"), which y-prosemirror's sync plugin writes under;
-//     packages/dispatch/web/src/features/doc/editor.ts takes doc.getMap("marks"); nothing else in
-//     packages/dispatch/web or packages/proof-editor names a root or makes a subdocument); a
-//     struct or a delete range ending past 2^53, which no JavaScript clock reaches, so that a
-//     caller adding the walk's clocks cannot wrap where ygo's decodeAndPark adds lengths
-//     unchecked (crdt/update.go:602-607); and bytes after the delete set, which no Yjs encoder
-//     writes and ygo's apply ignores.
+//     one would break every Yjs browser in the room); binary content (ContentBinary, tag 3) and
+//     an embed (ContentEmbed, tag 5), neither of which the editor writes, so neither carries a
+//     value of any size past the hook's rules at the cost of one clock (the search of the editor's
+//     sources below); a struct whose parent is a named root other than the document's fragment
+//     (fragmentName), its margin (marksMapName) and the history's retired clients
+//     (retiredMapName), the only roots a browser's update names: the editor writes the first two
+//     (milkdown's CollabService.bindDoc takes doc.getXmlFragment("prosemirror"), which
+//     y-prosemirror's sync plugin writes under; packages/dispatch/web/src/features/doc/editor.ts
+//     takes doc.getMap("marks"), which it only reads; nothing else in packages/dispatch/web or
+//     packages/proof-editor names a root or makes a subdocument), and a browser hands the third
+//     back in a whole-state message once a rebuild has seeded it, which the hook refuses when it
+//     carries an entry the room does not hold (weighPeerUpdate); a struct or a delete range ending
+//     past 2^53, which no JavaScript clock reaches, so that a caller adding the walk's clocks
+//     cannot wrap where ygo's decodeAndPark adds lengths unchecked (crdt/update.go:602-607); and
+//     bytes after the delete set, which no Yjs encoder writes and ygo's apply ignores.
+//
+// The editor's sources were searched for what writes binary or embedded content on 2026-10-26:
+// `grep -rn -E 'insertEmbed|applyDelta|setAttribute\(|Uint8Array|getMap|\.set\(|insert\('` over
+// y-prosemirror 1.3.7's src, the same over @milkdown/plugin-collab 7.22.1's src, and over
+// packages/proof-editor/src and packages/dispatch/web/src for every file importing yjs. yjs 13.6.32
+// makes ContentBinary only for a Uint8Array set into a map or an array (typeMapSet,
+// src/types/AbstractType.js:864-866; typeListInsertGenericsAfter, :679) and ContentEmbed only for a
+// non-string a text inserts (insertText, src/types/YText.js:265). y-prosemirror inserts the text
+// of ProseMirror text nodes, strings, into its texts (createTypeFromTextNodes and updateYText,
+// src/plugins/sync-plugin.js:856-865 and :1077-1091, and a neighbouring text's own delta at
+// :756-759), and sets each element's attributes from the node's attrs (createTypeFromElementNode,
+// :872-880, and :1160), which the Proof schema fills from markdown with strings, numbers, booleans
+// and null, the one minted value a block id that uuidV4 returns as a string
+// (packages/proof-editor/src/editor/schema/uuid.ts:8-14); the collab plugin writes nothing of its
+// own (it applies a template made the same way, collab-service.ts:208-211, which the Proof editor
+// never calls); and the Dispatch web app reads the margin map (bindRemoteMarks, editor.ts:38-62) and
+// applies only updates Yjs itself encoded (pending-sync.ts). None of them makes a Uint8Array value
+// or inserts a non-string into a text.
 //
 // Refusing is safe in both directions, and the tests hold it as a set relation over generated
 // edits, whole states and the fuzz corpus. Every update the walk accepts, ygo applies to a fresh
@@ -280,6 +303,9 @@ const (
 	parentFragment
 	// parentMargin is an item directly under the document's margin, marksMapName.
 	parentMargin
+	// parentRetired is an item directly under the history's retired clients, retiredMapName,
+	// which only a rebuild's seed writes (rebuiltSeed).
+	parentRetired
 	// parentOtherRoot is an item under any other named root, which only a walk of fromRoom yields.
 	parentOtherRoot
 )
@@ -392,8 +418,8 @@ func (w *updateWalker) walkStruct(walked *updateStruct) {
 	walked.content = w.buf[start:w.pos]
 }
 
-// namedRoot sorts walked's root into the fragment, the margin or another root, and refuses
-// another root in an update from a browser.
+// namedRoot sorts walked's root into the fragment, the margin, the retired clients or another
+// root, and refuses another root in an update from a browser.
 func (w *updateWalker) namedRoot(walked *updateStruct) {
 	if w.refusal != nil {
 		return
@@ -403,6 +429,8 @@ func (w *updateWalker) namedRoot(walked *updateStruct) {
 		walked.parent = parentFragment
 	case marksMapName:
 		walked.parent = parentMargin
+	case retiredMapName:
+		walked.parent = parentRetired
 	default:
 		if w.source == fromPeer {
 			w.notFromEditor("a root the editor never writes")
@@ -453,11 +481,19 @@ func (w *updateWalker) content(kind structKind) uint64 {
 		}
 		return n
 	case structBinary:
+		if w.source == fromPeer {
+			w.notFromEditor("binary content, which the editor never writes")
+			return 0
+		}
 		w.varBytes()
 		return 1
 	case structString:
 		return w.str()
 	case structEmbed:
+		if w.source == fromPeer {
+			w.notFromEditor("an embed, which the editor never writes")
+			return 0
+		}
 		if !w.skipJSON() {
 			w.undecodable("an embed that is not JSON")
 		}

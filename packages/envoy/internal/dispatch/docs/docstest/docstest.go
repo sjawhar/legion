@@ -37,6 +37,9 @@ type Peer struct {
 	// reader answers the room's sync step 1 while a test sends.
 	writes  sync.Mutex
 	endedAt time.Time
+	// closed is the close frame the room ended the connection with, nil for one that ended
+	// otherwise.
+	closed *gws.CloseError
 }
 
 // Dial connects a peer to artifactID's room at url, the document websocket's full address with its
@@ -100,12 +103,23 @@ func (p *Peer) EndedAt() time.Time {
 	return p.endedAt
 }
 
+// Closed is the close frame the room ended the connection with - its code and reason - or nil
+// for a connection that ended without one. It waits for the connection to end.
+func (p *Peer) Closed() *gws.CloseError {
+	<-p.Ended
+	return p.closed
+}
+
 // read applies every sync frame the room sends and answers its sync step 1 until the connection
 // closes, handing answers the content of each sync step 2 once it is applied.
 func (p *Peer) read(answers chan<- []byte) {
 	for {
 		_, message, err := p.connection.ReadMessage()
 		if err != nil {
+			var closed *gws.CloseError
+			if errors.As(err, &closed) {
+				p.closed = closed
+			}
 			return
 		}
 		decoder := encoding.NewDecoder(message)

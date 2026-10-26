@@ -19,6 +19,11 @@ import (
 const fragmentName = "prosemirror"
 const marksMapName = "marks"
 
+// retiredMapName is the root under which a rebuilt history lists the clients and clocks of the
+// history it replaced, so a browser still holding that history cannot hand it back (rebuiltSeed,
+// weighPeerUpdate). Only a rebuild writes it, and no rendering reads it.
+const retiredMapName = "retired"
+
 var (
 	ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
 	ErrDocSchema       = errors.New("document is outside the Proof schema")

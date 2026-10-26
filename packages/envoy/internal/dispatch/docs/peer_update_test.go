@@ -381,7 +381,8 @@ func proseAtLeast(bytes int) string {
 // maxAnchorBytes - whose whole state is far more than its markdown: growth.go:14-18 records
 // thirty-two suggestions of 900 KB that left the markdown as it was. What this does not weigh is
 // the items a long edit history tombstones, which no rendering shows and which the decode cap
-// bounds instead (maxUpdateItems: refuseUndecodable, and the peer update hook's structTotal).
+// bounds instead (maxUpdateItems: refuseUndecodable, and the peer update hook's structTotal);
+// TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor weighs those.
 func TestTheHeaviestWholeStateFrameFitsTheMessageFloor(t *testing.T) {
 	frame := len(crdt.EncodeStateAsUpdateV1(heaviestDocument(t), nil))
 	t.Logf("the heaviest whole-state frame is %d bytes; the message floor is %d", frame, maxMessageBytes)
@@ -389,6 +390,30 @@ func TestTheHeaviestWholeStateFrameFitsTheMessageFloor(t *testing.T) {
 		t.Fatalf("the heaviest whole-state frame is %d bytes, past a quarter of the %d-byte message floor: "+
 			"measure it again and set the floor at four times it, or take it back to the design if four times it passes the 64 MiB ygo allowed before",
 			frame, maxMessageBytes)
+	}
+}
+
+// The floor is the larger of four times the heaviest frame the server's own writes store and a
+// quarter more than F, the heaviest a browser can hand over under the hook's bounds, rounded up
+// to the next mebibyte, and under the 64 MiB ygo allowed before (maxMessageBytes). The heaviest
+// the server stores is a document an agent rewrote whole through the API until the decode cap
+// refused a write, whose state carries every rewrite's tombstones: built here, its frame is held
+// within serverStoredStateFrame, the figure the floor is set from, up to the few bytes a write's
+// random client ids move it by.
+func TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor(t *testing.T) {
+	state, refusal := agentRewrittenState(t)
+	if !errors.Is(refusal, ErrDocumentTooLarge) {
+		t.Fatalf("the agent's last write was refused with %v, want ErrDocumentTooLarge", refusal)
+	}
+	structs, rendered, _ := structsAndRendering(t, state)
+	floor := max(4*serverStoredStateFrame, heaviestHandoffBound*5/4+1)
+	t.Logf("an agent's rewrites stored %d structs rendering %d bytes in a %d-byte frame; F is %d; the floor is %d, from four times %d and a quarter more than F",
+		structs, rendered, len(state), heaviestHandoffBound, maxMessageBytes, serverStoredStateFrame)
+	if len(state) > serverStoredStateFrame+serverStoredStateFrame/1000 {
+		t.Fatalf("the stored frame is %d bytes, past the %d the floor is set from: measure it again and set the floor from it", len(state), serverStoredStateFrame)
+	}
+	if maxMessageBytes < floor || maxMessageBytes-1<<20 >= floor || maxMessageBytes > 64<<20 {
+		t.Fatalf("the floor is %d bytes, want the next mebibyte at or above %d, and at most the 64 MiB ygo allowed before", maxMessageBytes, floor)
 	}
 }
 
@@ -499,6 +524,7 @@ func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing
 		t.Fatalf("the heaviest document renders %d bytes, want at least %d", len(rendering), pmdoc.MaxDocumentBytes)
 	}
 	serverWritten := len(crdt.EncodeStateAsUpdateV1(room, nil))
+	serverUnrendered := countRoom(room).unrendered
 	service := &Service{}
 	replica := service.keepReplica(room, nil, &rendering)
 	// A client id of five bytes, the most a lib0 varint of one takes, which most random ids are:
@@ -578,6 +604,7 @@ func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing
 	t.Logf("%d updates of up to %d pairs, each pair inserting %d and rendering %d bytes, took the rendering from %d bytes to %d, against the %d-byte creep cap; "+
 		"the whole-state frame grew from %d to %d bytes, four times it %d; the message floor is %d",
 		updates, largest, insertedAPair, renderedAPair, loaded, published(), creepCap, serverWritten, frame, 4*frame, maxMessageBytes)
+	t.Logf("its unrendered bytes grew from %d to %d, against the %d-byte unrendered bound", serverUnrendered, countRoom(room).unrendered, maxUnrenderedBytes)
 	held, _ := applyHeapEstimate(t, room, state)
 	handedOver, _ := applyHeapEstimate(t, newDocumentCopy(), state)
 	t.Logf("its handoff is estimated at %d bytes into the room holding it and %d into a fresh one, against the %d-byte apply heap bound",
@@ -685,8 +712,8 @@ func requireRefusedTooLarge(t *testing.T, err error, called bool, room *crdt.Doc
 	}
 }
 
-// countedStructTotal is replica's struct total with its counts counted: the count of the room's
-// state the hook or the measurer takes calls it once each.
+// countedStructTotal is replica's totals with their counts counted: the count of the room's state
+// the hook or the measurer takes calls it once each.
 func countedStructTotal(t *testing.T, replica *renderedReplica) (*structTotal, *atomic.Int64) {
 	t.Helper()
 	total := replica.structs
@@ -694,9 +721,9 @@ func countedStructTotal(t *testing.T, replica *renderedReplica) (*structTotal, *
 		t.Fatal("the room's load made no struct total")
 	}
 	counts := new(atomic.Int64)
-	total.count = func(doc *crdt.Doc) uint64 {
+	total.count = func(doc *crdt.Doc) roomCount {
 		counts.Add(1)
-		return countRoomStructs(doc)
+		return countRoom(doc)
 	}
 	return total, counts
 }
@@ -1106,9 +1133,9 @@ func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T)
 		// The room's count stands where one addition fits and two do not.
 		near := maxUpdateItems - added - added/2
 		var counts atomic.Int64
-		total.count = func(*crdt.Doc) uint64 {
+		total.count = func(*crdt.Doc) roomCount {
 			counts.Add(1)
-			return near
+			return roomCount{structs: near}
 		}
 		total.recount(room)
 		release := make(chan struct{})
@@ -1138,7 +1165,7 @@ func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T)
 		total := replica.structs
 		const fit, racers = 3, 8
 		near := maxUpdateItems - fit*added - added/2
-		total.count = func(*crdt.Doc) uint64 { return near }
+		total.count = func(*crdt.Doc) roomCount { return roomCount{structs: near} }
 		total.recount(room)
 		start := make(chan struct{})
 		var passed atomic.Int64
@@ -1146,7 +1173,7 @@ func TestTwoReservationsOfTheStructTotalNearTheCapCannotBothPassIt(t *testing.T)
 		for range racers {
 			wg.Go(func() {
 				<-start
-				if total.reserve(room, added) {
+				if total.reserve(room, roomCount{structs: added}) {
 					passed.Add(1)
 				}
 			})
