@@ -33,3 +33,11 @@ func TestDispatchNamesKeepDispatchsExistingNames(t *testing.T) {
 		t.Errorf("WebhookRedeliveryBucket = %q, want %q", got, "envoy_webhook_redelivery")
 	}
 }
+
+// The Legion agent registry's bucket is the name the INFRA-204 architect fixed, which the listener's
+// NATS grant (packages/envoy/infra/core/permissions.go) and every reader of the bucket share.
+func TestLegionAgentBucketKeepsItsName(t *testing.T) {
+	if got := bus.LegionAgentBucket; got != "legion_agents" {
+		t.Errorf("LegionAgentBucket = %q, want %q", got, "legion_agents")
+	}
+}

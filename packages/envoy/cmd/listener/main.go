@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
+	"github.com/sjawhar/envoy/internal/legionagents"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -37,6 +38,9 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	// legionAgents is the Legion agent registry the /v1/legion/agents routes serve. It keeps no
+	// cache, so it is in no list of caches.
+	legionAgents *legionagents.Store
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
@@ -711,6 +715,16 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
+	// The Legion agent registry (internal/legionagents) keeps no cache: every read is a read of its
+	// bucket, so it joins no warm-up, self-health or drain. Its reconnect hook moves its bucket
+	// handle onto a connection the bus dialled to replace a closed one. A listener whose NATS grant
+	// lacks the bucket stops here, so the grant ships before an image that opens it.
+	legionAgents, err := legionagents.Open(client.Conn, legionagents.WithReplicas(cfg.NATSReplicas))
+	if err != nil {
+		log.Fatal(err)
+	}
+	client.AddReconnectHook(legionAgents.Reopen)
+
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection, and end them in the drain before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
@@ -783,13 +797,14 @@ func main() {
 	defer stop()
 
 	ready := &listenerDeps{
-		client:     client,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		consumer:   consumer,
-		streamName: bus.Stream,
+		client:       client,
+		registry:     registry,
+		sessions:     sessions,
+		legionAgents: legionAgents,
+		ciStore:      ciStore,
+		caches:       caches,
+		consumer:     consumer,
+		streamName:   bus.Stream,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

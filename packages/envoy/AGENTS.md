@@ -30,6 +30,7 @@ events to the right session.
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start; the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`) |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
+| Legion agent registry  | `internal/legionagents/`                  | the `legion_agents` bucket: one entry per Legion session the daemon ran, never deleted, read and written only through the listener's `/v1/legion/agents` routes; its validation (`Validate`, shared by both writes), its reads (every one a session key or a filtered listing of an issue's or role token's keys, no cache), and the replacement each read derives within a role token; key layout under "Legion agent registry" below |
 | KV cache watchers      | `internal/kvwatch/kvwatch.go`, `internal/kvwatch/scan.go` | the interest, session and CI caches' one watch lifecycle: first start, readiness, rewatch, recreated buckets, stop; and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`); `kvwatchtest` fakes nats.go's scan idle timeout |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
@@ -1959,6 +1960,9 @@ served. `/healthz`, `/metrics` and the webhook routes are served to any `Host`.
 | `/v1/interests/<session_id>` | GET, DELETE | Gets or removes a session's persisted interests. |
 | `/v1/registry/<session_id>` | GET | The authoritative answer for one session: is it live, and how is it named? The read goes through this listener's cache to the session bucket, so a session the cache does not hold yet — the bucket was recreated and the watcher is still refilling it, or another listener registered the session — is still found. A 200 carries the same body a row of `GET /v1/sessions` does (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`, `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`). It refuses three ways: a 413 naming its size or a 400 naming the key for an id NATS would refuse as a KV key, `404 {"error":"no live session <id>"}` only when the bucket holds no key for it, and `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` for a read that did not answer — never a session a caller may take for ended. |
 | `/v1/sessions/<session_id>` | DELETE | Removes a live session registration. |
+| `/v1/legion/agents/sessions/<session_id>` | GET, PUT | The Legion agent registry's entry for one session (see "Legion agent registry" below). GET answers the entry with `live` (the session is in this listener's session registry now) and, within its role token ordered by `started_at`, `replaced_by` and `replaced_at` (the next session's id and start, `null` for the newest), or `404 {"error":"unknown legion agent <id>"}` when the bucket holds no entry for it. PUT records the one entry its body holds, whose `session_id` must be the path's, and answers it as stored with the `recorded_at` of its first write. |
+| `/v1/legion/agents/roles/<role_token>` | GET | `{"entries":[…]}`: every session of the role token, newest first, the first being its current holder; `[]` when none. Each entry carries `live`, `replaced_by` and `replaced_at`. |
+| `/v1/legion/agents` | GET, PUT | GET `?issue=<KEY>` answers `{"entries":[…]}`, every session of the issue by role in workflow order (architect, planner, implementer, tester, reviewer, merger), then newest first; `[]` when none. PUT records a batch, `{"entries":[…]}` of at most 256 entries in a body of at most 1 MiB (413 past either), every entry validated and checked against what is stored before the first write, so one bad entry refuses the batch with a 400 (or a 409) naming its index (`entries[3]: …`) and nothing written. A write that fails partway is `503 {"error":"envoy: wrote <n> of <m> legion agents …","written":<n>}`; every write is idempotent, so the caller sends the batch again. |
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`,
 `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional
@@ -1969,6 +1973,46 @@ holds an empty token or whitespace, or a character outside nats.go's key alphabe
 `bus.ErrInvalidKey`), on every route that reads or writes one. Every `/v1` 4xx/5xx response,
 including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
 `expected` appears when the caller must provide a field.
+
+### Legion agent registry
+
+The `legion_agents` bucket (`bus.LegionAgentBucket`, `internal/legionagents`) records each Legion
+session the daemon ran, so a finished issue's agents can still be named and asked. File storage, no
+TTL, one value per key, the listener's replicas; nothing deletes a key, so a closed issue's agents
+keep their entries and no read replays delete markers. The daemon is its one writer, through the PUT
+routes above with the listener's `/v1` credential; Dispatch reads it through
+`internal/dispatch/envoy` (`Agent`, `RoleAgents`, `IssueAgents`).
+
+- **Keys.** `session.<session_id>` holds the entry. `issue.<ISSUE>.<session_id>` and
+  `role.<role_token>.<session_id>` hold the same entry JSON. A write puts the role key, the issue
+  key, then the session key, so a session a read finds is in both its listings.
+  `project.<legion_project>` is reserved for the daemon's own record (INFRA-204), and no read here
+  reaches it.
+- **Entry.** `session_id` (letters, digits, `-`, `_`, at most 128 bytes), `legion_project` (the
+  Legion project token, `claim.ProjectToken`: lower-case letters and digits; not the Dispatch
+  project), `issue` (a Dispatch issue key, upper case), `role` (one of the six workflow roles),
+  `role_token` (exactly `legion-<legion_project>-<issue lower-cased>-<role>`, `claim.NewToken`'s
+  token), `title`, `harness` (`omp` or `claude`), `started_at` (RFC 3339 UTC, ending `Z`) and
+  `recorded_at`, which the listener sets at a session's first write and keeps. `Validate` is the one
+  check both writes refuse through, and its bounds keep every key far inside what NATS takes, so a
+  validated entry is never refused halfway through its writes. A session id, issue key or role
+  token a route names is checked the same way before NATS sees it, so these routes answer a name
+  NATS would refuse with a 400 naming the field rather than a 413. Readers ignore fields they do not
+  know.
+- **A session belongs to one issue and role for good.** A write whose `legion_project`, `issue`,
+  `role` or `role_token` differs from the stored entry is `409 {"error":"legion agent <id> is
+  recorded for <issue> <role>"}` with nothing written, so no index key is orphaned; a write that
+  changes only `title`, `harness` or `started_at` rewrites all three keys.
+- **Reads come from the bucket, never a cache.** A session read is a key read; a listing is one
+  watch filtered to `issue.<KEY>.*` or `role.<token>.*`, ended at nats.go's initial-values marker,
+  and a watch that ends any other way (its idle timer, its subscription, the read's 2 s deadline)
+  is a 503, never a short list: an absence is the bucket's, the lesson of `/v1/sessions`'s cache
+  answers (INFRA-249). Every call on the bucket waits at most 2 s (`legionagents.ReadTimeout`).
+  `live` and `replaced_by` / `replaced_at` are derived at each read and never stored.
+- **Grant.** The bucket is in the listener's NATS grant (`listenerBuckets`,
+  `packages/envoy/infra/core/permissions.go`). A listener opens it at start, after the session
+  registry, and stops when it cannot; the reconnect hook moves its handle onto a connection the
+  bus replaced (`Store.Reopen`).
 
 ## Targeted Dispatch messages
 

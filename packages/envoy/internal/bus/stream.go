@@ -25,6 +25,10 @@ const (
 	SessionBucket = "envoy_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
+	// LegionAgentBucket holds the Legion agent registry: each Legion session the daemon ran, under
+	// session.<id>, and the same entry under its issue (issue.<ISSUE>.<id>) and its role token
+	// (role.<role_token>.<id>), never deleted (internal/legionagents).
+	LegionAgentBucket = "legion_agents"
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"

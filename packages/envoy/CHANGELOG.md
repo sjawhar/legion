@@ -4,6 +4,29 @@
 
 ### Added
 
+- The listener keeps a Legion agent registry, so a finished issue's agents can still be named and
+  asked (INFRA-448): the `legion_agents` KV bucket (file storage, no TTL, never deleted) holds one
+  entry per Legion session the daemon ran, `{session_id, legion_project, issue, role, role_token,
+  title, harness, started_at, recorded_at}`, under `session.<id>`, `issue.<ISSUE>.<id>` and
+  `role.<role_token>.<id>` (`project.*` is reserved for the daemon and no read reaches it). The
+  daemon writes it with `PUT /v1/legion/agents/sessions/<id>` (one entry) and `PUT
+  /v1/legion/agents` (`{"entries":[…]}`, at most 256 entries and 1 MiB, every entry validated
+  before the first write, a bad one refusing the batch with a 400 naming its index, and a write
+  that fails partway a 503 naming how many were written). `role_token` must be
+  `legion-<legion_project>-<issue lower-cased>-<role>` with the Legion project token, not the
+  Dispatch project, and a write moving a recorded session to another issue or role is
+  `409 {"error":"legion agent <id> is recorded for <issue> <role>"}` with nothing written;
+  `recorded_at` is the listener's time at a session's first write. `GET
+  /v1/legion/agents/sessions/<id>` (or `404 {"error":"unknown legion agent <id>"}`), `GET
+  /v1/legion/agents/roles/<role_token>` (newest first) and `GET /v1/legion/agents?issue=<KEY>` (by
+  role in workflow order, then newest first) read the bucket itself, never a cache, and add `live`
+  (from the session registry) and `replaced_by`/`replaced_at` (the next session of the role token by
+  `started_at`), both derived at the read. Dispatch's listener client reads them with `Agent`,
+  `RoleAgents` and `IssueAgents`. The listener's NATS grant (`ListenerPermissions`, and so
+  `HostPermissions` and `DispatchPermissions`) gains the bucket's key-value calls, so a hub's
+  rendered authorization changes, which replaces a GCP hub's VM on its next update. Deploy order:
+  apply the `envoy-infra` release carrying the grant before a listener image that opens the bucket;
+  a listener whose grant lacks it fails at start when it opens the bucket.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

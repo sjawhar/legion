@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/legionagents"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -1112,6 +1113,213 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 	}
 }
 
+// legionAgentBodyLimit bounds the body of a Legion agent registry write, one entry or a batch.
+const legionAgentBodyLimit = 1 << 20
+
+// legionAgentAnswer is one Legion agent registry entry as a read answers it: the entry, the session
+// that replaced it within its role token (legionagents.Agent), and whether its session is in this
+// listener's session registry now. Both are derived at the read and neither is stored.
+type legionAgentAnswer struct {
+	legionagents.Agent
+	Live bool `json:"live"`
+}
+
+// legionAgentList is a listing's answer, `[]` when the registry holds no entry.
+type legionAgentList struct {
+	Entries []legionAgentAnswer `json:"entries"`
+}
+
+// legionAgentBatchFailure is a batch write's 503 once some entries were written: written counts
+// those, and every write is idempotent, so the caller sends the batch again.
+type legionAgentBatchFailure struct {
+	Error   string `json:"error"`
+	Written int    `json:"written"`
+}
+
+func answerLegionAgent(sessions *session.SessionRegistry, agent legionagents.Agent) legionAgentAnswer {
+	return legionAgentAnswer{Agent: agent, Live: isSessionLive(sessions, agent.SessionID)}
+}
+
+func answerLegionAgents(sessions *session.SessionRegistry, agents []legionagents.Agent) legionAgentList {
+	entries := make([]legionAgentAnswer, len(agents))
+	for i, agent := range agents {
+		entries[i] = answerLegionAgent(sessions, agent)
+	}
+	return legionAgentList{Entries: entries}
+}
+
+// legionAgentReadContext bounds a registry read to roleHolderReadTimeout, as the session bucket's
+// read is bounded, so a read the bucket does not answer is a 503 inside the listener's 10 s HTTP
+// write timeout.
+func legionAgentReadContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), roleHolderReadTimeout)
+}
+
+// writeLegionAgentError answers a registry call that failed: a session moved to another issue or
+// role is a 409, an invalid name or entry a 400 naming the rule (and, in a batch, the entry's
+// index), a batch past legionagents.MaxBatch a 413, a key NATS refuses as writeNATSError answers
+// it, and anything else a read or write the bucket did not answer, a 503 to retry.
+func writeLegionAgentError(w http.ResponseWriter, err error) {
+	var conflict *legionagents.ConflictError
+	switch {
+	case errors.As(err, &conflict):
+		writeJSONError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, legionagents.ErrInvalid):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, legionagents.ErrTooMany):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, bus.ErrRefused):
+		writeNATSError(w, err, http.StatusBadRequest, err.Error())
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeJSONError(w, http.StatusServiceUnavailable, "envoy: the legion agent registry did not answer: "+err.Error())
+	}
+}
+
+// decodeLegionAgentBody decodes a registry write's body into into, answering a body past
+// legionAgentBodyLimit 413 and one that is not JSON 400. It reports whether the handler goes on.
+func decodeLegionAgentBody(w http.ResponseWriter, r *http.Request, into any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, legionAgentBodyLimit)
+	err := json.NewDecoder(r.Body).Decode(into)
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooLarge):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("the body is past %d bytes", legionAgentBodyLimit))
+		return false
+	case err != nil:
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
+		return false
+	}
+	return true
+}
+
+// legionAgentSessionHandler serves /v1/legion/agents/sessions/<session_id>. GET answers the
+// session's entry, its replacement within its role token and whether it is live, or
+// `404 {"error":"unknown legion agent <id>"}` when the bucket holds no entry for it. PUT records the
+// one entry its body holds, whose session_id must be the path's, and answers it as stored.
+func legionAgentSessionHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/legion/agents/sessions/")
+		if sessionID == "" {
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			ctx, cancel := legionAgentReadContext(r)
+			defer cancel()
+			agent, err := d.legionAgents.Get(ctx, sessionID)
+			switch {
+			case errors.Is(err, legionagents.ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "unknown legion agent "+sessionID)
+			case err != nil:
+				writeLegionAgentError(w, err)
+			default:
+				writeJSON(w, http.StatusOK, answerLegionAgent(d.sessions, agent))
+			}
+		case http.MethodPut:
+			if err := legionagents.ValidateSessionID(sessionID); err != nil {
+				writeLegionAgentError(w, err)
+				return
+			}
+			var entry legionagents.Entry
+			if !decodeLegionAgentBody(w, r, &entry) {
+				return
+			}
+			if entry.SessionID != sessionID {
+				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("session_id %q is not the path's %q", entry.SessionID, sessionID), "session_id")
+				return
+			}
+			stored, err := d.legionAgents.Put(r.Context(), entry)
+			if err != nil {
+				writeLegionAgentError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, stored)
+		default:
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}
+}
+
+// legionAgentRoleHandler serves GET /v1/legion/agents/roles/<role_token>: every session of the role
+// token, newest first, the first being its current holder, `[]` when none.
+func legionAgentRoleHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		token := strings.TrimPrefix(r.URL.Path, "/v1/legion/agents/roles/")
+		if token == "" {
+			writeJSONError(w, http.StatusBadRequest, "role_token is required", "role_token")
+			return
+		}
+		ctx, cancel := legionAgentReadContext(r)
+		defer cancel()
+		agents, err := d.legionAgents.ByRoleToken(ctx, token)
+		if err != nil {
+			writeLegionAgentError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, answerLegionAgents(d.sessions, agents))
+	}
+}
+
+// legionAgentsHandler serves /v1/legion/agents. GET ?issue=<KEY> answers every session of the
+// issue, by role in workflow order, then newest first, `[]` when none. PUT records a batch,
+// `{"entries":[…]}` of at most legionagents.MaxBatch entries in a body of at most
+// legionAgentBodyLimit bytes, all validated and checked before the first write, so one bad entry
+// refuses the batch with nothing written. A write that fails partway is a 503 naming how many
+// entries were written.
+func legionAgentsHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			issue := r.URL.Query().Get("issue")
+			if issue == "" {
+				writeJSONError(w, http.StatusBadRequest, "issue is required", "issue")
+				return
+			}
+			ctx, cancel := legionAgentReadContext(r)
+			defer cancel()
+			agents, err := d.legionAgents.ByIssue(ctx, issue)
+			if err != nil {
+				writeLegionAgentError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, answerLegionAgents(d.sessions, agents))
+		case http.MethodPut:
+			var body struct {
+				Entries []legionagents.Entry `json:"entries"`
+			}
+			if !decodeLegionAgentBody(w, r, &body) {
+				return
+			}
+			if body.Entries == nil {
+				writeJSONError(w, http.StatusBadRequest, "entries is required", "entries")
+				return
+			}
+			stored, written, err := d.legionAgents.PutAll(r.Context(), body.Entries)
+			var conflict *legionagents.ConflictError
+			switch {
+			case err == nil:
+				writeJSON(w, http.StatusOK, map[string][]legionagents.Entry{"entries": stored})
+			case errors.Is(err, legionagents.ErrInvalid), errors.Is(err, legionagents.ErrTooMany), errors.As(err, &conflict):
+				writeLegionAgentError(w, err)
+			default:
+				w.Header().Set("Retry-After", "1")
+				writeJSON(w, http.StatusServiceUnavailable, legionAgentBatchFailure{
+					Error:   fmt.Sprintf("envoy: wrote %d of %d legion agents before the registry failed: %v", written, len(body.Entries), err),
+					Written: written,
+				})
+			}
+		default:
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}
+}
+
 // registerV1Routes builds the /v1 routes over the listener's dependencies, which main hands over
 // only once every store is open, so no handler can see a store that is not.
 func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logger *logging.Logger) {
@@ -1148,6 +1356,9 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
+	v1.HandleFunc("/v1/legion/agents", legionAgentsHandler(d))
+	v1.HandleFunc("/v1/legion/agents/sessions/", legionAgentSessionHandler(d))
+	v1.HandleFunc("/v1/legion/agents/roles/", legionAgentRoleHandler(d))
 
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
