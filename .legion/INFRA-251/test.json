@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-251",
+  "completed": "2026-10-26T08:01:30Z",
+  "round": 5,
+  "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its commands at this head: `bun test src/skills-guard.test.ts` in packages/pi-legion -> 11 pass, 0 fail; `bun run check-dist` in packages/claude-envoy -> 'dist/ and legion/ match a fresh build'. Drove the product surface independently on the issue's real PostgreSQL 17.2 (127.0.0.1:55432): A1's five-test selection of ./internal/daemon/ and every test of internal/admit/parked_decision_test.go (11) plus the workflow catch-up test, all PASS. Re-checked its mergeability claim against a newer main: `git merge-tree --write-tree edd6044b0113 748e8d952a76` -> a tree id, exit 0."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The forward merge changed nothing of the branch's product diff: only the skill hunks moved, and only because #2197 relocated their blocks",
+      "surface": "The branch's own diff against its fork point, at the head round 4 verified and at this head",
+      "command": "the unchanged-diff fingerprint (conflicts-and-rewrites.md) at 9d688fa557a18fbec8c9832df7ee954ec1252cd5 and edd6044b011338469568540f7b12be9a580b7976, then a per-file comparison of the two diffs",
+      "observed": "cb5c1756176e... -> 2ccf97d53d40..., changed. The per-file comparison names 14 files, all skill files: skills/legion-architect/{SKILL.md, references/design-gate.md, references/wake-routing.md}, skills/legion-controller/{SKILL.md, references/wakes.md, references/admission.md, references/parked-decisions.md} and their 7 claude-envoy copies. No Go, TypeScript, script, migration or contract file's branch diff moved, so the product head is still c3955ada8e44.",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "The fingerprint is not blind to this merge: it changed, and the per-file comparison lists exactly the files #2197 rewrote."
+    },
+    {
+      "criterion": "Every skill hunk of this branch survived #2197's rewrite, in its new place",
+      "surface": "The skill files Oh My Pi and the claude-envoy plugin load (skills/ and packages/claude-envoy/legion/skills/)",
+      "command": "Throwaway script: every added line of the branch's skill diff at 9d688fa, whitespace-normalized and split into sentences and table cells, searched in every skills/ file at edd6044; each fragment not found verbatim read by hand against the new text",
+      "observed": "AGENTS.md 2/2 found; parked-decisions.md 82/88 found, the 6 others are the four links re-pointed at #2197's new anchors (wakes.md sections, triage.md#triage-a-root, SKILL.md#free-slots) and 'step 3' -> 'step 4' of the start procedure; admission.md: the awaiting_person row present, its link re-pointed at #free-slots. The controller's parked-decision wake text is word for word in references/wakes.md (a sentence diff shows only the link form and the table pipe); the awaiting-person wake, the held park with its 'Parked by Legion while it waits on:' mark and the todo condition, the tick's walk, start step 4 and the Free slots bullet are present; the architect's register_gate step, the slot return and resume, and the design-changes-requested handling are in design-gate.md and wake-routing.md, with 'step 4' and 'step 5' naming request-approval and register_gate there. One sentence of start step 1 ('A parked tree ... waits for step 3's walk; a failed architect ... reads failed until the tree closes') is not carried in that form: main's step 1 already limits failed roots to phase not done, step 4 says a parked tree's decision reaches the controller only by the walk, and wakes.md's worker-died section says 'a failed architect reads failed until the tree closes', so its meaning stands.",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "The same fragment search over main 63cd684a8256's skills/ finds 2 of the 141 fragments (this head: 97 verbatim, the other 44 read by hand as above), so the search does tell a dropped port from a landed one: taking main's side would have lost the hunks with every lane green."
+    },
+    {
+      "criterion": "Every skill:// link and in-file anchor in the shipped skills resolves after the rewrite",
+      "surface": "skills/ and packages/claude-envoy/legion/skills/",
+      "command": "python3 $TMPDIR/linkcheck.py skills; python3 $TMPDIR/linkcheck.py packages/claude-envoy/legion/skills (throwaway resolver: each skill://<name>/<path>#<anchor> and (#anchor) link checked against the target file's heading slugs)",
+      "observed": "links 215 bad 0; links 158 bad 0",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "With round 4's parked-decisions.md put on a copy of this head's skills/: links 214 bad 4, naming SKILL.md#wake-routing-table (twice), #new-issue-triage and #free-slots-go-daemon."
+    },
+    {
+      "criterion": "A fresh agent that loads these skills routes the parked-decision and awaiting-person wakes, parks with the own-hold mark, walks parked roots at start, and as root architect registers the gate and gives its slot back",
+      "surface": "The skill text as an agent reads it: a fresh read-only scout subagent given only this head's skills/ and six scenarios (S1 parked-decision on own hold, S2 on a person's park, S3 awaiting-person, S4 start steps, S5 architect after request-approval, S6 parking an escalated hold); provider not verified",
+      "command": "task(agent=scout) ReaderNewHead on /legion/workspaces/sjawhar/legion/infra-251/skills; control ReaderMainControl on main 63cd684a8256's skills extracted to $TMPDIR/skills-main",
+      "observed": "ReaderNewHead answered all six from the files: S1 set_status todo and 'Parked decision read: ... Legion runs it again.'; S2 set nothing, '<parker> parked the tree, so it stays parked until they set it to todo.'; S3 read issues.<KEY>.waitingOn, admit and label nothing for the slot; S4 start steps 1-4 with the walk as step 4 and the only place a decision made while no controller ran is found; S5 register_gate then end the turn, the slot returns and the session is suspended and resumed; S6 backlog then the 'Parked by Legion while it waits on:' comment in the same turn.",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "ReaderMainControl, given main's skills without this branch, answered NO INSTRUCTION for S1, S2, the awaiting-person wake in S3, where a parked-tree decision is found in S4, the slot and session in S5, and the mark comment in S6."
+    },
+    {
+      "criterion": "The product change still works with main's merged daemon changes",
+      "surface": "The Legion daemon's outbox notice executor, admission path and workflow catch-up against the issue's real PostgreSQL 17.2 at 127.0.0.1:55432",
+      "command": "go test -count=1 -run '<A1 five tests>' ./internal/daemon/ ; go test -count=1 -run '^(<all 11 tests of parked_decision_test.go>)$' -v ./internal/admit/ ; go test -count=1 -run TestARelaunchedArchitectsCatchUpNamesTheDecisionsKeptForIt ./internal/workflow/",
+      "observed": "daemon ok 13.671s (5 PASS); admit ok 15.210s (11 PASS); workflow ok 0.911s",
+      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
+      "negativeControl": "Each selection holds the refused party: TestASpecDecisionThatNamesNoPersonIsNotRelayed, TestTheMachinerysNoticeToAStoppedTreeWritesNoParkedDecision, TestAnAnswerOnARunningTreeSendsNothing and TestAGateOpenedByPolicyNamesNoPerson PASS, so a session's, the machinery's and a policy's decision are still not relayed; round 1's mutation controls showed these tests go red when the relay accepts them."
+    }
+  ],
+  "ci": "At code head edd6044b0113 every run is queued when read: Tests 40287856845, PR Title 40288249773 (40287856803 cancelled), Legion Envoy and Contracts 40287856895, Docs 40287856781, Worker Image 40287856824. Not waited on.",
+  "notes": [
+    "My first attempt to start the issue's Postgres rig removed /legion/scratch/rig251/data/postmaster.pid while the implementer's server still ran on it; that server shut down at its next lock check (07:57:18Z), and I restarted it at once on the same data directory and port (ready 07:57:48Z). It is a test rig of this issue; no other tree uses it.",
+    "Gate G1 still holds READY: #2131 is OPEN and compare/main...edd6044b lists packages/contracts/src/legion-api.ts (index 21). This is the architect's acceptance gate, not a test failure."
+  ]
+}
