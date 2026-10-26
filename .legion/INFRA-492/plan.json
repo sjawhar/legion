@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-492",
+  "completed": "2026-10-26T21:04:34Z",
+  "planDocument": "dispatch://INFRA-492/artifact/plan-md",
+  "base": "main 16e4bb0f758e",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's proof on a production-like surface (references/pr-body.md), the simplify pass, the push and PR body, and the production check after the close (references/merge-gate.md).",
+      "ce-simplify-code: the simplify pass over the rewritten refresh rules, scheduler and query client before the head that merges.",
+      "envoy: envoy_send of the pull request number to INFRA-258's owner session 01a1708c-1459-7298-8fc6-6e59db682fec (architect's note dispatch://INFRA-492/comment/8a3c1263-e4d0-48f6-ac8a-fa6f3c89257c).",
+      "dispatch: the production check's record and any failed-check ask follow its writing rules."
+    ],
+    "test": [
+      "legion-worker: re-running the implementer's proofs (both browser tests at the head and at the exported base tree, the Go api suite with DISPATCH_TEST_DATABASE_URL set, the web unit suite) and recording proof entries with negative controls (references/pr-body.md)."
+    ],
+    "review": [
+      "legion-worker: review threads and the approval of the head by SHA (references/review-threads.md, references/merge-gate.md), with the plan's departures and decisions as the contract to check against."
+    ]
+  },
+  "tasks": [
+    "1 Server: GET /api/v1/issues/{key}/summary and GET /api/v1/projects/{key}/artifacts/{slug}/summary (authAny), registeredRoutes 140, Go tests.",
+    "2 Server: issue.created/updated/closed payloads gain changed and ancestors; status-changing ones gain thread_logins (issue_patch.go, issue_create.go).",
+    "3 Server: comment/message/ask events gain thread_logins from user_threads after the insert, same transaction.",
+    "4 Server: user_state.updated gains changed (pinned, last_read_seq, dismissed); no issue key.",
+    "5 Server: GET /api/v1/events answers X-Dispatch-Event-Replay: complete for a resuming since at or below the head.",
+    "6 Go tests for 2-5.",
+    "7 Contracts: optional TS and zod fields; summary response types.",
+    "8 Web client: getIssueSummary, getProjectDocumentSummary.",
+    "9 Web references: issue and issue-document links read [issue-summary, K]; project documents [doc-summary, P, slug]; ask/comment links drop the issue read; message links move to [issue-message, K, id]; inline document links read no text; staleTime Infinity, no focus refetch.",
+    "10 Web: eventRefreshTargets in new api/event-refresh.ts with per-family rules, data predicates and fallbacks for events without the new fields; dead keys removed.",
+    "11 Web: query-refresh.ts scheduler (100 ms batch, 1 s per query, in-flight then on settle, never cancel, deferred predicates, inactive marked stale, live excluded).",
+    "12 Web: api/query-client.ts QueryClient subclass whose invalidations never cancel; main.tsx uses it.",
+    "13 Web: reconnect skips the whole-cache refresh when the replay header says complete.",
+    "14 Web: the issue pin mutation refreshes [issues, pinned].",
+    "15 Tests: rewrite sse.test.ts, sse-reconnect.test.tsx, live.e2e.ts (120-157, 443-517, 564-612), deep-links.e2e.ts 686-731, nav.e2e.ts 41-69; new scheduler unit tests.",
+    "16 Tests: e2e/refetch-budget.e2e.ts with the budget and sidebar acceptance tests, a transport-agnostic event barrier, run at the head and at the exported base tree.",
+    "17 Tests: e2e checks for pin across tabs, Replies count per thread, project-list throttle.",
+    "18 Docs: packages/dispatch/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md.",
+    "19 PR body with both runs; envoy_send to INFRA-258's owner; port into api/event-feed.ts if INFRA-258 merges first."
+  ],
+  "acceptance": [
+    {
+      "criterion": "Spec acceptance 1 (budget and freshness)",
+      "surface": "Dispatch in Chromium against the branch's Go server and a loopback Postgres",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=<loopback> bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/refetch-budget.e2e.ts -g budget; the same file at $TMPDIR/infra492-base (git archive of the base) must fail on the counts"
+    },
+    {
+      "criterion": "Spec acceptance 2 (sidebar keeps first responses)",
+      "surface": "same",
+      "command": "same file, -g sidebar, at the head and at the base"
+    },
+    {
+      "criterion": "Spec item 2 requirements with no spec check (pin across tabs, Replies per thread, list throttle)",
+      "surface": "same",
+      "command": "e2e/refetch-budget.e2e.ts task 17 tests"
+    },
+    {
+      "criterion": "Rules and scheduler",
+      "surface": "web unit suite",
+      "command": "cd packages/dispatch && bun run test"
+    },
+    {
+      "criterion": "Server routes and event fields",
+      "surface": "Go api package on a real Postgres",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/api/ -count=1 -timeout 55m"
+    },
+    {
+      "criterion": "Spec acceptance 3 (production check)",
+      "surface": "deployed Dispatch",
+      "command": "dispatch-production-check.sh --commit <merge sha> --page / --route /api/v1/inbox --route /api/v1/issues/INFRA-492/summary --route /api/v1/projects/INFRA/artifacts/goals-md/summary"
+    },
+    {
+      "criterion": "Spec acceptance 4 (request log over 10 minutes)",
+      "surface": "Dispatch's request log, every server pod, after INFRA-507 is applied",
+      "command": "kubectl -n dispatch logs <pod> -c envoy-dispatch --since=10m; mean rate count/600 per (caller, user agent) over caller_kind=user lines excluding GET /api/v1/events and /ws/*, worst 60 s window beside it, only pairs that also request a /summary route; p50/p95/max of the three sidebar routes"
+    }
+  ],
+  "decisions": [
+    "Summary reads are path-addressed because the production check passes only a route answering 200 or 403.",
+    "Agent-artifact links keep their read: no event refreshes it and it never held an issue read.",
+    "Events gain only optional fields, no new type (an old tab refreshes everything on an unknown type); every rule falls back to today's breadth when its field is absent.",
+    "user_state.updated gets changed, not an issue key, so it does not broadcast which issue each person reads.",
+    "Status changes refresh the details named in ancestors; parent, components or repo changes refresh every active detail.",
+    "No two requests in flight covers every refetch, through a QueryClient subclass, not only event-driven ones; when a fetch outlasts a second the in-flight rule wins.",
+    "A resuming reconnect with a complete replay refreshes nothing, so tab focus does not refetch every query (needed for the production rate bar).",
+    "The production rate is the mean over 10 minutes per (caller, user agent); served times are informational, since the spec sets no threshold.",
+    "Memory measured with kubectl top (comment 8d3d6ac7) is not in the approved acceptance and the worker cannot run it (pods.metrics.k8s.io forbidden at planning); not planned, the architect decides."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Acceptance test 1 cannot fail at the base with the links only in the spec: the live editor makes no per-reference reads.", "answer": "Departure recorded: the 50 links go in the spec and in a Conversation message; the test opens the Conversation tab."},
+      {"finding": "Both browser tests need a visible sign that an event was processed, without relying on the event-stream transport.", "answer": "Task 16 barrier: write the open issue's title until its detail read is requested once more and the header shows the title, retried every 2 s; works at both commits and under INFRA-258's transport."},
+      {"finding": "Each test must run unchanged at the base and fail on the stated assertion; polls and the iPhone project affect the budget.", "answer": "Task 16: only helpers present at the base; base tree exported with git archive; must fail on counts; the two 15 s polls count toward the 5; chromium carries the numbers, iphone must pass with the drawer opened."},
+      {"finding": "Existing tests pin today's breadth (sse.test.ts, sse-reconnect.test.tsx, live.e2e.ts three tests, deep-links, nav, delivery-live, Inbox.no-broker).", "answer": "Task 15 names each with its new expected value; refreshQueries with no keys keeps the whole-cache contract; live queries stay excluded."},
+      {"finding": "Item 4 can cover event refreshes only or every refetch, and 'within a second' conflicts with 'never two in flight' when a fetch is slow.", "answer": "Decision 7: every refetch, through a QueryClient subclass; decision 6: the in-flight rule wins over the 1 s bound."},
+      {"finding": "Whole-cache refreshes on every reconnect (each tab focus) and focus refetches may break the production 2/s bar; the bar has no definition.", "answer": "Decision 8 and task 13: replay header skips the refresh on a complete replay; summaries are staleTime Infinity with no focus refetch; decision 9 defines the rate as the 10-minute mean with the worst 60 s window beside it."},
+      {"finding": "The production measurement's mechanics are unspecified: old bundles, several pods, log format, restarts, load context, no pass rule for served times.", "answer": "Decision 9 and the production evidence section: only pairs that request a /summary route count; every pod; slog text fields; --previous across a restart; write rate quoted; served times informational."},
+      {"finding": "The spec's ask id differs from the one INFRA-507 cites.", "answer": "Checked: both dispatch://INFRA-492/ask/c1262b54-763f-484d-9eea-56a2d2cc71db and dispatch://INFRA-492/ask/d509ecc9-16eb-4e8c-baf5-9bc3f8931a15 resolve to the same answered question; nothing to correct."},
+      {"finding": "The measurement depends on INFRA-507 being applied by another session.", "answer": "Production evidence section: the check reports pending, naming the unmet prerequisite (deploy carrying the merge; can-i answering yes)."},
+      {"finding": "kubectl top before and after (comment 8d3d6ac7) is not in the approved acceptance.", "answer": "Not planned; the worker identity is refused pods.metrics.k8s.io; named for the architect."},
+      {"finding": "Mixed versions during rollout: replayed old events, old pods, unknown types, a summary 404 from an old pod.", "answer": "Decision 3: optional fields, no new type, per-rule fallback to today's breadth; a summary 404 leaves the link on its short form, as a failed read does today."},
+      {"finding": "Related issue refreshes cannot be computed from the cache when a middle issue is uncached; repo is missing from the triggers; create with a parent emits no child.added.", "answer": "Decision 4 and task 2: ancestors in the issue event payloads; status refreshes the named ancestors; parent, components or repo refresh every active detail; issue.created carries changed and ancestors."},
+      {"finding": "An issue key on user_state.updated would broadcast which issue each person reads.", "answer": "Decision 3: changed only, no issue key."},
+      {"finding": "Coordination with INFRA-258 is wider than the note says, and INFRA-258 may merge first.", "answer": "Task 10 keeps the rules in api/event-refresh.ts behind one call; task 19 names every change in the message and the port into api/event-feed.ts if it merges first."},
+      {"finding": "Requirements with no acceptance check: pin across tabs, Replies per thread, the 1 s throttle, the project-document rule.", "answer": "Task 17 e2e checks and the scheduler unit tests; task 10 states the project-document rule (events for that artifact id)."},
+      {"finding": "The production check's --route needs exact values and a path, not a query.", "answer": "Acceptance table: --route /api/v1/inbox, /api/v1/issues/INFRA-492/summary, /api/v1/projects/INFRA/artifacts/goals-md/summary."},
+      {"finding": "Documents the change reaches.", "answer": "Task 18 lists each."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Acceptance 1: a browser test opens an issue page whose spec links 50 different issues and waits until every reference shows its title.",
+      "plan": "The 50 links go in the issue's spec and in one message on it; the test opens the issue's Conversation tab, where the references render with titles.",
+      "evidence": "The live spec editor keeps the author's link text and makes no per-reference read (packages/dispatch/e2e/doc.e2e.ts:672-678); RefLink reads happen only in rendered Markdown (packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx:105-126). With the links only in the spec, no reference shows a title and the base commit makes none of the ~1,000 requests, so the test could not fail there.",
+      "outcome": {"kind": "changed", "acceptance": ["Acceptance 1's page is the issue's Conversation tab holding the 50 links in a message; its numbers are unchanged."]}
+    }
+  ]
+}
