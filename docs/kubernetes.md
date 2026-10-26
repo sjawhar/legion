@@ -297,7 +297,7 @@ name (`task(agent="…")`, `skill://…`) resolved by name through the same laun
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
 `ce-simplify-code` with Legion's other skills in its `dist/skills`; the Envoy plugin ships the
-`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-brainstorming` and `envoy` skills in its), so a build whose OMP or plugins are
+`asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `envoy` skills in its), so a build whose OMP or plugins are
 broken fails instead of publishing. The build has none of the operator's model configuration, so it
 leaves those agents' models unresolved (`--skip-agent-models`). It then checks every image-site row of
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
@@ -3377,13 +3377,21 @@ dies (`git remote-https`, `git index-pack`). It serves, on port 8418:
 - `GET /readyz`: 503 until the first clone is whole, then 200, with nothing else; the pod's
   readiness probe, which carries no token.
 - `GET /healthz`: `503 {"ready":false,…}` until the first clone is whole, then `200 {"ready":true,
-  "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>}`; it
-  waits on no fetch, and answers any request, since it holds nothing secret and nothing of the
-  repository's content.
+  "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>,
+  "streams":<s>}`, `streams` being the `/tar` requests it is sending or holding in its queue at the
+  answer; it waits on no fetch, and answers any request, since it holds nothing secret and nothing
+  of the repository's content.
 - `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/`,
   `objects/pack/pack-<id>.pack` and the `objects/pack/pack-<id>.idx` git reads each pack through,
   no loose object or configuration — which waits for a fetch under way to finish, so it never
-  streams a half-written ref or pack, and waits for no repack.
+  streams a half-written ref or pack, and waits for no repack. At most 32 streams are sent at once
+  (`maxStreams`, `internal/repocache/server.go`); a request past them waits, first come first
+  served, for one to end, within its own deadline. Streams share the cache pod's sending rate
+  evenly, so without the bound a large launch slows every stream at once until none finishes: on
+  2026-10-26 one cache sent a 4.0 GB clone (51 packs) at about 400 MB/s in all over 290 streams,
+  about 48 minutes before any reached its last byte, past the fetch's 30-minute `FetchTimeout`, and every
+  fetch failed and started over. Bounded, each stream takes its share among 32 and the queue
+  drains at the same total rate.
 
 `/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
 401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
@@ -3476,8 +3484,17 @@ An issue pod's launch makes its repository's cache when there is none yet, and t
 the cache of each repository it serves at boot and on every orphan sweep after it, once a minute:
 a missing cache is created (its Sandbox `Suspended`, then its Secret owned by that Sandbox, then
 its pod template and `Running`), and a cache whose pod runs another image than the daemon's, has
-ended, or was left `Suspended` gets a new pod while its Sandbox and volume stay, so a new release
-costs a pod, not a clone. A launch whose cache cannot be made fails, naming why. The cache of a
+ended, or was left `Suspended`, or whose Sandbox's pod template reserves other than
+`runtime.kubernetes.repository_cache.resources` now says, gets a new pod while its Sandbox and
+volume stay, so a new release or a new reservation costs a pod, not a clone. The reservation is
+read from the Sandbox's pod template, never from the pod, since GKE Autopilot rewrites a pod's
+requirements at admission. A pod still running is replaced only once it serves no stream: the
+daemon asks its `/healthz` first, whose `streams` counts the tars it is sending or holding in its
+queue, and while that is above 0 it logs `repository cache pod is replaced once it serves no
+stream` and leaves the pod to a later sweep, because the replacement would end every one of those
+tars, failing each fetch reading one and making its issue pod again. A cache of an earlier release
+answers no `streams`, and one whose `/healthz` cannot be read is replaced at once, as before. A
+launch whose cache cannot be made fails, naming why. The cache of a
 repository the mapping no longer names is annotated `legion.dev/cache-unmapped-at` at the sweep
 that finds it so, kept for `runtime.kubernetes.repository_cache.retain_hours` (168 by default), and
 then deleted with its volume and Secret; mapped again before that, it loses the annotation and
