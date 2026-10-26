@@ -160,7 +160,12 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { gatedWrite, mintMarker, setStoreMode } from "@legion/envoy-client/askgate-marker";
+import {
+  gatedWrite,
+  mintMarker,
+  setStoreMode,
+  uploadIsDocument,
+} from "@legion/envoy-client/askgate-marker";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
@@ -194,8 +199,6 @@ const SPEC_FLAGS = ["--spec", "--spec-file"];
  * a file's type from its path. The gate also reviews an upload whose `--name` ends in `.md`.
  */
 const UPLOAD_COMMAND = "artifact";
-const MARKDOWN_NAME = /\.md$/i;
-const MARKDOWN_PATH = /\.(md|markdown)$/i;
 /** The upload flags whose text is the document itself. */
 const INLINE_FLAGS = ["--content", "--content-file"];
 /** The upload flags that read the name or the path from a file, which only the dry run resolves. */
@@ -701,7 +704,8 @@ const flagName = (flag: Word) => flag.value.split("=", 1)[0];
 
 /**
  * Whether an upload's words leave it possibly a markdown document: inline text, a name or path read
- * from a file, or a name or path that is not literal (an expansion, a glob), or that is markdown's.
+ * from a file, or a name or path that is not literal (an expansion, a glob), or whose literal value
+ * makes one by the CLI's own predicate (`uploadIsDocument`, which trims the name as Dispatch does).
  * Only an upload whose literal name and literal path are both no markdown's is not one. An upload
  * with no `--name` or no `--path` and no inline text is one the CLI refuses before it sends.
  */
@@ -726,8 +730,7 @@ function uploadMayBeDocument(flags: readonly Word[]): boolean {
   return (
     !named.literal ||
     !file.literal ||
-    MARKDOWN_NAME.test(named.value) ||
-    MARKDOWN_PATH.test(file.value)
+    uploadIsDocument({ name: named.value, path: file.value })
   );
 }
 

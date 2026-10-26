@@ -3205,6 +3205,17 @@ console.log(JSON.stringify(args, null, 2));
         ["dispatch_artifact", "verdict"],
       ]);
     });
+    // The attack on the marker design at cf3f1e021, N7: the CLI's predicate trims the name, as
+    // Dispatch does, and the gate's did not, so the gate let `brief.md ` through unread and the CLI
+    // refused it for its missing marker. Both sides now use one predicate.
+    test("N7: a --name with a blank after .md is reviewed and marked, as the CLI gates it", async () => {
+      fs.writeFileSync(path.join(work, "n7-shot.png"), "image bytes");
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash("n7", "dispatch artifact --issue DSP-1 --name 'brief.md ' --path n7-shot.png");
+      expect(g.calls).toHaveLength(1);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([["dispatch_artifact", "verdict"]]);
+      expect(markersIn(g.store)).toMatchObject([{ outcome: "verdict" }]);
+    });
     test("other writes keep the full rules and do not get the upload instruction", async () => {
       const g = bind({ env: STUB, cwd: work });
       await g.bash("u8", ASK);
