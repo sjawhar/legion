@@ -3324,7 +3324,7 @@ describe("the literal grammar, widened to forms with no expansion", () => {
 
   /** What the CLI prints for a gated write with no marker, built on consumeMarker's own reason. */
   const unmarked = (mode: "block" | "warn") => {
-    const spent = consumeMarker([], ["comment"], {}, Date.now());
+    const spent = consumeMarker([], ["comment"], {}, [], Date.now());
     if (spent.ok) throw new Error("an empty store gave a marker");
     return mode === "block"
       ? `dispatch comment was not called: AskGate is on for this session, and ${spent.why}. Send the write again in that form.`

@@ -3852,7 +3852,8 @@ export async function executeDispatchTool(
               file:
                 input.uploadBytes === undefined
                   ? Bun.file(resolvePath(input.cwd, stringArg(args, "path")))
-                  : new Blob([input.uploadBytes], {
+                  : // The copy gives the bytes a plain buffer of their own, which a Blob takes.
+                    new Blob([new Uint8Array(input.uploadBytes)], {
                       type: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))).type,
                     }),
               ...(summary === undefined ? {} : { summary }),
