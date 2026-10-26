@@ -2855,8 +2855,8 @@ dies (`git remote-https`, `git index-pack`). It serves, on port 8418:
   (`maxStreams`, `internal/repocache/server.go`); a request past them waits, first come first
   served, for one to end, within its own deadline. Streams share the cache pod's sending rate
   evenly, so without the bound a large launch slows every stream at once until none finishes: on
-  2026-10-26 one cache sent a 2.1 GB clone at about 400 MB/s in all over 290 streams, about 29
-  minutes before any reached its last byte, past the fetch's 30-minute `FetchTimeout`, and every
+  2026-10-26 one cache sent a 4.0 GB clone (51 packs) at about 400 MB/s in all over 290 streams,
+  about 48 minutes before any reached its last byte, past the fetch's 30-minute `FetchTimeout`, and every
   fetch failed and started over. Bounded, each stream takes its share among 32 and the queue
   drains at the same total rate.
 

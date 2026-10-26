@@ -91,8 +91,8 @@ var repackTimeout = 2 * time.Hour
 // maxStreams is how many /tar streams the cache sends at once; a request past it waits for a stream
 // to end, first come first served, within its own deadline. The streams share the pod's sending
 // rate evenly, so with no bound every stream slows as the next pod launches, and a large launch
-// leaves none of them done: on 2026-10-26 a 2.1 GB clone's cache sent about 400 MB/s in all over
-// 290 streams at once, about 29 minutes before any reached its last byte, past the 30 minutes an
+// leaves none of them done: on 2026-10-26 a 4.0 GB clone's cache sent about 400 MB/s in all over
+// 290 streams at once, about 48 minutes before any reached its last byte, past the 30 minutes an
 // issue pod's fetch gives the stream and its verification (workspace.FetchTimeout), so every fetch
 // failed and started over. Bounded, a stream takes its share of the rate among maxStreams, and the
 // queue drains at the same total rate.
