@@ -123,8 +123,9 @@ func liveProofApps(environ []string) (implement, review liveProofApp, err error)
 }
 
 // liveProofAppsFrom is liveProofApps reading the lib at lib. It refuses anything but exactly six
-// fields, each non-empty and on one line, and a key command that failed, so a lib that wrote
-// stray output or printed no command never yields an App.
+// fields, each non-empty and on one line, and a key command that failed. Stray output on a line
+// of its own is refused with them; stray output with no line break joins a field, which the
+// gated path's GET /app check then refuses, since no key signs for that id.
 func liveProofAppsFrom(lib string, environ []string) (implement, review liveProofApp, err error) {
 	const script = `set -euo pipefail
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -338,25 +339,31 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	})
 
 	t.Run("a lib whose output is malformed yields no App", func(t *testing.T) {
-		// Each scratch lib sources the real one, then breaks one thing about what it prints.
+		// Each scratch lib sources the real one, then breaks one thing about what it prints. The
+		// control breaks nothing, so a scratch lib that fails to load cannot pass as a refusal.
 		real, err := filepath.Abs(githubAppsLib)
 		if err != nil {
 			t.Fatal(err)
 		}
 		wrap := `eval "$(declare -f require_app_inputs | sed '1s/^require_app_inputs/real_require_app_inputs/')"` + "\n"
-		for name, body := range map[string]string{
-			"a seventh field":             wrap + `require_app_inputs() { real_require_app_inputs "$@"; printf 'extra\0'; }`,
-			"stray output before a field": wrap + `require_app_inputs() { real_require_app_inputs "$@"; echo debug; }`,
-			"an empty key command":        `app_key_command() { :; }`,
-			"a key command that failed":   `app_key_command() { printf 'secrets %s' "$1"; return 3; }`,
-			"a key command on two lines":  `app_key_command() { printf 'secrets %s\nmore' "$1"; }`,
+		for _, scratch := range []struct{ name, body, refusal string }{
+			{"the control", wrap + `require_app_inputs() { real_require_app_inputs "$@"; }`, ""},
+			{"a seventh field", wrap + `require_app_inputs() { real_require_app_inputs "$@"; printf 'extra\0'; }`, "printed 7 fields"},
+			{"stray output on a line of its own", wrap + `require_app_inputs() { real_require_app_inputs "$@"; echo debug; }`, "field 1 of the two Apps empty or on more than one line"},
+			{"an empty key command", `app_key_command() { :; }`, "field 3 of the two Apps empty or on more than one line"},
+			{"a key command that failed", `app_key_command() { printf 'secrets %s' "$1"; return 3; }`, "exit status 3"},
+			{"a key command on two lines", `app_key_command() { printf 'secrets %s\nmore' "$1"; }`, "field 3 of the two Apps empty or on more than one line"},
 		} {
 			lib := filepath.Join(t.TempDir(), "github-apps.sh")
-			if err := os.WriteFile(lib, []byte("source "+strconv.Quote(real)+"\n"+body+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(lib, []byte("source "+strconv.Quote(real)+"\n"+scratch.body+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if implement, review, err := liveProofAppsFrom(lib, with()); err == nil {
-				t.Errorf("%s: got Apps %+v and %+v, want a refusal", name, implement, review)
+			implement, review, err := liveProofAppsFrom(lib, with())
+			switch {
+			case scratch.refusal == "" && (err != nil || implement.id != defaults["implement_app_id"] || review.id != defaults["review_app_id"]):
+				t.Errorf("%s: got Apps %+v and %+v (err %v), want the lib's default pair", scratch.name, implement, review, err)
+			case scratch.refusal != "" && (err == nil || !strings.Contains(err.Error(), scratch.refusal)):
+				t.Errorf("%s: got Apps %+v and %+v (err %v), want a refusal saying %q", scratch.name, implement, review, err, scratch.refusal)
 			}
 		}
 	})

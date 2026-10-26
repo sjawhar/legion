@@ -40,8 +40,8 @@ own unless the four App inputs name another's. It reads both Apps by running
 key command, with no copy of its own: each unset input takes this deployment's value, and a
 malformed one fails the run by name, never printing it. Before it acts, it proves both Apps
 against GitHub's `GET /app` as the stage proofs do (the lib's `check_github_apps` on the very block
-it uses), which needs `bun` and `jq` on `PATH`. The ungated `TestLiveProofAppsReadTheLib` proves
-the read in every `go test`.
+it uses), which needs `bun` on `PATH` (and `jq` for its log line). The ungated
+`TestLiveProofAppsReadTheLib` proves the read in every `go test`.
 It resolves each
 App key through its `private_key_command`, mints each App's lease through the real token source,
 writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against
@@ -68,7 +68,7 @@ READY must be accepted, or refused only by a check that runs after it: the head'
 conflict or a by-hand file list. It only reads GitHub; the pull request and its
 two heads are the operator's to make and close. As `TestRealGitHubCredentialSurface` does, it reads
 both Apps from [`lib/github-apps.sh`](#libgithub-appssh) and checks them against `GET /app` before
-it acts, which needs `bun` and `jq` on `PATH`.
+it acts, which needs `bun` on `PATH` (and `jq` for its log line).
 
 
 ## stage1-skeleton.sh
