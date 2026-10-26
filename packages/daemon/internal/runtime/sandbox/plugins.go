@@ -11,7 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// pluginsRoot is where a role's installed plugin generations live, under its own state home
+// pluginsRoot is where a role's installed plugin generations live, under the role's state home
 // (roleStateHome): <role state home>/legion-plugins. Not the Oh My Pi profile's plugin directory
 // (ompProfileDir+"/plugins") and nowhere extension discovery reads, so an installed pair never
 // loads twice (the boot gate's pod lane refuses an image where it would).

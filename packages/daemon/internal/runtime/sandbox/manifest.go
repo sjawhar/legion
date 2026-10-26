@@ -714,7 +714,7 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 // The XDG base directories, at the standard offsets from the image's HOME: what the issue pod's
 // workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role is
 // told none of the three home-directory ones: its cache and data homes are the issue's
-// scratch's, shared with every other role of the pod, and its state home its own directory under
+// scratch's, shared with every other role of the pod, and its state home a directory per role under
 // that scratch (roleEnvironment). The config home is the one path a role is told the same as
 // workspace-init. There it is the pod's shared in-memory volume: jj keeps a repository's `--repo`
 // configuration under $XDG_CONFIG_HOME/jj/repos/, so workspace-init writes Legion's settings of the
@@ -737,7 +737,7 @@ const (
 // what each role is told — workspace-fetch is told none (fetchEnvironment), and neither is the
 // controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role is told none
 // of them but the config home, at whose path it sees its own; its cache and data homes are the
-// issue's scratch's and its state home its own directory there (roleEnvironment).
+// issue's scratch's and its state home a directory per role there (roleEnvironment).
 func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -792,7 +792,7 @@ func roleEnvironment(role claim.Role) []corev1.EnvVar {
 }
 
 // roleStateHome is the XDG_STATE_HOME a role's agent is told, `/legion/scratch/state/<role>`: the
-// one directory of the issue's scratch that is the role's own rather than the issue's, in a pod
+// one directory of the issue's scratch that is one per role rather than one for the issue, in a pod
 // whose roles share the network namespace, the workspace path and the rest of that
 // scratch. Oh My Pi keeps its browser broker's lock under its state root (`run/daemons/<hash of
 // the workspace's real path>/broker.pid`), taken as an abstract unix socket named from the lock

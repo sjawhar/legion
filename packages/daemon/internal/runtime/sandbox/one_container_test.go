@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -577,6 +578,50 @@ func TestASharedLogStillPastTheBoundOnItsSecondReadSaysSo(t *testing.T) {
 	}
 	if served != 2 {
 		t.Fatalf("the log was read %d times for one role, want twice", served)
+	}
+}
+
+// A second read that fails (the shared bound expiring, or the API refusing the stream) keeps the
+// first read's lines: the quote is what the cut read held, with the note that it is not the
+// container's newest, never a bare "could not be read" that throws those lines away.
+func TestASharedLogsFailedSecondReadKeepsTheFirstRead(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	status := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "roles", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+	}}}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), podObject(name, recorded, sandboxUID, labels, status)}, withoutController())
+	padding := strings.Repeat("x", 64<<10)
+	log := make([]string, 0, sharedLogLines)
+	for i := range sharedLogLines {
+		log = append(log, fmt.Sprintf("tester: line %d %s", i, padding))
+	}
+	served := 0
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		served++
+		if served == 2 {
+			return true, nil, context.DeadlineExceeded
+		}
+		return true, &k8sruntime.Unknown{Raw: servedTail(t, action, log)}, nil
+	})
+	obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if served != 2 {
+		t.Fatalf("the log was read %d times for one role, want twice", served)
+	}
+	if strings.Contains(obs.Detail, "could not be read") {
+		t.Fatalf("the quote dropped the first read for the second's error: %.300q", obs.Detail)
+	}
+	if !strings.Contains(obs.Detail, fmt.Sprintf("line 126 %s", padding)) {
+		t.Fatalf("the quote %.300q…%.200q lacks the first read's last whole line", obs.Detail, obs.Detail[max(0, len(obs.Detail)-200):])
+	}
+	if !strings.HasSuffix(obs.Detail, logBoundNote(sharedLogReadBytes)) {
+		t.Fatalf("the quote ends %.200q, want %q", obs.Detail[max(0, len(obs.Detail)-200):], logBoundNote(sharedLogReadBytes))
 	}
 }
 

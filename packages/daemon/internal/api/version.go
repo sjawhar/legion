@@ -274,7 +274,7 @@ package api
 // is 751 MiB of build cache and 375 MiB of module cache for this repository, so the five
 // redundant copies would be about 5.5 GiB spent on nothing. `XDG_STATE_HOME`, whose
 // `/home/legion/.local/state/<role>` entry 18 declared, is the one directory of the scratch that
-// stays the role's own, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
+// stays one per role, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
 // from the state root, the name is an abstract unix socket, and an abstract socket name is one
 // name across every container of the pod, so one state home would block every role's broker but
 // the first. `XDG_CONFIG_HOME` is unchanged, the pod's shared in-memory volume `workspace-init`

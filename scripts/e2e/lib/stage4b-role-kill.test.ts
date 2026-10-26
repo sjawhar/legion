@@ -212,24 +212,6 @@ remove_negative_config && echo removed`,
   });
 });
 
-// Every script that enters a role finds its worker-shim by argv[1] alone, through role_enter_sh,
-// rather than by a matcher of its own that a later argv word could satisfy.
-describe("role entry", () => {
-  test("multi-repo-acceptance.sh enters a role through role-namespaces.sh's role_enter_sh", () => {
-    const script = readFileSync(join(import.meta.dir, "..", "multi-repo-acceptance.sh"), "utf8");
-    expect(script).toContain('. "$script_dir/lib/role-namespaces.sh"');
-    expect(script).toContain('sh -c "$role_enter_sh" role-enter');
-    expect(script).not.toMatch(/grep -qx worker-shim|^role_enter=/m);
-  });
-
-  test("role_enter_sh takes the shim by argv[1] alone", () => {
-    const text = readFileSync(lib, "utf8");
-    const enter = /^role_enter_sh='[\s\S]*?^'$/m.exec(text)?.[0] ?? "";
-    expect(enter).toContain('| sed -n 2p)\\" = worker-shim ]');
-    expect(enter).not.toContain("grep -qx worker-shim");
-  });
-});
-
 // The pod-side /proc readers run here against a fake /proc tree (proc_root), never the host's: a
 // Legion role running on the host has a real `legion worker-shim` with an `omp` child, which a scan
 // of the host's /proc would find.
@@ -295,7 +277,9 @@ describe("agent_pid_sh", () => {
       { pid: 19, ppid: 17, argv: ["omp"] },
     ]);
     const run = probe(root);
-    expect(run.err).toMatch(/^more than one Oh My Pi under a legion worker-shim: pids (9 and 19|19 and 9)$/);
+    expect(run.err).toMatch(
+      /^more than one Oh My Pi under a legion worker-shim: pids (9 and 19|19 and 9)$/
+    );
     expect(run.code).toBe(1);
   });
 });
@@ -320,7 +304,17 @@ describe("role_inits_sh", () => {
       {
         pid: 20,
         ppid: 1,
-        argv: ["legion", "launcher", "role-init", "--role", "planner", "--generation", "3", "--", "x"],
+        argv: [
+          "legion",
+          "launcher",
+          "role-init",
+          "--role",
+          "planner",
+          "--generation",
+          "3",
+          "--",
+          "x",
+        ],
       },
       {
         pid: 30,
@@ -339,10 +333,18 @@ describe("role_enter_sh finds the role-init in the proc root it is given", () =>
   const def = `. ${JSON.stringify(lib)}`;
   test("none of the role is refused, a --role after the shim's -- not counted", () => {
     const root = fakeProc("enter-none", [
-      { pid: 20, ppid: 1, argv: ["legion", "launcher", "role-init", "--role", "tester", "--", "--role", "planner"] },
+      {
+        pid: 20,
+        ppid: 1,
+        argv: ["legion", "launcher", "role-init", "--role", "tester", "--", "--role", "planner"],
+      },
     ]);
     const run = runSnippet(def, 'sh -c "$role_enter_sh" role-enter planner true', root);
-    expect(run).toEqual({ out: "", err: "no role-init of planner runs in this container", code: 1 });
+    expect(run).toEqual({
+      out: "",
+      err: "no role-init of planner runs in this container",
+      code: 1,
+    });
   });
 
   test("two of the role are refused, both named", () => {
@@ -353,6 +355,124 @@ describe("role_enter_sh finds the role-init in the proc root it is given", () =>
     const run = runSnippet(def, 'sh -c "$role_enter_sh" role-enter planner true', root);
     expect(run.err).toBe("two role-init processes of planner run in this container: 20 and 30");
     expect(run.code).toBe(1);
+  });
+});
+
+// role_enter_sh end to end against a fake tree, with a stand-in nsenter on PATH that records the
+// pid it enters and runs the rest of its argv here: the second hop (role_shim_sh) then reads the
+// same fake tree, so it must take the role-init's child whose argv[1] is worker-shim.
+function fakeNsenter(name: string): { bin: string; log: string } {
+  const bin = join(dir, `bin-${name}`);
+  const log = join(dir, `nsenter-${name}.log`);
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, "nsenter"),
+    `#!/bin/sh\nwhile [ "$1" != -- ]; do [ "$1" = -t ] && echo "$2" >>"${log}"; shift; done\nshift\nexec "$@"\n`,
+    { mode: 0o755 }
+  );
+  return { bin, log };
+}
+function runEntered(definition: string, call: string, root: string, bin: string) {
+  const r = Bun.spawnSync(["bash", "-c", `${definition}\n${call}`], {
+    env: { ...process.env, proc_root: root, PATH: `${bin}:${process.env.PATH}` },
+  });
+  return { out: r.stdout.toString().trim(), err: r.stderr.toString().trim(), code: r.exitCode };
+}
+const enterTree = (name: string, shims: FakeProc[]) =>
+  fakeProc(name, [
+    { pid: 1, ppid: 0, argv: ["legion", "launcher", "role-init", "--role", "planner"] },
+    ...shims,
+  ]);
+
+describe("role_shim_sh", () => {
+  const def = `. ${JSON.stringify(lib)}`;
+  test("enters the child of PID 1 whose argv[1] is worker-shim, not a later-word one", () => {
+    const root = enterTree("shim-one", [
+      { pid: 6, ppid: 1, argv: ["bash", "-c", "x", "worker-shim"] },
+      { pid: 7, ppid: 1, argv: ["/opt/legion/bin/legion", "worker-shim", "--", "omp"] },
+      { pid: 8, ppid: 7, argv: ["legion", "worker-shim"] },
+    ]);
+    const { bin, log } = fakeNsenter("shim-one");
+    const run = runEntered(def, 'sh -c "$role_shim_sh" role-shim planner echo in', root, bin);
+    expect(run).toEqual({ out: "in", err: "", code: 0 });
+    expect(readFileSync(log, "utf8")).toBe("7\n");
+  });
+
+  test("no shim is refused", () => {
+    const root = enterTree("shim-none", [
+      { pid: 6, ppid: 1, argv: ["bash", "-c", "x", "worker-shim"] },
+    ]);
+    const { bin } = fakeNsenter("shim-none");
+    const run = runEntered(def, 'sh -c "$role_shim_sh" role-shim planner echo in', root, bin);
+    expect(run).toEqual({
+      out: "",
+      err: "no worker-shim runs in the namespaces of planner",
+      code: 1,
+    });
+  });
+
+  test("two shims are refused, both named", () => {
+    const root = enterTree("shim-two", [
+      { pid: 7, ppid: 1, argv: ["legion", "worker-shim"] },
+      { pid: 17, ppid: 1, argv: ["legion", "worker-shim"] },
+    ]);
+    const { bin } = fakeNsenter("shim-two");
+    const run = runEntered(def, 'sh -c "$role_shim_sh" role-shim planner echo in', root, bin);
+    // The shell's glob lists 17 before 7.
+    expect(run.err).toBe("two worker-shims run in the namespaces of planner: 17 and 7");
+    expect(run.code).toBe(1);
+  });
+});
+
+describe("role_enter_sh runs both hops", () => {
+  test("enters the role-init, then its argv[1] worker-shim, and runs the command there", () => {
+    const root = enterTree("enter-both", [
+      { pid: 6, ppid: 1, argv: ["bash", "-c", "x", "worker-shim"] },
+      { pid: 7, ppid: 1, argv: ["legion", "worker-shim"] },
+    ]);
+    const { bin, log } = fakeNsenter("enter-both");
+    const run = runEntered(
+      `. ${JSON.stringify(lib)}`,
+      'sh -c "$role_enter_sh" role-enter planner sh -c \'echo "$0 $1"\' a "b c"',
+      root,
+      bin
+    );
+    expect(run).toEqual({ out: "a b c", err: "", code: 0 });
+    expect(readFileSync(log, "utf8")).toBe("1\n7\n");
+  });
+});
+
+// multi-repo-acceptance.sh's as_role_probe enters its role through role_enter_sh: run with kubectl
+// exec stubbed to run its command here, with the fake tree as the pod's /proc (kubectl exec passes
+// the caller's environment on to nothing, so as_role_probe's own proc_root never reaches the pod),
+// it reaches the role's worker-shim and hands python3 the probe on stdin with its arguments.
+describe("as_role_probe", () => {
+  const multi = join(import.meta.dir, "..", "multi-repo-acceptance.sh");
+  test("runs the probe in the role's worker-shim", () => {
+    const root = enterTree("probe", [{ pid: 7, ppid: 1, argv: ["legion", "worker-shim"] }]);
+    const { bin, log } = fakeNsenter("probe");
+    writeFileSync(
+      join(bin, "kubectl"),
+      `#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nproc_root=${root} exec "$@"\n`,
+      { mode: 0o755 }
+    );
+    writeFileSync(join(bin, "python3"), '#!/bin/sh\necho "$*"\ncat\n', { mode: 0o755 });
+    const probeScript = join(dir, "as-role.py");
+    writeFileSync(probeScript, "PROBE\n");
+    const run = runEntered(
+      `. ${JSON.stringify(lib)}
+as_role_script=${JSON.stringify(probeScript)} LEGION_E2E_REPO_T=t/r LEGION_E2E_REPO_O=o/r o_owner=o
+${scriptFunctions(multi)("as_role_probe")}`,
+      "as_role_probe pod-x planner /proc https://github.com/o/r /trusted",
+      root,
+      bin
+    );
+    expect(run).toEqual({
+      out: "-I - /proc t/r o/r o https://github.com/o/r /trusted\nPROBE",
+      err: "",
+      code: 0,
+    });
+    expect(readFileSync(log, "utf8")).toBe("1\n7\n");
   });
 });
 
@@ -369,7 +489,9 @@ describe("role_kill_sh reads the proc root it is given", () => {
   });
 
   test("a shim outside a process group of its own is refused, nothing signalled", () => {
-    const root = fakeProc("kill-group", [{ pid: 7, ppid: 5, pgrp: 4, argv: ["legion", "worker-shim"] }]);
+    const root = fakeProc("kill-group", [
+      { pid: 7, ppid: 5, pgrp: 4, argv: ["legion", "worker-shim"] },
+    ]);
     const run = runSnippet(def, 'sh -c "$role_kill_sh" role-kill 5', root);
     expect(run).toEqual({
       out: "",

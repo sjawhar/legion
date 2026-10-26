@@ -1400,12 +1400,20 @@ of 0 too. Do these steps in this order:
    Sandboxes alone. The controller's Sandbox and the repository caches' are left to the earlier
    release's sweep, which deletes them with their volumes: the controller's session and the caches'
    clones, which hold no issue's work.
-3. **Restore the dump into a new database**, and point the earlier release's `postgres_dsn` at it:
+3. **Restore the dump into a new database the daemon's login owns**, and point the earlier
+   release's `postgres_dsn` at it. Create the database as a login that may create one (an admin),
+   owned by the daemon's login, then restore as the daemon's login:
 
    ```sh
-   createdb <connection options> <new database>
-   pg_restore --exit-on-error --no-owner -d <new database> <dump file>
+   createdb <admin connection options> -O <daemon login> <new database>
+   pg_restore <daemon login's connection options> --exit-on-error --no-owner -d <new database> <dump file>
    ```
+
+   Both halves matter where the daemon's login is not a superuser. A database an admin owns
+   refuses the daemon's login a restore (`pg_restore` exits 1, `permission denied for schema
+   public`), and a restore an admin runs leaves every table the admin's, so the earlier release's
+   `Migrate` fails on its first read (`permission denied for table schema_version`) before it
+   writes anything.
 
    The database this release ran on is left untouched, and with it the shared session tables
    under a login of their own. Restoring into that database does not work:
@@ -1416,8 +1424,12 @@ of 0 too. Do these steps in this order:
    Run 2026-10-26 07:31Z on postgres:16.15 (Docker), at head `5511b8ad7`: a database at
    `legion-v10.0.0`'s migrations 0001 to 0032 with claims, dumped as step 5 says, then taken to
    0051 by this head's migrations; `pg_restore --clean --if-exists` into it exited 1 as quoted, and
-   the command above into a new database exited 0 with `schema_version` at 32, both claims, and no
-   session table, while the old database's session row stayed.
+   a restore into a new database exited 0 with `schema_version` at 32, both claims, and no session
+   table, while the old database's session row stayed. Run again 2026-10-26 08:18Z on
+   postgres:16.15 (Docker) with a daemon login that is not a superuser, which ran the migrations,
+   the dump and the restore: `createdb -O` and `pg_restore` as above exited 0, and the daemon's
+   login read `schema_version` 32 and its claim from the new database; the admin-owned database
+   and the admin's restore failed as quoted.
 4. **Put `legion.yaml` back**, the copy of the whole file step 6 said to keep, and run the earlier
    release's `legion start --check-config` on it. The earlier release reads the file before it
    opens the database or the cluster, and refuses this release's shape key by key, so a daemon
@@ -1952,7 +1964,7 @@ directories — and the `role-homes` disk `emptyDir`, which holds each role's ho
 `/tmp` and `/var/tmp` ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). Each role's
 private and state directories and the pod's shared config home are in-memory `emptyDir`s, whose pages the bound
 does not count, and the issue's temporary directory, cache and data homes and bun install cache,
-the role's own state home and the issue's shared Go caches are on the issue's volume, which the
+each role's state home and the issue's shared Go caches are on the issue's volume, which the
 bound does not count either.
 Pods of unrelated trees share a node, so one issue filling the node's disk would put every pod on
 it under `DiskPressure`; the limit has the kubelet evict the pod of the container that passed it,
@@ -4093,7 +4105,7 @@ every volume — the `roles` container's root filesystem (the image's own conten
 recipe writes outside the told directories) and the `role-homes` disk `emptyDir`, which holds each
 role's home overlay and its `/tmp` and `/var/tmp` (the issue's temporary directory, its cache and
 data homes and bun's install cache are one set its roles share on the issue's volume, each role's
-state home is its own directory there, and the two Go caches are one pair on that volume shared by
+state home is a separate directory there, and the two Go caches are one pair on that volume shared by
 the issue's roles) — is the node's disk, the node's allocatable ephemeral storage
 (its root volume; read it with `kubectl get node <n> -o
 jsonpath='{.status.allocatable.ephemeral-storage}'`). That disk must hold the sum of the pods'

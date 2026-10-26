@@ -583,7 +583,7 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 // home from it (launcher's TestARoleRunsInNamespacesOfItsOwn). It is in memory, so every
 // pod's starts empty and nothing an agent wrote reaches workspace-init's jj. The config home is
 // the one home the two agree on: a role's cache and data homes are the issue's scratch's on the
-// issue's volume and its state home its own directory there
+// issue's volume and its state home a directory per role there
 // (TestTheIssuesRolesShareOneScratchAndOneGoCachePair,
 // TestEachRolesAgentIsToldAStateHomeOfItsOwn), while the setup containers keep the image's home
 // directory ones, so nothing of the issue's scratch reaches a container that holds the
@@ -830,7 +830,7 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 // Each directory is held by the issue volume's own mount, exactly as uv's are
 // (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the workspace nor uv's
 // directories, and no two of the six are one directory. The state home is the one thing of the
-// scratch that stays the role's own, for the browser broker's lock
+// scratch that stays one per role, for the browser broker's lock
 // (TestEachRolesAgentIsToldAStateHomeOfItsOwn).
 func TestTheIssuesRolesShareOneScratchAndOneGoCachePair(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -880,7 +880,7 @@ func TestTheIssuesRolesShareOneScratchAndOneGoCachePair(t *testing.T) {
 // So each name on the shim's list, plus XDG_STATE_HOME, which the shim makes elsewhere
 // (podsafety.EnsureStateHome, which makes Oh My Pi's profile directory under it), is set to an
 // absolute path on the issue's volume — the issue's shared scratch for four of them, the issue's
-// Go caches for two, and the role's own state home for the last — and, the other way, every
+// Go caches for two, and the role's state home, one per role, for the last — and, the other way, every
 // variable the runtime sets to a path on that volume is on that list, bar the three it names for
 // a reason of their own, so neither a new directory of the issue's scratch nor a new per-role one
 // can appear that nothing makes.

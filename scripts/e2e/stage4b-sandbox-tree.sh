@@ -1922,7 +1922,7 @@ pod_facts() {
     op get pod "$pod" -o json | jq -c '{
       issue: .metadata.labels["legion.dev/issue"], tree: .metadata.labels["legion.dev/tree"], node: .spec.nodeName,
       init: [.status.initContainerStatuses[]? | {name, exit: .state.terminated.exitCode, started: .state.terminated.startedAt, finished: .state.terminated.finishedAt}],
-      launchers: [.spec.containers[] | {name, command, args}]}'
+      containers: [.spec.containers[] | {name, command, args}]}'
     kubectl --context "$operator" get --raw "/api/v1/nodes/$node/proxy/stats/summary" 2>/dev/null |
       jq -c '{node: .node.nodeName, ephemeralUsedBytes: .node.fs.usedBytes, ephemeralCapacityBytes: .node.fs.capacityBytes}'
   } >"$evidence/pods/$pod.$(op get pod "$pod" -o jsonpath='{.metadata.uid}').txt" 2>&1

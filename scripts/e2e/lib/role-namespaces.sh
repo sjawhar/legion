@@ -22,6 +22,31 @@
 # Every program here reads `${proc_root:-/proc}`: the container's own /proc, unless a test points
 # proc_root at a fake tree, since a test scanning the host's /proc would find the worker-shim and
 # Oh My Pi of any Legion role running on that host.
+# role_shim_sh is role_enter_sh's second hop, run inside the role-init's namespaces as
+# `sh -c "$role_shim_sh" role-shim ROLE COMMAND…`: it finds the role's worker-shim (the process
+# whose parent is the namespaces' PID 1 and whose argv[1] is worker-shim, and no later argv word)
+# and runs COMMAND in the shim's user namespace. No shim, or two, is exit 1 naming why. It holds no
+# single quote, since role_enter_sh carries it single-quoted.
+# shellcheck disable=SC2016  # expanded by the pod's shell
+role_shim_sh='
+role=$1
+shift
+shim=
+for d in "${proc_root:-/proc}"/[0-9]*; do
+  [ "$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)" = 1 ] || continue
+  [ "$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 2p)" = worker-shim ] || continue
+  if [ -n "$shim" ]; then
+    echo "two worker-shims run in the namespaces of $role: $shim and ${d##*/}" >&2
+    exit 1
+  fi
+  shim=${d##*/}
+done
+if [ -z "$shim" ]; then
+  echo "no worker-shim runs in the namespaces of $role" >&2
+  exit 1
+fi
+exec nsenter -t "$shim" -U --preserve-credentials -- "$@"
+'
 # shellcheck disable=SC2016  # expanded by the pod's shell
 role_enter_sh='
 role=$1
@@ -45,22 +70,7 @@ if [ -z "$init" ]; then
   echo "no role-init of $role runs in this container" >&2
   exit 1
 fi
-exec nsenter -t "$init" -U -m -p -i --preserve-credentials -- sh -c "
-  shim=
-  for d in \"\${proc_root:-/proc}\"/[0-9]*; do
-    [ \"\$(sed -n \"s/^PPid:[[:space:]]*//p\" \"\$d/status\" 2>/dev/null)\" = 1 ] || continue
-    [ \"\$(tr \"\\\\0\" \"\\\\n\" 2>/dev/null <\"\$d/cmdline\" | sed -n 2p)\" = worker-shim ] || continue
-    if [ -n \"\$shim\" ]; then
-      echo \"two worker-shims run in the namespaces of $role: \$shim and \${d##*/}\" >&2
-      exit 1
-    fi
-    shim=\${d##*/}
-  done
-  if [ -z \"\$shim\" ]; then
-    echo \"no worker-shim runs in the namespaces of $role\" >&2
-    exit 1
-  fi
-  exec nsenter -t \"\$shim\" -U --preserve-credentials -- \"\$@\"" role-shim "$@"
+exec nsenter -t "$init" -U -m -p -i --preserve-credentials -- sh -c '"'$role_shim_sh'"' role-shim "$role" "$@"
 '
 # role_kill_sh, run in the `roles` container as `sh -c "$role_kill_sh" role-kill INIT`, sends
 # SIGKILL to the process group of the worker-shim role-init INIT runs: the shim is the child of

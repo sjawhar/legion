@@ -46,8 +46,8 @@ type TmuxLocator struct {
 // SandboxLocator identifies one role process in an Agent Sandbox: an issue's, whose six roles share
 // one Sandbox, pod and container (IssuePodContainer), or the project controller's, whose pod runs
 // the controller's launcher alone in its container ControllerPodContainer. The pod UID, container
-// and generation are required because a pod's launchers start one generation after another. A
-// process incarnation is `PodUID/Generation`, rather than a pod UID alone.
+// and generation are required because a pod's launcher starts a role's generations one after
+// another. A process incarnation is `PodUID/Generation`, rather than a pod UID alone.
 type SandboxLocator struct {
 	Namespace  string `json:"namespace"`
 	Name       string `json:"name"`

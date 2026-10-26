@@ -111,7 +111,7 @@ Dispatch read them, delete the files, then install every App from
   request no greater than it, and bounds its ephemeral storage — the node's disk: the image's own
   content and each role's home and `/tmp`, the issue's temporary directory, cache and data homes
   and bun install cache being one set its roles share on the issue's volume instead, each role's
-  state home its own directory there, and the two Go caches one pair on that volume shared by the
+  state home a separate directory there, and the two Go caches one pair on that volume shared by the
   issue's roles — with a limit over a smaller request. `runtime.kubernetes.resources` takes two
   keys: `issue`, the one reservation of every issue pod (its `roles` container and both init
   containers), and `controller`, the daemon-launched controller's pod's (`controller: daemon`

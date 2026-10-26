@@ -508,10 +508,12 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 // ends before the container's newest lines, since a stream is read from its start, so readLog
 // reads once more, asking for half the whole lines the cut read held: the newest lines are then
 // what it reads, unless they are longer still, when that read is cut too and bounded says so, for
-// the caller to say so in its quote. tail is the TailLines of the read text came from. When the
-// byte bound dropped older bytes, the read starts from the first whole line it kept, and whole
-// says so: the text then starts just after a newline of the log. Otherwise it starts where the
-// kubelet's line count did, which may be inside a line.
+// the caller to say so in its quote. A second read that fails (its stream refused, or the shared
+// bound expiring) gives back the first read, still bounded, rather than losing what it held. tail
+// is the TailLines of the read text came from. When the byte bound dropped older bytes, the read
+// starts from the first whole line it kept, and whole says so: the text then starts just after a
+// newline of the log. Otherwise it starts where the kubelet's line count did, which may be inside
+// a line.
 func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit, read int) (text string, tail int64, whole, bounded bool, err error) {
 	reading, cancel := call(ctx)
 	defer cancel()
@@ -523,8 +525,11 @@ func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int6
 	if fewer >= lines {
 		return text, lines, whole, bounded, nil
 	}
-	text, whole, _, bounded, err = r.readLogOnce(reading, pod, container, fewer, limit, read)
-	return text, fewer, whole, bounded, err
+	again, againWhole, _, againBounded, err := r.readLogOnce(reading, pod, container, fewer, limit, read)
+	if err != nil {
+		return text, lines, whole, bounded, nil
+	}
+	return again, fewer, againWhole, againBounded, nil
 }
 
 // readLogOnce is one read of readLog's: the text, whether it starts on a whole line, how many
