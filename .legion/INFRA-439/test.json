@@ -2,49 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T06:02:30Z",
-  "round": 2,
-  "headSha": "e3cd19814820b14ddc23d52d77caa091c884304d",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6409323092",
-  "previousRound": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6408420209",
+  "completed": "2026-10-26T07:06:00Z",
+  "round": 3,
+  "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6410222928",
+  "previousRounds": [
+    "https://github.com/sjawhar/legion/pull/2228#issuecomment-6408420209",
+    "https://github.com/sjawhar/legion/pull/2228#issuecomment-6409323092"
+  ],
+  "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp turn in these runs (35 of 35 assistant turns, read from the session files)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` (local mode) at e3cd1981: exit 0, SMOKE REPLAY PASS. Legs 1 and 2 each showed one entry. In leg 3, four cards were held mid-turn and the process was SIGKILLed; each showed card=1 once idle and still one three heartbeats later. The control of the released plugin lost both of its mid-turn cards."
+    "how": "Re-ran `bash packages/pi-envoy/scripts/smoke-replay.sh` (local mode) at 2aef017d: exit 0, SMOKE REPLAY PASS through legs 1-6 (reconnect, resume, mid-turn SIGKILL, interrupt, plain abort, switch). The released plugin 10.17.7 lost its mid-turn cards in the control."
   },
-  "failed": 2,
-  "failures": [
-    {
-      "criterion": "Outcome and the injection criterion: a message the plugin cannot inject is delivered on a later attempt or reported where the session sees it, never only caught",
-      "evidence": "Escape during a turn in the omp TUI calls restoreQueuedMessagesToEditor({abort:true}). RPC abort_and_restore_queue does the same thing. Both call clearQueue({forInterrupt:true}), which withdraws the held envoy-message cards, writes none of them and returns an empty queue to restore ({\"steering\":[],\"followUp\":[]}). The plugin keeps each card's claim pending until a message_end that never comes, so the frame is not shown again for the life of the process. Live (r3 and r4, L5, real omp 18.8.9): 951..953 were held (queuedMessageCount 3); after abort_and_restore_queue the session was idle with card=0 and ledger=n for all three, four heartbeats later. Only a restart showed them. Red test: ae9db3a6a841, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"one a person's interrupt withdrew\"` -> fails (expected 2 cards, received 1)."
-    },
-    {
-      "criterion": "Outcome: an event reaches the session once when it comes back under the same session id",
-      "evidence": "A switch away during a streaming turn (new_session), then a switch back, makes the plugin record frames as shown that omp never wrote. Live (r3 and r4, L6): 961..963 were held for session A; new_session; nothing in session B; switch_session back to A. The plugin then wrote envoy-replay-delivered for all three, but omp emitted message_end for 961 only and wrote only its card. 962 and 963 have a ledger entry and no card in A's file (dispatch-1792994074139 and -140: ledger=1 cards=0), so no sweep or restart shows them. The cause: at the switch, the claim of each pending frame is settled without a record. After the switch back, the claim is refused (already delivered), so showReplayCard sends the card with no claim and answers 'shown' at once, although the host is streaming and holds it. Red test: ae9db3a6a841, `cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"one a switch away withdrew\"` -> fails (expected 1 card after the restart, received 0)."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "verifiedFixed": [
-    "Round 1's failure (a card held behind a streaming turn recorded as shown and lost when the process ends) is fixed on the live surface: r3 L1 (live, SIGKILL), L2 (replayed, SIGKILL), L3 (held for more than four heartbeats while streaming, no duplicate) and L4 (end of input mid-turn) each showed every event once after the resume. Round 1's red tests pass at this head."
+    "Round 2 failure 1 (an interrupt withdraws held cards, and they are not shown again while the process lives): r6 L5 same-process PASS. 3 cards held, then abort_and_restore_queue; each card shown once in the same process and still once after a restart.",
+    "Round 2 failure 2 (frames recorded shown after a switch away and back, though omp never wrote them): r6 L6 PASS. The new session got none of the 3 cards; after the switch back each was shown once in the old session.",
+    "Round 1 failure (a held card lost to SIGKILL): r6 L1 to L4 PASS."
   ],
   "proof": [
     {
-      "criterion": "Live proof: break a real Oh My Pi session's NATS connection, publish to its own topic, restore, show the event once; a card held behind a turn survives SIGKILL",
+      "criterion": "Live proof: break a real Oh My Pi session's NATS connection, publish to its own topic, restore, show the event once in the transcript with no second copy",
       "surface": "real omp --mode rpc with this checkout's pi-envoy, natsd -js and the listener built from this head, NATS behind a socat proxy",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; throwaway r3.sh (L1 to L4)",
-      "observed": "SMOKE REPLAY PASS; L1 to L4 PASS, every event exactly one card",
-      "headSha": "e3cd19814820b14ddc23d52d77caa091c884304d",
-      "negativeControl": "released plugin 10.17.7: mid-turn cards lost after SIGKILL (smoke control-mid-turn)"
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh",
+      "observed": "exit 0. Leg 1: one entry 1 s after the proxy restart, still one three heartbeats later. Leg 2 (resume): one entry. Legs 3 to 6: held cards shown once after SIGKILL, after an interrupt, after a plain abort and after a switch away and back",
+      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
+      "negativeControl": "released plugin 10.17.7: no entry for an event published while its connection was down; its mid-turn cards and its interrupted cards were lost"
     },
     {
-      "criterion": "Issue topic, dedupe, races, more than 32 subjects, Claude Code",
-      "surface": "same stack; claude-envoy dist/envoy-channel.js over MCP stdio",
-      "command": "throwaway adv4.sh, g3.sh, claude2.sh",
-      "observed": "ADV PASS, ADV G PASS (124 frames on 41 subjects each once), CLAUDE ADV PASS",
-      "headSha": "e3cd19814820b14ddc23d52d77caa091c884304d",
+      "criterion": "A message the plugin cannot inject is delivered later or reported, never only caught: cards held behind a turn and taken away by a kill, end of input, an interrupt or a switch",
+      "surface": "same stack; the throwaway legs r6 (L1 to L6), r5 (L7) and r8 (L8)",
+      "command": "/legion/scratch/tmp/adv/r6.sh, r5.sh, r8.sh, built on the smoke harness (comment 6410222928)",
+      "observed": "L1 to L6 PASS. L7: an aside card while idle, and one right after an interrupt, each one card, also after the person's next prompt. L8: 3 cards handed during each of two real compactions (compact answered success) each shown once, four heartbeats later",
+      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
+      "negativeControl": "the same L5 and L6 legs at 4202727e failed (round 2: 951..953 card=0 in the same process; 962 and 963 recorded with no card)"
+    },
+    {
+      "criterion": "Issue topic followed, dedupe across subjects and re-publishes, races, more than 32 subjects, the route's refusals",
+      "surface": "same stack",
+      "command": "/legion/scratch/tmp/adv/adv5.sh, g4.sh",
+      "observed": "ADV PASS (issue topic, both subjects, re-published event, live burst racing the sweep, reconnect storm, /new and back); ADV G PASS (124 frames on 41 subjects, each once, in stream order)",
+      "headSha": "2aef017d87b732a154c54ff0645d9fabd19925a9",
       "negativeControl": "POST /v1/replay naming another session's agent subject -> refused not_followed; 33 subjects -> 400"
     }
   ],
   "observations": [
-    "claude-envoy keeps 'the channel write counts as shown' (implement.json deviation). Claude Code may also hold a channel notification behind its turn; this pod has no claude binary, so that is unverified.",
-    "CI at e3cd1981 when read: Tests, Legion Envoy and Contracts and Docs queued; Worker Image in progress; PR Title pending."
+    "Claude Code channel server (claude7, real dist/envoy-channel.js over MCP stdio): the reconnect, restart and burst legs each showed every event once. In the SIGKILL-mid-sweep leg, the server wrote one notification at 06:57:09.856 and was killed before it saved its replay state. The restarted server showed that event again (dispatch-1792997769528 = 2). This is a duplicate, not a loss, inside the crash window that claude-envoy's documented boundary leaves open (a channel write counts as shown); Envoy delivery is documented at-least-once. Recorded as a risk for the reviewer, not as a failure. Round 1's run of the same leg showed every event once.",
+    "Withdrawn cards are handed again at the next heartbeat (90 s by default), not at once (implement.json deviation).",
+    "/v1/replay trusts a self-asserted session_id, like every /v1 route (round 1 observation; still true).",
+    "CI at 2aef017d when read: Docs in progress; Tests, Legion Envoy and Contracts and Worker Image queued; PR Title queued (earlier PR Title runs cancelled by newer pushes)."
   ]
 }
