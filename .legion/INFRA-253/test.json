@@ -2,63 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-253",
-  "completed": "2026-10-26T16:55:00Z",
-  "headSha": "76d1daad1f2c71705299c2f31f95881fdaae3f87",
-  "round": 6,
-  "rebaseRecheck": "rebase re-check 98840a82 → 76d1daad: fingerprint unchanged, bare gates only. 76d1daad is the implementer's second forward merge of main for a GitHub-reported conflict. Fingerprint (reference command: fork_point(main@origin | head) .. head, --context 0, '~(.legion | docs/solutions)', @@ and index lines dropped): 4faa5738b09770516c7d9012585b005d0c4ae5caa719110e9abf082ab531b64c at 98840a82 and 76d1daad, the same as at b5139e26, where round 4 drove the real surfaces. Bare gates: Stage 1 smoke at 76d1daad → `stage 1 e2e: PASS` (legion built from that tree, pod Postgres 17, tmux 3.5a). CI at 76d1daad is queued (see ciAtHead). Earlier: rebase re-check b5139e26 → 98840a82, fingerprint unchanged, Stage 1 PASS.",
-  "scope": "Narrowed by the architect: cee45e9b (the playwright.config.ts reuse-refusal fix; the port-file waits in stage2 and verifiers-staging-token) and the merge of main b5139e26, which resolved #2188's conflict in the daemon's scratch-Dispatch start (fingerprint 34d89a93 → 4faa5738).",
+  "completed": "2026-10-26T20:20:00Z",
+  "headSha": "993bd7c18ac0683c3adde737e887313db37157aa",
+  "generation": 3,
+  "rebaseRecheck": "76d1daad → 993bd7c1 (forward merge of main 6cdb9995 for a GitHub-reported conflict): fingerprint changed, 4faa5738b09770516c7d9012585b005d0c4ae5caa719110e9abf082ab531b64c → 69bcdf6cf4091c8129728c21f9344c94450d6d1853e1681741c824cb9c3792f2. An interdiff of the PR's own diff before and after the merge shows only stage3-devbox-workflow.sh's start_daemon moved: the daemon's env gains `-u LEGION_OMP_PATH`, a log offset is read before start_kept, and daemon_runs_the_pinned_omp (from main's #2242) runs after /healthz. Everything else is byte-identical, so the round-4 proofs at b5139e26 (and earlier rounds' proofs) stand for it, and this round drove the moved function.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove each round-4 change independently at b5139e26: the Playwright config's refusals across argv and port combinations; verifiers-staging-token.sh's boot block, run verbatim; port_of's three outcomes in both scripts; stage2 unmodified on the devbox up to its model turn; the four scratch-Dispatch tests against the pod's Postgres and a NATS server of the pod's own."
+    "how": "The implementer's merge note (PR comment at 19:07Z) lists bash -n, shellcheck counts and `bun test scripts/e2e/lib` for the moved function, with no real-process run of it. I ran the function myself against real processes (proof below), and it behaves as the note says. The earlier rounds verified the implementer's real-surface proofs."
   },
   "failures": [],
   "failed": 0,
-  "mergeCheck": "b5139e26's parents are cee45e9b and main bc307fb5. Per file, the PR's own +/- lines (main 8298fc71..cee45e9b vs main bc307fb5..b5139e26) are identical for daemon cmd/legion/main.go, main_test.go and internal/daemon/daemon.go. They differ only in internal/daemon/outbox_scratch_dispatch_test.go, where #2188 added a NATS-backed form (startScratchDispatchWithNATS: the `bus` line, NATS_URLS or DISPATCH_NATS_DISABLED=1). The resolution keeps that `bus` line in the held-socket start (heldSocket, DISPATCH_LISTEN_FD=3, ExtraFiles, the test's copy closed after Start) and drops main's boundPort retry loop.",
   "proof": [
     {
-      "criterion": "Review finding (playwright.config.ts): a `--list` the config cannot tell from a grep value exempts only the unset-ports refusal; with any harness port set and no DISPATCH_E2E_REUSE_SERVERS=1, every run, a listing included, is refused",
-      "surface": "pod: the real Playwright CLI evaluating e2e/playwright.config.ts at b5139e26; Chromium through bun e2e/run.ts against a scratch pgvector database",
-      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/smoke.e2e.ts with: all five ports set and no reuse × {--grep --list, --grep-invert --list, --list, nothing}; ports set + DISPATCH_E2E_REUSE_SERVERS=1 + --list; FAKE_ENVOY_PORT alone + --list; all unset × {--list, --grep --list}. Then bun e2e/run.ts -- bunx playwright test … --project=chromium --project=chromium-plain-http e2e/smoke.e2e.ts e2e/claim.e2e.ts e2e/plain-http-proxy.e2e.ts",
-      "observed": "Ports set with no reuse: each of --grep --list, --grep-invert --list, --list and a plain run is refused with 'This config starts no server, so it would run against whatever listens on 1111 (FAKE_ENVOY_PORT), … Or set DISPATCH_E2E_REUSE_SERVERS=1'. One port set + --list: the same refusal. Ports set + reuse=1 + --list: 'Total: 2 tests in 1 file'. All unset + --list: 'Total: 2 tests in 1 file'. All unset + --grep --list: fails at preflight ('fetch failed'), no spec run. No case started a server. Through run.ts the harness came up on 5 OS-chosen ports, 5 passed, and nothing was left running.",
-      "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
-      "negativeControl": "the reviewer's case, `--grep --list` with every harness port set and no reuse flag → refused before any spec ('This config starts no server, so it would run against whatever listens on 1111 (FAKE_ENVOY_PORT), …')"
+      "criterion": "Added sites (stage3-devbox-workflow.sh start_daemon after the merge of #2242): the daemon starts on its keeper's held socket without LEGION_OMP_PATH, and daemon_runs_the_pinned_omp reads only the log this start wrote",
+      "surface": "pod: start_daemon and daemon_runs_the_pinned_omp extracted verbatim from the script at 993bd7c1, run against the real legion built from the tree, a real held-port.py keep keeper and the pod's Postgres 17. Stage 1's omp stub stands in for Oh My Pi behind a mise stub whose `where <pin>` names a fake install; LEGION_OMP_PATH names a decoy stub in the caller's environment",
+      "command": "TESTER_PG_DSN=<pod pg> MODE=pinned|restart bash $TMPDIR/tester/startdaemon.sh",
+      "observed": "As written: the daemon logs `resolved OMP invocation … mise x omp/tester-pin -- …/omp/tester-pin/bin/omp`, not the decoy, and the check notes `the daemon resolved omp/tester-pin's own omp`. The same check over the whole log (offset 0) after a bad restart passes on the first start's line, so the offset taken before start_kept is what makes the check judge the start it follows.",
+      "headSha": "993bd7c18ac0683c3adde737e887313db37157aa",
+      "negativeControl": "a second `start_daemon keep` on the same kept port with `-u LEGION_OMP_PATH` removed: the daemon logs `\"invocation\":\"…/decoy/omp\"`, and the check fails: `FAIL restart-without-unset: the daemon did not log …/tester-pin/bin/omp, omp/tester-pin's own omp, as the binary for its boot probes and panes`"
     },
     {
-      "criterion": "verifiers-staging-token.sh waits for both port files through port-file.sh (port_of) and still boots both binaries on held sockets with no second bind",
-      "surface": "pod: the script's env arrays (161-176) and boot block (218-271, now with port_of) run verbatim; binaries rebuilt at b5139e26; dev-oidc-issuer for the staging issuer and the pod's Postgres 17 + pgvector, as accepted in round 2",
-      "command": "bash $TMPDIR/tester/verifiers-boot.sh; MODE=mismatch for the control",
-      "observed": "`dispatch on 63485, listener on 60572, both naming the issuer at boot`. Each port file equals the binary's logged address. Exactly one listening socket on each port, held only by the binary's own pid.",
-      "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
-      "negativeControl": "the listener's PORT='{port}' replaced by PORT=1 → `verifiers e2e: FAIL: the listener exited during boot` / `PORT=1 does not match ENVOY_LISTEN_FD=3, a socket listening on 127.0.0.1:61224`; nothing left running"
-    },
-    {
-      "criterion": "port_of in stage2-tmux-supervision.sh and verifiers-staging-token.sh: the port when the file comes, a failure naming the process when it exits first, a failure when the wait runs out",
-      "surface": "pod: each script's port_of extracted verbatim, over the real lib/port-file.sh (port_file_seconds set to 1 for the timeout case), with real processes",
-      "command": "bash $TMPDIR/tester/portof/h.sh ok|exited|timeout, for each script",
-      "observed": "ok: v=4242 for both. exited: 'the thing exited before it held a port' (verifiers passes the log to fail; stage2 says '; see <log>'), exit 1. timeout: 'the thing held no port within 1s', exit 1.",
-      "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
-      "negativeControl": "a process that exits 3 before writing the port file → `FAIL: the thing exited before it held a port`, exit 1"
-    },
-    {
-      "criterion": "stage2-tmux-supervision.sh with port_of: the daemon on its kept port and the listener on its held socket",
-      "surface": "devbox, run by the INFRA lead's session from a fresh worktree at b5139e26 with no local changes; key-file route with a placeholder key",
-      "command": "LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<placeholder> bash scripts/e2e/stage2-tmux-supervision.sh (12:42:35Z-12:44:26Z)",
-      "observed": "ok: gate-refuses-another-contract, gate-refuses-a-disabled-plugin, gate-refuses-without-the-envoy-plugin, gate-refuses-a-missing-skill, gate-refuses-a-skill-only-a-role-prompt-loads, gate-refuses-an-unconfigured-model-role, architect-registers-and-is-ready, envoy-role-held, ready-in-state, task-queued-before-ready-runs-once. FAIL model-turn-through-the-route (stopReason error from the placeholder key; no model route on the box). Nothing was left running.",
-      "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
-      "negativeControl": "the run's own gate refusals pass (another contract, a disabled plugin, no envoy plugin, a missing skill, a prompt-only skill, an unconfigured model role)"
-    },
-    {
-      "criterion": "The merge's resolution of #2188 in the daemon's scratch-Dispatch start: all four scratch-Dispatch tests pass against a real Dispatch on a held socket",
-      "surface": "pod: go test, which builds and starts the real envoy-dispatch, against the pod's Postgres 17 and a nats-server with JetStream on OS-chosen client and monitor ports (LEGION_TEST_NATS_URL/LEGION_TEST_NATS_MONITOR_URL, testnats' no-Docker path)",
-      "command": "cd packages/daemon && LEGION_TEST_NATS_URL=nats://127.0.0.1:<p> LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:<m> LEGION_TEST_PG_DSN=<pod pg> go test -p 1 -count=1 -run ScratchDispatch -v ./internal/daemon/",
-      "observed": "PASS TestBlockedIssuesAreNotStartedAgainstScratchDispatch (19.17s; #2188's NATS form), TestAHandOverReachesScratchDispatchAsOneEventCarryingTheTodoAndTheLabel (11.60s), TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch (9.21s), TestOutboxPostsABodyAtThePostLimitWithTheLongestMarkerAgainstScratchDispatch (11.20s); ok 51.26s.",
-      "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
-      "negativeControl": "without LEGION_TEST_NATS_URL, TestBlockedIssues… panics 'rootless Docker not found' (testnats' container path), which shows it ran against the external NATS when it passed"
+      "criterion": "S4a smoke at the new head: the Stage 1 live proof",
+      "surface": "pod: the real legion built at 993bd7c1, under tmux 3.5a, with Postgres 17 (rebuilt under $TMPDIR after the pod was replaced)",
+      "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
+      "observed": "`stage 1 e2e: PASS`, including the keeper restart and the check that only the daemon and keeper hold the listening socket",
+      "headSha": "993bd7c18ac0683c3adde737e887313db37157aa",
+      "negativeControl": "the run's own first check: a DSN to a port with no Postgres is refused, naming the host and not the password"
     }
   ],
-  "ciAtHead": "76d1daad at 16:53Z: Tests run 40362224860, Legion Envoy and Contracts run 40362224925, Docs run 40362225039 and Worker Image run 40362225199 are all queued; no job has started. 98840a82, read job by job: Tests success (test, typecheck, lint); Docs and Worker Image success; Legion Envoy and Contracts 40349306397: changes success, and every other job (envoy-smoke included) cancelled when the next push superseded the run. The last finished Envoy run is b5139e26's (40324211721): envoy-smoke and every Envoy job but two success; dispatch cancelled; claude-envoy failed on main's envoy-client TS4111, which main fixed and both later merges carry. Every job at 76d1daad must be read before approval.",
+  "devbox": "The model-turn runs at 993bd7c1 (stage2 to the end and stage3-devbox-workflow, both LEGION_E2E_MODEL_ROUTE=box-login, which #2242 brings into this head) were sent to session 01a16962. It acknowledged them at 19:13Z and had posted no result by 20:20Z. It posts each result on #2229. stage3-4b13b-acceptance, claude-backend-tmux and dispatch-user-turns take only the gateway route (lib/install-model-gateway.sh) and stay blocked on a box with no gateway. As the architect directed, the phase completes without waiting for runs that may not finish.",
+  "ciAtHead": "993bd7c1 at 20:18Z: Tests run 40383800403 success (test, typecheck, lint); Docs 40383800331 success; Worker Image 40383800105 success; Legion Envoy and Contracts 40383800219 still running (changes, pi-shared, pi-envoy, envoy-e2e-local success; dispatch and dispatch-memory in progress; envoy-smoke, envoy-go, envoy-infra-go and the rest queued). 76d1daad, read job by job: every job success, envoy-smoke and dispatch included. The reviewer must read the Envoy jobs at 993bd7c1, envoy-smoke included.",
   "notes": [
-    "Wording only: with a single harness port set, the reuse refusal lists the unset ones as port 0 ('… whatever listens on 1111 (FAKE_ENVOY_PORT), 0 (FAKE_GITHUB_PORT), …'). The run is refused either way.",
-    "Out of this round's narrowed scope and unchanged since round 3: the Dispatch, listener and legion start refusals, Stage 1, the held-port darwin path and the search scripts (round-3 proofs at c432d8ef)."
+    "The pod was replaced since the last round. Postgres 17 + pgvector, tmux 3.5a (behind an ELF launcher, since Stage 1 replaces a script tmux) and nats-server 2.11.4 were rebuilt under $TMPDIR/tester."
   ]
 }
