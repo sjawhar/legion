@@ -15063,6 +15063,45 @@ describe("messages missed while the subscription was down", () => {
       }
     });
 
+    test("a retention gap held while the host's turn streams is told once after the process is killed", async () => {
+      const model = new StreamModel();
+      // Read by the host context at each call, so the turn can start mid-test.
+      const host: { turn: "idle" | "streaming" } = { turn: "idle" };
+      const first = await bootReplay("replay-issue-gap-sigkill-a", model, host);
+      await first.follow(ISSUE_TOPIC);
+      // A message shown and recorded: the session has written its replay state just now.
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 13));
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("dispatch-13")).toHaveLength(1);
+
+      // A turn streams; the stream drops everything it held, on subjects the session does not
+      // follow, so the sweep only moves the session's cursor past the gap and holds the notice.
+      host.turn = "streaming";
+      const unfollowed = dispatchIssueSubject("OTHER-1", "issue.updated");
+      model.store(unfollowed, issueEvent(unfollowed, 14));
+      model.store(unfollowed, issueEvent(unfollowed, 15));
+      model.expireThrough(model.lastSeq);
+      await first.tick();
+      const gapNotices = (session: { readonly fixture: typeof first.fixture }) =>
+        session.fixture.deliveries.filter((delivery) =>
+          delivery.content.includes("messages older than 72 hours may be missing")
+        );
+      expect(gapNotices(first)).toHaveLength(0);
+
+      // SIGKILL: no session_shutdown runs; the session file holds what was appended before it.
+      const restarted = await bootReplay("replay-issue-gap-sigkill-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await restarted.tick();
+      await restarted.tick();
+
+      // One gap, told once: not once for the recorded held notice and again for the gap the
+      // restored cursor finds a second time.
+      expect(gapNotices(restarted)).toHaveLength(1);
+    });
+
     test("a retention gap held while the host's turn streams is told once after the host switches away and back", async () => {
       const restartAt = Date.now();
       try {
