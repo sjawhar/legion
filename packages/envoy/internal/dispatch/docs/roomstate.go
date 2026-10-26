@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -89,8 +91,11 @@ type roomState struct {
 	// reloading marks a state whose room a close is about to retire because the room stands behind
 	// the durable head (reserveRoomCloseLocked): no transaction takes its writer slot from then on
 	// (openLiveWrite), until the close has returned, whether or not it closed the room it checked
-	// (closeReservedRoom).
-	reloading bool
+	// (closeReservedRoom). reservedFor is the instance that close checked: a reservation outlasts
+	// that instance when it is retired and a load replaces it on this state before the close
+	// returns, and the replacement is not the reserving close's to answer for (closeRoomBehindHead).
+	reloading   bool
+	reservedFor *crdt.Doc
 	// released marks a state the service has forgotten (forgetLocked), so a lookup that found it
 	// before it went takes the document's current state instead.
 	released bool

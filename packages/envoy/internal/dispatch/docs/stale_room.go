@@ -247,15 +247,18 @@ func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactI
 // - mayEvict has already deferred the room on a window of its own, and a burst of refusals that
 // armed the retry instead would push the backoff out for a room nothing is wrong with. A verdict
 // - no room here, no cursor, the room at the head, a room behind the head that the close
-// (closeRoomBehindHead) closed, or a room that no longer holds the instance this decision read -
-// says what was to become of the room, so the window that brought it here has done its work, and
-// the run of attempts that got no answer before it, if there was one, ends with it
-// (reachedVerdict). A head read that failed, a close that failed, or an open live write of this
-// process is an attempt that got no answer, so the room is armed again (armRetry) and the next
-// wake tries it: the notification that brought it here is already spent - the last of a burst is
-// one the interval refuses - and a dropped attempt leaves a connected reader holding text the
-// store replaced, with nothing left to re-examine the room (roomIdleTimeout counts from the last
-// peer leaving, and that reader has not left).
+// (closeRoomBehindHead) closed, a room that no longer holds the instance this decision read, or a
+// room another close answers for (one that failed, which its own eviction reloads, or one a
+// refused settlement reserved for the instance this decision read) - says what was to become of
+// the room, so the window that brought it here has done its work, and the run of attempts that
+// got no answer before it, if there was one, ends with it (reachedVerdict). A head read that
+// failed, a close that failed, or a close something of this process held off (an open live
+// write, or a reservation for an instance this room no longer holds) is an attempt that got no
+// answer, so the room is armed again (armRetry) and the next wake tries it: the notification that
+// brought it here is already spent - the last of a burst is one the interval refuses - and a
+// dropped attempt leaves a connected reader holding text the store replaced, with nothing left to
+// re-examine the room (roomIdleTimeout counts from the last peer leaving, and that reader has not
+// left).
 func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID string) bool {
 	// The interval first, ahead of the room lookup, the unlocked head read, and the locked
 	// confirmation behind that: a room the interval refuses evicts nothing whatever those reads
@@ -342,9 +345,11 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	// settlement's own reload, reloadRoomBehindHead, a failed room's eviction, or ygo's idle sweep
 	// and a load) is left as it is.
 	closed, err := service.closeRoomBehindHead(ctx, artifactID, live)
-	if errors.Is(err, errRoomHasOpenLiveWrite) {
-		// A live write opened on the room between the check above and the hold that reserves
-		// the close: the same attempt with no answer as that check's, so the room is armed again.
+	if errors.Is(err, errRoomCloseHeldOff) {
+		// Something of this process holds the room open for now: a live write opened on it
+		// between the check above and the hold that reserves the close, or a close reserved for
+		// the instance live replaced has yet to return. The same attempt with no answer as that
+		// check's, so the room is armed again.
 		e.armRetry(artifactID)
 		return false
 	}
@@ -360,8 +365,8 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		// that leaves it behind notifies again; closed by name, that instance would be taken from
 		// the browser that has just reconnected to it - or the room holds live but is another
 		// close's: it failed, and its own eviction reloads it (evictFailed), or a refused
-		// settlement has reserved it, and that close either closes it or arms the settlement
-		// again on it (reloadRoomBehindHead, closeReservedRoom).
+		// settlement has reserved live itself, and that close either closes it or arms the
+		// settlement again on it (reloadRoomBehindHead, closeReservedRoom).
 		e.reachedVerdict(artifactID)
 		return false
 	}
@@ -528,8 +533,8 @@ func staleRoomRetryBackoff(attempt int) time.Duration {
 }
 
 // armRetry gives artifactID a window to be re-examined in after an attempt that reached no
-// verdict - a head read that failed, a close that failed or closed nothing, or an open live write
-// of this process (documentChanged). The room is as stale as that attempt found it, the
+// verdict - a head read that failed, a close that failed, or a close something of this process
+// held off (documentChanged). The room is as stale as that attempt found it, the
 // notification that carried the attempt is spent, and a document nobody writes again notifies
 // nobody again, so the wake this window asks for is the only thing that comes back for it
 // (wakeIn, woke).

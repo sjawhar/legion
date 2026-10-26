@@ -680,6 +680,41 @@ func TestARoomBehindTheHeadThatIsAnotherClosesIsAVerdictForTheEvictor(t *testing
 				}
 			}
 		}},
+		{"its failure while the evictor's close runs", func(t *testing.T, pair processPair, live *crdt.Doc) func() {
+			// The failure lands after the evictor reserved the room and before its close's Apply,
+			// which the failure refuses (allowInject). That refusal is no fault of the close's:
+			// the failure's own eviction closes the room.
+			hold := make(chan struct{})
+			release := sync.OnceFunc(func() { close(hold) })
+			t.Cleanup(release)
+			pair.taskA.beforeFailedEviction = func(room string) {
+				if room == pair.artifactID {
+					<-hold
+				}
+			}
+			var done chan struct{}
+			var failed atomic.Bool
+			pair.taskA.afterRoomCloseReserved = func(room string) {
+				if room != pair.artifactID || !failed.CompareAndSwap(false, true) {
+					return
+				}
+				pair.taskA.failRoom(room, errors.New("test: the room failed under the evictor's close"))
+				state := pair.taskA.lockExistingState(room)
+				done = state.failedDone
+				pair.taskA.unlockState(room, state)
+			}
+			return func() {
+				if !failed.Load() {
+					t.Fatal("the evictor's close never reserved the room, so nothing here is tested")
+				}
+				release()
+				select {
+				case <-done:
+				case <-time.After(roomWait(t)):
+					t.Fatal("the failed room's eviction never finished")
+				}
+			}
+		}},
 	} {
 		t.Run(other.name, func(t *testing.T) {
 			pair := newProcessPair(t)
@@ -702,6 +737,67 @@ func TestARoomBehindTheHeadThatIsAnotherClosesIsAVerdictForTheEvictor(t *testing
 			waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 		})
 	}
+}
+
+// A close reserved for one instance of a room does not answer for the instance that replaced it.
+// A refused settlement's close reserves the room and holds the reservation until its close
+// returns; ygo can retire the instance it checked meanwhile, and a browser's reconnect loads a
+// replacement onto the same record, whose writer slot that reservation refuses. When the other
+// process's write then leaves the replacement behind, the stale-room evictor finds the record
+// reserved. Taken as a verdict, that left the replacement to a settlement the reservation's close
+// re-arms, which does nothing once the document's issue has closed, and so to its reader leaving
+// and the idle minute. The evictor tries it again instead, and closes it once that close returns.
+func TestARoomReservedForTheInstanceItReplacedIsTriedAgain(t *testing.T) {
+	pair := newProcessPair(t)
+	ctx := context.Background()
+	evictor := newStaleRoomEvictor(pair.taskA)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+	first := pair.taskA.srv.GetDoc(pair.artifactID)
+	// A browser that stays connected, as the reconnecting one does, holds the record across the
+	// first instance's close.
+	pair.taskA.addConnection(pair.artifactID, 99, model.Actor{Kind: "user", ID: "reader"})
+
+	state := pair.taskA.lockState(pair.artifactID)
+	reservation, reserved := pair.taskA.reserveRoomCloseLocked(pair.artifactID, state, first)
+	pair.taskA.unlockState(pair.artifactID, state)
+	if !reserved {
+		t.Fatal("the first instance could not be reserved, so nothing here is tested")
+	}
+	if err := pair.taskA.Evict(ctx, pair.artifactID); err != nil {
+		t.Fatalf("retire the first instance: %v", err)
+	}
+	if err := pair.taskA.warmLiveDocument(ctx, pair.artifactID); err != nil {
+		t.Fatalf("load the replacement: %v", err)
+	}
+	replacement := pair.taskA.srv.GetDoc(pair.artifactID)
+	if replacement == nil || replacement == first {
+		t.Fatal("no replacement loaded, so nothing here is tested")
+	}
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2, bob, appendBlocks(t, "Bob types again.\n"))
+	if !roomBehind(t, pair.taskA, pair.artifactID) {
+		t.Fatal("the replacement stands at the head, so nothing here is tested")
+	}
+
+	if evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatal("the evictor closed the replacement under the reservation for the instance before it")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != replacement {
+		t.Fatal("the replacement was closed under the reservation for the instance before it")
+	}
+	if wake := evictor.wakeIn(); wake <= 0 {
+		t.Fatalf("the evictor reached a verdict (wakeIn = %s) on a replacement the reserving close does not answer for", wake)
+	}
+
+	// The reserving close returns, having closed nothing of its own, and the replacement is closed.
+	if closed, err := pair.taskA.closeReservedRoom(ctx, reservation); err != nil || closed {
+		t.Fatalf("the close reserved for the first instance = %v, %v, want false and no error", closed, err)
+	}
+	closed, err := pair.taskA.closeRoomBehindHead(ctx, pair.artifactID, replacement)
+	if err != nil || !closed {
+		t.Fatalf("close the replacement once the reservation is lifted = %v, %v, want true and no error", closed, err)
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }
 
 // The close of a room behind the head holds the room it checked against ygo's idle sweep until it

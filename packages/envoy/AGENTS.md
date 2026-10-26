@@ -717,7 +717,10 @@ it: ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep 
 without the close gate, so the close checks the instance again inside a `Server.Apply` on the
 room, which the sweep never retires, with the close gate held (`closeRoomInstance`); a room the
 sweep or another close retired first is left to the room that holds the document now, the
-reservation is lifted, and the settlement is armed again on it. That `Server.Apply` is the
+reservation is lifted, and a settlement the reservation ended is armed again on it. A
+reservation outlasts its instance when the room is replaced before the close returns
+(`reservedFor`); the evictor tries the replacement again once that close has returned. That
+`Server.Apply` is the
 service's own injection and carries its mark (`withOwnerVerified`), which `allowInject` admits on
 a closed issue: a room loaded while the issue was open and left behind the head by the other
 process's write is closed whenever its issue closed, rather than kept resident with text the store

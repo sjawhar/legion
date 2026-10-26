@@ -1072,15 +1072,6 @@ func (s *Service) retrySettleLocked(room string, state *roomState, generation ui
 		// instead) because the room it read was replaced first, and the replacement's load arms
 		// the settlement the document still owes.
 		slog.Info("dispatch: document settlement wrote nothing into a replaced room", "room", room, "error", err)
-	case errors.Is(err, ErrRoomBehindHead) && !fails:
-		// The gate working, not a fault: another process wrote the document since this room
-		// loaded. A refused settlement closes such a room itself (reloadRoomBehindHead) and the
-		// stale-room evictor closes it on the other process's notification, and either reload
-		// then settles every update; a refusal reaches here only once shutdown has cut the
-		// settlement short. Only the refusal that fails the room is an ERROR, since a room
-		// still behind at the settlement's last retry is one neither close reached. The message
-		// is the one every other refusal logs, which a reader matching it finds whatever the level.
-		slog.Info("dispatch: settle document", "room", room, "error", err)
 	default:
 		slog.Error("dispatch: settle document", "room", room, "error", err)
 	}
@@ -1813,38 +1804,50 @@ func (s *Service) reloadRoomBehindHead(ctx context.Context, room string, state *
 	}
 }
 
-// errRoomHasOpenLiveWrite is closeRoomBehindHead's answer when an open live write of this process
-// holds the room: it closed nothing, and the room is exactly as stale as its caller found it.
-var errRoomHasOpenLiveWrite = errors.New("the room has an open live write")
+// errRoomCloseHeldOff is closeRoomBehindHead's answer when something of this process holds the
+// room open for now: it closed nothing, and the room is exactly as stale as its caller found it.
+var errRoomCloseHeldOff = errors.New("the close of the room is held off")
 
 // closeRoomBehindHead closes live, room's resident instance, which the stale-room evictor found
-// behind the durable head, so the next access loads the document at the head. It closes nothing
-// while an open live write of this process is on the room, and answers errRoomHasOpenLiveWrite:
-// that is read under the state lock that reserves the close (reserveRoomCloseLocked), so no
-// writer is admitted between the check and the close. The other writers of this process are not
-// asked about, for the reason the evictor's own check gives (hasOpenLiveWrite): they take the
-// document's lock, and the evictor's confirmation under that lock already orders them. It closes
-// nothing, and answers false with no error, when the room is another close's or another
+// behind the durable head, so the next access loads the document at the head. It closes nothing,
+// and answers errRoomCloseHeldOff, while something of this process holds the room open: an open
+// live write, or a close reserved for an instance the room no longer holds, whose reservation
+// refuses the writer slot of the instance that replaced it until that close returns. The second
+// close answers for its own instance, not for live, so live is closed only by trying again. Both
+// are read under the state lock that reserves the close (reserveRoomCloseLocked), so no writer is
+// admitted between the check and the close. The other writers of this process are not asked
+// about, for the reason the evictor's own check gives (hasOpenLiveWrite): they take the
+// document's lock, and the evictor's confirmation under that lock already orders them.
+//
+// It closes nothing, and answers false with no error, when the room is another close's or another
 // instance's: live is no longer the instance room holds, the room failed (its own eviction
-// reloads it), or another close has reserved it. Otherwise the close reaches live alone
-// (closeRoomInstance). The state is taken as lockState takes it: a room that loaded onto a state
-// an earlier release then forgot has none registered, and one made for it here is the one the
-// close settles. A settlement the reservation ended is armed again (closeReservedRoom).
+// reloads it, evictFailed), whether before the reservation or while the close runs, or another
+// close has reserved live itself (that close closes it, or arms the settlement it ended again).
+// Otherwise the close reaches live alone (closeRoomInstance). The state is taken as lockState
+// takes it: a room that loaded onto a state an earlier release then forgot has none registered,
+// and one made for it here is the one the close settles. A settlement the reservation ended is
+// armed again (closeReservedRoom).
 func (s *Service) closeRoomBehindHead(ctx context.Context, room string, live *crdt.Doc) (closed bool, err error) {
 	if s.beforeCloseBehindHeadLock != nil {
 		s.beforeCloseBehindHeadLock(room)
 	}
 	state := s.lockState(room)
-	if state.openLiveWriteLocked() {
+	if state.openLiveWriteLocked() || (state.reloading && state.reservedFor != live) {
 		s.unlockState(room, state)
-		return false, errRoomHasOpenLiveWrite
+		return false, errRoomCloseHeldOff
 	}
 	reservation, reserved := s.reserveRoomCloseLocked(room, state, live)
 	s.unlockState(room, state)
 	if !reserved {
 		return false, nil
 	}
-	return s.closeReservedRoom(ctx, reservation)
+	closed, err = s.closeReservedRoom(ctx, reservation)
+	if err != nil && reservation.state.failure() != nil {
+		// The room failed while the close ran, and the failure refused the close's Apply
+		// (allowInject): the failure's own eviction closes it.
+		return false, nil
+	}
+	return closed, err
 }
 
 // roomCloseReservation is a close of a room behind the durable head that its caller has reserved
@@ -1879,6 +1882,7 @@ func (s *Service) reserveRoomCloseLocked(room string, state *roomState, live *cr
 		return roomCloseReservation{}, false
 	}
 	state.reloading = true
+	state.reservedFor = live
 	state.roomGeneration = s.nextRoomGeneration()
 	// The closed room's settlement failures are not the next room's, and the record outlives the
 	// close. retrySettleLocked counts a failure only for the generation its settlement read, and
@@ -1916,6 +1920,7 @@ func (s *Service) closeReservedRoom(ctx context.Context, reservation roomCloseRe
 	state.mu.Lock()
 	if !state.released {
 		state.reloading = false
+		state.reservedFor = nil
 	}
 	s.unlockState(reservation.room, state)
 	if reservation.owesSettlement {
@@ -2287,9 +2292,10 @@ func (s *Service) Evict(_ context.Context, artifactID string) error {
 // - Evict or Quiesce, which tests and the browser-test harness's own route call - after which the
 // browser reconnects and a replacement loads with a state of its own. A close by name here closed
 // that replacement under the browser. The stale-room evictor's close does not take a room that
-// has already failed (reserveRoomCloseLocked); a room that fails while that close runs keeps its
-// record, which nothing else can load onto while it is failed, so this close finds the name
-// holding no room and closes nothing.
+// has already failed (reserveRoomCloseLocked). A room that fails while that close runs keeps its
+// record, which nothing else can load onto while it is failed: when the failure refused the
+// close's Apply (allowInject), this close closes the room; when that close closed it first, this
+// close finds the name holding no room and closes nothing.
 //
 // Whose room is under the name is read from state, not from the document, because the load that
 // replaces the failed room can attach to the failed state: ygo's own load takes the state after
