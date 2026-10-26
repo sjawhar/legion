@@ -320,7 +320,10 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			return nil, fmt.Errorf("Dispatch ask.handed_back payload has no id")
 		}
 		return DispatchAskReply{Key: event.IssueKey, Ask: ask.ID, WaitingOn: "human", Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
-	case "comment.created":
+	case "comment.created", "comment.answered":
+		// comment.answered is a reply a session sends through a delivery's callback (Dispatch's
+		// comment_delivery), which joins its thread as comment.created does and carries the same
+		// ask_id and ask_waiting_on, so a hand-back sent that way starts the root's wait too.
 		var comment struct {
 			Ask       string `json:"ask_id"`
 			WaitingOn string `json:"ask_waiting_on"`
