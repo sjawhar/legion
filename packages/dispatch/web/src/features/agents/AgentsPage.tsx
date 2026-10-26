@@ -385,7 +385,6 @@ function AgentTargetedMessage({
       canSteer={capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !== false}
       deliveries={deliveryAttempts(read.message.deliveries, label)}
       header={null}
-      isClosed={false}
       onReply={() => onReply(agentReplyTo(agent, read, read.message, asker.label))}
       onRetry={retry.mutate}
       replyDisabled={replyDisabled}

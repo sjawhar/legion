@@ -222,6 +222,7 @@ test("ProofDocument reports connection status and pending edits through the tool
     await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
     rerender({ isClosed: true });
     expect(editors[0]?.readOnly).toBe(true);
+    expect(editors[0]?.readOnlyComments).toBe(true);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
     expect(
       within(view.container).getByText("This issue is closed. Its document is read-only.")
@@ -507,6 +508,99 @@ test("a selection-bar action opens the margin composer for the mark and settles 
   }
 });
 
+// A closed issue's document takes no mark, so the bar's Comment there reports the selection, and
+// the margin's composer names the text by quote and occurrence, which the server anchors.
+test("a closed document's Comment opens a quote composer with no mark, which posts the quote and its occurrence", async () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: "paragraph+" },
+      paragraph: { content: "text*", group: "block" },
+      text: {},
+    },
+  });
+  // "brown" twice: the reader selects the second (positions 11 to 16).
+  const document = schema.node("doc", undefined, [
+    schema.node("paragraph", undefined, [schema.text("brown fox brown")]),
+  ]);
+  const fake = fakeDocumentRuntime({ text: "brown fox brown" });
+  const removed: string[] = [];
+  const createEditor = fake.runtime.createEditor;
+  fake.runtime.createEditor = async (root, options) => {
+    const handle = await createEditor(root, options);
+    // The fake view's state is a plain object whose `doc` the test supplies.
+    const state = handle.view.state as unknown as { doc: ProseMirrorNode };
+    state.doc = document;
+    handle.removeMark = (markId) => void removed.push(markId);
+    return handle;
+  };
+  const queryClient = createQueryClient();
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const { editors, margin, sync, view } = renderProofDocument({
+    fake,
+    isClosed: true,
+    queryClient,
+  });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(editors[0]?.options).toMatchObject({ readOnly: true, readOnlyComments: true });
+    const onMarkAction = editors[0]?.options.onMarkAction;
+    if (onMarkAction === undefined) {
+      throw new Error("The editor did not receive an onMarkAction handler.");
+    }
+
+    let cancelled: Promise<void> | undefined;
+    act(() => {
+      cancelled = Promise.resolve(
+        onMarkAction({ from: 11, kind: "quote-comment", quote: "brown", to: 16 })
+      );
+      void cancelled.catch(() => {});
+    });
+    const open = margin.current?.pendingCompose;
+    expect(open).toMatchObject({
+      anchor: { artifact: artifact.id, occurrence: 1, quote: "brown" },
+      kind: "comment",
+    });
+    expect(open?.anchor.mark_id).toBeUndefined();
+    // Ending it unsent takes nothing out of the document: there is no mark.
+    act(() => margin.current?.cancelCompose(open?.seq ?? -1));
+    await expect(cancelled).rejects.toThrow("composer closed");
+    expect(removed).toEqual([]);
+
+    let sent: Promise<void> | undefined;
+    act(() => {
+      sent = Promise.resolve(
+        onMarkAction({ from: 11, kind: "quote-comment", quote: "brown", to: 16 })
+      );
+    });
+    const { anchor } = margin.current?.pendingCompose ?? {};
+    if (anchor === undefined) throw new Error("expected an open compose");
+    act(() =>
+      heldSends(queryClient).send(marginComposeSendKey(anchor.artifact), {
+        anchor,
+        ask: { multiple: false, options: [], urgency: "med" },
+        draft: { body: "After the close", mentions: [], replacement: "" },
+        edit: undefined,
+        kind: "comment",
+        owner: { issueKey: "CORE-1", kind: "issue" },
+        plainDelivery: "steer",
+        replyTo: null,
+      })
+    );
+    await expect(sent).resolves.toBeUndefined();
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", {
+        anchor: { artifact: artifact.id, occurrence: 1, quote: "brown" },
+        body: "After the close",
+      })
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
 test("a highlight click focuses its margin item and hover identifies its matching margin item", async () => {
   const { editors, margin, sync, view } = renderProofDocument();
 
@@ -674,7 +768,8 @@ test("Ctrl+Alt+M comments on the selection while the editor has focus, and nowhe
     expect(pressCommentChord(composer)).toBe(false);
     expect(editor.commented).toBe(1);
 
-    // A closed issue's document is read-only, where the bar offers nothing.
+    // A closed issue's document is read-only and cannot hold focus, so the chord stays out of it;
+    // the bar's own Comment is how a reader comments there.
     editor.root.focus();
     rerender({ isClosed: true });
     expect(pressCommentChord(editor.root)).toBe(false);

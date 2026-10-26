@@ -26,6 +26,8 @@ export interface FakeEditor {
   focusedBlocks: string[];
   options: EditorOptions;
   readOnly: boolean;
+  /** Whether the read-only editor still takes comments by quote (`readOnlyComments`). */
+  readOnlyComments: boolean;
   remoteMarks: Record<string, StoredMark>[];
   root: HTMLElement;
   /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
@@ -102,6 +104,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       markdown: undefined,
       options,
       readOnly: options.readOnly ?? false,
+      readOnlyComments: options.readOnlyComments ?? false,
       remoteMarks: [],
       root,
       selectionEmpty: true,
@@ -139,8 +142,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         editor.markdown = markdown;
         root.textContent = markdown;
       },
-      setReadOnly(readOnly: boolean) {
+      setReadOnly(readOnly: boolean, readOnlyComments = false) {
         editor.readOnly = readOnly;
+        editor.readOnlyComments = readOnlyComments;
       },
       view: {
         dispatch() {},

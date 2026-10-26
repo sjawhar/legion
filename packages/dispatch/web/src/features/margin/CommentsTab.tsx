@@ -71,10 +71,12 @@ interface CommentsTabProps {
 /** The composer on the open document. `MarginSheet` keeps it mounted, hidden, under the Pinned
  *  tab, a phone margin thread and the rail the margin collapses to, so an unsent draft stays with
  *  it; a send it has out, and that send's refusal, are the held-send store's, so they stay with
- *  the document whatever unmounts the composer. On a closed issue it shows only that send or its
- *  refusal. While a newer selection-bar action waits on its send, it says so. It takes focus the
- *  first time it is on screen: a compose mounts it before the margin has opened the compact sheet,
- *  left its rail or the Pinned tab for it, and a field out of sight takes no focus. */
+ *  the document whatever unmounts the composer. On a closed issue a comment compose - one the
+ *  selection bar opened by quote, since the closed document takes no mark - shows and sends; a
+ *  suggestion or ask compose shows only its send or its refusal. While a newer selection-bar
+ *  action waits on its send, it says so. It takes focus the first time it is on screen: a compose
+ *  mounts it before the margin has opened the compact sheet, left its rail or the Pinned tab for
+ *  it, and a field out of sight takes no focus. */
 export function MarginComposerSlot({
   composer,
   hidden,

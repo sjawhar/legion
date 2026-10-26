@@ -1,5 +1,6 @@
 import { api } from "../../api/client";
 import type {
+  AnchorInput,
   AskOption,
   AskUrgency,
   CreateCommentInput,
@@ -155,8 +156,14 @@ export async function sendRequest({
 }: SentRequest): Promise<unknown> {
   const { body, mentions, replacement } = draft;
   if (edit !== undefined) return edit.save(edit.id, body.trim());
-  const selection =
-    anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
+  // A provisional mark is named by its id; a quote anchor (a closed issue's document) by its text
+  // and occurrence, where the server writes the mark.
+  const selection: AnchorInput | undefined =
+    anchor === undefined
+      ? undefined
+      : anchor.mark_id === undefined
+        ? { artifact: anchor.artifact, occurrence: anchor.occurrence, quote: anchor.quote }
+        : { artifact: anchor.artifact, mark_id: anchor.mark_id };
   if (kind === "ask") {
     if (owner.kind === "session")
       throw new Error("The direct session channel does not support asks.");

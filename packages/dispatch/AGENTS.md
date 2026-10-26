@@ -99,18 +99,22 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   thread's own reply is out. On a phone that close only hides the thread view (`hide`), as above
   the phone layout it only collapses the thread: a refusal the thread's replies hold stays, and so
   does the comment they answer. The viewport widening past the phone layout while a send
-  from the thread view is out leaves the view open, full-screen at any width, until Back. And a
-  closed issue keeps its composers mounted (`closed` on `MentionComposer`): one shows itself only
-  for a send of its own still out or that send's refusal, with Send refused and `Discard draft` in
-  place of Retry, and otherwise renders nothing - the box a host places it in, its `frame`, with
-  it - its draft kept for a reopen, so an issue closed, or closed and reopened, under a send leaves
-  that send's composer where it was. A decided suggestion's thread offers no reply, yet its card
+  from the thread view is out leaves the view open, full-screen at any width, until Back. A closed
+  issue takes comments and messages (`closed` on `MentionComposer`): the docked composer, a phone
+  thread's, a thread card's reply and the margin's comment composer show and send there as on an
+  open issue, a refused send shows its refusal with Retry, and Conversation's Reply and delivery
+  Retry show; the composer's Suggest and Ask kinds are hidden, and Resolve, Reopen, Edit, Accept
+  and Reject stay hidden. A suggestion or ask composer whose issue closes stays mounted and shows
+  itself only for a send of its own still out or that send's refusal, with Send refused and
+  `Discard draft` in place of Retry, and otherwise renders nothing - its `frame` with it; an
+  unsent margin suggestion or ask ends as its issue closes, an unsent comment stays. A decided
+  suggestion's thread offers no reply, yet its card
   keeps the reply composer mounted (`finishing` on `MentionComposer`), which shows itself the same
   way but sends as ever, Retry included: a reply out when anyone accepts or rejects the suggestion
   keeps its draft and a refusal until it lands or the reader cancels it.
   `Jump to latest` takes an edge of the screen the docked composer leaves free, so it never covers
   the composer's controls. Below `sm`, where the composer sits at the foot of the screen and grows
-  upward with a refusal's Retry or Discard draft, the pill sits where the turns begin and sticks at
+  upward with a refusal's Retry, the pill sits where the turns begin and sticks at
   the top of the screen once they scroll under it, so it never rises over the issue's header, its
   tabs or the `All / Open / Closed` filter above the turns; from `sm`, where the composer sticks
   to the top, it sits at the foot. While a phone thread covers the Conversation it shows no pill,
@@ -362,16 +366,35 @@ the Pinned tab, under a phone margin thread, and under the rail the desktop marg
 so an unsent draft is where the reader left it. A composer mounts as its compose opens, before the
 margin has opened the compact sheet or come back from its rail or the Pinned tab for it, where its
 field can take no focus, so it takes focus the first time it is on screen (`onScreen` on
-`MarginComposerSlot`, `autoFocus` on `MentionComposer`, which focuses once). Leaving the document,
-or the issue closing, ends an unsent compose; a sent one is the store's, shown again on its
-document, and on a closed issue it shows only that send and then its outcome, as a closed issue's
-composers do. A switch over text another reader's mark of the new kind covers goes through and
+`MarginComposerSlot`, `autoFocus` on `MentionComposer`, which focuses once). Leaving the document
+ends an unsent compose, and the issue closing ends an unsent suggestion or ask (a closed issue
+takes a comment, so an unsent comment compose stays and sends); a sent one is the store's, shown
+again on its document, and on a closed issue a suggestion or ask shows only that send and then its
+outcome, as a closed issue's composers do. A switch over text another reader's mark of the new kind covers goes through and
 leaves that mark whole, as any record mark over another does. The composer's own mark writes are
 never undo steps (`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or
 y-prosemirror's UndoManager: neither undo nor redo writes one back, beside a recorded suggestion,
 after the reader refines the selection under an open composer, or over someone else's comment. A
 switch the editor refuses (the mark is gone, or a suggestion over text upstream will not mark) is
 said under the switch in the reader's words, and the kind stays.
+
+A closed issue's document is read-only, and its socket is admitted read-only, so the browser can
+write no mark there; the server still writes a comment's mark on it (`docs.WithCommentMarks`). So
+on a closed issue's document the selection bar offers Comment alone (`readOnlyComments` on the
+editor), which writes nothing and reports a `quote-comment`. `quoteAnchor`
+(`features/doc/quote-anchor.ts`) reads the selection as the server's `FindQuote` reads a document -
+text nodes in order, one space wherever text does not run on, U+0000 as U+FFFD - and names it by its
+quote and the occurrence of that quote it is, overlapping matches counted, without a leading
+heading marker the server would read as a heading's title. The compose carries that quote anchor
+(`ComposerAnchor` without `mark_id`), the send posts `anchor: {artifact, quote, occurrence}`, the
+server writes the mark where the reader selected, and the thread arrives over the socket like any
+other. A quote compose has no mark to remove or retype: ending it unsent takes nothing out of the
+document, and its kind switch, offered only if the issue reopens under it, is refused in words. On
+an open issue a socket admitted read-only for an outdated schema ("Reload to edit.") offers
+nothing: that editor's reading of the document may not be the server's, so the occurrence it
+counts could name other text. On a closed issue the server admits every socket read-only, so the
+admission cannot tell an outdated schema apart, and the bar offers Comment either way.
+Suggestions and asks stay unavailable on a closed document.
 
 Issue Conversation stays the record of the same comments, one card per thread rather than a
 chronological event list: collapsed comment turns provide a reply summary, a comment deep link

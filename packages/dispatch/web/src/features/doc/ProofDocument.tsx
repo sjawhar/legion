@@ -60,6 +60,7 @@ import {
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
+import { quoteAnchor } from "./quote-anchor";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import { VersionDiff } from "./VersionDiff";
@@ -313,11 +314,11 @@ export function ProofDocument({
     return copyText(`${window.location.origin}${window.location.pathname}#b-${blockId}`);
   }, []);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
-  // offered while this editor has focus, holds a selection and takes edits, which is when the bar
-  // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
-  // historical document - the chord does nothing. `inEditable` because the editor is where it is
-  // pressed. A document is its own scope, since the issue page and a project's document page both
-  // render one.
+  // offered while this editor has focus, holds a selection and takes edits; anywhere else - a
+  // comment composer, an ask card's field, a read-only or historical document, which cannot hold
+  // focus - the chord does nothing. `inEditable` because the editor is where it is pressed. A
+  // document is its own scope, since the issue page and a project's document page both render
+  // one.
   useKeymapScope("document");
   useKeymap("document", [
     {
@@ -526,7 +527,7 @@ export function ProofDocument({
             onAdmission: (readOnly) => {
               schemaReadOnlyRef.current = readOnly;
               setSchemaReadOnly(readOnly);
-              editor?.setReadOnly(isClosedRef.current || readOnly);
+              editor?.setReadOnly(isClosedRef.current || readOnly, isClosedRef.current);
             },
             onOutsideSchema: () => {
               if (!mounted) {
@@ -582,6 +583,20 @@ export function ProofDocument({
                         },
                         kind: composerKindFor(action.kind),
                       });
+                    case "quote-comment": {
+                      // A closed issue's document takes no mark: the comment names its text by
+                      // quote, and the server writes its mark where the reader selected.
+                      const doc = editor?.view.state.doc;
+                      const anchor =
+                        doc === undefined ? undefined : quoteAnchor(doc, action.from, action.to);
+                      if (anchor === undefined) {
+                        throw new Error("The selection holds no text to quote.");
+                      }
+                      return marginRef.current.composeForMark({
+                        anchor: { artifact: artifact.id, ...anchor },
+                        kind: "comment",
+                      });
+                    }
                     default:
                       throw new Error(
                         `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
@@ -590,7 +605,13 @@ export function ProofDocument({
                 },
                 onMarkClick: (markId) => marginRef.current.focusItemForMark(markId),
                 onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
+                // A closed issue's document takes comments by quote (the bar's Comment alone). The
+                // server admits every socket on a closed issue read-only, so its admission cannot
+                // say whether this editor's schema is outdated too; on an open issue a read-only
+                // admission means it is, and the document takes nothing until a reload, since this
+                // editor's reading of it may not be the server's.
                 readOnly: isClosedRef.current || schemaReadOnlyRef.current,
+                readOnlyComments: isClosedRef.current,
                 user: {
                   color: colorForLogin(userRef.current.login),
                   name: userRef.current.login,
@@ -637,7 +658,7 @@ export function ProofDocument({
   }, [textReadAt]);
 
   useEffect(() => {
-    editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
+    editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current, isClosed);
   }, [isClosed]);
 
   useEffect(() => {

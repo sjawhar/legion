@@ -245,7 +245,6 @@ interface TargetedMessageCardProps {
   readonly current?: boolean;
   readonly deliveries: readonly TargetedMessageAttempt[];
   readonly header: ReactNode;
-  readonly isClosed: boolean;
   readonly onReply?: () => void;
   readonly onRetry?: (delivery: MessageDeliveryMode) => void;
   /** Holds the Reply button while the composer it would address is busy with a send. */
@@ -268,7 +267,6 @@ export function TargetedMessageCard({
   current = false,
   deliveries,
   header,
-  isClosed,
   onReply,
   onRetry,
   register,
@@ -279,8 +277,7 @@ export function TargetedMessageCard({
   turnID,
 }: TargetedMessageCardProps): ReactNode {
   // Narrowed once, so the render below needs no second test of the same condition.
-  const retry =
-    answeredBy === undefined && !isClosed && !takenAsUserTurn(deliveries) ? onRetry : undefined;
+  const retry = answeredBy === undefined && !takenAsUserTurn(deliveries) ? onRetry : undefined;
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -291,7 +288,7 @@ export function TargetedMessageCard({
       <div className="flex gap-3">
         {header}
         <div className="min-w-0 flex-1">{body}</div>
-        {onReply === undefined || isClosed ? null : (
+        {onReply === undefined ? null : (
           <ReplyButton className="self-start" disabled={replyDisabled} onClick={onReply} />
         )}
       </div>

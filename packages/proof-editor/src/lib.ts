@@ -84,7 +84,7 @@ import {
 
 import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
 import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
-import { commentOnSelection, dispatchActionBarPlugin } from './dispatch-action-bar';
+import { commentOnSelection, dispatchActionBarPlugin, setReadOnlyComments } from './dispatch-action-bar';
 import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
@@ -132,9 +132,15 @@ export interface CreateProofEditorOptions {
   user: ProofEditorUser;
   /** Render the document read-only. Defaults to false. */
   readOnly?: boolean;
+  /** While read-only, the selection bar still offers Comment, alone: it writes no mark and
+   *  reports a `quote-comment` action, for a host whose server anchors the comment by its quote.
+   *  Defaults to false. */
+  readOnlyComments?: boolean;
   /** Fired for every mark-affecting user action: Comment/Suggest/Ask on the
    *  selection bar (the editor has already applied the mark locally with a
-   *  fresh markId over [from,to]; a rejected promise removes it), and
+   *  fresh markId over [from,to]; a rejected promise removes it), Comment on
+   *  a read-only view that takes comments (`quote-comment`: no mark is
+   *  written), and
    *  Reply/Resolve/Unresolve/Accept/Reject/Delete on the mark popover (no
    *  local mutation is applied for these — the host's server is expected to
    *  mutate and the change arrives back through the shared Y.Doc). */
@@ -160,8 +166,9 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   setMarkdown(markdown: string): void;
   /** Top offset of each mark's first span relative to the library root. */
   markOffsets(): Map<string, number>;
-  /** Toggle editability (e.g. for a readOnly flag change post-construction). */
-  setReadOnly(readOnly: boolean): void;
+  /** Toggle editability (e.g. for a readOnly flag change post-construction), and whether the
+   *  read-only document still takes comments (`readOnlyComments`). */
+  setReadOnly(readOnly: boolean, readOnlyComments?: boolean): void;
   /** Apply mark metadata received from a peer, re-anchoring by quote. Unified
    *  Proof marks (comment/suggestion/flagged/approved) only — see
    *  ./dispatch-marks.ts's module doc for why dispatchAsk marks are outside
@@ -177,7 +184,7 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
   /** Starts a comment on the current selection exactly as the selection bar's Comment button
    *  does, `onMarkAction` included, and answers whether it did: false for an empty selection and
-   *  while the document is read-only, where the bar offers no Comment. */
+   *  while the document is read-only and takes no comments, where the bar offers no Comment. */
   commentOnSelection(): boolean;
   /** Scrolls a mark's anchor into view and pulses it. Works for both the
    *  unified marks system and dispatchAsk marks: both render `data-id`. */
@@ -372,9 +379,11 @@ export async function createProofEditor(
   const view = editor.ctx.get(editorViewCtx);
 
   let currentReadOnly = Boolean(opts.readOnly);
+  setReadOnlyComments(view, Boolean(opts.readOnlyComments));
   view.setProps({ editable: () => !currentReadOnly });
-  const setReadOnly = (readOnly: boolean) => {
+  const setReadOnly = (readOnly: boolean, readOnlyComments = false) => {
     currentReadOnly = readOnly;
+    setReadOnlyComments(view, readOnlyComments);
     view.setProps({ editable: () => !currentReadOnly });
   };
 

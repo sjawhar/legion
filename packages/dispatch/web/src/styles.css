@@ -251,10 +251,6 @@ a {
   text-decoration: line-through;
 }
 
-.dispatch-doc[data-read-only="true"] .dispatch-action-bar {
-  display: none;
-}
-
 /* A typed block's header is a label, not a dump. No stylesheet targeted it, so the block's
    name and its attributes rendered as bare prose lines down the page (#1434/#1452, LEGION-67).
    The name is the eyebrow role, a `kind` is a badge beside it, a `title` is the header's text,

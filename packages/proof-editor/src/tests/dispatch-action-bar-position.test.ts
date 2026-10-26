@@ -116,6 +116,7 @@ function createActionBarView(document: FakeDocument) {
   const view = {
     dom,
     state,
+    editable: true,
     coordsAtPos: () => selection,
     hasFocus: () => true,
   } as unknown as EditorView;

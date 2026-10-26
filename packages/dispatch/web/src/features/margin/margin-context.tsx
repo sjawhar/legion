@@ -36,6 +36,11 @@ const KIND_SWITCH_REFUSALS: Record<RetypeRefusal["refused"], string> = {
     "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again.",
 };
 
+/** What the composer says when a compose that names its text by quote - a closed issue's
+ *  document's, which holds no provisional mark - is asked to change kind. */
+const QUOTE_KIND_SWITCH_REFUSAL =
+  "This comment names its text by quote, with no highlight to change. Close this composer and select the text again.";
+
 interface MarkComposeRequest {
   anchor: ComposerAnchor;
   kind: ComposerKind;
@@ -229,14 +234,15 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // it, a refusal's Retry posting to its mark. The refused action shows the reader why nothing
   // opened: the margin brings that compose on screen saying its send is still out. A refused send
   // gives way: the newer compose takes the composer the reader has there, which keeps its draft,
-  // and the refusal and its mark go.
+  // and the refusal and its mark go. A compose that names its text by quote (a closed issue's
+  // document) holds no mark, so it has none to take back.
   const composeForMark = useCallback(
     (request: MarkComposeRequest): Promise<void> =>
       new Promise<void>((resolve, reject) => {
         const { artifact, mark_id: markId } = request.anchor;
         const held = store.get(marginComposeSendKey(artifact));
         if (held !== undefined && held.status !== "refused") {
-          bridgeRef.current?.removeMark(markId);
+          if (markId !== undefined) bridgeRef.current?.removeMark(markId);
           show(artifact, true);
           reject(new Error("the open composer's send is out"));
           return;
@@ -244,7 +250,8 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
         if (held !== undefined) store.discard(held.mutationKey);
         const open = openCompose.current;
         if (open !== undefined) {
-          bridgeRef.current?.removeMark(open.request.anchor.mark_id);
+          const openMarkId = open.request.anchor.mark_id;
+          if (openMarkId !== undefined) bridgeRef.current?.removeMark(openMarkId);
           open.reject(new Error("replaced by a newer composer"));
         }
         sequence.current += 1;
@@ -257,7 +264,8 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     (seq: number) => {
       const open = openCompose.current;
       if (open === undefined || open.request.seq !== seq) return;
-      bridgeRef.current?.removeMark(open.request.anchor.mark_id);
+      const markId = open.request.anchor.mark_id;
+      if (markId !== undefined) bridgeRef.current?.removeMark(markId);
       publishCompose(undefined);
       open.reject(new Error("composer closed"));
     },
@@ -275,6 +283,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       const anchor = open?.request.anchor ?? held?.request.anchor;
       const current = open?.request.kind ?? held?.request.kind;
       if (anchor === undefined || current === kind) return undefined;
+      if (anchor.mark_id === undefined) return QUOTE_KIND_SWITCH_REFUSAL;
       // No open document means no mark to retype: the same words as a mark that is gone.
       const outcome = bridge?.retypeMark(anchor.mark_id, kind) ?? { refused: "missing" as const };
       if ("refused" in outcome) {

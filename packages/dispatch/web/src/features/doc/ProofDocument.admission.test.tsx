@@ -443,8 +443,35 @@ test("ProofDocument makes a schema-read-only admission non-editable and reloadab
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.readOnly).toBe(true);
+    expect(editors[0]?.readOnlyComments).toBe(false);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
     expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+// The server admits every socket on a closed issue's document read-only, so that admission says
+// nothing about this editor's schema, and the document takes comments by quote through it. On an
+// open issue a read-only admission means an outdated schema, and the document takes nothing.
+test("a closed issue's document takes comments by quote through its read-only admission; an open one's does not", async () => {
+  const { admit, connections, editors, rerender, sync, view } = renderProofDocument({
+    isClosed: true,
+  });
+
+  try {
+    await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => admit(true));
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(editors[0]?.options).toMatchObject({ readOnly: true, readOnlyComments: true });
+    act(() => admit(true));
+    expect(editors[0]?.readOnly).toBe(true);
+    expect(editors[0]?.readOnlyComments).toBe(true);
+
+    rerender({ isClosed: false });
+    expect(editors[0]?.readOnly).toBe(true);
+    expect(editors[0]?.readOnlyComments).toBe(false);
   } finally {
     view.unmount();
   }

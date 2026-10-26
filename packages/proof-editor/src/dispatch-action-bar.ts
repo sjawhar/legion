@@ -25,6 +25,12 @@
  * host is expected to collect the actual comment/suggestion body through its
  * own UI, correlated by `markId`. If the hook's promise rejects, the local
  * mark is removed.
+ *
+ * A read-only view takes no mark. There the bar offers nothing, unless the
+ * host takes comments on it (`setReadOnlyComments`): then it offers Comment
+ * alone, which writes nothing and reports a `quote-comment` action with the
+ * selection's quote and range, for a host whose server anchors the comment by
+ * its quote.
  */
 
 import { $prose } from '@milkdown/kit/utils';
@@ -102,6 +108,10 @@ export function positionBar(bar: HTMLElement, view: EditorView, range: MarkRange
 
 /** Each live view's bar, for `commentOnSelection`. */
 const controllers = new WeakMap<EditorView, ActionBarController>();
+/** The views that, while read-only, still take comments (`setReadOnlyComments`). The view keeps
+ *  the setting rather than its bar, since a plugin reconfiguration - the collab cursors' install -
+ *  builds the bar anew. */
+const readOnlyCommentViews = new WeakSet<EditorView>();
 
 class ActionBarController {
   private view: EditorView;
@@ -114,6 +124,8 @@ class ActionBarController {
   private destroyed = false;
   private selectionChangedAt: number | null = null;
   private selectionSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The buttons only an editable view offers. */
+  private readonly editButtons: HTMLButtonElement[] = [];
 
   private readonly handleSelectionChange = () => {
     const range = getSelectionRange(this.view);
@@ -215,8 +227,10 @@ class ActionBarController {
 
   update(view: EditorView): void {
     this.view = view;
+    for (const button of this.editButtons) button.hidden = !view.editable;
     const range = getSelectionRange(view);
-    if (!range || this.editorLostFocus) {
+    // A read-only view offers Comment alone where it takes comments, and nothing elsewhere.
+    if (!range || this.editorLostFocus || !(view.editable || readOnlyCommentViews.has(view))) {
       this.lastRange = range;
       this.hideBar();
       return;
@@ -258,6 +272,7 @@ class ActionBarController {
         this.pointerDown ||
         this.editorLostFocus ||
         !this.isTouchSelection() ||
+        !(this.view.editable || readOnlyCommentViews.has(this.view)) ||
         !isRangeValid(this.view, this.lastRange)
       ) {
         return;
@@ -280,15 +295,29 @@ class ActionBarController {
     this.bar.style.display = 'none';
   }
 
-  /** The one path from a selection to a mark, for the bar's buttons and `commentOnSelection`. It
-   *  marks nothing and answers false for an empty or stale range, or while the view is read-only,
-   *  where the bar offers no action. */
+  /** The one path from a selection to an action, for the bar's buttons and `commentOnSelection`.
+   *  It acts on nothing and answers false for an empty or stale range, or for a kind the view does
+   *  not offer: on a read-only view, anything but Comment, and Comment too unless the view takes
+   *  comments there, where it writes no mark and reports a `quote-comment` instead. */
   act(kind: SelectionBarActionKind, range: MarkRange | null): boolean {
-    // Dispatch hides this bar on read-only surfaces; this also keeps a reachable button from
-    // writing a provisional mark into a closed or historical document.
-    if (!this.view.editable || !isRangeValid(this.view, range)) return false;
-    void this.runAction(kind, range);
+    if (!isRangeValid(this.view, range)) return false;
+    if (this.view.editable) {
+      void this.runAction(kind, range);
+      return true;
+    }
+    // A reachable button must not write a provisional mark into a closed or historical document.
+    if (kind !== 'comment' || !readOnlyCommentViews.has(this.view)) return false;
+    void this.reportQuoteComment(range);
     return true;
+  }
+
+  private async reportQuoteComment(range: MarkRange): Promise<void> {
+    const quote = this.view.state.doc.textBetween(range.from, range.to, '\n', '\n');
+    try {
+      await this.options.onMarkAction?.({ kind: 'quote-comment', quote, from: range.from, to: range.to });
+    } catch {
+      // Nothing was written, so a rejection - the host's composer ending unsent - has nothing to undo.
+    }
   }
 
   private async runAction(kind: SelectionBarActionKind, range: MarkRange): Promise<void> {
@@ -338,16 +367,25 @@ class ActionBarController {
     };
 
     this.bar.appendChild(makeButton('Comment', 'comment'));
-    this.bar.appendChild(makeButton('Suggest', 'suggest'));
-    this.bar.appendChild(makeButton('Ask', 'ask'));
+    this.editButtons.push(makeButton('Suggest', 'suggest'), makeButton('Ask', 'ask'));
+    for (const button of this.editButtons) this.bar.appendChild(button);
   }
 }
 
 /** Starts a comment on `view`'s selection exactly as the bar's Comment button does - the same
- *  mark, then the same `onMarkAction` - and answers whether it did: not for an empty selection,
- *  nor while the view is read-only, where the bar offers no Comment. */
+ *  mark, or on a read-only view that takes comments the same `quote-comment`, then the same
+ *  `onMarkAction` - and answers whether it did: not for an empty selection, nor while the view is
+ *  read-only and takes no comments, where the bar offers no Comment. */
 export function commentOnSelection(view: EditorView): boolean {
   return controllers.get(view)?.act('comment', getSelectionRange(view)) ?? false;
+}
+
+/** Sets whether `view`, while read-only, still takes comments: its bar then offers Comment alone,
+ *  which marks nothing and reports a `quote-comment`. It takes effect at the view's next update,
+ *  which the caller's `setProps` makes. */
+export function setReadOnlyComments(view: EditorView, enabled: boolean): void {
+  if (enabled) readOnlyCommentViews.add(view);
+  else readOnlyCommentViews.delete(view);
 }
 
 export const dispatchActionBarPlugin = (options: ActionBarOptions) =>
