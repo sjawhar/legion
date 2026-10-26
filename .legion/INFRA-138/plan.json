@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-138",
-  "completed": "2026-10-26T18:03:28Z",
+  "completed": "2026-10-26T18:49:53Z",
   "planDocument": "dispatch://INFRA-138/artifact/plan-md",
   "summary": "Integration-only root: the root PR changes only .legion/INFRA-138/; every root Acceptance bullet (41, spec lines 232-275) is delivered by a named child and proven on main by INFRA-480. The root's own phases prove RC1-RC6 about its own PR and branch.",
   "requiredSkills": {
@@ -152,5 +152,11 @@
     "verdict": "approved",
     "rounds": 2
   },
-  "specDepartures": []
+  "specDepartures": [],
+  "generationRecheck": {
+    "generation": 3,
+    "mainAt": "6cdb99959fa1",
+    "result": "plan holds unchanged",
+    "evidence": "main's required checks still lint, typecheck, test, pr-title; squash and auto-merge allowed; main's diff since 8411fe855 touches no READY, classify, trailer, pr-body or merge-gate file (pr-and-main.yaml adds only a runner sysctl); INFRA-174 backlog and INFRA-177 todo, not landed; pull request #2265 changes only .legion/INFRA-138/ (RC1); the architect's correction comment c1fd60c4 (three render paths, not four) changes no part of the plan"
+  }
 }
