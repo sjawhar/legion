@@ -100,8 +100,8 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
    EOF
    ```
 
-   The merge's close hands you the production check's first look in this session; Dispatch's
-   `issue.deployed` wakes a later look only after you report `pending`
+   The merge's close hands you the production check's first look in this session; the daemon
+   wakes a later look at a deploy only after you report `pending`
    (`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
 8. **Complete** with the `legion` tool's `handoff_complete`, its summary two sentences for the
    architect. It reports your workspace's `@-`, so push first. In the workspace retro changes only
