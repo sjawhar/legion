@@ -161,6 +161,18 @@ func (r *Registry) Servable() error {
 	return r.watcher.Servable()
 }
 
+// NeedsRead reports whether the copy does not follow its bucket with no read under way to make it,
+// which only a Rewatch repairs (kvwatch.Watcher.NeedsRead).
+func (r *Registry) NeedsRead() bool {
+	return r.watcher.NeedsRead()
+}
+
+// Disconnected says the connection the cache's watcher reads through was lost
+// (kvwatch.Watcher.Disconnected).
+func (r *Registry) Disconnected() {
+	r.watcher.Disconnected()
+}
+
 // WatchErr is the cache watcher's terminal error, or nil while it runs, so the listener can tell a
 // rebuildable dead cache from a transient KV timeout.
 func (r *Registry) WatchErr() error {

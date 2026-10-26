@@ -205,13 +205,34 @@ func TestFullMux_StartingState(t *testing.T) {
 		}
 	})
 
-	t.Run("v1 sessions returns 503", func(t *testing.T) {
-		rr := httptest.NewRecorder()
-		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/sessions", nil))
-		if rr.Code != http.StatusServiceUnavailable {
-			t.Fatalf("expected 503, got %d", rr.Code)
-		}
-	})
+	// The two list reads get the refilling answer the routes give while their copies cannot be
+	// served: before /v1 opens no copy has been read.
+	for _, path := range []string{"/v1/sessions", "/v1/interests/"} {
+		t.Run("GET "+path+" answers refilling", func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+			assertListRefilling(t, rr.Result())
+		})
+	}
+
+	// Every other request keeps "service starting", a write or a single read on a list path too.
+	for _, request := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/sessions"},
+		{http.MethodDelete, "/v1/sessions/ses_x"},
+		{http.MethodGet, "/v1/interests/ses_x"},
+		{http.MethodPost, "/v1/interests/subscribe"},
+	} {
+		t.Run(request.method+" "+request.path+" answers service starting", func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(request.method, request.path, nil))
+			if body := rr.Body.String(); rr.Code != http.StatusServiceUnavailable || body != "{\"error\":\"service starting\"}\n" {
+				t.Fatalf("status %d body %q, want 503 service starting", rr.Code, body)
+			}
+			if retryAfter := rr.Header().Get("Retry-After"); retryAfter != "" {
+				t.Fatalf("Retry-After = %q, want none", retryAfter)
+			}
+		})
+	}
 }
 
 func TestPublishHandler_RejectsAgentTopics(t *testing.T) {

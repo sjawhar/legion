@@ -205,6 +205,18 @@ func (r *SessionRegistry) Servable() error {
 	return r.watcher.Servable()
 }
 
+// NeedsRead reports whether the copy does not follow its bucket with no read under way to make it,
+// which only a Rewatch repairs (kvwatch.Watcher.NeedsRead).
+func (r *SessionRegistry) NeedsRead() bool {
+	return r.watcher.NeedsRead()
+}
+
+// Disconnected says the connection the cache's watcher reads through was lost
+// (kvwatch.Watcher.Disconnected).
+func (r *SessionRegistry) Disconnected() {
+	r.watcher.Disconnected()
+}
+
 // logger is the logger WithSessionLogger set, or the default one.
 func (r *SessionRegistry) logger() *slog.Logger {
 	if r.log == nil {

@@ -469,6 +469,18 @@ func (s *Store) WatchErr() error {
 	return s.watcher.Err()
 }
 
+// NeedsRead reports whether the copy does not follow its bucket with no read under way to make it,
+// which only a Rewatch repairs (kvwatch.Watcher.NeedsRead).
+func (s *Store) NeedsRead() bool {
+	return s.watcher.NeedsRead()
+}
+
+// Disconnected says the connection the cache's watcher reads through was lost
+// (kvwatch.Watcher.Disconnected).
+func (s *Store) Disconnected() {
+	s.watcher.Disconnected()
+}
+
 // StopWatch retires the cache's watcher for a shutdown (kvwatch.Watcher.Stop).
 func (s *Store) StopWatch() {
 	s.watcher.Stop()

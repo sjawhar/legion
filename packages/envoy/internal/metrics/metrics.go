@@ -176,15 +176,24 @@ func (g *Gauge) Dec() { g.value.Add(-1) }
 // GaugeFunc
 // ---------------------------------------------------------------------------
 
-// GaugeFunc evaluates fn at scrape time to produce a gauge value.
+// GaugeFunc evaluates fn at scrape time to produce a gauge value. When fn reports no value, the
+// scrape carries the gauge's HELP and TYPE lines and no sample, so a value that cannot be stood
+// behind reads as missing rather than as a number.
 type GaugeFunc struct {
 	name string
 	help string
-	fn   func() int64
+	fn   func() (int64, bool)
 }
 
 // NewGaugeFunc registers a gauge whose value is computed by fn on each scrape.
 func (r *Registry) NewGaugeFunc(name, help string, fn func() int64) {
+	r.NewOptionalGaugeFunc(name, help, func() (int64, bool) { return fn(), true })
+}
+
+// NewOptionalGaugeFunc registers a gauge whose value is computed by fn on each scrape, and which
+// writes no sample on a scrape where fn reports false: a reader sees the series as absent there,
+// never as a value fn could not stand behind.
+func (r *Registry) NewOptionalGaugeFunc(name, help string, fn func() (int64, bool)) {
 	r.mu.Lock()
 	r.gaugeFuncs = append(r.gaugeFuncs, &GaugeFunc{name: name, help: help, fn: fn})
 	r.mu.Unlock()
@@ -253,7 +262,9 @@ func (r *Registry) Handler() http.Handler {
 
 		for _, gf := range r.gaugeFuncs {
 			writeType(w, gf.name, gf.help, "gauge")
-			fmt.Fprintf(w, "%s %d\n", gf.name, gf.fn())
+			if value, ok := gf.fn(); ok {
+				fmt.Fprintf(w, "%s %d\n", gf.name, value)
+			}
 		}
 	})
 }

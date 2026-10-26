@@ -31,8 +31,9 @@ import (
 )
 
 // listenerDeps holds the NATS-dependent resources, all open. main builds the /v1 handlers over it
-// once the stores are open; /healthz and the metrics gauges, which answer during startup too, read
-// it through an atomic.Pointer that stays nil until the durable consumer binds.
+// once the stores are open. /healthz, which answers during startup too, reads it through an
+// atomic.Pointer that stays nil until the durable consumer binds; the list gauges read it through
+// another that openV1Routes publishes when /v1 opens (registerListGauges).
 type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
@@ -51,6 +52,12 @@ type listenerDeps struct {
 type kvCache interface {
 	Rewatch(*nats.Conn) error
 	WatchErr() error
+	// NeedsRead reports a copy that does not follow its bucket with no read under way to make it
+	// (kvwatch.Watcher.NeedsRead), which only a Rewatch repairs.
+	NeedsRead() bool
+	// Disconnected says the connection the cache's watcher reads through was lost
+	// (kvwatch.Watcher.Disconnected).
+	Disconnected()
 	Ping() error
 	StopWatch()
 	EndWatch(context.Context)
@@ -124,12 +131,34 @@ func endListenerKVWatchers(ctx context.Context, caches []listenerCache) {
 	ended.Wait()
 }
 
+// hookListenerKVWatchers ties every cache's KV watcher to the client's connection. KV watchers are
+// not bus subscriptions, so a disconnect tells each cache that its copy stopped following its
+// bucket (nats.go keeps a watcher's subscription open through an outage, so nothing else would),
+// every recovered connection rewatches them, which reads each bucket again, and the drain ends
+// them before the connection's own.
+func hookListenerKVWatchers(client *bus.Client, caches []listenerCache) {
+	client.AddDisconnectHook(func() {
+		for _, c := range caches {
+			c.cache.Disconnected()
+		}
+	})
+	client.AddReconnectHook(func(conn *nats.Conn) error {
+		return rewatchListenerKVWatchers(conn, caches)
+	})
+	client.AddDrainHook(func(ctx context.Context) {
+		endListenerKVWatchers(ctx, caches)
+	})
+}
+
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop. A
 // missing bucket is terminal too: no watcher notices envoy_roles going, and a
 // rebuild cannot create a bucket, so its failed rebuilds end in a restart,
-// whose store Open creates it again.
+// whose store Open creates it again. A cache whose copy needs a read
+// (kvCache.NeedsRead) is rebuilt as a stopped watcher is: nothing but a
+// Rewatch reads its bucket again, for instance after the reconnect hook's
+// Rewatch failed while the old watcher survived.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
 	if err == nil || !client.Connected() {
 		return false
@@ -139,7 +168,7 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 		return true
 	}
 	for _, c := range caches {
-		if c.cache.WatchErr() != nil {
+		if c.cache.WatchErr() != nil || c.cache.NeedsRead() {
 			return true
 		}
 	}
@@ -310,13 +339,21 @@ func runSelfHealthMonitor(
 	}
 }
 
-// checkSelfHealth pings the KV-backed caches and the optional durable
-// consumer probe. Returns the first error encountered, or nil when all are
-// healthy.
+// errCacheNeedsRead is the self-health failure of a cache whose copy does not follow its bucket
+// with no read under way (kvCache.NeedsRead).
+var errCacheNeedsRead = errors.New("the cache does not follow its bucket and no read of it is under way")
+
+// checkSelfHealth pings the KV-backed caches, reports one whose copy needs a read, and runs the
+// optional durable consumer probe. Returns the first error encountered, or nil when all are
+// healthy. A copy that needs a read answers its Ping, so without its own failure here the monitor
+// would never rebuild it (isUnrecoverableSelfHealthFailure).
 func checkSelfHealth(caches []listenerCache, durable func() error) error {
 	for _, c := range caches {
 		if err := c.cache.Ping(); err != nil {
 			return fmt.Errorf("%s kv: %w", c.name, err)
+		}
+		if c.cache.NeedsRead() {
+			return fmt.Errorf("%s kv: %w", c.name, errCacheNeedsRead)
 		}
 	}
 	if durable != nil {
@@ -470,7 +507,10 @@ func newHTTPServer(handler http.Handler) *http.Server {
 // startingGate answers 503 "service starting" until open hands it the mux to serve, and logs each
 // request it refuses: that line is the listener's only record of a caller it turned away while it
 // started. main builds each gate's mux only once every dependency of its handlers is open, so a
-// request never reaches a handler over a dependency that is not there.
+// request never reaches a handler over a dependency that is not there. The two list reads, GET
+// /v1/sessions and GET /v1/interests/, get the refilling answer the routes give while their copies
+// cannot be served (writeListRefilling), since before /v1 opens no copy has been read: a caller
+// reads one answer for "the list is not ready" whether the gate or the route gives it.
 type startingGate struct {
 	name   string
 	logger *logging.Logger
@@ -492,10 +532,20 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 		)
+		if isListRead(r) {
+			writeListRefilling(w)
+			return
+		}
 		writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 		return
 	}
 	mux.ServeHTTP(w, r)
+}
+
+// isListRead reports whether r is one of the two list reads, GET /v1/sessions or GET
+// /v1/interests/, whose closed-gate answer is the refilling one.
+func isListRead(r *http.Request) bool {
+	return r.Method == http.MethodGet && (r.URL.Path == "/v1/sessions" || r.URL.Path == "/v1/interests/")
 }
 
 // openWebhooks builds the webhook routes over NATS and the CI store (nil without the GitHub route)
@@ -509,16 +559,49 @@ func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, 
 	gate.open(routes)
 }
 
-// openV1Routes builds the /v1 routes over the stores and opens the /v1 gate onto them. No /v1
-// handler reads the durable consumer, so /v1 opens before the durable binds: during a rolling deploy
-// the bind waits out the task being replaced, and callers that resolve the listener's name reach
-// both tasks meanwhile. Publishing the dependencies, which turns /healthz healthy, waits for the
-// bind.
-func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, logger *logging.Logger, listeningAt time.Time) {
+// openV1Routes builds the /v1 routes over the stores, opens the /v1 gate onto them and publishes
+// the stores to served, which the list gauges read (registerListGauges). No /v1 handler reads the
+// durable consumer, so /v1 opens before the durable binds: during a rolling deploy the bind waits
+// out the task being replaced, and callers that resolve the listener's name reach both tasks
+// meanwhile, so a list /v1 answers then has its sample. Publishing the dependencies that turn
+// /healthz healthy waits for the bind.
+func openV1Routes(gate *startingGate, ready *listenerDeps, served *atomic.Pointer[listenerDeps], machineID string, logger *logging.Logger, listeningAt time.Time) {
 	routes := http.NewServeMux()
 	registerV1Routes(routes, ready, machineID, logger)
 	gate.open(routes)
+	served.Store(ready)
 	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
+}
+
+// registerListGauges registers the two gauges that count a list /v1 answers: envoy_active_sessions
+// counts listedSessions, the listing GET /v1/sessions answers, and envoy_active_interests the
+// interest copy GET /v1/interests/ answers. served is the pointer openV1Routes publishes. Before
+// /v1 opens, and while a list would answer the refilling 503, a gauge writes no sample: a count of
+// a copy that cannot be served is no count of the live sessions, and a missing sample is not read
+// as zero, which only a complete empty copy reads.
+func registerListGauges(met *metrics.Registry, served *atomic.Pointer[listenerDeps]) {
+	met.NewOptionalGaugeFunc("envoy_active_sessions", "Number of active sessions", func() (int64, bool) {
+		d := served.Load()
+		if d == nil {
+			return 0, false
+		}
+		entries, err := listedSessions(d.registry, d.sessions)
+		if err != nil {
+			return 0, false
+		}
+		return int64(len(entries)), true
+	})
+	met.NewOptionalGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() (int64, bool) {
+		d := served.Load()
+		if d == nil {
+			return 0, false
+		}
+		interests, err := d.registry.List()
+		if err != nil {
+			return 0, false
+		}
+		return int64(len(interests)), true
+	})
 }
 
 func main() {
@@ -558,8 +641,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Shared state: nil until NATS initialization completes.
-	var deps atomic.Pointer[listenerDeps]
+	// Shared state: deps stays nil until the durable consumer binds (/healthz reads it), v1Deps
+	// until /v1 opens (the list gauges read it).
+	var deps, v1Deps atomic.Pointer[listenerDeps]
 
 	// Metrics registry — /metrics available during startup (like /healthz).
 	met := metrics.New()
@@ -573,28 +657,7 @@ func main() {
 	if webhookCfg.GitHub != nil {
 		ciLegacyHeld = met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the last summary tick held back")
 	}
-	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
-		d := deps.Load()
-		if d == nil {
-			return 0
-		}
-		entries, err := d.sessions.List()
-		if err != nil {
-			return 0
-		}
-		return int64(len(entries))
-	})
-	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
-		d := deps.Load()
-		if d == nil {
-			return 0
-		}
-		interests, err := d.registry.List()
-		if err != nil {
-			return 0
-		}
-		return int64(len(interests))
-	})
+	registerListGauges(met, &v1Deps)
 
 	// Phase 3: Build HTTP mux.
 	mux := http.NewServeMux()
@@ -607,11 +670,11 @@ func main() {
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
-	// The webhook and /v1 routes answer 503 "service starting" until their dependencies are open,
-	// each behind its own gate: the webhooks once NATS and, for the GitHub route, the CI store are
-	// (Phase 5), /v1 once the interest and session caches are too (Phase 6). Neither waits for the
-	// durable consumer, which only /healthz reads. The webhook paths reach their gate bare, /v1
-	// through apiAuth.
+	// The webhook and /v1 routes answer 503 "service starting" until their dependencies are open
+	// (the two /v1 list reads the refilling answer, startingGate), each behind its own gate: the
+	// webhooks once NATS and, for the GitHub route, the CI store are (Phase 5), /v1 once the
+	// interest and session caches are too (Phase 6). Neither waits for the durable consumer, which
+	// only /healthz reads. The webhook paths reach their gate bare, /v1 through apiAuth.
 	webhookGate, v1Gate := newStartingGate("webhook", logger), newStartingGate("v1", logger)
 	hooks := webhookRoutes(webhookCfg)
 	for _, hook := range hooks {
@@ -723,15 +786,11 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
-	// KV watchers are not bus subscriptions, so recreate them after every
-	// recovered NATS connection, and end them in the drain before the connection's own.
+	// KV watchers are not bus subscriptions: tie them to the connection, so a disconnect stops each
+	// copy following its bucket, every recovered connection reads each bucket again, and the drain
+	// ends them before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
-	client.AddReconnectHook(func(conn *nats.Conn) error {
-		return rewatchListenerKVWatchers(conn, caches)
-	})
-	client.AddDrainHook(func(ctx context.Context) {
-		endListenerKVWatchers(ctx, caches)
-	})
+	hookListenerKVWatchers(client, caches)
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
@@ -803,7 +862,7 @@ func main() {
 		consumer:   consumer,
 		streamName: bus.Stream,
 	}
-	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
+	openV1Routes(v1Gate, ready, &v1Deps, cfg.MachineID, logger, listeningAt)
 
 	// During a rolling deploy the old task still holds the durable's push binding, and nats.Bind
 	// rejects a second one ("consumer is already bound"), so the bind is polled until the old task's
