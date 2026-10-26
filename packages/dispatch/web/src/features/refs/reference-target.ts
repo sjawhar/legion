@@ -12,6 +12,7 @@ import type {
   IssueDetails,
   MessageRead,
 } from "../../api/types";
+import { routeBlock } from "./block-reference";
 import { useMarkdownHeadline } from "./markdown-engine";
 import {
   buildDispatchReference,
@@ -21,7 +22,6 @@ import {
   isProjectRoute,
   referencedArtifact,
   referenceTargetKind,
-  routeBlock,
 } from "./routes";
 
 /**

@@ -36,9 +36,9 @@ import {
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
+import { blockFragment } from "../refs/block-reference";
 import { fetchReferencePath, needsSpecSlug } from "../refs/reference-target";
 import {
-  blockFragment,
   buildIssuePath,
   buildProjectPath,
   buildReferencePath,

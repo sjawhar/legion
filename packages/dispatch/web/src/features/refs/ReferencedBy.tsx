@@ -10,10 +10,11 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { blockFragment, routeBlock } from "./block-reference";
 import { referenceTriggerProps } from "./RefPreview";
 import { referencesQuery } from "./reference-target";
 import type { DispatchReferenceRoute } from "./routes";
-import { blockFragment, buildReferencePath, parseDispatchReference, routeBlock } from "./routes";
+import { buildReferencePath, parseDispatchReference } from "./routes";
 import { Timestamp } from "./Timestamp";
 
 const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
