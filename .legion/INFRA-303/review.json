@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-303",
+  "completed": "2026-10-26T04:11:07Z",
+  "round": 1,
+  "reviewedHead": "01a0a9d352e9b0c63a28f173a05bb54f5fa21f01",
+  "codeHead": "f62bbb199fcdc2931aa1b6cfce4a6bb94a8ef0b2",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head bf43ea0d0c6e (newest pull_request runs): lint, typecheck, test, pr-title all completed success (one superseded pr-title cancelled); compare bf43ea0d...01a0a9d3 touches only .legion/. Non-required dispatch browser job (run 40264465405) in progress at 2026-10-26T04:10Z; round 1's ran 40 min and passed at d6d382936fb1.",
+  "thermo": "thermonuclear-deep-review at 01a0a9d3: APPROVE, one Minor (failed-read row comment names the wrong refetch). thermonuclear-code-quality at 01a0a9d3: CHANGES, no runtime correctness finding; file pushed past 1000 lines, triplicated e2e setup, unneeded callback ref, wrong guard-test citation.",
+  "runtimeVerdict": "No correctness finding in ConversationTab.tsx, use-follow-latest.ts or IssuePage.tsx: child layout effects run before the parent's [activeTab] restore in the same commit, onFirstPlacement fires only on the first placement, a return to a placed list still restores.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/phone-conversation.e2e.ts:945",
+      "description": "The PR pushes the file from 876 to 1161 lines with a self-contained suite (iphone constant, settle/landing/expectNewestInView, three INFRA-303 rows) that shares nothing with the file's thread and pill code, and the three rows repeat the same seed block, asks-read predicate, newest-card locator and newPage+setViewportSize. Move the suite to its own e2e file and give the repeated setup one helper each."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/phone-conversation.e2e.ts:1049",
+      "description": "The comment says the refetch is TanStack Query's visibility refetch; TanStack's focusManager listens on window (query-core 5.102.8 focusManager.ts:23) and the row dispatches a non-bubbling event on document, so what brings the list back is sse.ts's handleVisibilityChange -> forceReconnect -> refreshEverything (sse.ts:929). Say so."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/phone-conversation.e2e.ts:1112",
+      "description": "The comment says conversation.e2e.ts and phone.e2e.ts hold the tab-return scroll restore; neither does. The guard is doc.e2e.ts:371 'tab round-trips keep one document connection, the typed text, and the Conversation scroll position' (assertion at :406)."
+    }
+  ],
+  "adjudicated": [
+    "use-follow-latest.ts:36-41 callback ref (code-quality Minor 3): not a defect. The latest-callback ref is the standard idiom and keeps the placement effect correct for a caller that passes an unstable function; no change required."
+  ]
+}
