@@ -104,8 +104,10 @@ Dispatch read them, delete the files, then install every App from
   tolerates the taint `legion.dev/pool=legion:NoSchedule`. You may add node selectors, tolerations
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
 - **One reservation per pod, no affinity set by Legion.** An issue pod runs every role of the
-  issue in one container, `roles`, each role's process in Linux namespaces of its own that show it
-  only its own credentials. Every container of a Legion pod carries a cpu and memory limit with a
+  issue in one container, `roles`, each role's process in Linux namespaces of its own that keep
+  its tokens out of its siblings' reads; the roles share the issue's volume and network, so code
+  one of them plants there can run in another with that one's credentials. Every container of a
+  Legion pod carries a cpu and memory limit with a
   request no greater than it, and bounds its ephemeral storage — the node's disk: the image's own
   content and each role's home and `/tmp`, the issue's temporary directory, cache and data homes
   and bun install cache being one set its roles share on the issue's volume instead, each role's

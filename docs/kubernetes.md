@@ -300,10 +300,17 @@ probes the probe Sandbox's command adds `--role-namespaces /var/run/legion/role-
 first runs one role generation through `legion launcher role-init` as an issue pod's launcher
 runs every role, over a layout of its own in that directory and with its own `legion version` as
 the shim, and exits 1 with `legion probe-image: role namespaces: <why>` when the runtime or node
-refuses the role's namespaces, a mount role-init makes or the overlay over its home
-(`launcher.CheckRoleNamespaces`), so such a cluster fails the daemon's boot rather than every
-role's start. The image build's own run passes no `--role-namespaces`, since a build's container
-may not make the namespaces. The runtime requires
+refuses what that generation makes (`launcher.CheckRoleNamespaces`): user, mount, PID and IPC
+namespaces of its own; its gh, private and state directories bound at the fixed paths; an overlay
+whose lower layer is an empty home directory on the probe's own `emptyDir`; its own `/tmp` and
+`/var/tmp`, memory filesystems at `/run/lock` and `/dev/shm`, a devpts at `/dev/pts` and an mqueue
+at `/dev/mqueue`; the covers and its own `/proc`; and `legion version` started as uid 1000 in a
+nested user namespace, which must exit 0. So such a cluster fails the daemon's boot rather than
+every role's start. The probe does not test the overlay over the image's own `/home/legion`, whose
+lower layer is on the container's root filesystem, the home's volumes bound back on top of it, or
+the copy of the role's own config home: those run first when a role starts in an issue pod. The
+image build's own run passes no `--role-namespaces`, since a build's container may not make the
+namespaces. The runtime requires
 `capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
 is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
 check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
@@ -1319,7 +1326,7 @@ per-claim or tree-volume Sandbox all the same.
 
 Restore the dump from step 5 and re-pin the earlier release; work done under this release since the
 upgrade is not in the dump. Re-pinning without the restore does not work. Once this release has
-booted it has applied migrations 0033 to 0035 (`internal/store/migrations`), and the earlier
+booted it has applied migrations 0033 to 0051 (`internal/store/migrations`), and the earlier
 release cannot read what they and this release write:
 
 - it refuses an `issue_suspend` outbox row as an unknown kind (`decodeOutboxJSON` in
@@ -1330,6 +1337,61 @@ release cannot read what they and this release write:
   recorded and compares nothing against the version the database is at
   (`internal/store/store.go`, the same at `legion-v10.0.0`), so it would boot and then fail row by
   row.
+
+**The restore alone deletes every issue's volume.** The dump was taken after the drain, so every
+claim in it is retired. At boot the earlier release sweeps orphans with a grace of 0
+(`reconcileBootOrphans` in `internal/daemon/daemon.go` at `legion-v10.0.0`): it deletes every
+Sandbox labelled `legion.dev/project=<project>`, but the image probe's, whose name is not that of a
+claim it has not retired (`ReconcileOrphans` in `internal/runtime/sandbox/sandbox.go` at
+`legion-v10.0.0`). That is every Sandbox this release made: each issue's
+`legion-<project>-<issue key lowercased>`, the controller's and each repository cache's. An issue's
+volume is owned by its Sandbox ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so it goes
+with it: every change not pushed from the issue's workspace and, under `session_store: pvc`, every
+session on it. So before re-pinning, with this release's daemon stopped (scale its Deployment to
+zero, or `legion stop`), take each issue's Sandbox away and keep its volume. With `<namespace>` and
+`<project>` as in step 4, each Sandbox is set `Suspended`, which ends its pod, and is then deleted
+with `--cascade=orphan`, which leaves everything it owns in place with that ownership removed: its
+volume claim, its Secrets and its Service. The loop then deletes the Secrets (the role launcher
+tokens and gh files, and the provisioning token) and the Service, and keeps the volume claim:
+
+```sh
+kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+while read -r name; do
+  kubectl -n <namespace> patch sandbox "$name" --type merge -p '{"spec":{"operatingMode":"Suspended"}}'
+  kubectl -n <namespace> wait --for=delete "pod/$name" --timeout=5m
+  kubectl -n <namespace> delete sandbox "$name" --cascade=orphan
+  kubectl -n <namespace> delete secret "$name-boot" --ignore-not-found
+  for role in architect planner implementer tester reviewer merger; do
+    kubectl -n <namespace> delete secret "$name-$role-boot" --ignore-not-found
+  done
+  kubectl -n <namespace> delete service "$name" --ignore-not-found
+done
+kubectl -n <namespace> get pvc -l 'legion.dev/project=<project>,legion.dev/issue' \
+  -o custom-columns=NAME:.metadata.name,ISSUE:.metadata.labels.legion\\.dev/issue,OWNERS:.metadata.ownerReferences
+```
+
+The wait comes before the delete because an orphaned pod would keep running with nothing to stop
+it. The same `get sandboxes` query then prints nothing, and the last command lists one claim,
+`issue-legion-<project>-<issue key lowercased>`, per issue, each with `<none>` owners. The earlier
+release never mounts one of them: it names its claims `tree-legion-<project>-<root
+issue>-architect` (`TreeClaimName` in `names.go` at `legion-v10.0.0`), and its sweep lists
+Sandboxes alone. The controller's Sandbox and the repository caches' are left to the earlier
+release's sweep, which deletes them with their volumes: the controller's session and the caches'
+clones, which hold no issue's work.
+
+What the rollback loses, then: the record of every tree this release ran (the restored claims are
+the drained ones, so the earlier release resumes no role and knows no issue of those trees), every
+session this release's agents had (the earlier release has no claim that names one, so it starts
+none of them again), and the controller's session. Dispatch keeps the statuses this release wrote.
+What it keeps is each issue's volume, for recovery by hand: mount the claim in a pod of your own as
+[A shell on an issue's volume](#a-shell-on-an-issues-volume) says, push what the workspace at
+`/legion/workspaces/<owner>/<repo>/<issue key lowercased>` holds that its branch on GitHub does
+not, and copy out what you want of the sessions under `/legion/sessions` (under `pvc`; under
+`postgres` or `cloudsql-iam` they stay in the table). Then delete the claim (`kubectl -n
+<namespace> delete pvc issue-legion-<project>-<issue key lowercased>`), which deletes the volume
+where its StorageClass's reclaim policy is `Delete`. Hand each tree back to the earlier release as
+new work, its root `todo` with the `legion` label, once its branch holds what you kept.
 
 ### Pinning a release that drops what a running pod still uses
 
@@ -1400,6 +1462,12 @@ siblings resume into the new pod; a turn a role was in is sent again once its se
 moved address's relaunch does.
 `legion.yaml`'s `resources` takes one `issue` entry in place of the per-role entries
 ([Configuration](#configuration)); keep a copy of the block as it was, which a rollback puts back.
+`runtime.kubernetes.pod` loses names it could use before, each refused at load
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)): the volume names `role-homes` and
+`role-probe`; a mount at, under or above `/var/run/legion/roles`, `/var/run/legion/home`,
+`/var/run/legion/role-probe`, `/dev/pts` or `/dev/mqueue`; and a mount at or above `/tmp`,
+`/var/tmp`, `/run/lock`, `/var/lock` or `/dev/shm`, or the image's other spellings of them. Run
+this release's `legion start --check-config` on the file before the rollout.
 
 To roll this release back, every stored locator and every issue Sandbox both go back to what the
 earlier release reads. Re-pinning alone boots neither:
@@ -1459,9 +1527,14 @@ keeps the record, every Sandbox, its uid, its tree label and so its volume. In t
    launched in the meantime; with the row left, that upgrade would skip 0051 (its `Migrate` applies
    only the migrations `schema_version` does not record, `versionRecorded` in
    `internal/store/store.go`) and look for each role's own container in a pod that has only
-   `roles`. The earlier release reads `schema_version` the same way and never its highest row, so
-   the row's absence changes nothing for it. The SQL changes only these locators and that row, so
-   Oh My Pi's session tables, wherever they are, keep every turn taken under this release.
+   `roles`. The earlier release's `Migrate` checks each migration it has by its own number and reads
+   no highest row; only its `legion state` reports one, the `schemaVersion` it reads as
+   `max(version)` (`schemaVersion` in `internal/store/store.go`, the state read in
+   `internal/daemon/daemon.go`), which reads 50 once the row is gone, the earlier release's own
+   last migration. The SQL changes only these locators and that row, so Oh My Pi's session tables,
+   wherever they are, keep every turn taken under this release. The `51` in the `delete` is the
+   number of the migration that renames the container, `0051_issue_pod_roles_container.up.sql`;
+   where that file carries another number in the release you roll back from, use that number.
 3. **Return every one-container issue Sandbox to the earlier layout's template.** With
    `<namespace>` and `<project>` as in [Upgrading a deployment with running
    trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which
@@ -2421,9 +2494,11 @@ except the config home. That one is `workspace-init`'s, and no role sees or writ
 gets a config home of its own at `~/.config`, a copy of the shared one made the first time a
 generation of the role starts in the pod and kept on `role-homes` for the pod's life
 (`/var/run/legion/roles/.homes/<role>/config` in the container's view; `ownConfigHome` in
-`internal/launcher/roleinit_linux.go`), with any mount under the shared config home bound back on
-top. A git `core.fsmonitor` or a jj alias one role writes there so never runs in a sibling's git
-or jj.
+`internal/launcher/roleinit_linux.go`; the copy holds a `.legion-config-home-complete` file once
+whole, and one without it is made again), with any mount under the shared config home bound back
+on top. A git `core.fsmonitor` or a jj alias one role writes in its own `~/.config` so never runs in
+a sibling's git or jj; a jj setting it plants in the shared clone's `.jj/repo/config.toml`, or a git
+setting in the clone's `.git/config` other than the two the git pins below hold, does.
 A pod's gh projection names the owners of its creation, so an owner added to the project reaches
 the issue's next pod. The issue's `-boot` Secret holds the provisioning token, projected into
 `workspace-fetch` alone.
@@ -2446,7 +2521,12 @@ allows it today, and the layout does not lean on that. `/tmp` and
 the terminals the role opens (`newinstance`, `ptmxmode=0666`, with `/dev/ptmx` bound to it where
 the image's is a node), and `/dev/mqueue` is mounted from the role's own IPC namespace, so it
 shows only that namespace's message queues (`privateDevices`, `roleinit_linux.go`); `/proc` is the
-role's own. role-init then starts
+role's own. role-init follows no link on the way to a mount point in the role's own layers: a link
+an earlier generation of the role left there (a `~/.cache` linked elsewhere, say) is removed and
+the directory or empty file the mount needs is made in its place, logged as `role-init: <path> was
+a link, which role-init does not follow on the way to a mount point: replaced it with the mount
+point's place`, and anything else in the way that is neither a link nor a directory fails the
+generation. role-init then starts
 the shim's argv unchanged as its child, cloned into a nested user namespace that maps uid and gid
 1000 with no capabilities, and stays the PID namespace's init, so when a generation ends every
 process it started ends with it and a role's `kill -9 -1` reaches none of its siblings'. The
@@ -2458,7 +2538,14 @@ or `/dev/shm`, or at or above the image's other spellings of them (`/var/run/loc
 `/var/run/shm`), is refused: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above
 <dir>, which every role's namespace in an issue pod covers with its own: mount under it instead`.
 A mount under `/tmp` and the like is allowed, and role-init carries it back. A mount at, under or
-above `/var/run/legion/roles` or `/var/run/legion/home` is refused as any other path Legion mounts
+above `/dev/pts` or `/dev/mqueue` is refused, since role-init mounts a filesystem of the role's own
+there and carries nothing back onto it: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p>
+overlaps /dev/pts, which every role's namespace in an issue pod replaces with a filesystem of its
+own and carries no mount back onto: a mount may be neither at, under, nor above /dev/pts`. A mount
+at, under or
+above `/var/run/legion/roles`, `/var/run/legion/home` or `/var/run/legion/role-probe` (the image
+probe's volume, [The image is probed before it publishes](#the-image-is-probed-before-it-publishes))
+is refused as any other path Legion mounts
 is: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
 Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`. Every one
 of these rules, and the check of the paths Legion mounts and the image owns, compares a mount
@@ -2488,8 +2575,9 @@ volume.
 **One container, one fate.** Each role is judged by its own launcher connection's state: one role's
 process exiting is that role's `gone` alone. The `roles` container ending — its PID 1 exiting,
 `OOMKilled`, an eviction — ends every role of the issue: each is `gone`, its detail naming the
-container's reason and exit code and quoting only that role's own prefixed lines (`roleLines`,
-`observe.go`), and the supervisor relaunches each as it relaunches any `gone` role.
+container's reason and exit code and quoting that role's own last 20 prefixed lines, then the
+container's last 20 unprefixed lines, which are no role's (`roleLog`, `observe.go`), and the
+supervisor relaunches each as it relaunches any `gone` role.
 
 Every container carries a reservation, a cpu and memory limit with a request no greater than it,
 and an ephemeral-storage limit over a smaller request: the `roles` container and both init
@@ -2563,15 +2651,31 @@ own `.git/config` among them (`gitConfigPairs`, `manifest.go`): `GIT_CONFIG_COUN
 `credential.https://github.com.useHttpPath=true`, `core.fsmonitor` set to empty and
 `core.hooksPath=/dev/null`. The issue's roles share the clone and each can write its
 `.git/config` and hooks, so the last two keep a role's `git status` or `git commit` from running an
-fsmonitor program or a hook another role planted, with the first role's credentials. They do not
-make the roles of one issue a boundary against each other: the roles share the checkout by design,
-so a role can change code a sibling then runs (a test the tester runs, a script the reviewer runs)
-and can write other clone settings that run programs (a filter driver, `diff.external`,
-`core.pager`), or the clone's `.jj/repo/config.toml`, which a sibling's jj reads. The issue's roles
-trust one another's writes to the workspace as they did when each ran in a container of its own;
-the namespaces keep a role's tokens and private files out of a sibling's own reads, but code one
-role plants and a sibling runs runs with the sibling's credentials. So every git
-a role runs, the setup
+fsmonitor program or a hook another role planted, with the credentials of the role that runs git.
+They pin those two settings and no others, and they do not make the roles of one issue a boundary
+against each other. Every role can write the whole issue volume, and the roles share the pod's
+network namespace, so code one role plants runs in a sibling, with the sibling's credentials,
+through any of these:
+
+- the checkout, which the roles share by design: a test the tester runs, a script or build step the
+  reviewer runs;
+- the clone's other git settings that run a program or route a request: a filter driver
+  (`filter.<name>.clean` with `.git/info/attributes`), `diff.external`, a `textconv`, `core.pager`,
+  `gpg.program`, an `ext::` transport, and `http.proxy`, which sends the sibling's GitHub token
+  through a proxy the planting role runs, with no program of its own run in the sibling at all;
+- the clone's `.jj/repo/config.toml`, which a sibling's jj moves into its own config home and obeys
+  (`ui.pager`, an alias);
+- the workspace's `.omp/` directory, whose extensions a sibling's Oh My Pi loads when it starts;
+- a role's installed plugins: an installing launch loads the plugin pair from
+  `/legion/scratch/state/<role>/legion-plugins/g<generation>` on the issue volume, which every role
+  of the issue can write;
+- the caches every role shares on the issue volume, which `go run`, `uvx` and `bunx` run code
+  from: `GOMODCACHE` and `GOCACHE` (`/legion/go`), uv's cache and Pythons (`/legion/uv`), bun's
+  install cache, and `XDG_CACHE_HOME` and `XDG_DATA_HOME` (`/legion/scratch`).
+
+The issue's roles trust one another's writes to the volume as they did when each ran in a container
+of its own. The namespaces keep a role's tokens and private files out of a sibling's own reads, and
+no further. Through the helper, every git a role runs, the setup
 command's ([Configuration](#configuration)) and an agent's own clone of another repository
 included, answers `https://github.com/<owner>/…` from the role's own files when `<owner>` is an
 owner the bundle holds a directory for (one of the project's) and the role's App is installed on
@@ -2689,9 +2793,11 @@ run succeeds against the cache the first filled. That is why an agent's own inst
 documented consequence and the install Legion renders was a blocker: nothing is there to retry
 that one.
 
-`XDG_CONFIG_HOME` alone is unchanged, the pod's shared in-memory volume holding the jj
-configuration `workspace-init` writes, and `workspace-init` keeps every value it had.
-Every one of those paths is under the issue volume's own whole-volume mount at `/legion`: the
+`XDG_CONFIG_HOME` is the one XDG home not on the volume: every role is told
+`/home/legion/.config`, where its namespace binds its own config home, the copy on `role-homes` of
+the pod's shared in-memory one that holds the jj configuration `workspace-init` writes (above), and
+`workspace-init` keeps every value it had.
+The other paths are all under the issue volume's own whole-volume mount at `/legion`: the
 scratch adds no volume and no mount, and no directory of it is a `sub_path` mount of its own. The
 roles of an issue share one scratch, the state homes under its `state` directory the only part of
 it named for a role, and the role's shim makes six directories — the four the issue's roles share,
@@ -3017,7 +3123,7 @@ operator's context: the daemon's identity creates no pod and has no exec
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY> --field-selector=status.phase=Running
 kubectl -n legion exec -it <pod> -c roles -- sh
-export HOME=/var/run/legion/home XDG_CONFIG_HOME=/var/run/legion/home/.config   # the pod's config home (below)
+export XDG_CONFIG_HOME=/var/run/legion/home/.config   # the pod's config home (below)
 export XDG_STATE_HOME=/legion/scratch/state/architect   # the role's state home (below)
 jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
 ```
@@ -3034,8 +3140,11 @@ the `roles` container mounts it at `/var/run/legion/home/.config`. A role's own 
 copy of it made in its namespace (`/var/run/legion/roles/.homes/<role>/config` here, holding what
 that role wrote since). The shell's own `~/.config` is the image's, empty, so without the `export`
 the shell's jj reads it, says `Per-repo config not found`, and reads
-jj's default `git.abandon-unreachable-commits = true`, the setting Legion turns off. The second
-sets the state home, so
+jj's default `git.abandon-unreachable-commits = true`, the setting Legion turns off. jj needs only
+that variable, so the shell's `HOME` stays the image's `/home/legion`, which carries no mount in the
+`roles` container: an `omp` started there reads the image's own `~/.omp` profile, its plugins and
+natives, as a role's does through its overlay, where `/var/run/legion/home` holds only the
+container's mounts and no profile. The second `export` sets the state home, so
 an `omp` started in the shell roots its state where the role's agent does rather than under the
 profile's config root; for the agent's whole environment, read `/proc/<agent pid>/environ`, the
 process whose `argv[0]` is `omp` under the role's `legion worker-shim`, as stage 4a's `pod-baseline`
@@ -3396,7 +3505,6 @@ spec:
   ports: [{ port: 5432, targetPort: 5432 }]
 YAML
 kubectl apply -f "$dir/service.yaml"
-
 
 kubectl wait --for=create pod -l job-name="$workload" --timeout=120s   # it does not exist yet
 kubectl wait --for=condition=Ready pod -l job-name="$workload" --timeout=300s
@@ -4085,13 +4193,19 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   role's process exiting is that role's **dead (gone)** alone, and changes nothing for its
   siblings. The `roles` container terminated (its PID 1 exited, `OOMKilled`, an eviction) ends
   every role of the issue: each is **dead (gone)**, its detail naming the container's reason and
-  exit code and quoting only that role's own `<role>: ` lines of the container's log (`roleLines`,
-  `observe.go`). No status at all for the container → **unknown**. A connected launcher reporting
+  exit code and quoting that role's own last 20 `<role>: ` lines of the container's log, then the
+  container's last 20 unprefixed lines (`roleLog`, `observe.go`). No status at all for the
+  container → **unknown**. A connected launcher reporting
   a child of the recorded generation for the role is **alive**, even when Kubernetes still shows
   the container's previous instance terminated for a moment after a restart: that one answer is
   asked first, and it alone outranks the terminated status. Otherwise, with no launcher connection
   for the role → **unknown** (a booting or redialing launcher is not death; the boot watchdog
-  decides). Otherwise the connected launcher's remaining answers: a child of another generation is
+  decides), its detail adding the container's waiting reason and, once it has restarted, its
+  restart count and its last instance's reason and exit code (`role tester's launcher is
+  disconnected; container roles waiting (CrashLoopBackOff: …); container roles restarted 5 times,
+  its last instance terminated (Error, exit code 2 at …)`), so one crash-looping `roles` container
+  that holds every role `unknown` says why. Otherwise the connected launcher's remaining answers: a
+  child of another generation is
   **dead (not the recorded process)**, a last-reported exit matching the recorded generation is
   **dead (gone)**, a last exit of another generation is again **dead (not the recorded process)**,
   and no child ever reported is **dead (gone)**;
@@ -4233,21 +4347,28 @@ the tmux runtime, which runs the host's jj through the same code, the daemon ref
 jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38
 `.jj/repo/config.toml` is the repository's live configuration.
 
-What the boundary protects is identity. Since LEGION-631 each role holds its own App's
-tokens, read-only, in the gh bundle its `LEGION_GH_OWNERS_DIR` names, which only its own
+The boundary above protects the provisioning token alone. Since LEGION-631 each role holds its own
+App's tokens, read-only, in the gh bundle its `LEGION_GH_OWNERS_DIR` names, which only its own
 namespaces bind ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)): an implement role (the
 implementer, the merger) holds the implement App's tokens — for the issue's owner the same App,
 from the same lease, as the provisioning token — and a review role (the architect,
-planner, tester, reviewer) the review App's, every owner but the issue's narrowed to reading;
-and each role's `gh` and `git` run in a pod that mounts
-the issue's volume, with whatever an agent of the issue planted in the clone's configuration. A plant
-run by the implementer, then, reaches a token the implementer already holds for its push and its
-pull request. What no plant reaches is the other App: no review role ever holds the
-implement App's token (the review App cannot resolve a review thread on the implementer's pull
-request, so the reviewer names the bot threads it accepted to the implementer, which resolves them
-with its own `gh`; the daemon serves no thread route), and no implement role the review
-App's, so an approval posted as the review App is a review role's, and a push or a pull
-request as the implement App an implement role's.
+planner, tester, reviewer) the review App's, every owner but the issue's narrowed to reading. No
+review role holds the implement App's token, and no implement role the review App's (the review
+App cannot resolve a review thread on the implementer's pull request, so the reviewer names the
+bot threads it accepted to the implementer, which resolves them with its own `gh`; the daemon
+serves no thread route). That split keeps each role's tokens out of a sibling's own reads. It is
+not a boundary against code an agent of the same issue plants: each role's `gh`, `git`, jj, Oh My
+Pi and tools run on the issue's volume, with whatever an agent of the issue planted there, and the
+plant runs with the credentials of the role that runs it. The implementer can plant a git filter
+driver, a test or a script that the tester or the reviewer runs, a jj setting, an Oh My Pi
+extension in the workspace's `.omp/`, a module in a cache the roles share, or an `http.proxy` that
+receives the review role's token, and then act as the review App; a review role can act as the
+implement App the same ways. The full list is in [Anatomy of a Sandbox
+pod](#anatomy-of-a-sandbox-pod), under the git pins. So an approval posted as the review App says
+that a process holding the review App's token posted it, which code from any role of the issue can
+be; it does not prove that the reviewer's agent decided it. The same holds for a push or a pull
+request as the implement App. A repository that needs a person's approval sets that in its own
+branch protection, which Legion neither reads nor writes.
 
 On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
 0600 credential files, and the daemon's credentialed clone and fetch run in the host's shared clone

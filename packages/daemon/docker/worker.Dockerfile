@@ -559,10 +559,12 @@ RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-# The two plugins are root's like the rest of /opt/legion: every role of an issue pod loads them
-# from here, one container's filesystem, so a role that could write them could change the plugin
-# code its siblings load. The final step refuses an image where anything under them is not root's
-# or is writable by anyone else.
+# The two plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
+# install the plugins loads them from here, one container's filesystem, so a role that could write
+# them could change the plugin code its siblings load. A launch that installs the plugins loads them
+# from the role's state home on the issue volume instead, which every role of the issue can write;
+# nothing here covers that copy. The final step refuses an image where anything under them is not
+# root's or is writable by anyone else.
 COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
 COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
@@ -615,9 +617,9 @@ WORKDIR /home/legion
 #    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
 #    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
 #    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
-#    variant extracts nothing, while a node that selects the other has each role container write
-#    that one into its writable layer at its first OMP run. The probes in the final step never
-#    wait on it.
+#    variant extracts nothing, while a node that selects the other has each role write that one into
+#    its own home overlay's upper layer, on the pod's role-homes volume, at its first OMP run: up to
+#    six copies in an issue pod. The probes in the final step never wait on it.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
@@ -706,8 +708,10 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
 # neither rename nor replace what they hold; everything under /opt/legion/pi-envoy and
-# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the plugin code
-# its siblings load; the role mount points under /var/run/legion are root's, mode 0755 and empty;
+# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the image's copy
+# of the plugin code (a launch that installs the plugins loads them instead from the role's state
+# home on the issue volume, which every role of the issue can write); the role mount points under
+# /var/run/legion are root's, mode 0755 and empty;
 # and no file under /usr/lib/openssh or /usr/bin/ssh-agent
 # carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
 # ssh-agent's), so a rebuild of that layer that brings one back fails here.

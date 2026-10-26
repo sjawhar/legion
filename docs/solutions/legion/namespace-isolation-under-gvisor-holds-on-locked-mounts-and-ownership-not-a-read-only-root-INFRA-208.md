@@ -73,6 +73,12 @@ probes were throwaway shell scripts run in a pod (`nstest*.sh`) and server-side 
   could read. Each role now gets its own copy of the config home on `role-homes`, its own devpts
   instance (`newinstance`) and an mqueue mount from its own IPC namespace, and every role's git
   is told `core.fsmonitor=` and `core.hooksPath=/dev/null` after the shared clone's `.git/config`.
+  That closes those channels and no others. The issue's volume and the pod's network stay shared
+  by design, so code one role plants still runs in a sibling with the sibling's credentials: the
+  checkout's tests and scripts, the clone's other git settings (a filter driver, `diff.external`,
+  `http.proxy`) and its `.jj/repo/config.toml`, the workspace's `.omp/` extensions, the plugins an
+  installing launch puts under each role's state home, and the caches `go run`, `uvx` and `bunx`
+  run code from (`docs/kubernetes.md`, "Anatomy of a Sandbox pod", after the git pins).
 - **role-init stays the PID namespace's init.** Its exit ends every process of the generation, so
   a stop leaves nothing behind, and no role can signal a sibling.
 - **The home overlay's upper needs a disk `emptyDir`.** An upper on the root filesystem does not
