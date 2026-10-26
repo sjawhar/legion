@@ -88,14 +88,21 @@ func errorCode(t *testing.T, response *httptest.ResponseRecorder) string {
 	return body.Code
 }
 
-// The web app's three reads (a pull request or issue's state, and a commit's checks) go to GitHub
-// as the App installation that covers the repository, never as the person reading.
+// headSHA is a full commit sha, the only commit a workflow-runs read may name.
+const headSHA = "0123456789abcdef0123456789abcdef01234567"
+
+// The web app's reads (a pull request or issue's state, a commit's checks and the workflow runs of
+// that commit) go to GitHub as the App installation that covers the repository, never as the
+// person reading.
 func TestProxyReadsTheRepositoryAsItsAppInstallation(t *testing.T) {
 	client, fake := newProxyRig(t)
 	for _, path := range []string{
 		"repos/acme/web/pulls/7",
 		"repos/acme/web/issues/8",
 		"repos/acme/web/commits/0123abcd/check-runs?per_page=100",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA,
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&per_page=100&page=2",
+		"repos/acme/web/actions/runs?page=3&head_sha=" + headSHA,
 	} {
 		response := proxy(client, http.MethodGet, "/api/github/rest/"+path)
 		if response.Code != http.StatusOK || response.Body.String() != `{"state":"open","title":"Ship it"}` {
@@ -109,6 +116,9 @@ func TestProxyReadsTheRepositoryAsItsAppInstallation(t *testing.T) {
 		"GET /repos/acme/web/pulls/7 Bearer ghs_installation_11",
 		"GET /repos/acme/web/issues/8 Bearer ghs_installation_11",
 		"GET /repos/acme/web/commits/0123abcd/check-runs?per_page=100 Bearer ghs_installation_11",
+		"GET /repos/acme/web/actions/runs?head_sha=" + headSHA + " Bearer ghs_installation_11",
+		"GET /repos/acme/web/actions/runs?head_sha=" + headSHA + "&per_page=100&page=2 Bearer ghs_installation_11",
+		"GET /repos/acme/web/actions/runs?page=3&head_sha=" + headSHA + " Bearer ghs_installation_11",
 	}
 	if seen := fake.seen(); strings.Join(seen, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("GitHub saw:\n%s\nwant:\n%s", strings.Join(seen, "\n"), strings.Join(want, "\n"))
@@ -151,6 +161,26 @@ func TestProxyRefusesAPathTheWebAppDoesNotRead(t *testing.T) {
 		"repos/acme/web/pulls/7/../../contents/.env",
 		"repos/acme/../other/pulls/7",
 		"graphql",
+		// The workflow runs are read for one commit, by its full sha, and nothing deeper.
+		"repos/acme/web/actions/runs",
+		"repos/acme/web/actions/runs?per_page=100",
+		"repos/acme/web/actions/runs?branch=main",
+		"repos/acme/web/actions/runs?head_sha=0123abcd",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "0",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&status=failure",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&event=pull_request",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&head_sha=" + headSHA,
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&page=1&page=2",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&per_page=all",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&&page=1",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "&",
+		"repos/acme/web/actions/runs?head_sha=" + headSHA + "%26status=failure",
+		"repos/acme/web/actions/runs/123",
+		"repos/acme/web/actions/runs/123?head_sha=" + headSHA,
+		"repos/acme/web/actions/runs/123/jobs",
+		"repos/acme/web/actions/runs/123/logs",
+		"repos/acme/web/actions/workflows",
+		"repos/acme/web/actions/artifacts",
 	} {
 		response := proxy(client, http.MethodGet, "/api/github/rest/"+path)
 		if response.Code != http.StatusNotFound || errorCode(t, response) != "GITHUB_PATH_REFUSED" {

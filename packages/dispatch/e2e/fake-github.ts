@@ -1,13 +1,47 @@
 import { harnessPorts } from "./harness-ports";
 
 // Minimal GitHub App API for the architecture-source access check, the
-// architecture importer and the delivery reconcile: the installation lookup, the
-// installation-token mint, the repository read that proves the minted token works,
-// the commit/tree/blob reads a sync walks, and empty delivery listings. Tests seed
-// per-repository state through /__fixture/repos; the server reaches this via
-// DISPATCH_GITHUB_API_BASE.
+// architecture importer, the delivery reconcile and the issue header's GitHub link:
+// the installation lookup, the installation-token mint, the repository read that
+// proves the minted token works, the commit/tree/blob reads a sync walks, empty
+// delivery listings, and a seeded pull request with its head's check runs and
+// workflow runs. Tests seed per-repository state through /__fixture/repos; the
+// server reaches this via DISPATCH_GITHUB_API_BASE.
 
 const ARCHITECTURE_DIR = ".dispatch/architecture";
+
+/** A pull request the GitHub link reads: its title, state and head commit. */
+interface FakePull {
+  readonly head_sha: string;
+  readonly merged?: boolean;
+  readonly state: string;
+  readonly title: string;
+}
+
+/** One check run of a commit, in the check suite `check_suite_id` names. */
+interface FakeCheckRun {
+  readonly app_id?: number;
+  readonly check_suite_id: number;
+  readonly conclusion: string | null;
+  readonly id: number;
+  readonly name: string;
+  readonly status: string;
+}
+
+/** One workflow run of a commit: its workflow's name, its triggering event and its check suite. */
+interface FakeWorkflowRun {
+  readonly check_suite_id: number;
+  readonly event: string;
+  readonly id: number;
+  readonly name: string;
+}
+
+/** GitHub's page of a list: `per_page` (default 30, at most 100) items from page `page`. */
+function pageOf<T>(items: readonly T[], url: URL): T[] {
+  const perPage = Math.min(Number(url.searchParams.get("per_page") ?? 30), 100);
+  const page = Number(url.searchParams.get("page") ?? 1);
+  return items.slice((page - 1) * perPage, page * perPage);
+}
 
 interface FakeRepo {
   /** Contents permission the installation reports: "read", "write", "none". */
@@ -20,6 +54,12 @@ interface FakeRepo {
    *  branch commit is derived from their content, so a re-seed with different
    *  files moves the commit exactly like a push would. */
   readonly files?: Record<string, string>;
+  /** Pull requests keyed by number; a number not here answers a server error, as before. */
+  readonly pulls?: Record<string, FakePull>;
+  /** Check runs keyed by commit sha, in any order. */
+  readonly check_runs?: Record<string, readonly FakeCheckRun[]>;
+  /** Workflow runs keyed by head sha. */
+  readonly workflow_runs?: Record<string, readonly FakeWorkflowRun[]>;
 }
 
 /** Deterministic commit sha for a repository's current files. */
@@ -117,11 +157,57 @@ Bun.serve({
       return Response.json({ total_count: 0, workflow_runs: [] });
     }
 
-    // A stored pull request's attribution read is skipped on a server error, leaving the row as
-    // seeded. A 404 would mark it unfetchable and change the delivery data under the test.
-    const pull = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/pulls\/\d+$/);
+    // A commit's workflow runs (`actions/runs?head_sha=`), which the GitHub link joins to the
+    // check runs by check suite for each run's workflow name and event.
+    const commitWorkflowRuns = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/actions\/runs$/);
+    if (request.method === "GET" && commitWorkflowRuns !== null) {
+      const repo = repos.get(`${commitWorkflowRuns[1]}/${commitWorkflowRuns[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const headSHA = url.searchParams.get("head_sha") ?? "";
+      const runs = repo.workflow_runs?.[headSHA] ?? [];
+      return Response.json({
+        total_count: runs.length,
+        workflow_runs: pageOf(runs, url).map((run) => ({ ...run, head_sha: headSHA })),
+      });
+    }
+
+    // A seeded pull request answers as GitHub does. A stored pull request's attribution read is
+    // skipped on a server error, leaving the row as seeded, so an unseeded one answers 500: a 404
+    // would mark it unfetchable and change the delivery data under the test.
+    const pull = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
     if (request.method === "GET" && pull !== null) {
-      return Response.json({ message: "fixture has no pull request" }, { status: 500 });
+      const seeded = repos.get(`${pull[1]}/${pull[2]}`)?.pulls?.[pull[3] ?? ""];
+      if (seeded === undefined) {
+        return Response.json({ message: "fixture has no pull request" }, { status: 500 });
+      }
+      return Response.json({
+        head: { sha: seeded.head_sha },
+        merged: seeded.merged ?? false,
+        number: Number(pull[3]),
+        state: seeded.state,
+        title: seeded.title,
+      });
+    }
+
+    const checkRuns = url.pathname.match(
+      /^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)\/check-runs$/
+    );
+    if (request.method === "GET" && checkRuns !== null) {
+      const repo = repos.get(`${checkRuns[1]}/${checkRuns[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const runs = repo.check_runs?.[checkRuns[3] ?? ""] ?? [];
+      return Response.json({
+        check_runs: pageOf(runs, url).map(({ app_id, check_suite_id, ...run }) => ({
+          ...run,
+          app: { id: app_id ?? 15368, slug: "github-actions" },
+          check_suite: { id: check_suite_id },
+        })),
+        total_count: runs.length,
+      });
     }
 
     const commit = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)$/);
