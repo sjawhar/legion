@@ -258,6 +258,13 @@ export function readyLine(issue: Tracked, example: Example): string {
   return `READY #${number} at ${example.head} (approved at ${example.head}) for ${issue.key} (${url})`;
 }
 
+/** The first line of the READY message as Dispatch shows it: the bare issue key links and reads as
+ *  the issue's key and title. */
+export function readyLineShown(issue: Tracked, example: Example): string {
+  const { number, url } = example.pullRequest;
+  return `READY #${number} at ${example.head} (approved at ${example.head}) for ${issue.key} ${example.title} (${url})`;
+}
+
 /** The daemon posts the merger's READY on the issue. */
 export async function postReady(issue: Tracked, example: Example): Promise<void> {
   const api = await dispatchApi();
