@@ -2267,6 +2267,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       override: Override,
       upload = false
     ): Promise<Decision> => {
+      // Before any path that lets the write out: a session with no model role refuses in both
+      // modes, and a rebuttal, a halt, a breaker trip or a shutdown is no exception, since none
+      // of them is a review and the gate cannot review anything at all here.
+      if (resolveRole(ctx) === undefined) return noModelRole;
       if (rebuttal !== undefined) {
         breaker.reset(key);
         return {
@@ -2689,13 +2693,13 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             const unreadable = unreadableDispatchWrite(event.input.command);
             if (unreadable === undefined) return undefined;
             // A judgment on one call's form: block mode refuses it before anything in it runs, and
-            // warn mode runs it and hands the reason back (`unreadableCall`). A halt, or a session
-            // whose primary is off the gate's provider, lets it run as the resend would, and a
-            // session with no model role refuses it as it would refuse the resend.
+            // warn mode runs it and hands the reason back (`unreadableCall`). A session with no
+            // model role refuses it first, as it would refuse the resend; a halt, or a session
+            // whose primary is off the gate's provider, lets it run as the resend would.
             base = { ...identity(event, mode), tool: unreadable.tool, path: unreadable.label };
-            const resolved = halted ? undefined : resolveRole(ctx);
-            if (halted) decision = pass("halted");
-            else if (resolved === undefined) decision = noModelRole;
+            const resolved = resolveRole(ctx);
+            if (resolved === undefined) decision = noModelRole;
+            else if (halted) decision = pass("halted");
             else if (ctx.model?.provider !== resolved.model.provider)
               decision = pass("skipped", {
                 reason: `primary on ${ctx.model?.provider ?? "no model"}`,
@@ -2707,42 +2711,47 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               revised = withoutRebuttal;
             }
             base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
-            const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
-            if ("command" in run && run.command !== undefined)
-              revised = { ...event.input, command: run.command };
-            // An upload its dry run shows is no markdown document passes as an unscoped call does,
-            // with no entry; an override flag on it is still removed, since the CLI would refuse it.
-            if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
-            if ("cause" in run) decision = givenUp(mode, run.cause);
-            else if ("unreadable" in run) {
-              const resolved = halted ? undefined : resolveRole(ctx);
-              if (halted) decision = pass("halted");
-              else if (resolved === undefined) decision = noModelRole;
-              else if (ctx.model?.provider !== resolved.model.provider)
-                decision = pass("skipped", {
-                  reason: `primary on ${ctx.model?.provider ?? "no model"}`,
-                });
-              else decision = unreadableCall(run.unreadable, mode);
-            }
-            // The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
-            else if ("failure" in run) decision = pass("error", { reason: run.failure });
+            // Before the dry run and before any path that lets the write out: with no model role
+            // the gate can review nothing, and every one of those paths would otherwise allow.
+            if (resolveRole(ctx) === undefined) decision = noModelRole;
             else {
-              const key = breakerKey(scoped.tool, run.args);
-              base = {
-                ...base,
-                revisesForKey: breaker.reasons(key).length,
-                argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
-              };
-              decision = await decide(
-                { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
-                ctx,
-                started,
-                base,
-                key,
-                scoped.rebuttal,
-                scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
-                scoped.upload === true
-              );
+              const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
+              if ("command" in run && run.command !== undefined)
+                revised = { ...event.input, command: run.command };
+              // An upload its dry run shows is no markdown document passes as an unscoped call
+              // does, with no entry; an override flag on it is still removed, since the CLI
+              // would refuse it.
+              if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
+              if ("cause" in run) decision = givenUp(mode, run.cause);
+              else if ("unreadable" in run) {
+                if (halted) decision = pass("halted");
+                else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
+                  decision = pass("skipped", {
+                    reason: `primary on ${ctx.model?.provider ?? "no model"}`,
+                  });
+                else decision = unreadableCall(run.unreadable, mode);
+              }
+              // The CLI refuses arguments it cannot parse before it sends anything, so the
+              // command runs.
+              else if ("failure" in run) decision = pass("error", { reason: run.failure });
+              else {
+                const key = breakerKey(scoped.tool, run.args);
+                base = {
+                  ...base,
+                  revisesForKey: breaker.reasons(key).length,
+                  argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
+                };
+                decision = await decide(
+                  { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
+                  ctx,
+                  started,
+                  base,
+                  key,
+                  scoped.rebuttal,
+                  scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
+                  scoped.upload === true
+                );
+              }
             }
           }
         } else {

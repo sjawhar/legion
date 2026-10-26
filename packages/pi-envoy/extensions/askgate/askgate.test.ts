@@ -359,6 +359,74 @@ describe("mode and model role (plan tests c-g)", () => {
     expect(result?.reason).toContain("modelRoles.default");
     expect(g.entries).toMatchObject([{ decision: "revise", outcome: "no-model-role" }]);
   });
+  // Outside review of #2159 at 31c5cca3b, finding 7: a rebuttal, a halt, a breaker trip, a
+  // shutdown and a failed dry run each returned an allow before the gate looked for a model role,
+  // so "a session with no model role refuses in both modes" was false on each of those paths.
+  test("F7: with no model role every path that would allow refuses instead, in both modes", async () => {
+    const STUB_PATH = { PATH: "/usr/bin:/bin" };
+    for (const mode of ["warn", "block"]) {
+      const env = { ...STUB_PATH, OMP_ASKGATE: mode };
+      // A rebuttal on a device call and on a command.
+      const rebutted = bind({ env, roles: {} });
+      await rebutted.write(
+        "r1",
+        "xd://dispatch_comment",
+        '{"issue":"X-1","body":"b","advisor_rebuttal":"a link"}'
+      );
+      const device = await rebutted.device("r1", "dispatch_comment", { issue: "X-1", body: "b" });
+      expect(device?.block).toBe(true);
+      const command = await rebutted.bash(
+        "r2",
+        "dispatch comment --issue X-1 --body b --advisor-rebuttal 'a link'"
+      );
+      expect(command?.block).toBe(true);
+      expect(rebutted.entries.map((e) => e.outcome)).toEqual(["no-model-role", "no-model-role"]);
+      // A halt and a breaker trip, each reached while a role resolved, then the role gone.
+      const roles: { askgate?: GateModel } = { askgate: MODEL };
+      const halted = bind({
+        env: { ...env, OMP_ASKGATE_TIMEOUT_MS: "20" },
+        roles,
+        complete: untilAborted,
+      });
+      for (const id of ["a", "b", "c"]) await halted.device(id, "dispatch_comment", COMMENT);
+      expect(halted.entries.at(-1)?.outcome).toBe("timeout");
+      delete roles.askgate;
+      const afterHalt = await halted.device("d", "dispatch_comment", COMMENT);
+      expect(afterHalt?.block).toBe(true);
+      expect(halted.entries.at(-1)?.outcome).toBe("no-model-role");
+      const tripRoles: { askgate?: GateModel } = { askgate: MODEL };
+      const tripped = bind({ env, roles: tripRoles, complete: async () => ({ text: REVISE }) });
+      for (const id of ["t1", "t2"]) await tripped.device(id, "dispatch_comment", COMMENT);
+      expect(tripped.entries.map((e) => e.outcome)).toEqual(["verdict", "verdict"]);
+      delete tripRoles.askgate;
+      const third = await tripped.device("t3", "dispatch_comment", COMMENT);
+      expect(third?.block).toBe(true);
+      expect(tripped.entries.at(-1)?.outcome).toBe("no-model-role");
+      // A shutdown already begun, and a dry run that fails.
+      const closing = bind({ env, roles: {} });
+      await closing.event("session_shutdown");
+      const late = await closing.device("late", "dispatch_comment", COMMENT);
+      expect(late?.block).toBe(true);
+      expect(closing.entries.map((e) => e.outcome)).toEqual(["no-model-role"]);
+      const failing = bind({
+        env,
+        roles: {},
+        dryRun: async () => ({ exitCode: 1, stdout: "", stderr: "unknown flag", timedOut: false }),
+      });
+      const refused = await failing.bash("d1", "dispatch comment --issue X-1 --body hi");
+      expect(refused?.block).toBe(true);
+      expect(refused?.reason).toContain("modelRoles.askgate");
+      expect(failing.entries.map((e) => e.outcome)).toEqual(["no-model-role"]);
+      expect(failing.dryRuns).toHaveLength(0);
+      // An unreadable call, which warn mode would otherwise run.
+      const unreadable = bind({ env, roles: {} });
+      const wrapped = await unreadable.bash("u1", "cd $X && dispatch comment --issue X-1 --body b");
+      expect(wrapped?.block).toBe(true);
+      expect(unreadable.entries.map((e) => e.outcome)).toEqual(["no-model-role"]);
+      // No halt from any of them: a halt would let the next writes out.
+      for (const g of [rebutted, closing, failing, unreadable]) expect(g.notices).toHaveLength(0);
+    }
+  }, 30_000);
 });
 
 describe("scopedDevice (test 2)", () => {
