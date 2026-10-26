@@ -230,6 +230,16 @@ A block rewritten in place under its own id is one block, and neither the halves
 splice splits nor a repeat the live document already carries (a browser write can leave one until
 settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
 
+The graph bounds a block id at `text.MaxBlockIDBytes`, 256 bytes of UTF-8 (`MAX_BLOCK_ID_BYTES` in
+`@legion/contracts`): it keys a block by its id, and a Postgres B-tree key holds at most 2704
+bytes. The same caller markdown is refused when it names a longer id that the document it
+replaces whole does not already carry (`pmdoc.LongBlockID`, run by `pmdoc.ParseForWrite`):
+`400 INVALID_OP` for an `insert`, `400 INVALID_MARKDOWN` for the rest, quoting the id's start and
+naming its length and the bound. An insert or an accepted suggestion replaces no document, so any
+such id it names is refused. A browser's edit can still write a long id; the document stores,
+renders and versions it as any other, and an upload that keeps it, or an insert elsewhere, is
+written.
+
 Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
 another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
 document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
@@ -1359,7 +1369,11 @@ Each identified block of a document is a graph node too: kind `block`, id
 as `text.EncodeBlockID` writes it (`refs.BlockRef`). `refs.IndexBlocks` indexes a version's blocks
 in the version writer's transaction, from the same render and extraction as its references: the
 blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first
-holder of a repeated id being the node. Its tables are migration 0117's: `document_blocks` holds
+holder of a repeated id being the node. A block whose id is longer than `text.MaxBlockIDBytes` is
+no node (`uniqueBlocks`): a mention inside it starts at the innermost node holding it, or at the
+document when none does, and `IndexBlocks` logs a warning naming the document, the version, how
+many such blocks it skipped, the longest one's id bytes and the bound. The version is still
+written. Its tables are migration 0117's: `document_blocks` holds
 each block the latest indexed version holds, with its text's sha256, its
 text cut to 480 runes as its excerpt, and `changed_version` and `changed_at`, the version its text
 last changed in, which an unchanged text keeps. `document_block_texts` records a block's whole
@@ -1391,7 +1405,8 @@ route keeps every source: `refs.ReferencedBy` lists each item and document that 
 document or one of its current blocks once, a document by its own row, and `refs.Outgoing` lists
 a block target with its document as the artifact.
 
-A block reference may be pinned to version N of its document, `#b-<id>@v<N>`; the pin is no part
+A block reference may be pinned to version N of its document, `#b-<id>@v<N>`, with N at most
+9223372036854775807 (Go's `int`; a larger N makes the text no reference); the pin is no part
 of the edge (`refs.ToID` drops it), and it is read when the reference is.
 `GET /api/v1/references?to=<block reference>` names the block node with `text`, its whole current text
 (`refs.CurrentBlockText`); a pinned reference adds `pin` (`model.BlockPin`), read by
@@ -1401,7 +1416,9 @@ text with the current one, or `removed`, with `removed_version`, the node's text
 version absent and no edges, when no current version holds the block. An unpinned reference to a
 block no current version holds is `404 NOT_FOUND` `no block "<id>" in <document ref>`, and a pin
 to a version the document lacks, to one with no record of its blocks, or to one that did not hold
-the block is `404 NOT_FOUND` saying which (`blockReferenceNode`, `api/references.go`).
+the block is `404 NOT_FOUND` saying which (`blockReferenceNode`, `api/references.go`). Versions
+are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 2147483647 without a query as a
+version the document lacks: `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from
 blocks of one document to blocks of another, or of the same one, while both blocks are current.
 
@@ -1470,8 +1487,12 @@ block (`text.parseBlock`, the dashboard's `parseBlockReference`), and so does on
 document page (`documentPage`); a version page's fragment names no block. The id is read with any
 percent-encoding, and every writer writes it as `text.EncodeBlockID` and `encodeBlockId`
 (`@legion/contracts`) do: each UTF-8 byte but ASCII letters, digits and `-` percent-encoded in
-upper-case hex, so `@` is `%40` and a raw `@` in the fragment is only ever the `@v<N>` pin. Both
-are tested against `DISPATCH_BLOCK_ID_ENCODINGS`, whose JSON copy is
+upper-case hex, so `@` is `%40` and a raw `@` in the fragment is only ever the `@v<N>` pin. A
+fragment whose id decodes to more than `text.MaxBlockIDBytes` (`MAX_BLOCK_ID_BYTES`), 256 bytes,
+or whose pin is past 9223372036854775807 names no block: after `dispatch://` the text is no
+reference, and on a live document page it names the document. `parseBlockFragment` carries a pin
+as its digits, so the browser never rounds one past 2^53. The two encoders are tested against
+`DISPATCH_BLOCK_ID_ENCODINGS`, whose JSON copy is
 `text/testdata/dispatch-block-id-encodings.json`. The Go reader parses a reference as the browser
 does: a query's pairs split on `&` alone,
 as `URLSearchParams` splits them (`searchParams`), an item id is decoded as `decodeURIComponent`

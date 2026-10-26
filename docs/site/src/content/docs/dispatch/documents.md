@@ -130,7 +130,9 @@ issue's spec describes.
 
 Every paragraph, list, and other block in a document has a stable link. Put your cursor in a
 block and choose **Copy link to block** in the Spec tab row. The link ends in `#b-` and the block's
-id. Opening it scrolls to that block and highlights it briefly.
+id. Opening it scrolls to that block and highlights it briefly. Dispatch gives each block its id.
+Markdown an agent writes can name one as `{#id}`, at most 256 bytes long; Dispatch refuses a
+longer new one.
 
 ## References
 

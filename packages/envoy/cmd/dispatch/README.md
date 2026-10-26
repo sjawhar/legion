@@ -903,11 +903,16 @@ Each block of a document is a node of the graph too (migration `0117`; `packages
 "References form one graph"). Its reference is the document's with `#b-` and the block's id,
 percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
-`dispatch://PROJECT/artifact/<slug>#b-<id>`. A mention written inside a block starts at the
+`dispatch://PROJECT/artifact/<slug>#b-<id>`. A reference's id holds at most 256 bytes decoded
+(`text.MaxBlockIDBytes`): a longer one is no reference. A block carrying a longer id, which a
+browser's edit can write, is no node; the server logs a warning naming the document, the longest
+id's length and the bound, and writes the version. An API write naming a new such id is refused
+`400`, naming the bound. A mention written inside a block starts at the
 innermost block holding it, so `?to=` a cited node names that block, whose `document` is the
 citing document; a document's own read also lists the links at its blocks, each edge naming its
 block as `block`, and `?kind=part_of` on a document lists each of its current blocks. A block
-reference pinned to a version of its document, `#b-<id>@v<N>`, reads the block as that version
+reference pinned to a version of its document, `#b-<id>@v<N>` with N at most
+9223372036854775807, reads the block as that version
 held it: the node's `pin` carries the block's text at `N` and says whether the block is
 `unchanged`, `changed` or `removed` since. `GET /api/v1/block-links?from=<document>&to=<document>`
 lists the links from the blocks of one document to the blocks of another. Text stored before the

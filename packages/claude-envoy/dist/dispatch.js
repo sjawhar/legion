@@ -13899,6 +13899,7 @@ function encodeBlockId(id) {
   }
   return encoded;
 }
+var MAX_BLOCK_ID_BYTES = 256;
 function decodeBlockId(encoded) {
   if (encoded === "" || encoded.includes("@")) {
     return;
@@ -13909,19 +13910,20 @@ function decodeBlockId(encoded) {
   } catch {
     return;
   }
-  return id === "" || hasControlCharacter(id) ? undefined : id;
+  return id === "" || hasControlCharacter(id) || new TextEncoder().encode(id).length > MAX_BLOCK_ID_BYTES ? undefined : id;
 }
+var MAX_BLOCK_PIN = 9223372036854775807n;
 function parseBlockFragment(encoded) {
   const at = encoded.indexOf("@");
   const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
-  if (at !== -1 && pin === undefined) {
+  if (at !== -1 && (pin === undefined || BigInt(pin) > MAX_BLOCK_PIN)) {
     return;
   }
   const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
   if (block === undefined) {
     return;
   }
-  return pin === undefined ? { block } : { block, pin: Number(pin) };
+  return pin === undefined ? { block } : { block, pin };
 }
 // ../contracts/src/dispatch-snippet.ts
 var HTML_ENTITIES = [

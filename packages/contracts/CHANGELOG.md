@@ -13,8 +13,11 @@
   `#b-` fragment carries it (every byte but ASCII letters, digits and `-` percent-encoded, so `@` is
   `%40` and a raw `@` is only the pin), tested with Go's `text.EncodeBlockID` against
   `DISPATCH_BLOCK_ID_ENCODINGS`; `decodeBlockId` and `parseBlockFragment` read a fragment's id and
-  pin back, for the dashboard and the client alike; `DISPATCH_TEXT_REFERENCES` gains the block and
-  pin rows both reference readers are held to.
+  pin back, for the dashboard and the client alike. As Go reads them, an id holds at most
+  `MAX_BLOCK_ID_BYTES` (256 UTF-8 bytes, decoded; Go's `text.MaxBlockIDBytes`) and a pin at most
+  9223372036854775807, and a longer id or a larger pin names no block. `parseBlockFragment`'s `pin`
+  is N's decimal digits as a string, so no pin past 2^53 is rounded. `DISPATCH_TEXT_REFERENCES`
+  gains the block and pin rows both reference readers are held to, the bounds included.
 - `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
   (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
   read lists the last 10 without either.

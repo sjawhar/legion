@@ -1,5 +1,3 @@
-import { MAX_BLOCK_ID_BYTES } from "./dispatch-block-ref";
-
 /**
  * Markdown bodies with the `dispatch://` references each one cites, in order of first appearance,
  * as read against the server origin `https://dispatch.test`, or the row's `origin` where it names
@@ -170,15 +168,21 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   { body: "dispatch://CORE-1#b-x", refs: [] },
   { body: "dispatch://CORE-1/spec#b-%E0%A4", refs: [] },
   { body: "dispatch://CORE-1/spec#b-%0A", refs: [] },
-  // An id of MAX_BLOCK_ID_BYTES UTF-8 bytes (an `é` is two) is a block; one byte more names
-  // nothing, and a dashboard page whose fragment holds it is the document.
+  // An id of MAX_BLOCK_ID_BYTES (256) bytes is a block; one byte more names nothing, and a
+  // dashboard page whose fragment holds it is the document. The ids are written out, not built,
+  // so a bundle that does not use this table leaves it out.
   {
-    body: `dispatch://CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}`,
-    refs: [`dispatch://CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}`],
+    body: "dispatch://CORE-1/spec#b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    refs: [
+      "dispatch://CORE-1/spec#b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ],
   },
-  { body: `dispatch://CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}x`, refs: [] },
   {
-    body: `https://dispatch.test/issues/CORE-1/spec#b-${"%C3%A9".repeat(MAX_BLOCK_ID_BYTES / 2)}x`,
+    body: "dispatch://CORE-1/spec#b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaax",
+    refs: [],
+  },
+  {
+    body: "https://dispatch.test/issues/CORE-1/spec#b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaax",
     refs: ["dispatch://CORE-1/spec"],
   },
   // A dashboard page's `#b-` fragment names the block it lands on.

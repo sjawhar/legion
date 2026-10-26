@@ -21,7 +21,10 @@
   exits 1 with `No block <id> in <document>.`; a pinned one to a removed block prints it and exits 0.
   `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse a block reference, naming the
   arguments for its document, and every read's reference row on a document ends
-  `(block <ref>)` when the graph names the document's block at that edge.
+  `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
+  gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
+  so a pin past 2^53 is never rounded. As the server reads it, a block id longer than 256 bytes
+  decoded, or a pin past 9223372036854775807, is no reference.
 
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so

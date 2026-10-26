@@ -8,8 +8,17 @@
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
   `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
-  pins it to version N of the document. A mention written inside a block starts at the innermost
-  block holding it: `GET /api/v1/references` names that block as the source (`kind: "block"`, with
+  pins it to version N of the document. A reference names a block id of at most 256 bytes,
+  decoded (`text.MaxBlockIDBytes`), and N of at most 9223372036854775807: a longer id or a larger
+  N is no reference, `400 INVALID_REFERENCE` where the API is given one, and a pin past every
+  version the document has is `404 NOT_FOUND` `no version N of <document>`. A seeded spec, an
+  upload, an `insert` or an accepted suggestion that names a new block id past the bound is
+  refused, naming the bound (`400 INVALID_MARKDOWN`, `400 INVALID_OP` for an insert); an id the
+  document already holds is kept. A block carrying such an id, which a browser's edit can write,
+  is no graph node: its version is written, a mention inside it starts at the block holding it,
+  and the server logs a warning naming the document, the longest id's length and the bound. A
+  mention written inside a block starts at the innermost block holding it: `GET /api/v1/references`
+  names that block as the source (`kind: "block"`, with
   `block_id`, `document`, `changed_version` and `changed_at`, the version its text last changed
   in), a node cited from two blocks of one document counts twice, a document's own read names the
   block at each edge as `block`, and each block is `part_of` its document, which a document's read
@@ -26,7 +35,9 @@
   nine. `rebuild-refs` marks every document owed that index and prints `blocks_owed=`. The
   dashboard titles a block link with the block's text, its hover card shows the document and, for
   a pinned link, the version and how the block stands since, a pinned link opens that version, and
-  Referenced by shows one row per citing block, each linked to its block.
+  Referenced by shows one row per citing block, each linked to its block; on a document's page each
+  row also links the document's own block the edge meets (`block <id>`), so a source citing two
+  of its blocks is two rows.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
