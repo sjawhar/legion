@@ -186,8 +186,9 @@ aside) or a user turn sent while a turn streams in memory, and writes it, emitti
 starts, and a process that ends in between loses it (measured on omp 18.8.9, which writes a queued
 card after an abort too). So a card carries the frame's ledger identity in its `details`
 (`{event_id?, dedupe_key?}`, `replayLedgerIdentity`), and the `message_end` of a card naming a
-frame the plugin waits on (`Unwritten` in `extensions/envoy.ts`) records it and settles its
-claim; a card whose `details` name nothing is known by the event id its rendered text names (the
+frame the plugin waits on (`UnwrittenFrames` in `src/unwritten-frames.ts`, which owns each such
+claim's settle and release) records it and settles its claim; a card whose `details` name nothing
+is known by the event id its rendered text names (the
 `envoy:` block's `id:`, or a failure notice's `event_id:`). Until then the claim stays pending:
 a sweep leaves the stream's copy, and that subject's cursor stays before it, so the restarted
 session's sweep shows it. A replayed card and a failure notice claim their frame too, and the
@@ -214,11 +215,12 @@ them in the run it starts at once (measured on omp 18.8.9: `ctx.hasPendingMessag
 true, at the aborted run's `agent_end`). So each heartbeat tick, while the host is idle
 (`ctx.isIdle()`) and holds no message (`ctx.hasPendingMessages()`), hands each card still
 unwritten again, as it was and under its claim, which also covers a live frame on a topic the
-stream does not keep (`handBackWithdrawnCards`). A card handed since the last tick or aborted
-run's end is left alone: `pi.sendMessage` returns before the host queues the card or starts its
-run, so the host reads idle and empty for that moment. A person's turn the interrupt withdrew is
-not handed again (run late, it could act on an instruction the person no longer means): Oh My Pi
-18.8.9 answers a typed input (`pi.sendUserInput`, `handled: "prompt"`) or a `pi.sendUserMessage`
+stream does not keep (`UnwrittenFrames.handBackWithdrawn`). A card handed since the last tick or
+aborted run's end is left alone: `pi.sendMessage` returns before the host queues the card or
+starts its run, so the host reads idle and empty for that moment. A person's turn the interrupt
+withdrew is not handed again (run late, it could act on an instruction the person no longer
+means): Oh My Pi 18.8.9 answers a typed input (`pi.sendUserInput`, `handled: "prompt"`) or a
+`pi.sendUserMessage`
 turn the streaming turn held in `abort_and_restore_queue`'s `steering` list, to whoever
 interrupted, and never writes it. So at that same moment a turn still unwritten that the host
 took into its queue before the last tick or aborted run's end (a typed input from when
@@ -229,8 +231,9 @@ interrupt withdrew is not shown again.
 
 A sweep asks, for each followed subject, for the stored messages after that subject's cursor,
 merges them by stream sequence and shows each that neither path has shown. The followed subjects
-are what `registerSession` registers (`followedSubjects`): the agent subject and every open
-subscription not held for a role. One sweep runs at a time, on the engine's own chain, never in
+are what `registerSession` registers (`followedSubjects`, by the engine's shared rule
+`replayFollowedSubjects`): the agent subject and every open subscription not held for a role. One
+sweep runs at a time, on the engine's own chain, never in
 `passes` or `roleMoves`. A sweep starts (`triggerReplay`) after a pass opens the agent subject and
 the recovered interests (a start, a switch, a resume), after the pump reopens a subscription,
 on each nats.js `reconnect` status (`watchReconnects`), on every heartbeat tick, and after
@@ -254,9 +257,9 @@ it. A frame the renderer skips (`notify: false`, the session's own event, anothe
 follow) records nothing, so an eligible copy of it on another subject still shows. A replayed
 `subscription.removed` closes a topic only when it was stored after the session started following
 that topic (the cursor's `since`), and takes it out of the listener's registry as
-`envoy_unsubscribe` does (`client.unsubscribe`): a resumed session registered the topic again
-before the sweep, and the registry, which only ever adds a registered topic, would have the next
-restart follow it again.
+`envoy_unsubscribe` does (`client.unsubscribe`), both by the engine's shared rule
+(`closeReplayedRemoval`): a resumed session registered the topic again before the sweep, and the
+registry, which only ever adds a registered topic, would have the next restart follow it again.
 
 Two transcript entries hold it, written with `pi.appendEntry` and rebuilt by
 `restoreLocalSessionState` from every entry of the session file (`replaySnapshot`):
@@ -270,7 +273,8 @@ sweep that handled no message and only moved its cursors to the stream's end, wh
 subjects' traffic moves, writes nothing: that move goes with the next write, or once the state
 last written is an hour old. A restore drops ledger entries recorded 72 hours ago or more and
 keeps the state at any age. `recoverRegisteredInterests` resubscribes the union of
-the listener's registered interests and the newest state's subjects, so a session stopped longer
+the listener's registered interests and the newest state's topics (`rememberedTopics`: neither an
+agent subject nor a role lane), so a session stopped longer
 than the listener's 10-minute grace still follows its topics and recovers what the stream kept for
 them; an unfollow (`envoy_unsubscribe`, a removal) is written at once and stays unfollowed.
 
@@ -285,7 +289,7 @@ replay does not read (a team topic, a subject refused or without a cursor yet, o
 listener's replay is failing), or one the plugin received before its subject's cursor started (a
 new follow, a new session, a reset after a stream recreation), since that cursor starts at the
 stream's end, which can be past a frame the live path still held. One card that starts no turn
-says that the stream was recreated,
+(`routeReplayNotice` sends this kind to a card) says that the stream was recreated,
 so messages from
 before it may be lost, or that a cursor fell behind the stream's oldest message, so messages
 older than 72 hours may be missing. A listener without the route answers 404; one whose NATS
@@ -570,7 +574,7 @@ state never nudges.
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
-| Missed messages | `extensions/envoy.ts` (`replay`, `showReplayed`, `triggerReplay`), `src/missed-messages.ts`, `../envoy-client/src/replay.ts`, `scripts/smoke-replay.sh` | The replay of what the stream stored while a subscription was down ("Missed messages" above); the engine and its rules are `@legion/envoy-client/replay`'s, this package holds its triggers, cards and transcript entries |
+| Missed messages | `extensions/envoy.ts` (`replay`, `showReplayed`, `triggerReplay`), `src/missed-messages.ts`, `src/unwritten-frames.ts` (`UnwrittenFrames`: the cards and turns handed and not yet written, each claim's settle and release), `../envoy-client/src/replay.ts`, `scripts/smoke-replay.sh` | The replay of what the stream stored while a subscription was down ("Missed messages" above); the engine and its rules, with the host policy both plugins share (`replayFollowedSubjects`, `rememberedTopics`, `closeReplayedRemoval`, `routeReplayNotice`), are `@legion/envoy-client/replay`'s; this package holds its triggers, cards and transcript entries |
 
 ## Critical conventions
 

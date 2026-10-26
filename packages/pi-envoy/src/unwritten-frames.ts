@@ -1,0 +1,305 @@
+import type { DedupeIdentity, DeliveryClaim } from "@legion/envoy-client/delivery";
+import { replayLedgerIdentity } from "@legion/envoy-client/replay";
+import type { ContentBlock } from "@legion/pi-shared/pi-types";
+import { writtenCardIdentity } from "./missed-messages";
+
+/** How a card is handed to the host: as a steer, or as an aside. */
+export type CardDelivery = "steer" | "aside";
+
+/**
+ * A frame handed to the host that the host has not written to the session's transcript yet. Oh
+ * My Pi holds a card or a user turn sent while a turn streams in memory until the turn takes it,
+ * and writes it, emitting its `message_end`, only then (measured on omp 18.8.9, idle and mid-turn
+ * alike); a process that ends first loses it. Until then the frame's claim stays pending, so a
+ * replay sweep leaves the stream's copy and its cursor before it, and nothing records it shown.
+ */
+interface Unwritten {
+  /** The session it was handed to: written once the host is on another, it records nothing. */
+  readonly sessionID: string;
+  readonly identity: DedupeIdentity;
+  /**
+   * The frame's claim, settled once the host writes it. None for a replayed card of a frame the
+   * dedupe had already let go of (`showReplayCard` in extensions/envoy.ts): that card still waits
+   * to be written.
+   */
+  readonly claim: DeliveryClaim | undefined;
+}
+
+/** A card waiting to be written, under every key `unwrittenCardKeys` gives its frame. */
+interface UnwrittenCard extends Unwritten {
+  readonly keys: readonly string[];
+  /** What it was handed as: a card the host withdrew unwritten is handed again as it was. */
+  readonly content: string | readonly ContentBlock[];
+  readonly deliverAs: CardDelivery;
+  /** The host moments counted when it was handed (`handBackWithdrawn`). */
+  readonly handedAt: number;
+}
+
+/** A person's turn waiting to be written; a `pi.sendUserMessage` turn is found by its text. */
+interface UnwrittenTurn extends Unwritten {
+  readonly via: "text" | "typed";
+  /**
+   * The host moments counted when the host took it into its queue (`handBackWithdrawn`): a
+   * `pi.sendUserMessage` turn's at the send, a typed input's once `pi.sendUserInput` answers that
+   * it submitted a message; undefined until then.
+   */
+  readonly handedAt: number | undefined;
+}
+
+/** A person's turn as `UnwrittenFrames.awaitTurn` takes it. */
+export interface HandedTurn {
+  /** The session the turn was handed to. */
+  readonly sessionID: string;
+  readonly identity: DedupeIdentity;
+  readonly claim: DeliveryClaim | undefined;
+  /** `text`: sent with `pi.sendUserMessage`, in the host's queue from the send. `typed`: sent with
+   *  `pi.sendUserInput`, in the queue only once the host answers that it submitted a message. */
+  readonly via: "text" | "typed";
+}
+
+/** What `UnwrittenFrames` asks of the extension around it. */
+export interface UnwrittenFramesHost {
+  /** The session this instance serves now: a frame written once it is on another records nothing. */
+  sessionID(): string;
+  /** Records a frame the host wrote in the replay ledger (`ReplayEngine.recordDelivered`). */
+  recordDelivered(identity: DedupeIdentity): Promise<void>;
+  /** Hands the host a card (`pi.sendMessage`); a throw means it was not handed. */
+  handCard(
+    content: string | readonly ContentBlock[],
+    deliverAs: CardDelivery,
+    identity: DedupeIdentity | undefined
+  ): void;
+  /** The Dispatch message id of the person's turn `message` is, among the turns noted for this
+   *  session (`matchInjectedUserTurn`), if any. */
+  matchTurn(message: unknown): string | undefined;
+  /** The interrupt withdrew the person's turn `messageID` handed to `sessionID`: no message will
+   *  carry it, so whatever was noted to find it, or to go with it, goes. */
+  turnWithdrawn(sessionID: string, messageID: string): void;
+  /** A card the host withdrew unwritten could not be handed again; the next moment tries again. */
+  handBackFailed(identity: DedupeIdentity, error: unknown): void;
+}
+
+/**
+ * The keys a card waiting to be written is found under, from the frame it shows: its event id and
+ * its dedupe key, as the ledger knows it (`replayLedgerIdentity`), so the written card names it
+ * by either. None for a frame the ledger keeps nothing of.
+ */
+export function unwrittenCardKeys(identity: {
+  readonly event_id?: string;
+  readonly dedupe_key?: string;
+}): string[] {
+  return [
+    ...(identity.event_id === undefined ? [] : [`event:${identity.event_id}`]),
+    ...(identity.dedupe_key === undefined ? [] : [`key:${identity.dedupe_key}`]),
+  ];
+}
+
+/**
+ * The cards (`unwrittenCardKeys`) and the person's turns (by Dispatch message id) handed to the
+ * host and not yet written (`Unwritten`), each under the claim of its frame. This owns each
+ * claim from the hand-off on: the claim settles, and the replay ledger records the frame, once
+ * the host writes it (`written`, `turnHandled`, `textTurnsEnded`); it is released, recording
+ * nothing, when the host dropped the frame unwritten (a session change, `releaseOtherSessions`;
+ * a person's turn an interrupt withdrew, `handBackWithdrawn`), so a sweep shows the stream's copy.
+ */
+export class UnwrittenFrames {
+  readonly #host: UnwrittenFramesHost;
+  readonly #cards = new Map<string, UnwrittenCard>();
+  readonly #turns = new Map<string, UnwrittenTurn>();
+  // The moments the host had to queue or write a card handed before it: each heartbeat, and each
+  // run that ended aborted (`handBackWithdrawn`, `runAborted`).
+  #moments = 0;
+
+  constructor(host: UnwrittenFramesHost) {
+    this.#host = host;
+  }
+
+  /**
+   * Hands the host a card for the frame `identity`: one that shows it, or a failure notice naming
+   * it. The card is shown only once the host writes it (`written`), and the answer says it waits
+   * so, under `claim` when there is one; one of a frame the ledger keeps nothing of does not wait,
+   * and its caller settles at once. A send that throws leaves nothing waiting.
+   */
+  sendCard(
+    content: string | readonly ContentBlock[],
+    deliverAs: CardDelivery,
+    identity: DedupeIdentity | undefined,
+    claim: DeliveryClaim | undefined
+  ): boolean {
+    const keys = identity === undefined ? [] : unwrittenCardKeys(replayLedgerIdentity(identity));
+    const card: UnwrittenCard | undefined =
+      identity === undefined || keys.length === 0
+        ? undefined
+        : {
+            sessionID: this.#host.sessionID(),
+            identity,
+            claim,
+            keys,
+            content,
+            deliverAs,
+            handedAt: this.#moments,
+          };
+    if (card !== undefined) this.#awaitWrite(card);
+    try {
+      this.#host.handCard(content, deliverAs, identity);
+    } catch (error) {
+      if (card !== undefined) this.#stopAwaitingWrite(card);
+      throw error;
+    }
+    return card !== undefined;
+  }
+
+  /** Whether a card of the frame `identity` waits to be written: that card shows it. */
+  waitsOnCard(identity: DedupeIdentity): boolean {
+    return unwrittenCardKeys(replayLedgerIdentity(identity)).some((key) => this.#cards.has(key));
+  }
+
+  /** A person's turn `messageID` was handed to the host, which writes it as a user message. */
+  awaitTurn(messageID: string, turn: HandedTurn): void {
+    this.#turns.set(messageID, {
+      ...turn,
+      handedAt: turn.via === "text" ? this.#moments : undefined,
+    });
+  }
+
+  /** The host answered that typed input `messageID` submitted a message: it is in the host's
+   *  queue from now on, unless its message was written already. */
+  turnSubmitted(messageID: string): void {
+    const waiting = this.#turns.get(messageID);
+    if (waiting !== undefined) this.#turns.set(messageID, { ...waiting, handedAt: this.#moments });
+  }
+
+  /** A person's turn the host wrote, or answered that it submitted no message for: done waiting. */
+  async turnHandled(messageID: string): Promise<void> {
+    const turn = this.#turns.get(messageID);
+    if (turn === undefined) return;
+    this.#turns.delete(messageID);
+    await this.#recordWritten(turn);
+  }
+
+  /**
+   * The host wrote `message` to the transcript as it ended it (`message_end`): a card or a
+   * person's turn handed to it, idle or taken by a turn after it streamed, is shown from here on.
+   * A card is found by the frame its `details` or text name (`writtenCardIdentity`), a turn by
+   * the host's `matchTurn`.
+   */
+  async written(message: unknown): Promise<void> {
+    const card = writtenCardIdentity(message);
+    const waiting = unwrittenCardKeys(card ?? {})
+      .map((key) => this.#cards.get(key))
+      .find((found) => found !== undefined);
+    if (waiting !== undefined) {
+      this.#stopAwaitingWrite(waiting);
+      await this.#recordWritten(waiting);
+    }
+    if (this.#turns.size === 0) return;
+    const turn = this.#host.matchTurn(message);
+    if (turn !== undefined) await this.turnHandled(turn);
+  }
+
+  /** A run ended aborted: it may have taken back the cards it held, and those handed before its
+   *  end are looked at by the next `handBackWithdrawn`. */
+  runAborted(): void {
+    this.#moments += 1;
+  }
+
+  /**
+   * A run's end stopped the search for this session's `pi.sendUserMessage` turns: each still
+   * waiting is done with now, found or not. The host keeps no mark of such a turn, so its text was
+   * the only way to tell it was written.
+   */
+  async textTurnsEnded(): Promise<void> {
+    for (const [messageID, turn] of this.#turns) {
+      if (turn.via === "text" && turn.sessionID === this.#host.sessionID()) {
+        await this.turnHandled(messageID);
+      }
+    }
+  }
+
+  /**
+   * Counts a host moment (each heartbeat tick) and, when `settled` (the host is idle, holds no
+   * message, and is on the session this instance serves), hands back what an interrupt withdrew.
+   *
+   * Oh My Pi withdraws every card a streaming turn holds, writing none and restoring none, when
+   * the person interrupts the turn (Escape; RPC `abort_and_restore_queue`), and is idle with an
+   * empty queue from then on; after a plain abort it keeps them queued and writes them in the run
+   * it starts at once (measured on omp 18.8.9: `hasPendingMessages()` false, then true, at the
+   * aborted run's `agent_end`). So a card still unwritten while the host is idle and holds no
+   * message was withdrawn: it is handed again, as it was, its claim kept. One handed since the
+   * host's last moment is left alone, as it may still be on its way into the queue:
+   * `pi.sendMessage` returns before the host queues the card or starts its run.
+   *
+   * The interrupt withdraws a person's turn the same way: a typed input (`pi.sendUserInput`,
+   * answered `handled: "prompt"`) or a `pi.sendUserMessage` turn the streaming turn held goes back
+   * to whoever interrupted (measured on omp 18.8.9: RPC `abort_and_restore_queue` answers it in
+   * its `steering` list, the terminal puts it in the editor) and is never written. Such a turn is
+   * not handed again, since run late it could act on an instruction the person no longer means:
+   * its claim is released and nothing records it, so the next sweep shows the stream's copy as a
+   * card that runs nothing.
+   */
+  handBackWithdrawn(settled: boolean): void {
+    const since = this.#moments;
+    this.#moments += 1;
+    if (!settled) return;
+    const sessionID = this.#host.sessionID();
+    for (const card of new Set(this.#cards.values())) {
+      if (card.sessionID !== sessionID || card.handedAt >= since) continue;
+      const again: UnwrittenCard = { ...card, handedAt: this.#moments };
+      this.#awaitWrite(again);
+      try {
+        this.#host.handCard(card.content, card.deliverAs, card.identity);
+      } catch (error) {
+        // Still waiting as it was: the next heartbeat hands it again.
+        this.#stopAwaitingWrite(again);
+        this.#awaitWrite(card);
+        this.#host.handBackFailed(card.identity, error);
+      }
+    }
+    for (const [messageID, turn] of this.#turns) {
+      if (turn.sessionID !== sessionID || turn.handedAt === undefined || turn.handedAt >= since) {
+        continue;
+      }
+      this.#turns.delete(messageID);
+      this.#host.turnWithdrawn(turn.sessionID, messageID);
+      turn.claim?.release();
+    }
+  }
+
+  /**
+   * The host moved to `sessionID`: what the session it left was handed and has not written is no
+   * longer waited on, since the host dropped it with the session (measured on omp 18.8.9: a card a
+   * turn held when RPC `new_session` ran got no `message_end`). Its claim is released and nothing
+   * records it, so a sweep of that session, once the host is back on it or resumes it, shows the
+   * stream's copy again and waits on it anew.
+   */
+  releaseOtherSessions(sessionID: string): void {
+    for (const waiting of [this.#cards, this.#turns]) {
+      for (const [key, frame] of waiting) {
+        if (frame.sessionID === sessionID) continue;
+        waiting.delete(key);
+        frame.claim?.release();
+      }
+    }
+  }
+
+  // The host wrote what it was handed: the ledger records the frame, so no sweep shows the
+  // stream's copy again, here or after a restart, and its claim settles. Written once the host is
+  // on another session, it is recorded nowhere: that session's own sweep reads its transcript.
+  async #recordWritten(frame: Unwritten): Promise<void> {
+    if (frame.sessionID === this.#host.sessionID()) {
+      await this.#host.recordDelivered(frame.identity);
+    }
+    frame.claim?.settle();
+  }
+
+  // A card waits under every key of its frame, and stops waiting only as the entry it is.
+  #awaitWrite(card: UnwrittenCard): void {
+    for (const key of card.keys) this.#cards.set(key, card);
+  }
+
+  #stopAwaitingWrite(card: UnwrittenCard): void {
+    for (const key of card.keys) {
+      if (this.#cards.get(key) === card) this.#cards.delete(key);
+    }
+  }
+}

@@ -66,6 +66,19 @@ told once when the stream was recreated, when its cursor fell behind the stream'
 `REPLAY_UNAVAILABLE`, 401, 403). Work started for one session stops, writing nothing, once
 `sessionID()` names another.
 
+The host policy both plugins share sits beside the engine, so each host keeps only how it shows a
+card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,
+heldForRole?)` is what a host's `followedSubjects()` answers: its own agent subject and every
+topic it follows but a role lane, a subject it holds for a role, and another session's agent
+subject. `rememberedTopics(state)` is what a restore follows again from a persisted state: every
+subject but agent subjects and role lanes. `closeReplayedRemoval(frame, host)` acts on a replayed
+`subscription.removed` naming the session: it closes each topic the session followed before the
+frame was stored (`followedBefore`, through the host's `close`), then starts the host's
+`unregister` of the closed topics from the listener's registry and waits on it and on the host's
+`followedChanged`. `routeReplayNotice(notice, {warn, card})` sends a one-time notice where its kind
+belongs: `not_served` and `unavailable` are a warning, `stream_recreated` and `retention_gap` a
+card rendered by `envoyNoticeText`.
+
 ## HTTP transport
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish

@@ -31,7 +31,11 @@
   once written (`recordDelivered`), so a process that ends first shows it after the restart;
   `replayLedgerIdentity` names a frame as the ledger does. The transport gains `replay()` (one
   try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
-  dedupe `pending()`, true until the claim is settled or released (INFRA-439).
+  dedupe `pending()`, true until the claim is settled or released. Beside the engine sits the host
+  policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), the topics
+  a restore follows again (`rememberedTopics`), a replayed removal's close and unregister
+  (`closeReplayedRemoval`), and which one-time notices are a card or a warning
+  (`routeReplayNotice`) (INFRA-439).
 
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so

@@ -1,7 +1,6 @@
 import { unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
 import {
-  AGENT_TOPIC_PREFIX,
   agentSubject,
   type DeliveryCapability,
   ROLE_TOPIC_PREFIX,
@@ -25,15 +24,18 @@ import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
+  closeReplayedRemoval,
   createReplayEngine,
   envoyNoticeText,
   failureNoticeFields,
   type ReplayDeliveryOutcome,
   type ReplayFrame,
   type ReplaySnapshot,
+  rememberedTopics,
   replayedText,
-  replayNoticeFields,
+  replayFollowedSubjects,
   replaySuppressed,
+  routeReplayNotice,
 } from "@legion/envoy-client/replay"
 import {
   type SessionConfigFile,
@@ -526,14 +528,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /**
    * A stored frame is shown as a live one is, and runs nothing. A removal closes a topic only when
-   * it was stored after the session started following that topic, so an old one never closes a
-   * topic followed again since.
+   * it was stored after the session started following that topic (`closeReplayedRemoval`).
    */
   const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
-    const removed = (subscriptionRemovedTopics(frame.data, identity.id) ?? []).filter(
-      (topic) => replay.followedBefore(topic, frame.seq) && userTopics.delete(topic),
-    )
-    if (removed.length > 0) await dropRemovedTopics(removed)
+    await closeReplayedRemoval(frame, {
+      sessionID: identity.id,
+      engine: replay,
+      close: (topic) => userTopics.delete(topic),
+      unregister: unfollowRemovedTopics,
+      followedChanged: () => replay.followedChanged(),
+    })
     return delivery.replay(frame)
   }
 
@@ -544,14 +548,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   const replay = createReplayEngine({
     host: {
       sessionID: () => (shuttingDown || replayBound !== identity.id ? undefined : identity.id),
-      // What the session registers: its agent subject and every topic it follows, never one held
-      // for a role (role messages stay live only) nor another session's agent subject.
-      followedSubjects: () => [
-        directSubject,
-        ...[...userTopics].filter(
-          (topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !topic.startsWith(AGENT_TOPIC_PREFIX),
-        ),
-      ],
+      // What the session registers (`replayFollowedSubjects`).
+      followedSubjects: () => replayFollowedSubjects(directSubject, userTopics),
       deliver: showReplayed,
       showFailureNotice: (notice) => delivery.notice(envoyNoticeText(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error) => {
@@ -562,14 +560,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       notify: (notice) => {
         // That the listener does not replay goes where every start notice of this server goes,
         // as pi-envoy raises it as a warning rather than a card for the model.
-        if (notice.kind === "not_served" || notice.kind === "unavailable") {
-          process.stderr.write(`envoy-channel: ${notice.message}\n`)
-          return
-        }
-        delivery.notice(envoyNoticeText(replayNoticeFields(notice))).catch((error: unknown) => {
-          process.stderr.write(
-            `envoy-channel: ${notice.message} (the session could not be told — ${messageFor(error)})\n`,
-          )
+        routeReplayNotice(notice, {
+          warn: (message) => process.stderr.write(`envoy-channel: ${message}\n`),
+          card: (content) => {
+            delivery.notice(content).catch((error: unknown) => {
+              process.stderr.write(
+                `envoy-channel: ${notice.message} (the session could not be told — ${messageFor(error)})\n`,
+              )
+            })
+          },
         })
       },
       log: (message, error) => {
@@ -585,8 +584,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   })
 
   /**
-   * Loads the current id's replay state into the engine and returns the subjects it followed. A
-   * file that cannot be read starts the session's replay over; its next write replaces the file.
+   * Loads the current id's replay state into the engine and returns the topics it followed that a
+   * restore follows again (`rememberedTopics`). A file that cannot be read starts the session's
+   * replay over; its next write replaces the file.
    */
   const restoreReplay = async (): Promise<readonly string[]> => {
     const sessionId = identity.id
@@ -600,7 +600,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     })
     replay.restore(snapshot)
     replayBound = sessionId
-    return Object.keys(snapshot.state?.subjects ?? {})
+    return rememberedTopics(snapshot.state)
   }
 
   /** A sweep runs on the engine's own chain, never in the registry's. */
@@ -635,6 +635,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * taken out of `userTopics`, and resolves once the replay state no longer follows them.
    */
   function dropRemovedTopics(topics: readonly string[]): Promise<void> {
+    unfollowRemovedTopics(topics)
+    return replay.followedChanged()
+  }
+
+  /**
+   * Starts dropping removed topics from the forwarder and the registry entry, each failure
+   * reported here: the drop half of `dropRemovedTopics`, and what a replayed removal takes out of
+   * the registry (`closeReplayedRemoval`).
+   */
+  function unfollowRemovedTopics(topics: readonly string[]): void {
     const { dropping, unsubscribing } = dropFromForwarderAndRegistry(topics)
     dropping.catch((error: unknown) => {
       process.stderr.write(
@@ -651,7 +661,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}; the next heartbeat reconciles it\n`,
       )
     })
-    return replay.followedChanged()
   }
 
   /**
@@ -1031,7 +1040,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // a direct delivery to an advertised but deaf channel process.
   forwarder.follow(directSubject)
   for (const topic of remembered) {
-    if (topic.startsWith(AGENT_TOPIC_PREFIX) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue
     userTopics.add(topic)
     forwarder.follow(topic)
   }

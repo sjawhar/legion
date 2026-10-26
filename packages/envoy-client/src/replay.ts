@@ -1,4 +1,5 @@
 import {
+  AGENT_TOPIC_PREFIX,
   DELIVERY_DUPLICATE_WINDOW_MS,
   dedupeKeyNamesItsEvent,
   type Envelope,
@@ -15,6 +16,7 @@ import {
   type RenderInboundResult,
   senderLabel,
 } from "./delivery";
+import { subscriptionRemovedTopics } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
 import {
   EnvoyApiError,
@@ -891,6 +893,100 @@ export function replayNoticeFields(notice: ReplayNotice): Readonly<Record<string
  */
 export function envoyNoticeText(fields: Readonly<Record<string, string>>): string {
   return encode({ envoy: fields });
+}
+
+/**
+ * The subjects a session follows for replay, which are what it registers with the listener: its
+ * own agent subject, then every topic it follows but a role's and another session's agent subject.
+ * Role messages stay live only, whether on a role lane or on a subject the host holds for a role
+ * (`heldForRole`); another session's agent subject (a fork's parent, until the host closes it) is
+ * not this session's to replay, and the listener would refuse it.
+ */
+export function replayFollowedSubjects(
+  ownAgentSubject: string,
+  topics: Iterable<string>,
+  heldForRole: (topic: string) => boolean = () => false
+): string[] {
+  const followed = [...topics].filter(
+    (topic) =>
+      !topic.startsWith(ROLE_TOPIC_PREFIX) &&
+      !topic.startsWith(AGENT_TOPIC_PREFIX) &&
+      !heldForRole(topic)
+  );
+  return [...new Set([ownAgentSubject, ...followed])];
+}
+
+/**
+ * The topics a persisted state says the session followed that a restore follows again, so a
+ * session back after the listener reaped its interests still follows and recovers them: every
+ * subject of the state but agent subjects (the host opens its own, and another's is not its to
+ * follow) and role lanes (live only, held through a role's claim). An unfollowed topic is absent
+ * from the newest state, so it stays unfollowed.
+ */
+export function rememberedTopics(state: ReplayState | undefined): string[] {
+  return Object.keys(state?.subjects ?? {}).filter(
+    (topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX)
+  );
+}
+
+/** What `closeReplayedRemoval` asks of the host. */
+export interface ReplayedRemovalHost {
+  /** The session the frame is replayed for: a removal naming another session closes nothing. */
+  readonly sessionID: string;
+  /** The engine replaying the frame, whose cursors say since when each topic was followed. */
+  readonly engine: Pick<ReplayEngine, "followedBefore">;
+  /** Stops following `topic`; false when the session did not follow it, so nothing closed. */
+  close(topic: string): boolean;
+  /**
+   * Takes the closed topics out of the listener's registry, as `envoy_unsubscribe` does, with
+   * whatever else the host drops them from in the same step; its failure is the host's to report.
+   * The helper waits on what it returns.
+   */
+  unregister(topics: readonly string[]): Promise<void> | void;
+  /** The followed subjects changed: the host tells its engine (`ReplayEngine.followedChanged`). */
+  followedChanged(): Promise<void>;
+}
+
+/**
+ * Acts on a replayed `subscription.removed` naming the session, and answers the topics it closed.
+ * A topic closes only when the frame was stored after the session started following it
+ * (`followedBefore`: above its cursor's `since`), so an old removal never closes a topic followed
+ * again since. The closed topics leave the engine's followed subjects, and the listener's registry
+ * too: a resumed session registered them again before this sweep, and the registry, which only
+ * ever adds a registered topic, would have the next restart follow them again. The registry write
+ * starts first, so a registration the host queues meanwhile cannot advertise them again.
+ */
+export async function closeReplayedRemoval(
+  frame: Pick<ReplayFrame, "data" | "seq">,
+  host: ReplayedRemovalHost
+): Promise<readonly string[]> {
+  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter(
+    (topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic)
+  );
+  if (closed.length === 0) return closed;
+  const unregistering = host.unregister(closed);
+  await host.followedChanged();
+  await unregistering;
+  return closed;
+}
+
+/** Where `routeReplayNotice` sends a one-time notice. */
+export interface ReplayNoticeRoutes {
+  /** The listener does not replay (`not_served`, `unavailable`): a standing condition of the
+   *  session's setup, which the person is warned of as a start notice is, not a model's card. */
+  warn(message: string): void;
+  /** Messages may be missing (`stream_recreated`, `retention_gap`): a card the session is shown,
+   *  its text rendered as every notice is (`envoyNoticeText`). */
+  card(text: string): void;
+}
+
+/** Sends a one-time notice (`ReplayHost.notify`) where its kind belongs: a warning, or a card. */
+export function routeReplayNotice(notice: ReplayNotice, routes: ReplayNoticeRoutes): void {
+  if (notice.kind === "not_served" || notice.kind === "unavailable") {
+    routes.warn(notice.message);
+    return;
+  }
+  routes.card(envoyNoticeText(replayNoticeFields(notice)));
 }
 
 /** Whether a frame is a role lane's: those stay live only, so a sweep passes them over. */

@@ -34,7 +34,12 @@ fresh file, as a new session does, so nothing from before it comes back. A frame
 times, or a live frame that fails and no sweep will show, is replaced by a notice naming it on
 the same path; a notice that cannot be shown, and a listener that does not replay (404,
 `REPLAY_UNAVAILABLE`, 401 or 403), go to stderr. A crash between the hand-off and the ledger
-write can show a frame twice, never lose it.
+write can show a frame twice, never lose it. The host policy pi-envoy shares is the engine's too:
+which subjects are followed for replay (`replayFollowedSubjects`: the agent subject and every
+topic but a role's or another session's agent subject), which remembered topics come back at start
+(`rememberedTopics`), when a replayed `subscription.removed` closes a topic and takes it out of
+the registry (`closeReplayedRemoval`), and which one-time notices are a card rather than a warning
+(`routeReplayNotice`); this server keeps only how it shows a card, where it warns, and its file.
 
 A session advertises the delivery modes its deliveries' path can honour, never `btw`, and none at
 all when its deliveries are channel notifications Claude Code did not load (`src/claude-channel.ts`;

@@ -5,6 +5,7 @@ import {
   type ReplaySnapshot,
   type ReplayState,
   ReplayStateSchema,
+  rememberedTopics,
 } from "@legion/envoy-client/replay";
 
 /** The custom type of every card the extension shows the session. */
@@ -169,7 +170,8 @@ function writtenCards(
   return found;
 }
 
-/** The subjects the newest replay state says the session followed. */
+/** The topics the newest replay state says the session followed that a restore follows again
+ *  (`rememberedTopics`: neither an agent subject nor a role lane). */
 export function rememberedSubjects(entries: readonly unknown[]): readonly string[] {
-  return Object.keys(newestState(entries)?.subjects ?? {});
+  return rememberedTopics(newestState(entries));
 }

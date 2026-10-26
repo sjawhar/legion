@@ -44166,6 +44166,29 @@ function replayNoticeFields(notice) {
 function envoyNoticeText(fields) {
   return encode3({ envoy: fields });
 }
+function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
+  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !topic.startsWith(AGENT_TOPIC_PREFIX) && !heldForRole(topic));
+  return [...new Set([ownAgentSubject, ...followed])];
+}
+function rememberedTopics(state) {
+  return Object.keys(state?.subjects ?? {}).filter((topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX));
+}
+async function closeReplayedRemoval(frame, host) {
+  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter((topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic));
+  if (closed.length === 0)
+    return closed;
+  const unregistering = host.unregister(closed);
+  await host.followedChanged();
+  await unregistering;
+  return closed;
+}
+function routeReplayNotice(notice, routes) {
+  if (notice.kind === "not_served" || notice.kind === "unavailable") {
+    routes.warn(notice.message);
+    return;
+  }
+  routes.card(envoyNoticeText(replayNoticeFields(notice)));
+}
 function isRoleForward(envelope2) {
   return envelope2.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope2.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
 }
@@ -49311,18 +49334,19 @@ async function startChannelSession(options) {
   const dedupe = createDeliveryDedupe();
   let replayBound;
   const showReplayed = async (frame) => {
-    const removed = (subscriptionRemovedTopics(frame.data, identity.id) ?? []).filter((topic) => replay.followedBefore(topic, frame.seq) && userTopics.delete(topic));
-    if (removed.length > 0)
-      await dropRemovedTopics(removed);
+    await closeReplayedRemoval(frame, {
+      sessionID: identity.id,
+      engine: replay,
+      close: (topic) => userTopics.delete(topic),
+      unregister: unfollowRemovedTopics,
+      followedChanged: () => replay.followedChanged()
+    });
     return delivery.replay(frame);
   };
   const replay = createReplayEngine({
     host: {
       sessionID: () => shuttingDown || replayBound !== identity.id ? undefined : identity.id,
-      followedSubjects: () => [
-        directSubject,
-        ...[...userTopics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !topic.startsWith(AGENT_TOPIC_PREFIX))
-      ],
+      followedSubjects: () => replayFollowedSubjects(directSubject, userTopics),
       deliver: showReplayed,
       showFailureNotice: (notice) => delivery.notice(envoyNoticeText(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error48) => {
@@ -49330,14 +49354,15 @@ async function startChannelSession(options) {
 `);
       },
       notify: (notice) => {
-        if (notice.kind === "not_served" || notice.kind === "unavailable") {
-          process.stderr.write(`envoy-channel: ${notice.message}
+        routeReplayNotice(notice, {
+          warn: (message) => process.stderr.write(`envoy-channel: ${message}
+`),
+          card: (content) => {
+            delivery.notice(content).catch((error48) => {
+              process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error48)})
 `);
-          return;
-        }
-        delivery.notice(envoyNoticeText(replayNoticeFields(notice))).catch((error48) => {
-          process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error48)})
-`);
+            });
+          }
         });
       },
       log: (message, error48) => {
@@ -49358,7 +49383,7 @@ async function startChannelSession(options) {
     });
     replay.restore(snapshot);
     replayBound = sessionId;
-    return Object.keys(snapshot.state?.subjects ?? {});
+    return rememberedTopics(snapshot.state);
   };
   const triggerReplay = () => {
     if (!shuttingDown)
@@ -49383,6 +49408,10 @@ async function startChannelSession(options) {
     }
   });
   function dropRemovedTopics(topics) {
+    unfollowRemovedTopics(topics);
+    return replay.followedChanged();
+  }
+  function unfollowRemovedTopics(topics) {
     const { dropping, unsubscribing } = dropFromForwarderAndRegistry(topics);
     dropping.catch((error48) => {
       process.stderr.write(`envoy-channel: could not drop a removed subscription \u2014 ${messageFor(error48)}
@@ -49392,7 +49421,6 @@ async function startChannelSession(options) {
       process.stderr.write(`envoy-channel: could not drop a removed subscription from the registry \u2014 ${messageFor(error48)}; the next heartbeat reconciles it
 `);
     });
-    return replay.followedChanged();
   }
   function dropFromForwarderAndRegistry(topics) {
     return {
@@ -49614,8 +49642,6 @@ async function startChannelSession(options) {
   const remembered = await restoreReplay();
   forwarder.follow(directSubject);
   for (const topic of remembered) {
-    if (topic.startsWith(AGENT_TOPIC_PREFIX) || topic.startsWith(ROLE_TOPIC_PREFIX))
-      continue;
     userTopics.add(topic);
     forwarder.follow(topic);
   }

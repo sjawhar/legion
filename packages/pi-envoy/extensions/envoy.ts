@@ -20,7 +20,6 @@ import {
   createDeliveryDedupe,
   type DedupeIdentity,
   DedupeIdentitySchema,
-  type DeliveryClaim,
   type DispatchDelivery,
   expectsLaneReceipt,
   inboundTimestamp,
@@ -52,6 +51,7 @@ import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import {
+  closeReplayedRemoval,
   createReplayEngine,
   envoyNoticeText,
   failureNoticeFields,
@@ -59,9 +59,10 @@ import {
   type ReplayEngine,
   type ReplayFrame,
   replayedText,
+  replayFollowedSubjects,
   replayLedgerIdentity,
-  replayNoticeFields,
   replaySuppressed,
+  routeReplayNotice,
 } from "@legion/envoy-client/replay";
 import {
   sessionConfigFile,
@@ -137,11 +138,11 @@ import {
   REPLAY_STATE_ENTRY,
   rememberedSubjects,
   replaySnapshot,
-  writtenCardIdentity,
 } from "../src/missed-messages";
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
+import { UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -266,60 +267,6 @@ const ClaimIdentitySchema = DedupeIdentitySchema.extend({
   source: DedupeIdentitySchema.shape.source.catch(undefined),
   source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
 });
-
-/**
- * A frame handed to the host that the host has not written to the session's transcript yet. Oh
- * My Pi holds a card or a user turn sent while a turn streams in memory until the turn takes it,
- * and writes it, emitting its `message_end`, only then (measured on omp 18.8.9, idle and mid-turn
- * alike); a process that ends first loses it. Until then the frame's claim stays pending, so a
- * replay sweep leaves the stream's copy and its cursor before it, and nothing records it shown.
- */
-interface Unwritten {
-  /** The session it was handed to: written once the host is on another, it records nothing. */
-  readonly sessionID: string;
-  readonly identity: DedupeIdentity;
-  /**
-   * The frame's claim, settled once the host writes it. None for a replayed card of a frame the
-   * dedupe had already let go of (`showReplayCard`): that card still waits to be written.
-   */
-  readonly claim: DeliveryClaim | undefined;
-}
-
-/** A card waiting to be written, under every key `unwrittenCardKeys` gives its frame. */
-interface UnwrittenCard extends Unwritten {
-  readonly keys: readonly string[];
-  /** What it was handed as: a card the host withdrew unwritten is handed again as it was. */
-  readonly content: string | readonly ContentBlock[];
-  readonly deliverAs: "steer" | "aside";
-  /** The host moments counted when it was handed (`handBackWithdrawnCards`). */
-  readonly handedAt: number;
-}
-
-/** A person's turn waiting to be written; a `pi.sendUserMessage` turn is found by its text. */
-interface UnwrittenTurn extends Unwritten {
-  readonly via: "text" | "typed";
-  /**
-   * The host moments counted when the host took it into its queue (`handBackWithdrawnCards`): a
-   * `pi.sendUserMessage` turn's at the send, a typed input's once `pi.sendUserInput` answers that
-   * it submitted a message; undefined until then.
-   */
-  readonly handedAt: number | undefined;
-}
-
-/**
- * The keys a card waiting to be written is found under, from the frame it shows: its event id and
- * its dedupe key, as the ledger knows it (`replayLedgerIdentity`), so the written card names it
- * by either. None for a frame the ledger keeps nothing of.
- */
-function unwrittenCardKeys(identity: {
-  readonly event_id?: string;
-  readonly dedupe_key?: string;
-}): string[] {
-  return [
-    ...(identity.event_id === undefined ? [] : [`event:${identity.event_id}`]),
-    ...(identity.dedupe_key === undefined ? [] : [`key:${identity.dedupe_key}`]),
-  ];
-}
 
 /**
  * Transcript entry recording the role this session holds. Successful claims
@@ -640,13 +587,6 @@ export default function envoyExtension(pi: PiApi): void {
   const passDeadlineMs = (): number => active?.settings.passDeadlineMs ?? MIN_PASS_DEADLINE_MS;
   const subscriptions = new Map<string, Subscription>();
   const delivered = createDeliveryDedupe();
-  // The cards (`unwrittenCardKeys`) and the person's turns (by Dispatch message id) handed to the
-  // host and not yet written (`Unwritten`); `message_end` records each once the host writes it.
-  const unwrittenCards = new Map<string, UnwrittenCard>();
-  const unwrittenTurns = new Map<string, UnwrittenTurn>();
-  // The moments the host had to queue or write a card handed before it: each heartbeat, and each
-  // run that ended aborted (`handBackWithdrawnCards`).
-  let hostMoments = 0;
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
@@ -910,18 +850,8 @@ export default function envoyExtension(pi: PiApi): void {
       forgetShownPictures(previousSessionID);
       if (notedSessionIDs.delete(previousSessionID)) forgetInjectedUserTurns(previousSessionID);
       typedPictures.dropOtherSessions(sessionID);
-      // What the session left was handed and has not written is no longer waited on: the host
-      // dropped it with the session (measured on omp 18.8.9: a card a turn held when RPC
-      // `new_session` ran got no `message_end`). Its claim is released and nothing records it, so
-      // a sweep of that session, once the host is back on it or resumes it, shows the stream's
-      // copy again and waits on it anew.
-      for (const waiting of [unwrittenCards, unwrittenTurns]) {
-        for (const [key, frame] of waiting) {
-          if (frame.sessionID === sessionID) continue;
-          waiting.delete(key);
-          frame.claim?.release();
-        }
-      }
+      // What the session left was handed and has not written is no longer waited on.
+      unwritten.releaseOtherSessions(sessionID);
     }
   };
 
@@ -1043,30 +973,6 @@ export default function envoyExtension(pi: PiApi): void {
     return images === undefined ? undefined : { images: [...(event.images ?? []), ...images] };
   });
 
-  // The host wrote what it was handed: the ledger records the frame, so no sweep shows the stream's
-  // copy again, here or after a restart, and its claim settles. Written once the host is on
-  // another session, it is recorded nowhere: that session's own sweep reads its transcript.
-  const recordWritten = async (frame: Unwritten): Promise<void> => {
-    if (frame.sessionID === sessionID) await replay?.recordDelivered(frame.identity);
-    frame.claim?.settle();
-  };
-  // A person's turn the host wrote, or answered that it submitted no message for: done waiting.
-  const turnHandled = async (messageID: string): Promise<void> => {
-    const turn = unwrittenTurns.get(messageID);
-    if (turn === undefined) return;
-    unwrittenTurns.delete(messageID);
-    await recordWritten(turn);
-  };
-
-  // A card waits under every key of its frame, and stops waiting only as the entry it is.
-  const awaitWrite = (card: UnwrittenCard): void => {
-    for (const key of card.keys) unwrittenCards.set(key, card);
-  };
-  const stopAwaitingWrite = (card: UnwrittenCard): void => {
-    for (const key of card.keys) {
-      if (unwrittenCards.get(key) === card) unwrittenCards.delete(key);
-    }
-  };
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
   // on the message it writes.
   const handCard = (
@@ -1086,38 +992,32 @@ export default function envoyExtension(pi: PiApi): void {
     );
   };
 
-  // Hands the host a card for the frame `identity`: one that shows it, or a failure notice naming
-  // it. The card is shown only once the host writes it (`message_end`), and the answer says it
-  // waits so, under `claim` when there is one; one of a frame the ledger keeps nothing of does not
-  // wait, and its caller settles at once. A send that throws leaves nothing waiting.
-  const sendCard = (
-    content: string | readonly ContentBlock[],
-    deliverAs: "steer" | "aside",
-    identity: DedupeIdentity | undefined,
-    claim: DeliveryClaim | undefined
-  ): boolean => {
-    const keys = identity === undefined ? [] : unwrittenCardKeys(replayLedgerIdentity(identity));
-    const card: UnwrittenCard | undefined =
-      identity === undefined || keys.length === 0
-        ? undefined
-        : { sessionID, identity, claim, keys, content, deliverAs, handedAt: hostMoments };
-    if (card !== undefined) awaitWrite(card);
-    try {
-      handCard(content, deliverAs, identity);
-    } catch (error) {
-      if (card !== undefined) stopAwaitingWrite(card);
-      throw error;
-    }
-    return card !== undefined;
-  };
+  const unwritten = new UnwrittenFrames({
+    sessionID: () => sessionID,
+    recordDelivered: async (identity) => {
+      await replay?.recordDelivered(identity);
+    },
+    handCard,
+    matchTurn: (message) => matchInjectedUserTurn(sessionID, message),
+    turnWithdrawn: (turnSessionID, messageID) => {
+      dropInjectedUserTurn(turnSessionID, messageID);
+      typedPictures.withdraw(messageID);
+    },
+    handBackFailed: (identity, error) => {
+      logger.warn("envoy: a card the host withdrew unwritten could not be handed again", {
+        eventID: identity.event_id,
+        error: messageFor(error),
+      });
+    },
+  });
 
   // Shows a card the replay engine asked for (a stored frame, or a failure notice naming one)
   // under a claim of that frame, so a live copy arriving meanwhile is a repeat: `queued` while it
-  // waits to be written (`sendCard`), `shown` when it does not wait. A frame the live path is
-  // delivering now is that path's to show and record, and one whose card waits already is that
-  // card's. A frame the dedupe let go of that the open session's ledger does not hold (one shown
-  // before the host moved to this session, say) is handed with no claim, and waits on its card's
-  // write all the same: nothing records it until the host writes it.
+  // waits to be written (`UnwrittenFrames.sendCard`), `shown` when it does not wait. A frame the
+  // live path is delivering now is that path's to show and record, and one whose card waits
+  // already is that card's. A frame the dedupe let go of that the open session's ledger does not
+  // hold (one shown before the host moved to this session, say) is handed with no claim, and waits
+  // on its card's write all the same: nothing records it until the host writes it.
   const showReplayCard = (content: string, envelope: unknown): "shown" | "queued" => {
     const parsed = ClaimIdentitySchema.safeParse(envelope);
     const identity = parsed.success ? parsed.data : undefined;
@@ -1125,67 +1025,18 @@ export default function envoyExtension(pi: PiApi): void {
     if (
       claim === undefined &&
       identity !== undefined &&
-      (delivered.pending(identity) ||
-        unwrittenCardKeys(replayLedgerIdentity(identity)).some((key) => unwrittenCards.has(key)))
+      (delivered.pending(identity) || unwritten.waitsOnCard(identity))
     ) {
       return "queued";
     }
     try {
-      if (sendCard(content, "steer", identity, claim)) return "queued";
+      if (unwritten.sendCard(content, "steer", identity, claim)) return "queued";
     } catch (error) {
       claim?.release();
       throw error;
     }
     claim?.settle();
     return "shown";
-  };
-
-  // Oh My Pi withdraws every card a streaming turn holds, writing none and restoring none, when
-  // the person interrupts the turn (Escape; RPC `abort_and_restore_queue`), and is idle with an
-  // empty queue from then on; after a plain abort it keeps them queued and writes them in the run
-  // it starts at once (measured on omp 18.8.9: `hasPendingMessages()` false, then true, at the
-  // aborted run's `agent_end`). So a card still unwritten while the host is idle and holds no
-  // message was withdrawn: it is handed again, as it was, its claim kept. One handed since the
-  // host's last moment is left alone, as it may still be on its way into the queue:
-  // `pi.sendMessage` returns before the host queues the card or starts its run.
-  //
-  // The interrupt withdraws a person's turn the same way: a typed input (`pi.sendUserInput`,
-  // answered `handled: "prompt"`) or a `pi.sendUserMessage` turn the streaming turn held goes back
-  // to whoever interrupted (measured on omp 18.8.9: RPC `abort_and_restore_queue` answers it in
-  // its `steering` list, the terminal puts it in the editor) and is never written. Such a turn is
-  // not handed again, since run late it could act on an instruction the person no longer means:
-  // its claim is released and nothing records it, so the next sweep shows the stream's copy as a
-  // card that runs nothing.
-  const handBackWithdrawnCards = (context: SessionContext | undefined): void => {
-    const since = hostMoments;
-    hostMoments += 1;
-    if (context?.isIdle?.() !== true || context.hasPendingMessages?.() !== false) return;
-    if (shuttingDown || hostSessionID() !== sessionID) return;
-    for (const card of new Set(unwrittenCards.values())) {
-      if (card.sessionID !== sessionID || card.handedAt >= since) continue;
-      const again: UnwrittenCard = { ...card, handedAt: hostMoments };
-      awaitWrite(again);
-      try {
-        handCard(card.content, card.deliverAs, card.identity);
-      } catch (error) {
-        // Still waiting as it was: the next heartbeat hands it again.
-        stopAwaitingWrite(again);
-        awaitWrite(card);
-        logger.warn("envoy: a card the host withdrew unwritten could not be handed again", {
-          eventID: card.identity.event_id,
-          error: messageFor(error),
-        });
-      }
-    }
-    for (const [messageID, turn] of unwrittenTurns) {
-      if (turn.sessionID !== sessionID || turn.handedAt === undefined || turn.handedAt >= since) {
-        continue;
-      }
-      unwrittenTurns.delete(messageID);
-      dropInjectedUserTurn(turn.sessionID, messageID);
-      typedPictures.withdraw(messageID);
-      turn.claim?.release();
-    }
   };
 
   // Runs a person's accepted Send or Aside as if typed at the terminal (`pi.sendUserInput`): a
@@ -1233,21 +1084,18 @@ export default function envoyExtension(pi: PiApi): void {
             // Every input handler has run: pictures never handed over never will be.
             typedPictures.inputPassed(turn.messageId);
             // In the host's queue from now on, unless its message was written already.
-            const waiting = unwrittenTurns.get(turn.messageId);
-            if (waiting !== undefined) {
-              unwrittenTurns.set(turn.messageId, { ...waiting, handedAt: hostMoments });
-            }
+            unwritten.turnSubmitted(turn.messageId);
           } else {
             dropInjectedUserTurn(noted, turn.messageId);
             typedPictures.withdraw(turn.messageId);
-            void turnHandled(turn.messageId);
+            void unwritten.turnHandled(turn.messageId);
           }
           return typedInputReply(turn.body, result);
         },
         (error: unknown) => {
           dropInjectedUserTurn(noted, turn.messageId);
           typedPictures.withdraw(turn.messageId);
-          void turnHandled(turn.messageId);
+          void unwritten.turnHandled(turn.messageId);
           return typedInputReply(turn.body, { error: messageFor(error) });
         }
       )
@@ -1450,7 +1298,7 @@ export default function envoyExtension(pi: PiApi): void {
               true,
               shown
             );
-            const held = sendCard(
+            const held = unwritten.sendCard(
               card.content,
               rendered.delivery?.mode === "aside" ? "aside" : "steer",
               identity,
@@ -1491,24 +1339,17 @@ export default function envoyExtension(pi: PiApi): void {
                 // run's end, which stops that search (`endInjectedUserTurns`).
                 if (identity === undefined) await taken();
                 else {
-                  unwrittenTurns.set(turn.messageId, {
+                  unwritten.awaitTurn(turn.messageId, {
                     sessionID: injectionSessionID,
                     identity,
                     claim,
                     via: "text",
-                    handedAt: hostMoments,
                   });
                 }
               }
             } else {
               if (identity !== undefined) {
-                unwrittenTurns.set(turn.messageId, {
-                  sessionID,
-                  identity,
-                  claim,
-                  via: "typed",
-                  handedAt: undefined,
-                });
+                unwritten.awaitTurn(turn.messageId, { sessionID, identity, claim, via: "typed" });
               }
               runTypedInput(
                 sendUserInput,
@@ -1685,44 +1526,43 @@ export default function envoyExtension(pi: PiApi): void {
     if (inbox.length > 50) inbox.pop();
   };
 
-  // What the session follows for replay: what `registerSession` registers, its own agent subject
-  // and every open subscription not held for a role, with a subscription still in its resubscribe
-  // delay, which the session still follows (dropped, its cursor would restart past what the
-  // outage cost). Another session's agent subject (a fork's parent, until a pass closes it) is
-  // not this session's to replay, and the listener would refuse it.
+  // What the session follows for replay (`replayFollowedSubjects`): what `registerSession`
+  // registers, its own agent subject and every open subscription not held for a role, with a
+  // subscription still in its resubscribe delay, which the session still follows (dropped, its
+  // cursor would restart past what the outage cost).
   const followedSubjects = (): string[] => {
     if (sessionID === "") return [];
-    const topics = [...subscriptions.keys(), ...awaitingRetry].filter(
-      (subject) =>
-        !isRoleBound(subject) &&
-        !intentionallyClosed.has(subject) &&
-        !subject.startsWith(agentSubject(""))
+    const open = [...subscriptions.keys(), ...awaitingRetry].filter(
+      (subject) => !intentionallyClosed.has(subject)
     );
-    return [...new Set([agentSubject(sessionID), ...topics])];
+    return replayFollowedSubjects(agentSubject(sessionID), open, isRoleBound);
   };
 
   // Replays a stored frame: a card and nothing else. A targeted frame (BTW, Aside, Steer, a
   // person's Send) runs no side turn, asks Dispatch to accept no user turn and posts no reply: a
   // person's input run late could act on an instruction they no longer mean, so the session is
-  // shown it and decides. A removal closes a topic only when it was stored after the session
-  // started following that topic, so an old one never closes a topic followed again since, and
-  // takes it out of the listener's registry too, as `envoy_unsubscribe` does: a resumed session
-  // registered it again before this sweep, and the registry, which only ever adds a registered
-  // topic, would have the next restart follow it again. The card is `queued` until the host
-  // writes it (`showReplayCard`).
+  // shown it and decides. A removal closes a topic and takes it out of the listener's registry
+  // only when it was stored after the session started following that topic
+  // (`closeReplayedRemoval`). The card is `queued` until the host writes it (`showReplayCard`).
   const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
     const rendered = renderInbound(frame.data, sessionID, frame.subject);
-    const removed = (subscriptionRemovedTopics(frame.data, sessionID) ?? []).filter(
-      (topic) => replay?.followedBefore(topic, frame.seq) === true && closeIntentionally(topic)
-    );
-    if (removed.length > 0) {
-      await replayFollowedChanged();
-      await active?.client.unsubscribe({ sessionID, topics: removed }).catch((error: unknown) =>
-        logger.warn("envoy: a replayed subscription removal was not taken out of the registry", {
-          topics: removed,
-          error: messageFor(error),
-        })
-      );
+    if (replay !== undefined) {
+      await closeReplayedRemoval(frame, {
+        sessionID,
+        engine: replay,
+        close: closeIntentionally,
+        unregister: async (topics) => {
+          await active?.client
+            .unsubscribe({ sessionID, topics })
+            .catch((error: unknown) =>
+              logger.warn(
+                "envoy: a replayed subscription removal was not taken out of the registry",
+                { topics, error: messageFor(error) }
+              )
+            );
+        },
+        followedChanged: replayFollowedChanged,
+      });
     }
     if (replaySuppressed(rendered)) return "suppressed";
     if (rendered.envelope !== undefined) noteInbox(rendered.envelope);
@@ -1758,19 +1598,19 @@ export default function envoyExtension(pi: PiApi): void {
             },
             notify: (notice) => {
               logger.warn(`envoy: ${notice.message}`);
-              if (notice.kind === "not_served" || notice.kind === "unavailable") {
-                activeSessionContext?.ui.notify(`envoy: ${notice.message}`, "warning");
-                return;
-              }
-              pi.sendMessage(
-                {
-                  customType: "envoy-message",
-                  content: envoyNoticeText(replayNoticeFields(notice)),
-                  display: true,
-                  details: LOCAL_ENVOY_NOTICE,
-                },
-                { deliverAs: "steer", triggerTurn: false }
-              );
+              routeReplayNotice(notice, {
+                warn: (message) => activeSessionContext?.ui.notify(`envoy: ${message}`, "warning"),
+                card: (content) =>
+                  pi.sendMessage(
+                    {
+                      customType: "envoy-message",
+                      content,
+                      display: true,
+                      details: LOCAL_ENVOY_NOTICE,
+                    },
+                    { deliverAs: "steer", triggerTurn: false }
+                  ),
+              });
             },
             log: (message, error) =>
               logger.warn(
@@ -1969,20 +1809,10 @@ export default function envoyExtension(pi: PiApi): void {
     recordAgentStreamMessage(event.message, true);
   });
   // The host writes a message to the transcript as it ends it: a card or a person's turn handed to
-  // it, idle or taken by a turn after it streamed, is shown from here on (`Unwritten`).
+  // it, idle or taken by a turn after it streamed, is shown from here on (`UnwrittenFrames`).
   pi.on("message_end", async (event) => {
     recordAgentStreamMessage(event.message, false);
-    const card = writtenCardIdentity(event.message);
-    const waiting = unwrittenCardKeys(card ?? {})
-      .map((key) => unwrittenCards.get(key))
-      .find((found) => found !== undefined);
-    if (waiting !== undefined) {
-      stopAwaitingWrite(waiting);
-      await recordWritten(waiting);
-    }
-    if (unwrittenTurns.size === 0) return;
-    const turn = matchInjectedUserTurn(sessionID, event.message);
-    if (turn !== undefined) await turnHandled(turn);
+    await unwritten.written(event.message);
   });
 
   // The session stops holding its role: close the notice subjects it took for it, so a holder
@@ -2224,11 +2054,17 @@ export default function envoyExtension(pi: PiApi): void {
       // Sessions can be created lazily after session_start (a fresh TUI has no session yet); until
       // the host mints an id there is nothing to register.
       if (context.sessionManager.getSessionId() === "") return;
-      // A card the host withdrew unwritten is handed again first, so the sweep finds its frame
-      // still claimed. Every tick also sweeps the stream, outside the pass, so a sweep never waits
-      // on one: it catches up on what a missed trigger left, and keeps probing a listener without
-      // replay.
-      handBackWithdrawnCards(activeSessionContext);
+      // A card the host withdrew unwritten is handed again first, while the host is idle, holds no
+      // message and is on this instance's session, so the sweep finds its frame still claimed.
+      // Every tick also sweeps the stream, outside the pass, so a sweep never waits on one: it
+      // catches up on what a missed trigger left, and keeps probing a listener without replay.
+      const hostContext = activeSessionContext;
+      unwritten.handBackWithdrawn(
+        hostContext?.isIdle?.() === true &&
+          hostContext.hasPendingMessages?.() === false &&
+          !shuttingDown &&
+          hostSessionID() === sessionID
+      );
       triggerReplay();
       if (healing) {
         // A pass that has not settled holds the queue, and with it the registration refresh that
@@ -2325,13 +2161,10 @@ export default function envoyExtension(pi: PiApi): void {
     // Abandoned during the unsubscribe: a newer pass reads the registry itself, and this one
     // registers nothing further.
     if (!live()) return;
+    // The newest replay state's topics (`rememberedTopics`), but a retired Slack topic.
     const remembered = rememberedSubjects(
       activeSessionContext?.sessionManager.getEntries() ?? []
-    ).filter(
-      (topic) =>
-        !topic.startsWith(agentSubject("")) &&
-        !(slackRetired && slackTopicChannel(topic) !== undefined)
-    );
+    ).filter((topic) => !(slackRetired && slackTopicChannel(topic) !== undefined));
     for (const topic of new Set([...registered, ...remembered])) {
       if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
       if (retired.includes(topic)) continue;
@@ -3310,9 +3143,9 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("agent_end", async (event, context) => {
     const id = context.sessionManager.getSessionId();
     const lastReply = event.messages?.findLast((message) => message.role === "assistant");
-    // An interrupted run may have taken back the cards it held (`handBackWithdrawnCards`): those
-    // handed before its end are looked at by the next heartbeat.
-    if (lastReply?.stopReason === "aborted") hostMoments += 1;
+    // An interrupted run may have taken back the cards it held (`UnwrittenFrames`): those handed
+    // before its end are looked at by the next heartbeat.
+    if (lastReply?.stopReason === "aborted") unwritten.runAborted();
     // A person's direct message sent through `pi.sendUserMessage` and not yet seen as a user
     // message by the end of the run is not looked for again; one sent as typed input is, by its tag,
     // since the host can run it as a turn of its own after this run
@@ -3320,11 +3153,8 @@ export default function envoyExtension(pi: PiApi): void {
     // `sessionID`, where `deliver` notes a turn and the stream recorder matches it, and not under
     // the host's live id, which a fresh terminal's differs from until the heartbeat heals it.
     endInjectedUserTurns(sessionID);
-    // A `pi.sendUserMessage` turn no longer looked for is done with now, found or not: the host
-    // keeps no mark of it, so its text was the only way to tell it was written.
-    for (const [messageID, turn] of unwrittenTurns) {
-      if (turn.via === "text" && turn.sessionID === sessionID) await turnHandled(messageID);
-    }
+    // A `pi.sendUserMessage` turn no longer looked for is done with now, found or not.
+    await unwritten.textTurnsEnded();
     // A run that started under a switch's announcement and ended with a reply it was not aborted
     // in, the host still on the session it announced leaving: that switch was cancelled. A fork's
     // run ends after the host moved, which keeps the announcement, and with it the parent's frames.
