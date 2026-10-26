@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-366",
-  "completed": "2026-10-26T12:30:00Z",
+  "completed": "2026-10-26T14:30:00Z",
   "proof": [
+    {
+      "criterion": "Review round 3, finding 1: `dispatch read` of the href `dispatch search` prints for an ask hit never fails where main printed the document; the hit links its typed block only while the block is a graph node, otherwise `?ask=<id>`",
+      "surface": "Real Go server builds on fresh local Postgres databases (head, previous head e26a6648, main 8298fc71) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r9-search.sh",
+      "command": "NAME=<build> BIN=<binary> bash $TMPDIR/infra366/r9-search.sh (a spec with ask blocks `kept`, a 3200-byte id and `gone` (deleted by doc-edit); then `dispatch search --query <word>` and `dispatch read --ref <href>` for each)",
+      "observed": "Head: `kept` → …/spec#b-kept, read 'Block: kept' exit 0; the 3200-byte-id ask → …/spec?ask=<id>, read 'Question: Ship the sextant?' exit 0; server log 0 '54000'. (An API doc-edit that deletes an ask block also deletes its ask on the head, so the removed-block case is covered by TestSearchLinksAnAskBlockOnlyWhileTheBlockIsANode in keyword, meaning and keyword-only search.) Main 8298fc71 cannot store the 3200-byte ask: the spec write logs SQLSTATE 54000.",
+      "headSha": "811b7261e713704103edf175108f563859eeac32",
+      "negativeControl": "The previous head e26a6648 gives the 3200-byte ask the href …/spec#b-<3200 bytes>, and `dispatch read` of it exits 1 with 'No block <id> in …'"
+    },
+    {
+      "criterion": "Review round 3, finding 2: the dashboard draws a picture and opens a link an author names whatever the length of its target's key (2049-2692 bytes); only bare text it links stays bounded (deployment instructions: a browser test that fails before and passes at the change)",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_ln?sslmode=disable DISPATCH_E2E_PORT=8797 FAKE_ENVOY_PORT=9051 FAKE_GITHUB_PORT=9052 FAKE_BROKER_PORT=9054 bun run e2e -- e2e/pictures.e2e.ts -g 'a long-named picture in a comment draws'",
+      "observed": "2 passed (chromium, iphone): the 2611-byte-key picture's img src is /api/v1/issues/CORE-1/artifacts/<slug>/versions/1 and it draws; the 2613-byte-key document link's href is /issues/CORE-1/artifacts/<slug> and a click opens it in-app showing 'The long-named design.'",
+      "headSha": "2ece5e055e11d4c3468be36043bda50bd08f8f70",
+      "negativeControl": "The same test file in a git archive of e26a6648: 2 failed on the new behaviour, img src 'dispatch://CORE-1/artifact/aaaa…' instead of the bytes route (and, in a probe without the picture assertions, link href '' instead of the document path)"
+    },
     {
       "criterion": "Review round 2 and the architect's rule (2026-10-26): a length bound only decides which keys go into an index; it never makes a read fail and never refuses a write main accepts. References read of a document whose key is 2049-2692 bytes; a rebuild with a long block id; a suggestion's create and accept with a long block id; a read of a block id over 256 bytes.",
       "surface": "Real Go server builds on fresh local Postgres databases (one per build): the head, the previous head 05ea3ef4 and main 9ed0397b; the real dispatch CLI and dev-signed-in human calls; throwaway script $TMPDIR/infra366/r7-cases.sh (corrupts doc_updates to make a document unloadable for the rebuild)",
@@ -114,7 +130,8 @@
     "Round 8: text.TargetID and text.ParseRef, refs.ToID removed, API reads unbounded, envoy-client parsers unbounded (98206c03)",
     "Round 8: dashboard target-id.ts and reference-spans.ts out of routes.ts (922 lines), parseNodeReference/nodeRouteFromHref for server data, versioned spec page, BlockTarget.block = {id, pin?}, contracts utf8Bytes and encodeBlockId per code point, shared href rows (aee29df2)",
     "Round 8: MentionExcerpts comment, indexRenderedVersion/indexUnrenderedVersion, acceptance lib.sh (4fb3569c); docs (c00e53a6)",
-    "Round 8: forward merge of main 8298fc71, migrations renumbered 0118-0125 after main's 0117, envoy-client dispatch-command.ts args['issue'] for claude-envoy's typecheck (e26a6648)"
+    "Round 8: forward merge of main 8298fc71, migrations renumbered 0118-0125 after main's 0117, envoy-client dispatch-command.ts args['issue'] for claude-envoy's typecheck (e26a6648)",
+    "Round 9: api/search.go askBlockNodeSQL and search_ask_block_href_test.go (394e2fb9); dashboard routes.ts, DispatchPicture.tsx, RefLink.tsx, RefPreview.tsx, ProofDocument.tsx and their tests (573dd319); e2e/pictures.e2e.ts, e2e/sends.ts (2ece5e05); forward merges of main a5aeddf1 and 3f34ba12 (6fdbd78e, 811b7261)"
   ],
   "trickyParts": [
     "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
@@ -130,7 +147,8 @@
     "Round 2: the earlier proof entries ran at 042c0195; this round changes only refs.BlockTextAt, so I re-ran the block-graph driver (37 PASS) at 73e2394d and did not repeat the browser and A12 runs.",
     "Round 3: the Referenced by row now also shows a 'block <id>' link to the block of the shown document it cites. Without it, a source's two rows are identical. The reviewer's row-key finding asked only for the key; the link is what makes the two rows tell apart, and the browser test covers it.",
     "Round 3: pmdoc's three timing tests (TestUpdateIsLinearInTheBlockCount, TestBareURLShapesParseAndRenderLinearly, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText) fail on this pod on main 81a3b5ef too (10 ms clock granularity); claude-envoy's tmux SIGTERM timing test failed once in the full suite as before.",
-    "Round 8: components have Go-only bound rows; the dashboard's text reader parses no component reference (on main either), so a shared-table row would fail its TS reader."
+    "Round 8: components have Go-only bound rows; the dashboard's text reader parses no component reference (on main either), so a shared-table row would fail its TS reader.",
+    "Round 9: the merges after 2ece5e05 change no Dispatch server or dashboard file (only daemon, agent-secrets, contracts' daemon-api fixtures and envoy-client slack-post, plus main's own copy of dispatch-command.ts's args['issue'] line), so the round-9 proofs ran at 2ece5e05's Dispatch code. The Firefox project of picture-link-click.e2e.ts cannot launch in this harness (no Firefox binary); its Chromium run passes."
   ],
   "openQuestions": []
 }
