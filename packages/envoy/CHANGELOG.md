@@ -1308,6 +1308,7 @@
   new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
   "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
   sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
+
 - A browser that opens a document while Dispatch closes that document's room now keeps getting the
   document's edits. Dispatch closes a room when an issue closes, when it evicts a stale or failed
   room, and at shutdown, and each close takes ygo a moment: it closes the browsers it found, waits
@@ -1318,6 +1319,7 @@
   `v1.51.3-sami.1` to `v1.51.3-sami.3`, where a forced close also closes such a browser before it
   returns, so the dashboard's usual reconnect takes it to the live room (reearth/ygo#331,
   INFRA-403).
+
 - An agent woken by a Slack message now reads the words the message carries, wherever it carries
   them. A Slack delivery's `text` is the message's own text and then every display string its
   blocks and then its attachments hold — the strings under `pretext`, `author_name`,
