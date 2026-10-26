@@ -2,14 +2,16 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-189",
-  "completed": "2026-10-26T08:19:23Z",
-  "plan": "dispatch://INFRA-189/artifact/plan-md version 2 (generation 3). Version 1 stays the design of record (its 'What exists today', 'Decisions this plan makes' and 'Tasks'); version 2 lists what remains. Spec dispatch://INFRA-189/spec v7, unchanged. State read: branch legion/INFRA-189 3e63dbfc (plan v1 Tasks 1-7 committed, no proofs, no PR, no implement.json), main 84e8f052, merge-base 0f7c25ee.",
+  "completed": "2026-10-26T18:55:30Z",
+  "plan": "dispatch://INFRA-189/artifact/plan-md version 3 (generation 4): only what remains on PR #2245 (head 22d4ea85). Version 1 is the design of record, version 2 records the architect's decisions and departures; both stand (architect, 2026-10-26 18:47Z: do not re-plan the design). Spec v7 unchanged.",
   "standingRules": [
     "(1) A defect found in code this tree touches or depends on is fixed in this pull request: no finding ask, no new issue (dispatch://INFRA-49/ask/2d080aec-ce9a-4c7c-a235-ae998d2b0830).",
     "(2) No credential minted out of band.",
     "(3) Merge main into legion/INFRA-189 only to resolve a conflict, or when the only red check is a failure main has since fixed.",
     "(4) Any Dispatch ask for Sami goes as a draft to the architect first; the architect routes it through the controller.",
-    "(5) A review verdict names the provider that actually answered, read from the run's turns."
+    "(5) A review verdict names the provider that actually answered, read from the run's turns.",
+    "(6) In anything addressed to Sami, PR #2245's body included, link his answer instead of quoting it back to him.",
+    "(7) Legion workers never read the review App private key; the reviewer reviews through its own role gh."
   ],
   "architectDecisions": [
     "D1 keep (2026-10-26): a bare key naming the text's own issue is indexed and linked; R2 has no exception and dispatch://<own key> already behaves so.",
@@ -18,27 +20,24 @@
     "D15 keep: follow INFRA-366's merge-second contract plus this plan's additions; re-check PR #2210 before the PR is marked ready. The architect routes to INFRA-366's architect the hazard of an INFRA-189-only build's scope drain re-indexing block text with the pre-block grammar during INFRA-366's roll."
   ],
   "tasks": [
-    "Env: Postgres 17 + pgvector and Playwright browsers on the issue volume per docs/solutions/testing/...INFRA-42.md and ...INFRA-43.md; one idempotent script under $TMPDIR/infra189/; a fresh database per proof and suite run; dispatch:local with a loopback DATABASE_URL.",
-    "Step 1: forward-merge main (conflicts in packages/envoy/cmd/dispatch/README.md and api/routes_table_test.go; branch lacks main's 0116 so TestMigrationSetIsNumberedOneToN fails). Route pin = main's count + 1, counted. Migrations stay 0117-0122 while main ends at 0116, else renumber (beforeRefsOwed, census files, README, comments). Post-merge greps: source on every MarkdownBody/MarkdownPreview/Unfurl call site, insert into refs only in refs.go, every text writer reaches text.Mentions, no title-only issue-link locator. PR #2210 merge-second checklist (a)-(f): Mentions in indexDocument; refs_owed ack in shared replaceRefs; leasePoolSize counts block-index; migration numbers; drain document item and RebuildAll go through indexDocument; one source-text reader (SourceText or LoadSource, not both). Check #2210 before opening the PR and before completing.",
-    "Step 2: leasePoolSize = count of duty.Exclusive callers on the merged head (+1 per delivery durable), comment list, README :373 and multiprocess_test.go:1064 counts updated; multiprocess lease test evidence is CI's dispatch-multiprocess job. Scope items: 0121 trigger enqueues scope only when the version's :::ask directive lines change; ScopeCitations one query per kind with the questionCandidate filter in SQL; question map computed once per scope item. Tests: store (directive-unchanged version enqueues no scope; add/remove/rename/copied_from does), drain (map computed once, each citer once), SQL pattern equals questionCandidate on fixtures. reading.md:29 names rebuild-refs.",
-    "Step 3: table rows &#x20;, &#9;, &#10;, CORE-1, with code-span twins; bare-references.e2e.ts drives every table row on renderer (comment per row), inert one-line preview (Replies row per row, <=160 chars) and live editor (second document, paragraph per row), with world rewriting and a 404 precondition, editor exclusions :::ask{#q2} and [x](CORE-1) named; reference-titles.e2e.ts adds the inert one-line preview with negative controls and the one-line ellipsis checks (nowrap, ellipsis, scrollWidth>clientWidth, one line-height, paragraph height equal with caret inside) in editor and past version; Unfurl card fallback shows the written text (unit + e2e row); useBareReferences scans only linkable text, 404 held until issue.created (unit tests); rendered-references.test.tsx spies api.getIssue; A7 multi-reference row; one isReferenceOnlyBody predicate.",
-    "Step 4: [Unreleased] entries in packages/envoy, packages/pi-envoy and packages/contracts CHANGELOGs; run packages/pi-envoy/src/skills-guard.test.ts.",
-    "Step 5: simplify pass (ce-simplify-code), then Go DB suites on a fresh database (text, refs, store, docs, api) with every new test run, not skipped; web/contracts/proof-editor/tsc/biome read from CI.",
-    "Step 6: LEGSMOKE pre-deploy fixtures in production (spec with q1 'see #q2' and q2; comment 'blocked on LEGSMOKE-<m>'), with production's running build recorded beside them in implement.json.",
-    "Step 7: proofs at the final head: A1 (CI + Step 5), A2/A3 on dispatch:local, A4/A6/A7 browser specs green on chromium and iphone plus changed existing specs, red on a git archive of the merge-base with the head's specs, e2e helpers and contracts table copied in, A5 two real builds on one fresh database (plan v1 steps 1-4). Any head move after proofs re-runs the head-side runs; a moved merge-base re-runs red.",
-    "Step 8: PR with 'Dispatch: INFRA-189', departures, A8 limit, #2210 rule, neutral keys; implement.json with proof array, fixtures, harness script in trickyParts.",
-    "After the close (A8): dispatch-production-check.sh --commit <merged sha> --page /issues/<fixture issue> --route /api/v1/issues/LEGSMOKE-<m>/references (bare path only; prodcheck.sh:69-77 refuses queries); then quoted authenticated reads: /api/v1/references/questions?kind=comment&id=<uuid> answers {document, questions}; /api/v1/references?to=dispatch://LEGSMOKE-<m>&kind=mentions lists the pre-deploy comment; fresh A2/A3 citations and the pre-deploy fixtures via dispatch read --ref; Production line states roll overlap not observed, A5 step 4 is its proof."
+    "Step 1: rebuild the harness under $TMPDIR/infra189-harness/ per the INFRA-42/INFRA-43 docs plus the lost setup.sh's lessons: PG17+pgvector via dpkg-deb with libicu76, chmod 0700 pgdata, non-byte-order default collation (INFRA-56 doc; api/rank_test.go:309-318), Playwright browsers and libs, caches on the volume, bun install, proof-sdk-upstream src copy, bun run build in packages/contracts (head and red tree), pre-built Go server, one lane per LEGION_ROLE; PATH/LD_LIBRARY_PATH only around harness commands; fresh database per run.",
+    "Step 2: forward-merge main@origin (jj new, never rebase); one conflict, packages/envoy/CHANGELOG.md, keep both sides; post the before/after fingerprint comment; on the merged head recount migration numbers (main ends 0119; branch 0120-0125), the route pin from routes(), leasePoolSize (9) against duty.Exclusive callers (CI dispatch-multiprocess is the evidence), and plan v2 Step 1.2 greps; check PR #2210 and apply plan v2 Step 1.3 (a)-(f) if merged.",
+    "Step 3: real-surface proof of review round 1 fixes, each red on the merge-base and green at the head: editor '#q2-'/'#q2_' keeps the trailing char as text (finding 2); rendered 'See \\#q2 and #q3' links only q3 and a #id the server would not index links nothing (finding 3); a 404 key gets no second GET /api/v1/issues/<key> on issue.updated/issue.closed and one on issue.created, then links with no reload (finding 1, counted with page.on('request')); a2a3.sh regains its 16th check: fenced :::ask{#q9 copied_from=\"<q2 uuid>\"} in example.md, #q9 citer stores nothing (finding 4).",
+    "Step 4: proofs at the new head, in a new PR comment that also quotes setup.sh, env.sh, a2a3.sh and a5.sh in full: Go DB suites text, refs, store, docs, api on a fresh database (every new test run, not skipped); browser specs bare-references, reference-titles, reference-cards plus deep-links, doc, hover-preview, references on chromium and iphone; red on a git archive of the new merge-base with head specs, reference-surfaces.ts and contracts table copied in and contracts built; a2a3.sh on fresh dispatch:local; a5.sh with .a5-commit written into the base archive, schema 119->125; real PASS counts quoted.",
+    "Step 5: edit the PR body's own lines per pr-body.md (E2E (implementer), Proven by, Size, Threads with the four thread node ids PRRT_kwDORFy7ds6wUzZo/Zv/Z2/Z6, fix commits 27d03a6b x3 and da84a845, resolved-at head; Order section with #2210's state); the CI line is the tester's; rule 6 applies. Write implement.json (proof at new head, productionFixtures carried, trickyParts naming the harness and the proof comment holding the scripts), commit, push; check #2210 again right before handoff_complete and record it.",
+    "After the close (A8): plan v2's A8 on SMOKE fixtures: prodcheck --route /api/v1/issues/SMOKE-38/references; quoted reads of /api/v1/references/questions?kind=comment&id=15581a16-..., /api/v1/references?to=dispatch%3A%2F%2FSMOKE-38&kind=mentions, dispatch read --ref of q2's ask (dispatch://SMOKE-39/ask/97d2162e-35fe-428d-b7c5-8b84e767135a), and fresh A2/A3 citations on SMOKE."
   ],
   "acceptanceChecks": {
     "A1": "cd packages/envoy && go test ./internal/dispatch/text/ -count=1; cd packages/contracts && bun test src/dispatch-text-references.test.ts; cd packages/dispatch && bun test web/src/features/refs/ (CI)",
     "A2_A3": "bun run dispatch:local on a fresh loopback DATABASE_URL; DISPATCH_URL=http://127.0.0.1:<port> DISPATCH_TOKEN=e2e-token DISPATCH_TOKEN_FILE= dispatch read --ref dispatch://ACME-1/ask/<q2 uuid> and dispatch://ACME-2 print '- mentions <kind> dispatch://...' per citer; ACME-999999 stores nothing; second-document citation lists only under its own question",
     "A4_A6_A7": "cd packages/dispatch && DATABASE_URL=<fresh> bun run e2e -- e2e/bare-references.e2e.ts e2e/reference-titles.e2e.ts e2e/reference-cards.e2e.ts (chromium and iphone), red on the merge-base archive with head specs, helpers and contracts table copied in, each failure an assertion on new behaviour",
     "A5": "two real builds (merge-base, final head) on one fresh database: base writes fixtures, head starts via run-server.sh without reset and lists them within 60 s; old binary on a second port edits while head runs, stops, head lists the new target within 60 s",
-    "A8": "after the close: prodcheck --route /api/v1/issues/LEGSMOKE-<m>/references plus quoted reads of /api/v1/references/questions?kind=comment&id=<uuid> and /api/v1/references?to=dispatch://LEGSMOKE-<m>&kind=mentions; fresh A2/A3 on LEGSMOKE and pre-deploy fixtures via dispatch read --ref"
+    "A8": "after the close: prodcheck --route /api/v1/issues/SMOKE-38/references plus quoted reads of /api/v1/references/questions?kind=comment&id=<15581a16 uuid> and /api/v1/references?to=dispatch://SMOKE-38&kind=mentions; fresh A2/A3 on SMOKE and the pre-deploy fixtures via dispatch read --ref",
+    "reviewRound1": "browser assertions for findings 1-3 and a2a3.sh check 16 for finding 4, red on the merge-base, green at the new head"
   },
   "requiredSkills": {
     "implement": [
-      "legion-worker: phase rules, forward merge and rewrite rules (conflicts-and-rewrites.md), push and PR procedure, pr-body.md (proof lines, simplify pass), default-branch-check.md",
+      "legion-worker: forward merge and fingerprint (conflicts-and-rewrites.md), push and PR body lines (pr-body.md), review-threads.md for the Threads line, default-branch-check.md",
       "ce-simplify-code: the simplify pass over the settled diff before the proof runs",
       "dispatch: writing the LEGSMOKE pre-deploy fixtures in production Dispatch and the production record after the close"
     ],
@@ -52,49 +51,84 @@
   },
   "gapAnalysis": {
     "findings": [
-      {"finding": "F1: INFRA-366's merge-second contract does not cover INFRA-189's own drain and rebuild entries or the duplicate source reader, and #2210 can merge at any time.", "answer": "Step 1.3 adds (e) drain document item and RebuildAll go through indexDocument and (f) one source-text reader, and names what is redone; Step 1.4 re-checks #2210 before the PR opens, before completion, and at the tester's and reviewer's phase start."},
-      {"finding": "F2: simplify pass and later forward merges after the proofs would leave quoted runs off the final head.", "answer": "Order rule: code, forward merges, simplify, then proofs; a head move re-runs head-side runs, a moved merge-base re-runs red."},
-      {"finding": "F3: plan v1's four decisions sent to the architect have no recorded answer.", "answer": "Architect answered 2026-10-26: keep D1, D10, D11 (named departure, plus an A7 multi-reference row) and D15 (with the #2210 re-check); recorded in plan v2 with reasons."},
-      {"finding": "F4: a table-driven browser test cannot use the current one-line seed; rows carry their own world.", "answer": "Step 3.2 settles grouping (comment per row, reply per row <=160 chars, editor paragraph per row in a second document), world rewriting (seeded issues incl. XCORE, origin rewrite, settled ask uuids), a 404 precondition, named editor exclusions, per-surface tests, and the red tree gets the head's contracts table."},
-      {"finding": "F5: caching a 404 forever breaks the spec Decision that a key links once its issue exists.", "answer": "Step 3.6: 404 held until issue.created invalidates ['issue']; unit tests for no refocus request and linking after issue.created with no refocus or remount."},
-      {"finding": "F6: the ScopeCitations fix has no check and leaves the per-version scope cost.", "answer": "Step 2.2: trigger enqueues scope only on changed ask directives, one SQL query per kind, question map once per item; store, drain and SQL-pattern tests named."},
-      {"finding": "F7: leasePoolSize must be counted on the merged head; multiprocess test needs NATS.", "answer": "Step 2.1 counting rule with the grep, comment and README/test counts; CI's dispatch-multiprocess job is the evidence."},
-      {"finding": "F8: a clean merge can still break call-site, writer, lease and locator invariants; full browser suite.", "answer": "Step 1.2 post-merge greps; Step 7 runs the changed existing specs and reads CI's Dispatch e2e job for the full suite."},
-      {"finding": "F9: A6 'one-line preview' ambiguous.", "answer": "Step 3.3 covers both the collapsed card (live) and the inert one-line Replies row, with negative controls on the inert one."},
-      {"finding": "F10: the one-line ellipsis title has no defined check.", "answer": "Step 3.4: nowrap, ellipsis, scrollWidth>clientWidth, one line-height, paragraph height equal with caret inside, editor and past version, both projects."},
-      {"finding": "F11: A8 routes answer 400 without a query; no record of production's build at fixture time; roll overlap unobservable.", "answer": "A8 uses the bare path /api/v1/issues/LEGSMOKE-<m>/references for the check and quoted authenticated query reads for the new behaviour; Step 6 records production's build with the fixtures; departure 3 records the roll-overlap limit and the Production line states it."},
-      {"finding": "F12: environment needs Playwright browsers and libraries, fresh databases, both projects.", "answer": "Environment section names INFRA-42/INFRA-43 docs, browsers on the volume, fresh database per run, PG17 pgdata reuse only with PG17 binaries, chromium and iphone."},
-      {"finding": "F13: no CHANGELOG entries.", "answer": "Step 4: envoy, pi-envoy, contracts Unreleased entries and the skills guard test."},
-      {"finding": "F14: INFRA-368 overlap unverified.", "answer": "Read: INFRA-368 is in triage and has no branch (git ls-remote empty, no PR); only #2210 needs an order rule."},
-      {"finding": "F15: table lacks &#x20;, &#9;, &#10; and CORE-1, that decision 1 names.", "answer": "Step 3.1 adds them with code-span twins."},
-      {"finding": "Cross-issue: if INFRA-189 merges first, its scope drain can drop dispatch://...#b- edges during INFRA-366's roll.", "answer": "Sent to the architect, who routes it to INFRA-366's architect (2026-10-26)."}
+      {
+        "finding": "1: review findings 1-3 had only unit-test proof.",
+        "answer": "Step 3 adds a browser assertion per finding, red on the merge-base and green at the head."
+      },
+      {
+        "finding": "2: a2a3.sh's finding-4 check (16th) is quoted nowhere.",
+        "answer": "Step 3 restates the check; Step 4 posts a2a3.sh, a5.sh, setup.sh and env.sh in full in the new proof comment."
+      },
+      {
+        "finding": "3: the harness and scripts were lost with the pod; /legion/harness did not survive.",
+        "answer": "Step 1 names $TMPDIR/infra189-harness/, lists every learned setup step, and makes the PR comment the durable copy; an unreachable package host is reported to the architect, not skipped."
+      },
+      {
+        "finding": "4: PR body line list did not match the template (no CI line; Threads needs thread node ids, fix commits, resolved head).",
+        "answer": "Step 5 names the template's lines, the four thread node ids and fix commits, and leaves the CI line to the tester. Threads verified resolved by legion-implementer[bot] via GraphQL."
+      },
+      {
+        "finding": "5: leasePoolSize and route pin must be recounted on the merged head.",
+        "answer": "Step 2 recounts both, by grep and from routes()."
+      },
+      {
+        "finding": "6: #2210 checked only once.",
+        "answer": "Checked at Step 2 and again right before handoff_complete, recorded in implement.json."
+      },
+      {
+        "finding": "7: A5 base archive needs .a5-commit, schema 119->125, real PASS counts; C collation breaks an api test.",
+        "answer": "Step 4 names .a5-commit, 119->125 and quoting real counts; Step 1 picks a non-byte-order default collation (INFRA-56 doc)."
+      },
+      {
+        "finding": "8: live state claims (main head, single conflict, migration 0119, #2210 open) unverified by the analyst.",
+        "answer": "Planner verified with git merge-tree, git ls-tree and gh pr view at ~18:50Z; the implementer re-confirms before Step 2."
+      }
     ]
   },
   "planReview": {
-    "verdict": "rejected",
-    "rounds": 3,
-    "remainingIssues": [
-      {"issue": "Round 3: A8 expected GET /api/v1/issues/LEGSMOKE-<m>/references to list the pre-deploy comment, which that route never returns (it lists documents reached from the issue's own content). Revised after round 3: the read is now GET /api/v1/references?to=dispatch://LEGSMOKE-<m>&kind=mentions; the bare route stays only as the check's --route.", "evidence": "api/routes_table.go:89, api/references.go:242-280, refs/closure.go:17-41; api/references.go:99-106 and refs/graph.go:16 accept kind=mentions."}
-    ]
+    "verdict": "approved",
+    "rounds": 1
   },
   "specDepartures": [
     {
       "spec": "Design 1: a key counts only when the character before it is the start of the text, whitespace, or one of ( [ \" ' * _ >.",
       "plan": "Also a backtick, ~, |, and a numeric character reference for whitespace (&#32;, &#x20;, &#9;, &#10;) immediately before the key.",
       "evidence": "A1 requires every positive row inside a code span to be indexed by the server, which a backtick before the key forbids under Design 1's list; refs.go:13-22 ends a reference at | and trims ~; stored markdown writes a mark's edge space as &#32; (pmdoc/escape.go:131-157).",
-      "outcome": {"kind": "unchanged"}
+      "outcome": {
+        "kind": "unchanged"
+      }
     },
     {
       "spec": "R6: a reply or message whose whole text is one reference shows the card; text with anything else beside the reference shows no card.",
       "plan": "A body made only of references (one or more) shows one card per reference on the margin, the Inbox thread and the Conversation, as main's margin does; any other text beside them shows none. Kept by the architect 2026-10-26; A7 gains a multi-reference row.",
       "evidence": "Unfurl.tsx isBareReferenceBody and Unfurl.test.tsx:322-331 on main: the margin cards several references today; a narrowing would remove that, which no requirement asks for.",
-      "outcome": {"kind": "unchanged"}
+      "outcome": {
+        "kind": "unchanged"
+      }
     },
     {
       "spec": "A8: after the deploy, A2, A3 and A5 are repeated on LEGSMOKE in production Dispatch.",
       "plan": "A5's first sentence is repeated in production with LEGSMOKE fixtures written before the deploy; its second sentence (an older build edits while the new one runs) is proved locally by A5 step 4 only, and the Production line says 'roll overlap not observed in production'.",
       "evidence": "Observing it needs an older and a newer build serving production at once under the implementer's control; nothing deploys Dispatch on demand (dispatch://INFRA-64) and no worker asks a person to deploy.",
-      "outcome": {"kind": "changed", "scope": "acceptance", "acceptance": ["A8: the roll-overlap half of A5 is proved by the local two-build run, not in production"]}
+      "outcome": {
+        "kind": "changed",
+        "scope": "acceptance",
+        "acceptance": [
+          "A8: the roll-overlap half of A5 is proved by the local two-build run, not in production"
+        ]
+      }
+    },
+    {
+      "spec": "A8: A2, A3 and A5 are repeated on LEGSMOKE, Legion's test project, in production Dispatch.",
+      "plan": "A8 runs on SMOKE, where the pre-deploy fixtures were written (SMOKE-38, SMOKE-39).",
+      "evidence": "Production Dispatch has no LEGSMOKE project (dispatch projects, 2026-10-26T10:56Z, recorded in implement.json productionFixtures).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "acceptance",
+        "acceptance": [
+          "A8: the production project is SMOKE, not LEGSMOKE"
+        ]
+      }
     }
   ]
 }
