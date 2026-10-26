@@ -55,8 +55,8 @@ describe("the dispatch command surface", () => {
     }
   });
 
-  test("names map both ways for all 23 tools, and no two flags of one command collide", () => {
-    expect(dispatchToolSpecs).toHaveLength(23);
+  test("names map both ways for all 25 tools, and no two flags of one command collide", () => {
+    expect(dispatchToolSpecs).toHaveLength(25);
     for (const spec of dispatchToolSpecs) {
       expect(toolForCommand(commandName(spec.name))).toBe(spec.name);
       const flags = commandFlags(spec.name);
@@ -211,6 +211,8 @@ describe("the dispatch command surface", () => {
         "comment",
         "doc-edit",
         "doc-read",
+        "handoff-read",
+        "handoff-write",
         "issue-update",
         "message",
         "read",
@@ -287,6 +289,32 @@ describe("the dispatch command surface", () => {
   test("a bare value that is not an issue key is refused", () => {
     expect(parseCommand(["read", "hello"], noFiles)).toMatchObject({
       problems: ["unexpected argument hello: every value follows its flag"],
+    });
+  });
+
+  test("handoff-write reads its body from a file or stdin unchanged, and handoff-read takes a version", () => {
+    const body = '{"schemaVersion":1,\n  "phase": "implement"}\n';
+    const files = { readText: (path: string) => (path === "-" || path === "h.json" ? body : "") };
+    for (const source of ["h.json", "-"]) {
+      expect(
+        parseCommand(
+          ["handoff-write", "DSP-1", "--phase", "implement", "--body-file", source],
+          files
+        )
+      ).toEqual({
+        kind: "call",
+        tool: "dispatch_handoff_write",
+        args: { issue: "DSP-1", phase: "implement", body },
+        dryRun: false,
+      });
+    }
+    expect(
+      parseCommand(["handoff-read", "DSP-1", "--phase", "plan", "--version", "2"], noFiles)
+    ).toEqual({
+      kind: "call",
+      tool: "dispatch_handoff_read",
+      args: { issue: "DSP-1", phase: "plan", version: 2 },
+      dryRun: false,
     });
   });
 });

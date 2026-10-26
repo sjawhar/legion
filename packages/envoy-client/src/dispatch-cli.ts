@@ -152,11 +152,12 @@ export function fitOutput(
  * One `dispatch` command: parses `argv` into a Dispatch tool's arguments, runs that tool once as
  * the host session the environment names, and prints what the model reads. The host plugin sets
  * `DISPATCH_HOST`, `ENVOY_CONFIG_FILE` (the envoy.json it chose) and the session's id in the
- * agent's shell (`CLAUDE_CODE_SESSION_ID` under Claude Code, `DISPATCH_SESSION_ID` elsewhere); an
- * empty variable counts as unset. With `DISPATCH_HOST` unset, `CLAUDE_CODE_CHILD_SESSION=1`, which
- * Claude Code sets in every Bash and hook process it runs, is host `claude`: a Claude Code
- * subagent's Bash can lack what the bridge's `SessionStart` hook writes to `CLAUDE_ENV_FILE`
- * (anthropics/claude-code#46696).
+ * agent's shell (`CLAUDE_CODE_SESSION_ID` under Claude Code, where claude-envoy's QA override
+ * `ENVOY_SESSION_ID` wins over it as it does on the session's claim; `DISPATCH_SESSION_ID`
+ * elsewhere); an empty variable counts as unset. With `DISPATCH_HOST` unset,
+ * `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code sets in every Bash and hook process it runs, is
+ * host `claude`: a Claude Code subagent's Bash can lack what the bridge's `SessionStart` hook
+ * writes to `CLAUDE_ENV_FILE` (anthropics/claude-code#46696).
  *
  * The envoy.json it reads is the one its session's plugin chose: with `DISPATCH_HOST` set, the file
  * `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host's own rule
@@ -181,9 +182,12 @@ export async function runDispatchCli(
   // The host need not be known for the session to be: a Python `subprocess.run(["dispatch", …])`
   // inherits the session id without `DISPATCH_HOST`. A ledger that cannot be written changes
   // nothing here: the refusal is already printed, and the caller is exiting.
+  // Under Claude Code the session is the one claude-envoy registers and claims under: its QA
+  // override ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID (`claudeSessionId` in claude-envoy).
+  const claudeSession = env.ENVOY_SESSION_ID ?? env.CLAUDE_CODE_SESSION_ID;
   const refuse = (text: string, code: number, tool?: string): number => {
     print(text);
-    const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    const sessionId = claudeSession ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
       try {
         appendResult(sessionDirectory(env, sessionId), {
@@ -228,11 +232,10 @@ export async function runDispatchCli(
       parsed.tool
     );
   }
-  const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
-  const sessionId = env[sessionVariable];
+  const sessionId = host === "claude" ? claudeSession : env.DISPATCH_SESSION_ID;
   if (sessionId === undefined) {
     return refuse(
-      `dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`,
+      `dispatch: ${host === "claude" ? "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID"} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`,
       USAGE,
       parsed.tool
     );

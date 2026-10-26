@@ -3421,6 +3421,166 @@ describe("executeDispatchTool", () => {
     expect(result.text).not.toContain("shared token");
   });
 
+  describe("handoffs", () => {
+    const handoffId = "0b7c2c5e-8f6d-4b8a-9a43-5d2e8c1f0a11";
+    const firstId = "6f1d3a2b-4c5e-4f60-8a7b-9c0d1e2f3a4b";
+    const author = { kind: "session", id: "session-1" };
+    // Spacing and key order a re-serialization would lose.
+    const body = '{ "schemaVersion": 1,\n  "b": 2, "a": 1 }\n';
+    const summary = (id: string, version: number) => ({
+      id,
+      issue_key: "DSP-1",
+      phase: "implement",
+      version,
+      author,
+      created_at: `2026-10-26T00:00:0${version}Z`,
+    });
+    const run = (tool: string, args: Record<string, unknown>, fetchImpl: typeof fetch) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      });
+    const serve = (requests: string[], answer: (method: string, pathname: string) => Response) =>
+      (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const method = init?.method ?? "GET";
+        const { pathname } = new URL(String(url));
+        requests.push(`${method} ${pathname}`);
+        if (init?.body !== undefined) requests.push(String(init.body));
+        return answer(method, pathname);
+      }) as typeof fetch;
+
+    test("dispatch_handoff_write sends the body text as written, as this session", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_write",
+        { issue: "DSP-1", phase: "implement", body },
+        serve(requests, () => response(summary(handoffId, 2), 201))
+      );
+      expect(requests[0]).toBe("POST /api/v1/issues/DSP-1/handoffs/implement");
+      const sent = JSON.parse(requests[1] ?? "{}") as { actor: unknown; body: unknown };
+      expect(sent.body).toBe(body);
+      expect(sent.actor).toMatchObject({ kind: "session", id: "session-1" });
+      expect(result.text).toBe(
+        `Recorded the implement handoff of DSP-1, version 2 (id ${handoffId})`
+      );
+      expect(result.details).toEqual({
+        issue: "DSP-1",
+        phase: "implement",
+        version: 2,
+        handoff: handoffId,
+      });
+    });
+
+    test("dispatch_handoff_write refuses a body that is not one JSON object before any request", async () => {
+      const requests: string[] = [];
+      const noRequest = serve(requests, () => {
+        throw new Error("no request expected");
+      });
+      for (const notAnObject of ["[1, 2]", "not json", '"text"']) {
+        await expect(
+          run(
+            "dispatch_handoff_write",
+            { issue: "DSP-1", phase: "implement", body: notAnObject },
+            noRequest
+          )
+        ).rejects.toThrow("body is not one JSON object");
+      }
+      await expect(
+        run("dispatch_handoff_write", { issue: "DSP-1", phase: "Implement", body }, noRequest)
+      ).rejects.toThrow("phase is not a handoff phase");
+      expect(requests).toEqual([]);
+    });
+
+    test("dispatch_handoff_write passes a refusal's code on", async () => {
+      await expect(
+        run(
+          "dispatch_handoff_write",
+          { issue: "DSP-1", phase: "implement", body },
+          serve([], () => response({ code: "ISSUE_CLOSED", error: "issue DSP-1 is closed" }, 409))
+        )
+      ).rejects.toThrow("ISSUE_CLOSED: issue DSP-1 is closed");
+    });
+
+    test("dispatch_handoff_read prints one line about the newest record, then its body as stored", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_read",
+        { issue: "DSP-1", phase: "implement" },
+        serve(requests, () => response({ ...summary(handoffId, 2), body }))
+      );
+      expect(requests).toEqual(["GET /api/v1/issues/DSP-1/handoffs/implement/latest"]);
+      expect(result.text).toBe(
+        `DSP-1 implement handoff, version 2 (id ${handoffId}), written by session session-1 at 2026-10-26T00:00:02Z\n${body}`
+      );
+      expect(result.details).toEqual({
+        issue: "DSP-1",
+        phase: "implement",
+        version: 2,
+        handoff: handoffId,
+      });
+    });
+
+    test("dispatch_handoff_read with a version finds that version's id in the list and reads it", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_read",
+        { issue: "DSP-1", phase: "implement", version: 1 },
+        serve(requests, (_method, pathname) =>
+          pathname === "/api/v1/issues/DSP-1/handoffs"
+            ? response([
+                summary(handoffId, 2),
+                { ...summary(handoffId, 1), id: "plan-id", phase: "plan" },
+                summary(firstId, 1),
+              ])
+            : response({ ...summary(firstId, 1), body })
+        )
+      );
+      expect(requests).toEqual([
+        "GET /api/v1/issues/DSP-1/handoffs",
+        `GET /api/v1/handoffs/${firstId}`,
+      ]);
+      expect(result.text).toBe(
+        `DSP-1 implement handoff, version 1 (id ${firstId}), written by session session-1 at 2026-10-26T00:00:01Z\n${body}`
+      );
+    });
+
+    test("dispatch_handoff_read refuses a version or phase that has no record with HANDOFF_NOT_FOUND", async () => {
+      const requests: string[] = [];
+      const listed = serve(requests, () => response([summary(handoffId, 2), summary(firstId, 1)]));
+      await expect(
+        run("dispatch_handoff_read", { issue: "DSP-1", phase: "implement", version: 3 }, listed)
+      ).rejects.toThrow(
+        "HANDOFF_NOT_FOUND: issue DSP-1 has no implement handoff version 3; its newest implement handoff is version 2"
+      );
+      await expect(
+        run("dispatch_handoff_read", { issue: "DSP-1", phase: "test", version: 1 }, listed)
+      ).rejects.toThrow(
+        "HANDOFF_NOT_FOUND: issue DSP-1 has no test handoff version 1; it has no test handoff at all"
+      );
+      // Only the list was read: no version matched, so no record was asked for by id.
+      expect(requests).toEqual([
+        "GET /api/v1/issues/DSP-1/handoffs",
+        "GET /api/v1/issues/DSP-1/handoffs",
+      ]);
+      await expect(
+        run(
+          "dispatch_handoff_read",
+          { issue: "DSP-1", phase: "plan" },
+          serve([], () =>
+            response({ code: "HANDOFF_NOT_FOUND", error: "issue DSP-1 has no plan handoff" }, 404)
+          )
+        )
+      ).rejects.toThrow("HANDOFF_NOT_FOUND: issue DSP-1 has no plan handoff");
+    });
+  });
+
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
     const existingLink = { url: "https://ci.example/run/1", kind: "url" };

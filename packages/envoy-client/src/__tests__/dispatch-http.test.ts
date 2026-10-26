@@ -1026,6 +1026,38 @@ test("createProject surfaces PROJECT_EXISTS as the refusal's code", async () => 
   });
 });
 
+test("maps handoff writes and reads to the handoff routes, the body sent as its own text", async () => {
+  const summary = {
+    id: "0b7c2c5e-8f6d-4b8a-9a43-5d2e8c1f0a11",
+    issue_key: "DSP-1",
+    phase: "implement",
+    version: 2,
+    author: actor,
+    created_at: "2026-10-26T00:00:00Z",
+  };
+  // Spacing and key order a re-serialization would lose.
+  const body = '{ "schemaVersion": 1,\n  "b": 2, "a": 1 }\n';
+  const { fetchImpl, requests } = fakeFetch([
+    jsonResponse(summary, 201),
+    jsonResponse([summary]),
+    jsonResponse({ ...summary, body }),
+    jsonResponse({ ...summary, body }),
+  ]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+  expect(await client.writeHandoff("DSP-1", "implement", { actor, body })).toEqual(summary);
+  expect(await client.listHandoffs("DSP-1")).toEqual([summary]);
+  expect((await client.latestHandoff("DSP-1", "implement")).body).toBe(body);
+  expect((await client.handoff(summary.id)).body).toBe(body);
+  expect(requests.map((request) => [request.init.method, new URL(request.url).pathname])).toEqual([
+    ["POST", "/api/v1/issues/DSP-1/handoffs/implement"],
+    ["GET", "/api/v1/issues/DSP-1/handoffs"],
+    ["GET", "/api/v1/issues/DSP-1/handoffs/implement/latest"],
+    ["GET", `/api/v1/handoffs/${summary.id}`],
+  ]);
+  expect(requestBody(requests[0] as RecordedRequest)).toEqual({ actor, body });
+});
+
 test("syncArchitectureSource refuses a repository with an empty owner or name without a request", async () => {
   const { fetchImpl, requests } = fakeFetch([]);
   const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);

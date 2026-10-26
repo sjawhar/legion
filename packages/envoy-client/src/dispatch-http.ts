@@ -31,6 +31,8 @@ import type {
   Event,
   GraphEdgeKind,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   Issue,
   IssueDetails,
   IssuePriority,
@@ -938,6 +940,45 @@ export class DispatchClient {
       undefined,
       artifact ? { artifact } : undefined
     );
+  }
+
+  /** `POST /api/v1/issues/{key}/handoffs/{phase}`: records `body`, the handoff's exact text, as
+   *  the next version of the issue's phase, written by `actor`, the session it names. The text
+   *  travels as one JSON string, so the server stores the very characters it was given. */
+  async writeHandoff(
+    issue: string,
+    phase: string,
+    input: { readonly actor: Actor; readonly body: string }
+  ): Promise<HandoffSummary> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs", phase],
+      input
+    );
+  }
+
+  /** `GET /api/v1/issues/{key}/handoffs`: every handoff of the issue, newest first, without bodies. */
+  async listHandoffs(issue: string): Promise<HandoffSummary[]> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/handoffs/{phase}/latest`: the phase's newest handoff with its body;
+   *  404 HANDOFF_NOT_FOUND when the phase has none. */
+  async latestHandoff(issue: string, phase: string): Promise<Handoff> {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "handoffs",
+      phase,
+      "latest",
+    ]);
+  }
+
+  /** `GET /api/v1/handoffs/{id}`: one handoff by id, with its body. */
+  async handoff(id: string): Promise<Handoff> {
+    return this.#json("GET", ["api", "v1", "handoffs", id]);
   }
 
   async getIssueReferences(issue: string): Promise<IssueReferences> {

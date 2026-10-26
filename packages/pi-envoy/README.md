@@ -200,6 +200,13 @@ dispatch artifact --issue LEGION-1 --name spec.md --content-file - <<'EOF'
 EOF
 ```
 
+`dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` records a Legion phase
+handoff on its issue as this session: the file's text, one JSON object, is stored exactly as
+written, and each write is the phase's next version. Keep the file outside the workspace (such as
+`$TMPDIR/<KEY>-<phase>.json`), since jj snapshots every file in it.
+`dispatch handoff-read --issue <KEY> --phase <phase>` prints one line naming the record's version,
+id, session and time, then the body exactly as stored; `--version <n>` reads an earlier version.
+
 Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
 architect's role topic; Dispatch is for durable questions to the human and the shared
 document, not for coordination between roles.

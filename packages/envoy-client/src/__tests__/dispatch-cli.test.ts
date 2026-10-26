@@ -180,6 +180,17 @@ let textReads = 0;
  *  `served` (past `last` once events were written after the issue was read), each a message, by
  *  `after` and `limit` as Dispatch pages them. `queries` records each events request's query. */
 let eventLog = { last: 40, served: 40, queries: [] as string[] };
+/** DSP-1's handoffs as the handoff routes store them, oldest first: each write the next version
+ *  of its phase, written by the actor it names, its body kept as the text sent. */
+const handoffs: {
+  id: string;
+  issue_key: string;
+  phase: string;
+  version: number;
+  author: unknown;
+  created_at: string;
+  body: string;
+}[] = [];
 
 const server = Bun.serve({
   port: 0,
@@ -330,6 +341,37 @@ const server = Bun.serve({
         ],
       });
     }
+    const handoffWrite = pathname.match(/^\/api\/v1\/issues\/DSP-1\/handoffs\/([a-z-]+)$/);
+    if (handoffWrite !== null && request.method === "POST") {
+      const phase = handoffWrite[1] ?? "";
+      const record = {
+        id: `00000000-0000-4000-8000-00000000000${handoffs.length + 1}`,
+        issue_key: "DSP-1",
+        phase,
+        version: handoffs.filter((handoff) => handoff.phase === phase).length + 1,
+        author: body.actor,
+        created_at: `2026-10-26T00:00:0${handoffs.length + 1}Z`,
+        body: body.body,
+      };
+      handoffs.push(record);
+      const { body: _, ...summary } = record;
+      return Response.json(summary, { status: 201 });
+    }
+    const handoffLatest = pathname.match(/^\/api\/v1\/issues\/DSP-1\/handoffs\/([a-z-]+)\/latest$/);
+    if (handoffLatest !== null) {
+      const latest = handoffs.filter((handoff) => handoff.phase === handoffLatest[1]).at(-1);
+      return latest === undefined
+        ? Response.json(
+            { code: "HANDOFF_NOT_FOUND", error: `issue DSP-1 has no ${handoffLatest[1]} handoff` },
+            { status: 404 }
+          )
+        : Response.json(latest);
+    }
+    if (pathname === "/api/v1/issues/DSP-1/handoffs") {
+      return Response.json(handoffs.map(({ body: _, ...summary }) => summary).reverse());
+    }
+    const byId = handoffs.find((handoff) => pathname === `/api/v1/handoffs/${handoff.id}`);
+    if (byId !== undefined) return Response.json(byId);
     if (pathname === "/v1/interests/ses-1") return interests();
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
@@ -344,6 +386,7 @@ beforeEach(() => {
   blocksServer = { tableRows: true, editedBetweenReads: false };
   textReads = 0;
   eventLog = { last: 40, served: 40, queries: [] };
+  handoffs.length = 0;
   interests = () => Response.json({ error: "unset" }, { status: 500 });
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
@@ -417,6 +460,88 @@ describe("the dispatch CLI", () => {
     expect(code).toBe(0);
     const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/messages");
     expect(posted?.body).toMatchObject({ actor: { id: "b" } });
+  });
+
+  test("under Claude Code, claude-envoy's ENVOY_SESSION_ID override is the session, as on its claim", async () => {
+    const { code } = await run(["message", "--issue", "DSP-1", "--body", "hello"], {
+      DISPATCH_HOST: "claude",
+      ENVOY_SESSION_ID: "qa-ses",
+      CLAUDE_CODE_SESSION_ID: "native-ses",
+    });
+    expect(code).toBe(0);
+    const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/messages");
+    expect(posted?.body).toMatchObject({ actor: { id: "qa-ses" } });
+    expect(ledger("qa-ses").map((line) => line.tool)).toEqual(["dispatch_message"]);
+    expect(existsSync(join(stateDir, "sessions", "native-ses"))).toBe(false);
+
+    requests.length = 0;
+    const unset = await run(["message", "--issue", "DSP-1", "--body", "x"], {
+      DISPATCH_HOST: "claude",
+    });
+    expect(unset.code).toBe(2);
+    expect(unset.stdout).toContain("ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID is not set");
+    expect(requests).toEqual([]);
+  });
+
+  test("handoff-write records the body file's text as written, and handoff-read prints it back exactly", async () => {
+    // Spacing, key order and a trailing newline a re-serialization would lose.
+    const text = `{ "schemaVersion": 1,\n  "b": [2, 1], "a": "é\\u0041" }\n`;
+    const file = join(stateDir, "DSP-1-implement.json");
+    writeFileSync(file, text);
+    const first = await run(
+      ["handoff-write", "DSP-1", "--phase", "implement", "--body-file", file],
+      omp
+    );
+    expect(first).toMatchObject({ code: 0, stderr: "" });
+    expect(first.stdout).toBe(
+      "Recorded the implement handoff of DSP-1, version 1 (id 00000000-0000-4000-8000-000000000001)\n"
+    );
+    const second = await run(
+      ["handoff-write", "DSP-1", "--phase", "implement", "--body-file", "-"],
+      omp,
+      '{"round":2}'
+    );
+    expect(second.stdout).toContain("version 2 (id 00000000-0000-4000-8000-000000000002)");
+    const posted = requests.find((request) => request.method === "POST");
+    expect(posted?.body).toMatchObject({ actor: { kind: "session", id: "ses-1" }, body: text });
+
+    const latest = await run(["handoff-read", "DSP-1", "--phase", "implement"], omp);
+    expect(latest.code).toBe(0);
+    expect(latest.stdout).toBe(
+      'DSP-1 implement handoff, version 2 (id 00000000-0000-4000-8000-000000000002), written by session ses-1 at 2026-10-26T00:00:02Z\n{"round":2}\n'
+    );
+    const versionOne = await run(
+      ["handoff-read", "DSP-1", "--phase", "implement", "--version", "1"],
+      omp
+    );
+    expect(versionOne.code).toBe(0);
+    const [line, ...rest] = versionOne.stdout.split("\n");
+    expect(line).toBe(
+      "DSP-1 implement handoff, version 1 (id 00000000-0000-4000-8000-000000000001), written by session ses-1 at 2026-10-26T00:00:01Z"
+    );
+    expect(rest.join("\n")).toBe(text);
+
+    const missing = await run(
+      ["handoff-read", "DSP-1", "--phase", "implement", "--version", "3"],
+      omp
+    );
+    expect(missing.code).toBe(1);
+    expect(missing.stdout).toContain(
+      "HANDOFF_NOT_FOUND: issue DSP-1 has no implement handoff version 3; its newest implement handoff is version 2"
+    );
+  });
+
+  test("handoff-write refuses a body that is not one JSON object, dry run included, sending nothing", async () => {
+    for (const argv of [
+      ["handoff-write", "DSP-1", "--phase", "plan", "--body-file", "-"],
+      ["handoff-write", "DSP-1", "--phase", "plan", "--body-file", "-", "--dry-run"],
+    ]) {
+      const { code, stdout } = await run(argv, omp, "[1, 2]\n");
+      expect(code).toBe(1);
+      expect(stdout.split("\n")[0]).toBe("dispatch handoff-write was not called: 1 problem");
+      expect(stdout).toContain("body is not one JSON object");
+    }
+    expect(requests).toEqual([]);
   });
 
   test("an empty session id counts as unset", async () => {
