@@ -32,8 +32,15 @@ type repairFixture struct {
 
 func newRepairFixture(t *testing.T) repairFixture {
 	t.Helper()
+	return newRepairFixtureSettlingAfter(t, 20*time.Millisecond)
+}
+
+// newRepairFixtureSettlingAfter is newRepairFixture with a document service whose settle delay is
+// settle.
+func newRepairFixtureSettlingAfter(t *testing.T, settle time.Duration) repairFixture {
+	t.Helper()
 	database := storetest.Open(t)
-	documents := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Settle: 20 * time.Millisecond})
+	documents := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Settle: settle})
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{

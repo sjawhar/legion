@@ -1155,7 +1155,10 @@
   were, and a withdrawn approval request writes no review. The close first settles the issue's
   documents that owe a settlement, so a decision block written seconds before the close is
   withdrawn with a record. A reopen opens again exactly the asks the close withdrew, each with one
-  `ask.opened` before `issue.updated`, and they return to the Inbox.
+  `ask.opened` before `issue.updated`, and they return to the Inbox. An ask resolved in the moment
+  between the close's settlement and its taking the issue keeps its resolver's record, and the
+  close's sweep writes each copy of its block in another document of the issue `resolved`, as the
+  copy's own settlement would have, since none runs while the issue is closed.
   `withdrawn` is the server's alone: `POST /api/v1/asks/{id}/resolve` still takes only `retracted`
   and `resolved`, and an ask on a closed issue is still `409 ISSUE_CLOSED`. A repair pass,
   `api.RepairIssueAsks`, runs at boot (bounded at 30 s) and then every 10 minutes under the lease

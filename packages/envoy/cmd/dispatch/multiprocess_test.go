@@ -14,6 +14,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -24,9 +25,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,12 +37,17 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -1047,6 +1055,162 @@ func TestTheRefusedNotificationClosesARoomNoSettlementWillFail(t *testing.T) {
 	if settled := pair.a.logLines("dispatch: settle document", artifactID); len(settled) > 0 {
 		t.Errorf("A settled this room after all, so something other than the window could have closed it:\n%v", settled)
 	}
+}
+
+// ───── the asks of a closed issue ──────────────────────────────────────────
+
+// A browser connected to B's room writes a decision block into a document of an issue A has just
+// closed. A's close, and the sweep it runs once its rooms are closed, reach only A's rooms
+// (SetIssueClosed), so B's room still takes the write: the block is stored, and the document owes a
+// settlement no process runs while the issue is closed, so the block would read open, with no ask,
+// for as long as the issue stays closed. One repair pass, run as the interval runs it - from
+// another process on the same database, bounded to the documents marked owing a settlement since a
+// moment before the close - gives the issue the close's final sweep: the block reads resolved in
+// the durable document, and in B's room once B has reloaded it.
+func TestTheRepairSweepResolvesADecisionBlockWrittenOnTheOtherProcessAfterTheClose(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SWP")
+	pair.a.createProject(t, project, "Swept after the close")
+	issueKey, artifactID := pair.a.createIssueIn(t, project, "Closed on A, written on B", "Context")
+
+	editor := pair.b.openEditor(t, artifactID, "Context\n")
+	// The tab's sync and the issue's creation each leave a settlement owed, which B and A settle
+	// within their settle delay; the close is to find the document settled.
+	waitForSettlementOwed(t, pair.database, artifactID, false)
+	var markedSince time.Time
+	if err := pair.database.Pool.QueryRow(context.Background(), `select statement_timestamp()`).Scan(&markedSince); err != nil {
+		t.Fatalf("read the database's clock: %v", err)
+	}
+	pair.a.call(t, http.MethodPatch, "/api/v1/issues/"+issueKey, `{"status":"done"}`, http.StatusOK)
+	if settlementOwed(t, pair.database, artifactID) {
+		t.Fatal("A's close left the document owing a settlement, so this row could not tell B's write from it")
+	}
+
+	const block = ":::ask{#written-on-b urgency=\"low\" multiple=\"false\"}\nWritten on B after the close?\n:::\n"
+	head := storedHead(t, pair, artifactID)
+	appendBlock(t, editor, block)
+	// B stores the tab's update, which marks the document owing a settlement again.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if storedHead(t, pair, artifactID) > head && settlementOwed(t, pair.database, artifactID) &&
+			settlementMarkedAt(t, pair.database, artifactID).After(markedSince) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B never stored its tab's block: stored head %d (was %d), settlement owed %v\nB:\n%s",
+				storedHead(t, pair, artifactID), head, settlementOwed(t, pair.database, artifactID), pair.b.Output.String())
+		}
+	}
+	const written = `:::ask{#written-on-b urgency="low" multiple="false" state="open"}`
+	if text := pair.b.documentText(t, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("B's room does not hold the block its tab wrote:\n%s", text)
+	}
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("the durable document does not hold the block B's tab wrote:\n%s", text)
+	}
+
+	logs := captureDefaultLog(t)
+	broker := events.NewBroker()
+	documents := docs.New(docs.Deps{Store: pair.database, Events: broker})
+	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	repair, err := api.RepairIssueAsks(store.WithTransactionTracking(context.Background()),
+		api.Deps{Store: pair.database, Docs: documents, Events: broker}, &markedSince)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if repair.Swept != 1 || repair.Withdrawn != 0 || repair.Restored != 0 {
+		t.Fatalf("repair = %+v, want the one block B's tab wrote swept", repair)
+	}
+	logged := logs.String()
+	if !slices.ContainsFunc(strings.Split(logged, "\n"), func(line string) bool {
+		return holdsAll(line, `msg="dispatch: repaired the asks of an issue"`, "issue="+issueKey, "swept=1")
+	}) {
+		t.Fatalf("the repair logged no line sweeping one block of %s:\n%s", issueKey, logged)
+	}
+	const resolved = `:::ask{#written-on-b urgency="low" multiple="false" state="resolved"}`
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, resolved) {
+		t.Fatalf("the durable document after the repair:\n%s\nwant it to hold %s", text, resolved)
+	}
+	// The repair's write leaves B's room behind the durable head, which B closes; a reader then
+	// reads the document B loads again.
+	select {
+	case <-editor.Ended:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("B's room never closed behind the repair's write:\nB:\n%s", pair.b.Output.String())
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		text := pair.b.documentText(t, artifactID)
+		if strings.Contains(text, resolved) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B serves the document without the swept block after reloading it:\n%s", text)
+		}
+	}
+}
+
+// appendBlock appends markdown's blocks to the end of the editor's document in one keystroke's
+// transaction, and sends the room the update it made.
+func appendBlock(t *testing.T, editor *docstest.Peer, markdown string) {
+	t.Helper()
+	typed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	var changeErr error
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			changeErr = err
+			return
+		}
+		tree.Children = append(tree.Children, typed.Children...)
+		changeErr = pmdoc.Update(txn, fragment, tree)
+	}); err != nil || changeErr != nil {
+		t.Fatalf("the editor's edit: %v %v", err, changeErr)
+	}
+}
+
+// durableText is the document as its stored updates hold it: read by a document service of this
+// test's own, which holds no room of it until this read loads one from the store.
+func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
+	t.Helper()
+	reader := docs.New(docs.Deps{Store: pair.database})
+	defer func() { _ = reader.Shutdown(context.Background()) }()
+	text, err := reader.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read the durable document %s: %v", artifactID, err)
+	}
+	return text
+}
+
+// defaultLog is what the default logger writes while a test runs, safe to read while the
+// document service's goroutines still write it.
+type defaultLog struct {
+	mu      sync.Mutex
+	written bytes.Buffer
+}
+
+func (l *defaultLog) Write(data []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.written.Write(data)
+}
+
+func (l *defaultLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.written.String()
+}
+
+// captureDefaultLog records what the default logger writes until the test ends.
+func captureDefaultLog(t *testing.T) *defaultLog {
+	t.Helper()
+	logs := &defaultLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
 }
 
 // ───── the leased maintenance loops ────────────────────────────────────────

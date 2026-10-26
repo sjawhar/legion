@@ -148,11 +148,11 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 // sweepClosedIssueAsks is the close's last pass over its issue's documents, run once the close
 // has committed and SetIssueClosed has closed the issue's rooms, when no browser of this process
 // can write to them any more. In a transaction of its own, holding the issue's row, it writes the
-// blocks of withdrawn - the asks the close withdrew - and their copies again, from their rows as
-// they now stand, and writes resolved every readable ask block no settlement has indexed: one a
-// browser wrote into the room after the close forked it, or one whose settlement failed before the
-// close. Each such block is logged. An issue reopened in the meantime is left alone. The sweep
-// never fails the close: an error is logged.
+// blocks of withdrawn - the asks the close withdrew - and of every other resolved block ask of the
+// issue, and their copies, again, from their rows as they now stand, and writes resolved every
+// readable ask block no settlement has indexed: one a browser wrote into the room after the close
+// forked it, or one whose settlement failed before the close. Each such block is logged. An issue
+// reopened in the meantime is left alone. The sweep never fails the close: an error is logged.
 //
 // ctx must not be cancelled by the client (context.WithoutCancel), and no transaction is open.
 func (s *server) sweepClosedIssueAsks(ctx context.Context, issueKey string, withdrawn []model.Ask, actor model.Actor) {
@@ -181,11 +181,15 @@ func (s *server) sweepClosedIssueAsksTx(ctx context.Context, issueKey string, wi
 		ids[index] = ask.ID
 	}
 	// The rows as they stand under the issue's row: a reopen, an answer and a second close
-	// between the close's commit and this lock leave them other than the close wrote them.
+	// between the close's commit and this lock leave them other than the close wrote them. Every
+	// other resolved block ask's blocks are written from its row too: an ask resolved after the
+	// close's settlement ran and before its transaction took the issue's row marked its copies
+	// owed a settlement, and no settlement runs while the issue is closed, so the sweep writes
+	// those copies its state in that settlement's place.
 	current, err := s.readIssueAsks(documentCtx, tx, `
 		select `+askRowColumns+`
 		`+askRowFrom+`
-		where a.issue_key = $1 and a.id = any($2::uuid[])
+		where a.issue_key = $1 and (a.id = any($2::uuid[]) or (a.state = 'resolved' and a.block_id is not null))
 		order by a.id
 	`, issueKey, ids)
 	if err != nil {
