@@ -34,9 +34,10 @@ type legionAgentRegistry struct {
 	// conn is the connection the next open uses, the latest a connection event brought.
 	conn  atomic.Pointer[nats.Conn]
 	state atomic.Pointer[legionAgentState]
-	// failing is whether the last open failed, so a failure logs once rather than at each retry.
-	// Only the open in progress reads or writes it, and there is never more than one.
-	failing bool
+	// failing is what the last open failed at, "open" or "move", or empty when it has not failed, so
+	// each kind of failure logs once rather than at each retry. Only the open in progress reads or
+	// writes it, and there is never more than one.
+	failing string
 	// reconnected wakes the retry at once after a connection event.
 	reconnected chan struct{}
 	// firstWait and maxWait bound the retry's backoff, which doubles from one to the other.
@@ -100,27 +101,36 @@ func startLegionAgentRegistry(conn *nats.Conn, logger *logging.Logger, openBucke
 // open opens the bucket on the latest connection, and reports whether the registry has its store.
 // A connection event that lands during the open moves the store to the new connection: the event's
 // hook stores the connection before it reads the state, and open stores the state before it reads
-// the connection, so one of the two sees the other's.
+// the connection, so one of the two sees the other's. A move open makes that fails leaves the
+// registry without a store, and the retry opens the bucket again on the latest connection: that
+// event's hook found no store to move and only woke the retry, so no later event is owed.
 func (r *legionAgentRegistry) open() bool {
 	conn := r.conn.Load()
 	store, err := r.openBucket(conn)
 	if err != nil {
 		reason := fmt.Sprintf("envoy: the legion agent registry is unavailable: could not open the %s bucket (a missing grant is the usual cause): %v", bus.LegionAgentBucket, err)
 		r.state.Store(&legionAgentState{unavailable: reason})
-		if !r.failing {
-			r.failing = true
+		if r.failing != "open" {
+			r.failing = "open"
 			r.logger.Error("legion agent registry unavailable: could not open the "+bus.LegionAgentBucket+" bucket (a missing grant is the usual cause), so the /v1/legion/agents routes answer 503 while every other route serves; the listener retries the open in the background",
 				slog.String("bucket", bus.LegionAgentBucket), slog.String("error", err.Error()))
 		}
 		return false
 	}
 	r.state.Store(&legionAgentState{store: store})
-	r.logger.Info("legion agent registry opened", slog.String("bucket", bus.LegionAgentBucket))
 	if latest := r.conn.Load(); latest != conn {
 		if err := store.Reopen(latest); err != nil {
-			r.logger.Error("legion agent registry did not move to the new NATS connection", slog.String("error", err.Error()))
+			reason := fmt.Sprintf("envoy: the legion agent registry is unavailable: it opened the %s bucket, then could not move it to the new NATS connection: %v", bus.LegionAgentBucket, err)
+			r.state.Store(&legionAgentState{unavailable: reason})
+			if r.failing != "move" {
+				r.failing = "move"
+				r.logger.Error("legion agent registry did not move to the new NATS connection, so the /v1/legion/agents routes answer 503 while every other route serves; the listener retries the open in the background",
+					slog.String("bucket", bus.LegionAgentBucket), slog.String("error", err.Error()))
+			}
+			return false
 		}
 	}
+	r.logger.Info("legion agent registry opened", slog.String("bucket", bus.LegionAgentBucket))
 	return true
 }
 
@@ -148,17 +158,14 @@ func (r *legionAgentRegistry) retry(ctx context.Context) {
 	}
 }
 
-// close ends the retry and waits, until ctx ends, for an open it has under way. main adds it as a
-// drain hook, so no open runs while the connection drains.
-func (r *legionAgentRegistry) close(ctx context.Context) {
+// close ends the retry. main adds it as a drain hook. It does not wait for an open under way: that
+// open takes no context and can run its 10 s, which the drain's hooks, run one after another, cannot
+// spend; an open that ends after close only stores the registry's state.
+func (r *legionAgentRegistry) close(context.Context) {
 	if r.stop == nil {
 		return
 	}
 	r.stop()
-	select {
-	case <-r.retried:
-	case <-ctx.Done():
-	}
 }
 
 // reconnect is the registry's reconnect hook. A store it has moves to conn, failing the hook as any
