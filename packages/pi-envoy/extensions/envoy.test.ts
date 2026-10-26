@@ -14024,6 +14024,41 @@ describe("messages missed while the subscription was down", () => {
         for (const message of held.splice(0)) await write(message);
         await settle();
       },
+      /**
+       * The person interrupts the streaming turn (Escape at the terminal, or RPC
+       * `abort_and_restore_queue`): Oh My Pi's `clearQueue({ forInterrupt: true })` withdraws the
+       * cards the turn held and writes none of them, the run ends aborted (`agent_end`), and the
+       * host is idle from then on, writing each card it is handed.
+       */
+      interrupt: async () => {
+        held.splice(0);
+        options = { ...options, turn: "idle" };
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] },
+          context
+        );
+        await settle();
+      },
+      /**
+       * The host switches to another session (`/new`) while the turn streams, withdrawing the cards
+       * it held unwritten, then back to this one, its turn streaming again. What the extension
+       * appends while the host is on the other session goes to that session's file, not this one.
+       */
+      switchAwayAndBack: async (otherSessionID: string) => {
+        held.splice(0);
+        const other: SessionContext = {
+          ...sessionContext(otherSessionID),
+          setInterval: (callback) => {
+            intervals.push(callback);
+          },
+        };
+        const mark = fixture.entries.length;
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, other);
+        await settle();
+        fixture.entries.splice(mark);
+        await fixture.handlers.get("session_switch")?.({ reason: "resume" }, context);
+        await settle();
+      },
       /** The host writes a user message, the turn a person's Send became: its `message_end`. */
       writeUserTurn: async (text: string, tag?: string) => {
         const message = {
@@ -14201,6 +14236,60 @@ describe("messages missed while the subscription was down", () => {
 
       expect(second.cards("evt-live-written")).toHaveLength(0);
       expect(second.cards("evt-live-held")).toHaveLength(1);
+    });
+  });
+
+  // A card the host held behind a streaming turn can also leave without ever being written while
+  // the process lives on: an interrupt withdraws it, as a switch away does.
+  describe("a card the host withdrew without writing it", () => {
+    test("one a person's interrupt withdrew is shown again in the same process, once", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-withdrawn-interrupt", model);
+      const replayed = peerMessage("ses_replay", "withdrawn-replayed");
+      const live = peerMessage("ses_replay", "withdrawn-live");
+      model.store(session.agentSubject, replayed);
+      await session.reconnect();
+      model.store(session.agentSubject, live);
+      session.live(session.agentSubject).push(live);
+      await until(() => session.cards("evt-withdrawn-live").length > 0, "the live card");
+
+      await session.interrupt();
+      await session.tick();
+      await session.tick();
+
+      // Handed again after the interrupt, and written this time: the session saw each once.
+      expect(session.cards("evt-withdrawn-replayed")).toHaveLength(2);
+      expect(session.cards("evt-withdrawn-live")).toHaveLength(2);
+      await session.tick();
+      expect(session.cards("evt-withdrawn-replayed")).toHaveLength(2);
+      expect(session.cards("evt-withdrawn-live")).toHaveLength(2);
+    });
+
+    test("one a switch away withdrew is not recorded shown when it is handed again after the switch back", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-withdrawn-switch-a", model);
+      // An earlier message the turn took, so the session's replay state is written to its file.
+      model.store(first.agentSubject, peerMessage("ses_replay", "withdrawn-switch-earlier"));
+      await first.reconnect();
+      await first.take();
+      await first.tick();
+      const frame = peerMessage("ses_replay", "withdrawn-switch");
+      model.store(first.agentSubject, frame);
+      first.live(first.agentSubject).push(frame);
+      await until(() => first.cards("evt-withdrawn-switch").length > 0, "the live card");
+
+      await first.switchAwayAndBack("ses_elsewhere");
+      await first.tick();
+      // Handed again after the switch back, and still held by the streaming turn when the
+      // process ends: it never reached the transcript.
+      await first.stop();
+
+      const second = await bootReplay("replay-withdrawn-switch-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-withdrawn-switch")).toHaveLength(1);
     });
   });
 
