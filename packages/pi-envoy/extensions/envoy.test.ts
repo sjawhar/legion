@@ -15025,6 +15025,44 @@ describe("messages missed while the subscription was down", () => {
       }
     });
 
+    test("a retention gap held while the host's turn streams is told after a restart that cut the hold short", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-killed-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 11));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 12));
+        // The notice is held for the streaming turn, and the process ends before the turn does.
+        const second = await bootReplay("replay-issue-gap-killed-b", model, {
+          entries: first.entries(),
+          turn: "streaming",
+        });
+        await second.tick();
+        await second.stop();
+
+        const third = await bootReplay("replay-issue-gap-killed-c", model, {
+          entries: second.entries(),
+          turn: "idle",
+        });
+        await third.tick();
+        await third.tick();
+
+        // Told once, by the session that came back, since the session it was raised in never was.
+        expect(
+          third.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          )
+        ).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
     test("a topic the session unfollowed stays unfollowed after a restart", async () => {
       const model = new StreamModel();
       const first = await bootReplay("replay-issue-unfollowed-a", model);
