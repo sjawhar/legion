@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-304",
-  "completed": "2026-10-26T02:05:00Z",
+  "completed": "2026-10-26T02:30:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2218",
   "proof": [
+    {
+      "criterion": "Round 2 (review fix, comment only): the shipped rule is unchanged and the rows still hold; the note's document row matches the editor's pitch",
+      "surface": "Dispatch browser suite, iphone project, pod harness (ports 18777/19021-19024, database dispatch_implementer); pod Chromium scratch page for the 16px-on-25.6px row",
+      "command": "cd packages/dispatch && (source /legion/harness/env.sh && bun run build:web && grep -o '\\.prose a{[^}]*}' web/dist/assets/*.css && bunx playwright test --config e2e/playwright.config.ts --project=iphone -g \"reasoning link's padded box|an inline link keeps its line\")",
+      "observed": "web/dist/assets/index-BQJouVYI.css:.prose a{padding-block:calc(.5lh - .6em)} — the same file name (content hash) as at 64e609b7, so the shipped CSS is byte-identical; 2 passed (28.9s). Scratch page, DejaVu Sans 16px, line-height 1.6: pad 3.19688px, lh 25.6px, clearance 3.41.",
+      "headSha": "87de9d95b0a96b5cb2451f434b52cf45c6ca38a6",
+      "negativeControl": "The 3px and 0 controls of round 1 (at be150e35) still bound the rows: same rule, same bundle hash."
+    },
     {
       "criterion": "Reasoning: the lower link's padded box does not overlap the upper line's text (live view /agents/<id>/live at 390px)",
       "surface": "Dispatch browser suite, iphone project (iPhone 13 profile on Chromium), real Go server + Postgres 17/pgvector + production web/dist, in the issue pod, lane ports 18777/19021-19024, database dispatch_implementer",
@@ -45,7 +53,15 @@
   ],
   "deviations": [
     "Simplify pass applied one finding: the four repeated pitch/clearance assertions became expectConsecutiveLinksClear in e2e/layout.ts (the plan's consecutiveLinkClearance helper returned the metrics instead). Same checks and tolerances.",
-    "The stylesheet note states the measured text-box heights (19px at 16px, 18px at 15px, 14px at 12px) rather than a single em ratio, and states that a pitch tighter than 1.2em gets no padding because its lines leave no gap; I re-measured the plan's table in pod Chromium with DejaVu Sans and it matched."
+    "The stylesheet note states the measured text-box heights (19px at 16px, 18px at 15px, 14px at 12px) rather than a single em ratio, and that a pitch tighter than 1.2em gets no padding. Its document row was the plan's Typography 1.75 scratch row (16/28) until round 2, which replaced it with the editor's 16px on 25.6px: re-measured in pod Chromium with DejaVu Sans, padding 3.197px, clearance 3.41px."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "round": 2,
+  "reviewFixes": [
+    {
+      "thread": "PRRT_kwDORFy7ds6wHjO2",
+      "finding": "styles.css note recorded document prose as 16px on 28px, 4.4px / 4.6px; the editor is 16px on 25.6px (proof-editor lib.css:31,55,603)",
+      "fix": "note now says a document in the editor, 16px on 25.6px, 3.2px / 3.4px; PR body Change bullet corrected"
+    }
+  ]
 }
