@@ -51,7 +51,10 @@ func refuseFractionalIntegers(prov p.Provider) p.Provider {
 	var schemaErr error
 	prov.Construct = func(ctx context.Context, req p.ConstructRequest) (p.ConstructResponse, error) {
 		once.Do(func() {
-			resp, err := getSchema(ctx, p.GetSchemaRequest{})
+			// The result is cached for every later Construct, so the read keeps the request's
+			// values (the run info the schema is named from) but not its cancellation: a first
+			// request cancelled mid-read must not fail every Construct after it.
+			resp, err := getSchema(context.WithoutCancel(ctx), p.GetSchemaRequest{})
 			if err != nil {
 				schemaErr = fmt.Errorf("reading the schema to check integer inputs: %w", err)
 				return

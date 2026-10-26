@@ -99,3 +99,26 @@ func TestRefuseFractionalIntegersRefusesWithoutASchema(t *testing.T) {
 		})
 	}
 }
+
+// The schema is read once and cached, so it is read without the first request's cancellation: a
+// GetSchema that honours its context, as a real one may, still answers when that first request's
+// context is already cancelled, and so does every Construct after it.
+func TestRefuseFractionalIntegersSurvivesACancelledFirstRequest(t *testing.T) {
+	var constructed bool
+	fake := fakeProvider(exampleSchema, nil, &constructed)
+	fake.GetSchema = func(ctx context.Context, _ p.GetSchemaRequest) (p.GetSchemaResponse, error) {
+		if err := ctx.Err(); err != nil {
+			return p.GetSchemaResponse{}, err
+		}
+		return p.GetSchemaResponse{Schema: exampleSchema}, nil
+	}
+	prov := refuseFractionalIntegers(fake)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	req := p.ConstructRequest{Urn: exampleURN, Inputs: property.NewMap(map[string]property.Value{"count": property.New(2.5)})}
+	_, err := prov.Construct(cancelled, req)
+	require.EqualError(t, err, "example:index:Component example: count 2.5 must be a whole number")
+	_, err = prov.Construct(t.Context(), p.ConstructRequest{Urn: exampleURN, Inputs: property.NewMap(map[string]property.Value{"count": property.New(3.0)})})
+	require.NoError(t, err)
+	require.True(t, constructed)
+}
