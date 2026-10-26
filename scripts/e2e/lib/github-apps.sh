@@ -8,11 +8,16 @@
 # key, read by require_app_inputs from two inputs that default to this repository's own
 # deployment:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)
-#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the `secrets` CLI resolves to the App's
+#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the key runner resolves to the App's
 #                                   private key, base64-encoded PEM
+# and one input for both, the key runner:
+#   LEGION_E2E_APP_KEY_RUNNER       the command that runs `<runner> <NAME> -- <command>` with the
+#                                   key NAME holds in that command's environment alone; `secrets`
+#                                   by default, or any store's runner of that form (`agent-secrets`
+#                                   reads the broker with no local fallback). Legion names no store.
 # A deployment with its own Apps sets all four; a run here sets none and acts as it always has.
 # write_github_apps writes the `github_apps` block of legion.yaml from them, each key read by a
-# private_key_command that runs `secrets <name> -- …`, and check_github_apps proves each App's key
+# private_key_command that runs `<runner> <name> -- …`, and check_github_apps proves each App's key
 # is its id's, whether the pair came from a default or an input: lib/app-logins.ts signs an App JWT
 # with the key and refuses the run unless GitHub's GET /app answers that id and the write
 # permission the role's work needs. The key never enters
@@ -46,6 +51,7 @@ default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 # the run starts inherits no App key, the proof human's included.
 github_apps_read=()
 app_key_unsets=()
+app_key_runner=
 require_app_inputs() {
   local role upper id_var key_var id_default key_default id key name roles_read=()
   for role in "$@"; do
@@ -67,6 +73,11 @@ require_app_inputs() {
     printf -v "${role}_app_key_name" %s "$key"
     roles_read+=("$role")
   done
+  # The runner is a command word in the key command's shell text, so it is one word of path
+  # characters: a store's runner by name or by path, never a command line.
+  app_key_runner=${LEGION_E2E_APP_KEY_RUNNER-secrets}
+  [[ "$app_key_runner" =~ ^[A-Za-z0-9_./+-]+$ && ${#app_key_runner} -le 256 ]] ||
+    fail "LEGION_E2E_APP_KEY_RUNNER must be one command, by name or path (letters, digits and _ . / + -), that runs '<runner> <NAME> -- <command>'; its value is not printed"
   if [[ " ${roles_read[*]} " == *" implement "* && " ${roles_read[*]} " == *" review "* ]]; then
     [ "$implement_app_id" != "$review_app_id" ] ||
       fail "LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID are both $implement_app_id: the workflow needs two Apps"
@@ -88,12 +99,13 @@ require_app_inputs() {
 }
 
 # app_key_command NAME prints the private_key_command that prints the PEM the secret-store key NAME
-# holds: `secrets` puts the value in one `sh` child's environment, which turns the store's
+# holds: the key runner (`secrets` unless LEGION_E2E_APP_KEY_RUNNER names another) puts the value in
+# one `sh` child's environment, which turns the store's
 # Node-style base64 (URL-safe alphabet, unpadded, maybe one dangling sextet) into POSIX base64 and
 # decodes it to stdout, the daemon's pipe.
 app_key_command() {
   # shellcheck disable=SC2016 # the expansions are the key command's own, run by its sh
-  printf 'secrets %s -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$1" "$1"
+  printf '%s %s -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$app_key_runner" "$1" "$1"
 }
 
 # write_github_apps ROLE... writes $work/github-apps.yaml, the `github_apps` block of legion.yaml

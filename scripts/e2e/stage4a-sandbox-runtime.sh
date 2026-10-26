@@ -450,6 +450,7 @@ env \
   LEGION_E2E_POD_REACHABILITY="$pod_reachability" \
   LEGION_E2E_IMPLEMENT_APP_ID="$implement_app_id" \
   LEGION_E2E_IMPLEMENT_APP_KEY_NAME="$implement_app_key_name" \
+  LEGION_E2E_APP_KEY_RUNNER="$app_key_runner" \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \

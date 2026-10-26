@@ -14,7 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scriptFunctions } from "./script-functions";
 
-// session_text, session_copy, record_pair, claim_session_text and collect_transcripts, taken from
+// session_psql, session_text and session_byte_len, taken from lib/session-db.sh by name, and
+// session_copy, record_pair, claim_session_text and collect_transcripts, taken from
 // stage4b-sandbox-tree.sh by name: every pod of the run keeps its Oh My Pi session in the run's
 // scratch Postgres, keyed by the path its file would have had, so the harness reads a session from
 // the table through the database's own container (session_psql: `docker exec … psql -A -t`), never
@@ -25,6 +26,7 @@ import { scriptFunctions } from "./script-functions";
 // session refused by name, a key, which an agent writes and so is not trusted, never taken as a
 // path to write at, a directory to write in never one a caller derives from an agent's value, and
 // a key refused costing no other session yet failing the run's teardown.
+const db = scriptFunctions(join(import.meta.dir, "session-db.sh"));
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-session-text-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -93,8 +95,9 @@ function run(body: string, rows: Record<string, string>, dockerExit = 0): Ran {
       `set -Eeuo pipefail
 session_db_container=${container}
 ${dockerStub}
-${fn("session_psql")}
-${fn("session_text")}
+${db("session_psql")}
+${db("session_text")}
+${db("session_byte_len")}
 ${fn("session_copy")}
 ${fn("collect_transcripts")}
 ${body}`,
@@ -165,6 +168,41 @@ describe("session_text", () => {
     expect(r.sql).not.toContain(key);
     expect(r.sql).toContain(":'path'");
     expect(r.sql).toContain("ORDER BY p.start_offset");
+  });
+});
+
+// session_byte_len reads the row's byte_len alone, and an answer that is no number, as a session
+// the table does not hold answers (no row, no output), is a failure that says so, as is a read
+// that fails.
+describe("session_byte_len", () => {
+  test("prints the row's byte_len", () => {
+    const r = run(`session_byte_len '${key}'`, { [key]: "1234" });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("1234\n");
+    expect(r.sql).toContain("SELECT byte_len FROM omp_session_files WHERE path = :'path'");
+    expect(r.args.at(-1)).toBe(`path=${key}`);
+  });
+
+  test("a session the table does not hold fails, naming its key", () => {
+    const r = run(`session_byte_len '${key}'`, {});
+    expect(r.code).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain(`the session table holds no byte_len for ${key} ('')`);
+  });
+
+  test("an answer that is no number fails, showing it", () => {
+    const r = run(`session_byte_len '${key}'`, { [key]: "12x" });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain(`the session table holds no byte_len for ${key} ('12x')`);
+  });
+
+  test("a database that does not answer fails, naming the key", () => {
+    const r = run(`session_byte_len '${key}'`, { [key]: "1234" }, 2);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(
+      `the session database ${container} could not be read for the session ${key}`
+    );
   });
 });
 

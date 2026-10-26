@@ -110,16 +110,19 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 	// its length tells it from a store key's name, and a refusal prints neither.
 	id := regexp.MustCompile(`^[1-9][0-9]{0,11}$`)
 	key := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+	// One command word, by name or path, that runs `<runner> <NAME> -- <command>`: lib/github-apps.sh's
+	// LEGION_E2E_APP_KEY_RUNNER, `secrets` unless the operator names another store's runner.
+	runner := input("LEGION_E2E_APP_KEY_RUNNER", "secrets", regexp.MustCompile(`^[A-Za-z0-9_./+-]{1,256}$`))
 	apps, err := config.ResolveGitHubApps(config.GitHubApps{
 		Implement: config.GitHubApp{
 			AppID: input("LEGION_E2E_IMPLEMENT_APP_ID", defaultImplementAppID, id),
-			PrivateKeyCommand: privateKeyCommand(
+			PrivateKeyCommand: privateKeyCommand(runner,
 				input("LEGION_E2E_IMPLEMENT_APP_KEY_NAME", defaultImplementAppKeyName, key),
 			),
 		},
 		Review: config.GitHubApp{
 			AppID: input("LEGION_E2E_REVIEW_APP_ID", defaultReviewAppID, id),
-			PrivateKeyCommand: privateKeyCommand(
+			PrivateKeyCommand: privateKeyCommand(runner,
 				input("LEGION_E2E_REVIEW_APP_KEY_NAME", defaultReviewAppKeyName, key),
 			),
 		},
@@ -152,11 +155,11 @@ func TestAppFallbacksMatchTheLiveProofLib(t *testing.T) {
 	}
 }
 
-func privateKeyCommand(key string) string {
+func privateKeyCommand(runner, key string) string {
 	// secretsd stores the reviewer key in Node-compatible base64: unpadded and with one trailing
 	// dangling sextet. Normalize exactly as config.decodeBase64LikeNode before POSIX base64 decodes
 	// it; the key remains in this daemon-owned child process.
-	return "secrets " + key + ` -- sh -c 'value=$(printf %s "${` + key + `}" | tr "_-" "/+"); case $((${#value} % 4)) in 1) value=${value%?};; esac; case $((${#value} % 4)) in 2) value="${value}==";; 3) value="${value}=";; esac; printf %s "$value" | base64 -d'`
+	return runner + " " + key + ` -- sh -c 'value=$(printf %s "${` + key + `}" | tr "_-" "/+"); case $((${#value} % 4)) in 1) value=${value%?};; esac; case $((${#value} % 4)) in 2) value="${value}==";; 3) value="${value}=";; esac; printf %s "$value" | base64 -d'`
 }
 
 type realCommandResult struct {

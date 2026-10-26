@@ -406,6 +406,8 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/session-db.sh
+. "$root/scripts/e2e/lib/session-db.sh"
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
@@ -948,37 +950,11 @@ bash_legion_commands() {
 # keys a session by the path its file would have had (internal/ompsessions): the session file a
 # claim records is that key, and so is a subagent's <parent's stem>/<id>.jsonl beside it. No pod
 # holds a file at either, so every read of a pod's session goes to the table, through the database
-# container the run started (session_db_container), with no client on the devbox and no input
-# beyond the ones that start it. The operator's controller runs on this machine, outside the sandbox
-# runtime, and keeps its sessions as files in the run's profile, which are read as files.
+# container the run started (session_db_container) with lib/session-db.sh's readers, with no client
+# on the devbox and no input beyond the ones that start it. The operator's controller runs on this
+# machine, outside the sandbox runtime, and keeps its sessions as files in the run's profile, which
+# are read as files.
 
-# session_psql NAME VALUE runs the SQL on stdin in the session database as its owner, legion, with
-# VALUE the psql variable NAME, which the SQL quotes as a literal (:'NAME'), so no value is ever
-# spliced into it; the SQL comes on stdin because psql interpolates no variable into a -c command.
-# The output is unaligned and tuples-only (-A -t): each value exactly as the server sent it, with no
-# padding, wrapping, quoting, escaping, header or row count, so a transcript's quotes, backslashes
-# and newlines arrive as Oh My Pi wrote them, and psql ends the last row with one newline of its own.
-# The aligned default pads and wraps a value of many lines, and COPY's text and CSV formats escape
-# or quote one, so each would corrupt the JSONL. ON_ERROR_STOP makes an SQL error psql's exit status.
-session_psql() {
-  docker exec -i -e PGCLIENTENCODING=UTF8 "$session_db_container" \
-    psql -X -q -A -t -v ON_ERROR_STOP=1 -U legion -d sessions -v "$1=$2"
-}
-# session_text PATH prints the session the table holds at PATH whole, as Oh My Pi reads it and
-# ompsessions.Read does: the row's content, then each of its parts in start_offset order, in one
-# statement so both come from one snapshot. The statement answers one row for a session the table
-# holds and none otherwise, so psql's closing newline is what tells a held session, however short,
-# from none: it is taken off, and none fails naming PATH, as the `cat` of a missing file did. The x
-# after psql's output keeps the substitution from stripping the session's own trailing newlines.
-session_text() {
-  local out
-  out=$(session_psql path "$1" <<<"SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset)
-    FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path';" && printf x) ||
-    { echo "the session database $session_db_container could not be read for the session $1" >&2; return 1; }
-  out=${out%x}
-  [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
-  printf '%s' "${out%$'\n'}"
-}
 # session_copy PREFIX AREA STEM copies every session the table holds under the key prefix PREFIX into
 # the directory STEM of AREA, one of the evidence directories this function names for itself:
 # `transcripts`, `daemon-controller` (transcripts/daemon-controller) or `review-pair`, under

@@ -6,7 +6,7 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/session-db.sh`](#libsession-dbsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
@@ -3354,9 +3354,10 @@ which two optional operator inputs give:
 | input | what it names |
 | :--- | :--- |
 | `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_REVIEW_APP_ID` | the App's numeric id |
-| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secret-store key the `secrets` CLI resolves to the App's private key (base64-encoded PEM) |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_KEY_NAME` | the secret-store key the key runner resolves to the App's private key (base64-encoded PEM) |
+| `LEGION_E2E_APP_KEY_RUNNER` | the key runner, one for both Apps: a command, by name or path, that runs `<runner> <NAME> -- <command>` with the key `NAME` holds in that command's environment alone. `secrets` by default; a store's own runner otherwise (`agent-secrets` reads the broker with no local fallback). Legion names no store |
 
-Each defaults to this repository's own deployment's value, which the lib holds in one place
+Each App input defaults to this repository's own deployment's value, which the lib holds in one place
 (`default_<role>_app_id`, `default_<role>_app_key_name`), so a run here sets none of them and acts
 as it always has, and a deployment with its own Apps sets all four.
 
@@ -3367,7 +3368,7 @@ in a shell command and as a variable name, and a pasted key is refused by its le
 never prints the value. With both roles read it also refuses one id or one key
 name for both Apps. `write_github_apps ROLE...` writes `$work/github-apps.yaml`, the `github_apps`
 block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command` that
-runs `secrets <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
+runs `<runner> <name> -- sh -c …` to decode the store's Node-style base64 into the PEM on stdout. It
 refuses, writing nothing, a role the last `require_app_inputs` did not read.
 `check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over that file and
 fails the check unless GitHub's `GET /app`, under a JWT each key signs with its id as issuer,
@@ -3379,7 +3380,8 @@ script's shell, an argv or a file. A run
 refuses before its first write anywhere: Stage 3, 4b.13b, the Claude Code backend and Stage 4b
 check both Apps (`read_app_logins`), Stage 4a, which acts as the implement App alone, checks that
 one. `TestRealGitHubCredentialSurface` and `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` read the
-same four inputs with the same defaults. `require_app_inputs` also fills `app_key_unsets`, the
+same four inputs and the key runner with the same defaults, and Stage 4a hands its Go harness
+the runner beside the implement App's pair. `require_app_inputs` also fills `app_key_unsets`, the
 `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
 role's key name, this deployment's own two, and every exported variable whose name holds
 `PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the three
@@ -3411,6 +3413,27 @@ key), and either `label_prefix` (the prefix every run label of the proof carries
 | `run_named LIST` | prints the lines of a `-o name` listing whose object name carries the run's label as written, or as a claim token carries it (every character outside `a-z0-9` dropped): every object the run's daemon and harness create is named from one or the other |
 | `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes and ConfigMaps labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
 | `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |
+
+## lib/session-db.sh
+
+The reads a stage proof makes of its run's scratch session database, where every pod of the run
+keeps its sessions (`session_store: postgres`): Oh My Pi's table `omp_session_files` and its parts
+`omp_session_files_parts`, keyed by the path the session's file would have had. Stage 4b and
+[`claude-backend-sandbox.sh`](#claude-backend-sandboxsh) source it; each starts the database's
+container itself.
+
+```sh
+. "$root/scripts/e2e/lib/session-db.sh"     # sourced, never run
+```
+
+The caller sets `session_db_container`, the container running the database (owner `legion`,
+database `sessions`). Every read goes through that container, with no client on the devbox.
+
+| function | does |
+| :--- | :--- |
+| `session_psql NAME VALUE` | runs the SQL on stdin with `psql -A -t` as `legion`, VALUE the psql variable NAME, which the SQL quotes as `:'NAME'`, so no value is spliced into it; an SQL error is its exit status |
+| `session_text PATH` | prints the session the table holds at PATH whole, the row's content and then its parts in `start_offset` order, from one statement; a session the table does not hold, or a read that fails, fails naming PATH |
+| `session_byte_len PATH` | prints the row's `byte_len` at PATH; an answer that is no number (no such row), or a read that fails, fails naming PATH |
 
 ## lib/bridge-tunnel.sh
 

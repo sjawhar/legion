@@ -522,6 +522,49 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     expect(sources.review?.privateKeyCommand).toStartWith("secrets REVIEW_KEY -- sh -c '");
   });
 
+  test("a key runner input reads each key through that runner, and the check proves the Apps through it", async () => {
+    // A store whose runner is not `secrets`: the stand-in `secrets` would serve the same keys, so
+    // it is made to fail, and only the named runner can have produced the keys GitHub accepted.
+    const runnerBin = mkdtempSync(join(dir, "runner-bin."));
+    writeFileSync(
+      join(runnerBin, "other-store"),
+      `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
+      { mode: 0o755 }
+    );
+    writeFileSync(join(runnerBin, "secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+    const { code, stdout, stderr, work } = await githubApps(
+      {
+        ...appInputs,
+        LEGION_E2E_APP_KEY_RUNNER: join(runnerBin, "other-store"),
+        PATH: `${runnerBin}:${process.env.PATH}`,
+      },
+      proveBoth
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain('"implement":"example-implement[bot]"');
+    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
+    expect(sources.implement?.privateKeyCommand).toStartWith(
+      `${join(runnerBin, "other-store")} IMPLEMENT_KEY -- sh -c '`
+    );
+    expect(sources.review?.privateKeyCommand).toStartWith(
+      `${join(runnerBin, "other-store")} REVIEW_KEY -- sh -c '`
+    );
+  });
+
+  test("a key runner that is not one command word is refused without printing it, and nothing is written", async () => {
+    for (const runner of ["", "secrets; true", "agent-secrets --account x"]) {
+      const { code, stderr, work } = await githubApps(
+        { ...appInputs, LEGION_E2E_APP_KEY_RUNNER: runner },
+        proveBoth
+      );
+      expect(code).toBe(1);
+      expect(stderr).toContain("LEGION_E2E_APP_KEY_RUNNER must be one command");
+      if (runner) expect(stderr).not.toContain(runner);
+      expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+    }
+  });
+
   test("one role proves that App alone, as Stage 4a runs it", async () => {
     const { code, stdout, stderr } = await githubApps(
       { LEGION_E2E_IMPLEMENT_APP_ID: "101", LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "IMPLEMENT_KEY" },

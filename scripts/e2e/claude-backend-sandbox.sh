@@ -237,6 +237,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/session-db.sh
+. "$root/scripts/e2e/lib/session-db.sh"
 # Nothing the run starts inherits the operator's production Dispatch bearer.
 unset DISPATCH_TOKEN
 
@@ -420,39 +422,9 @@ pod_endpoint_mismatch() {
 # there as rows keyed by their absolute paths, and restores from there in a replacement pod before
 # Claude Code starts (internal/launcher's claude.go; docs/kubernetes.md, "Where a Claude Code
 # session lives across pods"). Every read goes through the database's own container
-# (session_db_container), with no client on the devbox, as Stage 4b's do.
+# (session_db_container) with lib/session-db.sh's readers, with no client on the devbox, as Stage
+# 4b's do.
 
-# session_psql NAME VALUE runs the SQL on stdin in the session database as its owner, legion, with
-# VALUE the psql variable NAME, which the SQL quotes as a literal (:'NAME'), so no value is ever
-# spliced into it; the SQL comes on stdin because psql interpolates no variable into a -c command.
-# The output is unaligned and tuples-only (-A -t): each value exactly as the server sent it, with no
-# padding, wrapping, quoting, escaping, header or row count, so a transcript's quotes, backslashes
-# and newlines arrive as their writer wrote them, and psql ends the last row with one newline of its
-# own. ON_ERROR_STOP makes an SQL error psql's exit status.
-session_psql() {
-  docker exec -i -e PGCLIENTENCODING=UTF8 "$session_db_container" \
-    psql -X -q -A -t -v ON_ERROR_STOP=1 -U legion -d sessions -v "$1=$2"
-}
-# session_text PATH prints the session the table holds at PATH whole, as Oh My Pi reads it and
-# ompsessions.Read does: the row's content, then each of its parts in start_offset order, in one
-# statement so both come from one snapshot. The statement answers one row for a session the table
-# holds and none otherwise, so psql's closing newline is what tells a held session, however short,
-# from none: it is taken off, and none fails naming PATH. The x after psql's output keeps the
-# substitution from stripping the session's own trailing newlines.
-session_text() {
-  local out
-  out=$(session_psql path "$1" <<<"SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset)
-    FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path';" && printf x) ||
-    { echo "the session database $session_db_container could not be read for the session $1" >&2; return 1; }
-  out=${out%x}
-  [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
-  printf '%s' "${out%$'\n'}"
-}
-# session_byte_len PATH prints the byte_len of the table's row at PATH, the size in bytes of what
-# its writers have saved there, and nothing when the table holds no such row.
-session_byte_len() {
-  session_psql path "$1" <<<"SELECT byte_len FROM omp_session_files WHERE path = :'path';"
-}
 # pod_uid_gone POD UID: no pod named POD has uid UID any more — it is gone, or a replacement holds
 # its name. A read the API server refuses is not an answer, so it is never taken for gone.
 pod_uid_gone() {
@@ -1148,10 +1120,7 @@ case "$transcript" in
 esac
 [ "$(pod_exec "$pod" implementer sh -c 'wc -c <"$1"' sh "$transcript" | tr -d '[:space:]')" -gt 0 ] ||
   fail "the implementer's transcript $transcript is missing or empty in pod $pod"
-registered_len=$(session_byte_len "$transcript") || fail "the session database $session_db_container could not be read for the session $transcript"
-case "$registered_len" in
-  '' | *[!0-9]*) fail "the session table holds no row for the registered transcript $transcript (byte_len '${registered_len}')" ;;
-esac
+registered_len=$(session_byte_len "$transcript") || fail "the session table gives no byte_len for the registered transcript $transcript (the reason is above)"
 note "implementer claim $token: generation $generation, pod $pod (uid $pod_uid), Claude Code session $session"
 note "its transcript is $transcript, on the pod's disk under CLAUDE_CONFIG_DIR=$config_dir, and a row of the session table (byte_len $registered_len)"
 pass
@@ -1275,10 +1244,7 @@ op delete pod "$pod" --wait=false >/dev/null || fail "the operator could not del
 until_true 600 "the deleted pod $pod (uid $pod_uid) to be gone" pod_uid_gone "$pod" "$pod_uid"
 session_text "$transcript" >"$work/table-transcript" ||
   fail "the session table does not give the implementer's transcript $transcript once pod $pod is gone (the reason is above)"
-held_len=$(session_byte_len "$transcript") || fail "the session database $session_db_container could not be read for the session $transcript"
-case "$held_len" in
-  '' | *[!0-9]*) fail "the session table's row for $transcript carries no byte_len ('$held_len')" ;;
-esac
+held_len=$(session_byte_len "$transcript") || fail "the session table gives no byte_len for the held transcript $transcript (the reason is above)"
 [ "$held_len" -ge "$size" ] ||
   fail "the session table's row for $transcript has byte_len $held_len, short of the $size bytes the transcript held in pod $pod before its deletion"
 held_size=$(wc -c <"$work/table-transcript")
