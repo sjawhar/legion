@@ -24,8 +24,9 @@
 // starts and names in LEGION_E2E_NATS_URL. GitHub is noRequiredChecksGitHub, a REST stand-in that
 // answers every read the required-checks pass makes with a 2xx - a non-2xx would keep the set last
 // read, so a switch would never reach the daemon - and whose base branches the driver switches
-// between requiring nothing and requiring the check `ci`. Dispatch is the board the merged-root
-// proof's driver keeps (mergedRootWaitsDispatch), which takes the status writes and messages a
+// between requiring nothing and requiring the check `ci`. Dispatch is the board the package's
+// whole-daemon live proofs share (liveDispatch, in live_proof_test.go, the harness this driver
+// shares with merged_root_waits_live_test.go), which takes the status writes and messages a
 // send-back and a blocked count post. Envoy's listener is the package's noticeListener, and the two
 // Apps' tokens are workflowTokenRecorder's placeholders. No agent runs: an implementer a send-back
 // starts is launched by the package's fake runtime, which says it provisions each workspace in the
@@ -39,7 +40,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -51,27 +51,18 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
-	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
-// noRequiredChecksRepo is the repository the project's Dispatch mapping serves (workflowConfig's
-// servedMapping), and noRequiredChecksCheck the one check a base branch requires when it requires
-// anything.
-const (
-	noRequiredChecksRepo  = "acme/widgets"
-	noRequiredChecksCheck = "ci"
-)
+// noRequiredChecksCheck is the one check a base branch requires when it requires anything.
+const noRequiredChecksCheck = "ci"
 
 // noRequiredChecksRead bounds the wait for the daemon's read of a base branch the driver switched:
 // the required-checks pass reads every open pull request at boot and every requiredChecksInterval
@@ -79,23 +70,11 @@ const (
 // for a slow pass, not a second chance.
 const noRequiredChecksRead = requiredChecksInterval + time.Minute
 
-// noRequiredChecksSettle is how long a step that must see nothing happen watches for it: a notice
-// is published by the outbox after the fact that enqueued it commits, so the step watches this long
-// for a checks-red that must never come.
-const noRequiredChecksSettle = 3 * time.Second
-
 // noRequiredChecksLive is one run of the proof: the booted daemon, the stand-ins it reads and
 // writes, and the three issues the steps drive.
 type noRequiredChecksLive struct {
-	t       *testing.T
-	cfg     config.Config
-	d       *daemon
-	js      jetstream.JetStream
-	github  *noRequiredChecksGitHub
-	notices *noticeListener
-	st      *store.Store
-	records record.Store
-	project string
+	liveProof
+	github *noRequiredChecksGitHub
 	// nothing is the issue on a base that requires nothing (steps 1 and 2), green the one on a base
 	// that requires ci (step 3), and pushed the one at an exhausted fix-attempt count whose base
 	// stops requiring anything under it (step 4). Each is a root of its own tree, and each pull
@@ -125,9 +104,9 @@ func (i noRequiredChecksIssue) branch() string { return "legion/" + i.key }
 // push onto the counted head once its base requires nothing leaves the counted attempt, so the new
 // head's red, once the base requires the check again, sends the work back.
 func TestABaseThatRequiresNothingGivesNoVerdictLive(t *testing.T) {
-	natsURL := os.Getenv(mergedRootWaitsNATSURL)
+	natsURL := os.Getenv(liveNATSURLEnv)
 	if natsURL == "" {
-		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; scripts/e2e/no-required-checks.sh starts a nats-server and sets it", mergedRootWaitsNATSURL)
+		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; scripts/e2e/no-required-checks.sh starts a nats-server and sets it", liveNATSURLEnv)
 	}
 	r := newNoRequiredChecksLive(t, natsURL)
 	r.step("nothing-required-failed-check", r.nothingRequiredFailedCheck)
@@ -146,43 +125,22 @@ func newNoRequiredChecksLive(t *testing.T, natsURL string) *noRequiredChecksLive
 	// One counted attempt exhausts the count, so step 4's first red is held and reported, and its
 	// last is held too unless the push onto the base that required nothing left that attempt.
 	cfg.MaxFixAttempts = 1
-	board := newMergedRootWaitsDispatch(t, cfg.Project)
-	dispatchServer := httptest.NewServer(board)
-	t.Cleanup(dispatchServer.Close)
-	cfg.DispatchURL = dispatchServer.URL
-	notices := newNoticeListener()
-	envoyServer := httptest.NewServer(notices)
-	t.Cleanup(envoyServer.Close)
-	cfg.EnvoyURL = envoyServer.URL
-
-	project, err := claim.ProjectToken(cfg.Project)
-	if err != nil {
-		t.Fatal(err)
-	}
+	proof := newLiveProof(t, natsURL, cfg)
 	number, err := strconv.ParseInt(randomSuffix(t)[:6], 16, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := &noRequiredChecksLive{
-		t: t, cfg: cfg, notices: notices, records: record.NewStore(), project: project,
-		nothing: noRequiredChecksIssue{key: cfg.Project + "-1", number: int(number) + 1, base: "base-nothing"},
-		green:   noRequiredChecksIssue{key: cfg.Project + "-2", number: int(number) + 2, base: "base-green"},
-		pushed:  noRequiredChecksIssue{key: cfg.Project + "-3", number: int(number) + 3, base: "base-pushed"},
+		liveProof: proof,
+		nothing:   noRequiredChecksIssue{key: cfg.Project + "-1", number: int(number) + 1, base: "base-nothing"},
+		green:     noRequiredChecksIssue{key: cfg.Project + "-2", number: int(number) + 2, base: "base-green"},
+		pushed:    noRequiredChecksIssue{key: cfg.Project + "-3", number: int(number) + 3, base: "base-pushed"},
 	}
 	r.github = newNoRequiredChecksGitHub(t)
 	r.github.pull(r.nothing, "a1")
 	r.github.pull(r.green, "c1", noRequiredChecksCheck)
 	r.github.pull(r.pushed, "b1", noRequiredChecksCheck)
-	r.showOnBoard(board)
-	r.js = mergedRootWaitsStream(t, natsURL)
-	ctx := context.Background()
-	if r.st, err = store.Open(ctx, cfg.PostgresDSN); err != nil {
-		t.Fatalf("open the store: %v", err)
-	}
-	t.Cleanup(r.st.Close)
-	if _, err := r.st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate the store: %v", err)
-	}
+	r.showOnBoard()
 	r.seed()
 	// The runtime provisions each claim's workspace itself (fake.Runtime's InPod), so a send-back's
 	// implementer start reaches the fake's launch without the daemon cloning acme/widgets from
@@ -192,15 +150,15 @@ func newNoRequiredChecksLive(t *testing.T, natsURL string) *noRequiredChecksLive
 	o := fakeRuntime(rt, &built{})
 	o.workflowTokens = &workflowTokenRecorder{}
 	o.githubAPI = r.github.url
-	r.d = startDaemonWithin(t, cfg, o, r.log(), 60*time.Second)
+	r.d = startDaemonWithin(t, r.cfg, o, r.log(), 60*time.Second)
 	return r
 }
 
 // showOnBoard puts the three issues on the Dispatch stand-in at the statuses they are seeded with.
-func (r *noRequiredChecksLive) showOnBoard(board *mergedRootWaitsDispatch) {
-	board.show(r.nothing.key, "testing")
-	board.show(r.green.key, "needs_review")
-	board.show(r.pushed.key, "testing")
+func (r *noRequiredChecksLive) showOnBoard() {
+	r.board.show(r.nothing.key, "testing")
+	r.board.show(r.green.key, "needs_review")
+	r.board.show(r.pushed.key, "testing")
 }
 
 // seed records the three issues as the daemon would hold them: each a root handed to Legion,
@@ -236,14 +194,14 @@ func (r *noRequiredChecksLive) seed() {
 		for _, seeded := range issues {
 			key := seeded.issue.key
 			if err := r.records.PutIssue(ctx, tx, record.Issue{
-				Key: key, Repo: noRequiredChecksRepo, DefaultBranch: "main", GitHubRepo: noRequiredChecksRepo, Tree: key, Project: r.cfg.Project,
+				Key: key, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: key, Project: r.cfg.Project,
 				Title: "an issue on " + seeded.issue.base, Phase: seeded.phase, Generation: 1, Status: seeded.status, DispatchStatus: seeded.status,
 				Rank: seeded.rank, LastDispatchSeq: 1, HandedOver: true,
 			}); err != nil {
 				return err
 			}
 			pr := seeded.pr
-			pr.State, pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.Failing = record.PullRequestOpen, key, noRequiredChecksRepo, seeded.issue.number, seeded.issue.branch(), []string{}
+			pr.State, pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.Failing = record.PullRequestOpen, key, liveRepo, seeded.issue.number, seeded.issue.branch(), []string{}
 			if err := r.records.PutPullRequest(ctx, tx, pr); err != nil {
 				return err
 			}
@@ -269,37 +227,6 @@ func (r *noRequiredChecksLive) seed() {
 	}
 }
 
-// log is where the booted daemon writes its own log: the file mergedRootWaitsLog names, and
-// nowhere when it names none.
-func (r *noRequiredChecksLive) log() *slog.Logger {
-	r.t.Helper()
-	path := os.Getenv(mergedRootWaitsLog)
-	if path == "" {
-		return quietLogger()
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		r.t.Fatalf("open the daemon's log %s: %v", path, err)
-	}
-	r.t.Cleanup(func() { file.Close() })
-	return slog.New(slog.NewTextHandler(file, &slog.HandlerOptions{Level: slog.LevelDebug}))
-}
-
-// step runs one of the proof's steps between its `== name` and `ok name (<s>s)` lines, as the
-// repository's live proofs print them.
-func (r *noRequiredChecksLive) step(name string, body func()) {
-	r.t.Helper()
-	started := time.Now()
-	fmt.Printf("== %s\n", name)
-	body()
-	fmt.Printf("ok %s (%ds)\n", name, int(time.Since(started).Seconds()))
-}
-
-// note prints what a step drove or read, under its heading.
-func (r *noRequiredChecksLive) note(format string, args ...any) {
-	fmt.Printf("   "+format+"\n", args...)
-}
-
 // Step 1. The base requires nothing, and CI settles the head with ci failed: the head has no
 // verdict, so the state's pull request carries no checksVerdict at all, the issue stays in testing,
 // and its architect is told no checks-red. Before this change the empty set read green.
@@ -317,7 +244,7 @@ func (r *noRequiredChecksLive) nothingRequiredFailedCheck() {
 	}
 	r.note("read back: issues[%s].pullRequest in GET /legion/v1/state has no checksVerdict key: %s", issue.key, r.rawJSON(pullRequest))
 	r.holdsWithoutNotice(issue, phase.Testing, "checks-red")
-	r.note("read back over %s: %s still in testing, and no checks-red notice on its architect's topic", noRequiredChecksSettle, issue.key)
+	r.note("read back over %s: %s still in testing, and no checks-red notice on its architect's topic", liveSettle, issue.key)
 }
 
 // Step 2. The same base now requires ci. The daemon's next pass reads it, and the same settlement,
@@ -406,8 +333,8 @@ func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt
 	pushed := r.publishPush(issue, "b1", "b2")
 	synchronized := r.publishSynchronize(issue, "b2")
 	r.note("drove the implementer's push of b2 onto b1 (src/widget.go, pusher legion-implement[bot]) and GitHub's synchronize of #%d to b2", issue.number)
-	r.waitProcessed(pushed)
-	r.waitProcessed(synchronized)
+	r.waitProcessed(pushed, pushed)
+	r.waitProcessed(synchronized, synchronized)
 	got = r.issue(issue.key)
 	if got.PullRequest == nil || got.PullRequest.Head != "b2" || got.PullRequest.FixAttempts != 1 {
 		t.Fatalf("after the push of b2 issues[%s].pullRequest is %+v, want head b2 and fixAttempts still 1: a push onto a head with no verdict counts nothing", issue.key, got.PullRequest)
@@ -436,16 +363,6 @@ func (r *noRequiredChecksLive) aPushOntoABaseThatRequiresNothingLeavesTheAttempt
 		t.Fatalf("%s's architect was told %d pr-blocked notices over the step, want the one the held red reported", issue.key, len(blocked))
 	}
 	r.note("read back: one checks-red notice on %s's architect's topic: %s; still the one pr-blocked", issue.key, told[0].Payload)
-}
-
-// issue is key as GET /legion/v1/state shows it now.
-func (r *noRequiredChecksLive) issue(key string) api.Issue {
-	r.t.Helper()
-	issue, ok := r.d.state().Issues[key]
-	if !ok {
-		r.t.Fatalf("the state records no issue %s", key)
-	}
-	return issue
 }
 
 // rawPullRequest is issues[key].pullRequest as GET /legion/v1/state sends it, each key as it is on
@@ -524,25 +441,11 @@ func (r *noRequiredChecksLive) waitRequired(issue noRequiredChecksIssue, want []
 		issue.base, want, noRequiredChecksRead, last.Required, r.github.unanswered())
 }
 
-// waitProcessed waits for the daemon's processed_events row for the GitHub envelope eventID, which
-// the intake writes in the transaction that applies the event.
-func (r *noRequiredChecksLive) waitProcessed(eventID string) {
-	r.t.Helper()
-	testwait.Eventually(r.t, "the daemon's record that it took "+eventID, func() bool {
-		var taken bool
-		if err := r.st.Pool().QueryRow(context.Background(),
-			"select exists(select 1 from processed_events where source = 'github' and event_id = $1)", eventID).Scan(&taken); err != nil {
-			r.t.Fatalf("read the processed event %s: %v", eventID, err)
-		}
-		return taken
-	})
-}
-
-// holdsWithoutNotice watches issue for noRequiredChecksSettle, failing if it leaves want or its
+// holdsWithoutNotice watches issue for liveSettle, failing if it leaves want or its
 // architect is told a notice of kind.
 func (r *noRequiredChecksLive) holdsWithoutNotice(issue noRequiredChecksIssue, want phase.Phase, kind string) {
 	r.t.Helper()
-	deadline := time.Now().Add(noRequiredChecksSettle)
+	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
 		if got := r.issue(issue.key); got.Phase != want {
 			r.t.Fatalf("%s is in %s, want %s", issue.key, got.Phase, want)
@@ -558,37 +461,24 @@ func (r *noRequiredChecksLive) holdsWithoutNotice(issue noRequiredChecksIssue, w
 // them, each payload replaced by the notice's reason.
 func (r *noRequiredChecksLive) waitNotices(issue noRequiredChecksIssue, kind string, count int) []listenerPublish {
 	r.t.Helper()
-	var got []listenerPublish
-	testwait.Eventually(r.t, fmt.Sprintf("%d %s notices to %s's architect", count, kind, issue.key), func() bool {
-		got = r.noticesOfKind(issue, kind)
-		return len(got) == count
-	})
-	return got
+	return r.waitNoticesOn(fmt.Sprintf("%d %s notices to %s's architect", count, kind, issue.key), r.architectTopic(issue), kind, count)
 }
 
 // noticesOfKind is every notice of kind the daemon has published to the architect topic of
 // issue's tree, each payload replaced by the notice's reason.
 func (r *noRequiredChecksLive) noticesOfKind(issue noRequiredChecksIssue, kind string) []listenerPublish {
 	r.t.Helper()
+	return r.noticesOn(r.architectTopic(issue), kind)
+}
+
+// architectTopic is the role topic the architect of issue's tree is told on.
+func (r *noRequiredChecksLive) architectTopic(issue noRequiredChecksIssue) string {
+	r.t.Helper()
 	architect, err := claim.NewToken(r.project, issue.key, claim.RoleArchitect)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	var got []listenerPublish
-	for _, published := range r.notices.acceptedOn(notify.RoleTopicPrefix + string(architect)) {
-		var payload struct {
-			Kind   string `json:"kind"`
-			Reason string `json:"reason"`
-		}
-		if err := json.Unmarshal([]byte(published.Payload), &payload); err != nil {
-			r.t.Fatalf("decode the notice payload %q: %v", published.Payload, err)
-		}
-		if payload.Kind == kind {
-			published.Payload = payload.Reason
-			got = append(got, published)
-		}
-	}
-	return got
+	return notify.RoleTopicPrefix + string(architect)
 }
 
 // wantRedAt fails unless the checks-red notice told names head and the required check, as the
@@ -598,11 +488,6 @@ func (r *noRequiredChecksLive) wantRedAt(issue noRequiredChecksIssue, told liste
 	if want := "CI is red at " + head + ": " + noRequiredChecksCheck; told.Payload != want {
 		r.t.Fatalf("%s's checks-red notice reads %q, want %q", issue.key, told.Payload, want)
 	}
-}
-
-// subjectRepo is the repository as a GitHub envelope's subject spells it.
-func (r *noRequiredChecksLive) subjectRepo() string {
-	return strings.ReplaceAll(noRequiredChecksRepo, "/", ".")
 }
 
 // publishSettlement publishes CI's settlement of head on issue's pull request with the one check
@@ -618,7 +503,7 @@ func (r *noRequiredChecksLive) publishSettlement(issue noRequiredChecksIssue, he
 	}
 	r.seq++
 	payload, err := json.Marshal(map[string]any{
-		"kind": "checks", "repo": noRequiredChecksRepo, "number": strconv.Itoa(issue.number), "sha": head,
+		"kind": "checks", "repo": liveRepo, "number": strconv.Itoa(issue.number), "sha": head,
 		"check_runs": []map[string]any{{"name": noRequiredChecksCheck, "id": r.seq}}, "generation": 1,
 		"snapshot": fmt.Sprintf("%s-%s-%d", issue.key, head, r.seq), "settled_at": time.Now().UnixMilli(),
 		"failed": failedGroup, "passed": passedGroup, "running": group(), "queued": group(), "cancelled": group(), "skipped": group(),
@@ -627,7 +512,7 @@ func (r *noRequiredChecksLive) publishSettlement(issue noRequiredChecksIssue, he
 		r.t.Fatalf("encode the settlement payload: %v", err)
 	}
 	subject := fmt.Sprintf("notifications.github.%s.pr.%d.checks", r.subjectRepo(), issue.number)
-	r.publish(subject, fmt.Sprintf("checks-%d-%s-%d", issue.number, head, r.seq), string(payload))
+	r.publish(subject, "github", fmt.Sprintf("checks-%d-%s-%d", issue.number, head, r.seq), string(payload))
 }
 
 // publishPush publishes the implementer's push of to onto from on issue's branch, changing code, as
@@ -635,7 +520,7 @@ func (r *noRequiredChecksLive) publishSettlement(issue noRequiredChecksIssue, he
 func (r *noRequiredChecksLive) publishPush(issue noRequiredChecksIssue, from, to string) string {
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
-		"kind": "push", "repo": noRequiredChecksRepo, "ref": "refs/heads/" + issue.branch(), "before": from, "after": to,
+		"kind": "push", "repo": liveRepo, "ref": "refs/heads/" + issue.branch(), "before": from, "after": to,
 		"changed_paths": "src/widget.go", "changed_paths_truncated": "false", "forced": "false",
 		"pusher": "legion-implement[bot]", "commit_count": "1", "head_subject": "fix the widget",
 	})
@@ -643,7 +528,7 @@ func (r *noRequiredChecksLive) publishPush(issue noRequiredChecksIssue, from, to
 		r.t.Fatalf("encode the push payload: %v", err)
 	}
 	subject := fmt.Sprintf("notifications.github.%s.push.branch.%s", r.subjectRepo(), issue.branch())
-	return r.publish(subject, fmt.Sprintf("push-%d-%s", issue.number, to), string(payload))
+	return r.publish(subject, "github", fmt.Sprintf("push-%d-%s", issue.number, to), string(payload))
 }
 
 // publishSynchronize publishes GitHub's synchronize of issue's pull request to head, as Envoy relays
@@ -651,37 +536,16 @@ func (r *noRequiredChecksLive) publishPush(issue noRequiredChecksIssue, from, to
 func (r *noRequiredChecksLive) publishSynchronize(issue noRequiredChecksIssue, head string) string {
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
-		"action": "synchronize", "kind": "pr", "repo": noRequiredChecksRepo, "number": strconv.Itoa(issue.number),
+		"action": "synchronize", "kind": "pr", "repo": liveRepo, "number": strconv.Itoa(issue.number),
 		"head_sha": head, "base_ref": issue.base, "head_ref": issue.branch(), "title": "an issue on " + issue.base,
-		"url":        "https://github.com/" + noRequiredChecksRepo + "/pull/" + strconv.Itoa(issue.number),
+		"url":        "https://github.com/" + liveRepo + "/pull/" + strconv.Itoa(issue.number),
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		r.t.Fatalf("encode the synchronize payload: %v", err)
 	}
 	subject := fmt.Sprintf("notifications.github.%s.pr.%d", r.subjectRepo(), issue.number)
-	return r.publish(subject, fmt.Sprintf("pr-%d-synchronize-%s", issue.number, head), string(payload))
-}
-
-// publish puts one GitHub envelope on the stream the daemon consumes, and returns its event id. The
-// event id carries the run's own project, since a processed event is deduplicated by its id across
-// the shared database, and this proof's runs share one.
-func (r *noRequiredChecksLive) publish(subject, eventID, payload string) string {
-	r.t.Helper()
-	eventID = r.cfg.Project + "-" + eventID
-	envelope, err := json.Marshal(map[string]any{
-		"event_id": eventID, "source": "github", "source_event_id": eventID, "topic": subject, "dedupe_key": eventID,
-		"issued_at": time.Now().UnixMilli(), "payload_summary": subject, "payload": payload, "trace_id": eventID,
-	})
-	if err != nil {
-		r.t.Fatalf("encode the %s envelope: %v", subject, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := r.js.Publish(ctx, subject, envelope); err != nil {
-		r.t.Fatalf("publish %s: %v", subject, err)
-	}
-	return eventID
+	return r.publish(subject, "github", fmt.Sprintf("pr-%d-synchronize-%s", issue.number, head), string(payload))
 }
 
 // noRequiredChecksGitHub is GitHub's REST API for acme/widgets as this proof's daemon reads it,
@@ -757,7 +621,7 @@ func (g *noRequiredChecksGitHub) ServeHTTP(w http.ResponseWriter, req *http.Requ
 		_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":null}}}`)
 		return
 	}
-	rest, ours := strings.CutPrefix(req.URL.Path, "/repos/"+noRequiredChecksRepo)
+	rest, ours := strings.CutPrefix(req.URL.Path, "/repos/"+liveRepo)
 	if req.Method == http.MethodGet && ours {
 		if g.answer(w, rest) {
 			return
@@ -772,7 +636,7 @@ func (g *noRequiredChecksGitHub) ServeHTTP(w http.ResponseWriter, req *http.Requ
 // had one.
 func (g *noRequiredChecksGitHub) answer(w http.ResponseWriter, rest string) bool {
 	if rest == "" {
-		g.write(w, map[string]any{"full_name": noRequiredChecksRepo, "default_branch": "main"})
+		g.write(w, map[string]any{"full_name": liveRepo, "default_branch": "main"})
 		return true
 	}
 	if base, ok := strings.CutPrefix(rest, "/rules/branches/"); ok {

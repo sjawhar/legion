@@ -21,7 +21,8 @@
 // What the proof stands in for lies outside the two rules. The broker is a native nats-server the
 // script starts and names in LEGION_E2E_NATS_URL, rather than the testcontainers one workflowNATS
 // starts. Dispatch is this package's own stand-in (workflowConfig's) extended to record what the
-// daemon writes to it, mergedRootWaitsDispatch. Envoy's listener is the package's noticeListener,
+// daemon writes to it, liveDispatch, from the harness this driver shares with the package's other
+// whole-daemon live proof (live_proof_test.go). Envoy's listener is the package's noticeListener,
 // which takes every notice the daemon publishes to a role topic. GitHub is the package's
 // repositoriesGitHub, and the two Apps' tokens are workflowTokenRecorder's placeholders. No agent
 // runs: every claim is launched by the package's fake runtime and driven over the daemon's own
@@ -35,71 +36,40 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
-	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
-// mergedRootWaitsNATSURL names the running nats-server the script hands the driver. Unset, the
-// driver skips rather than starting a broker of its own, so `go vet -tags e2e ./...` and a plain
-// `go test -tags e2e ./internal/daemon` still compile and run it.
-const mergedRootWaitsNATSURL = "LEGION_E2E_NATS_URL"
-
-// mergedRootWaitsLog names the file the booted daemon's own log is written to, at debug, for the
-// run's evidence. Unset, the daemon's log is dropped, as every other test in this package drops
-// it.
-const mergedRootWaitsLog = "LEGION_E2E_DAEMON_LOG"
-
-// The repository the project's Dispatch mapping serves (workflowConfig's servedMapping) and the
-// commits the two merges carry.
+// The commits the two merges carry.
 const (
-	mergedRootWaitsRepo        = "acme/widgets"
 	mergedRootWaitsParentMerge = "merge-parent"
 	mergedRootWaitsChildMerge  = "merge-child"
 )
 
-// mergedRootWaitsSettle is how long a step that must see nothing happen watches for it: the boot's
-// sweep of merged pull requests runs behind the API, so the restart's step waits this long for a
-// second notice that must never come.
-const mergedRootWaitsSettle = 3 * time.Second
-
 // mergedRootWaitsLive is one run of the proof: the booted daemon, the tree it runs, and the three
 // stand-ins the steps read the daemon's own writes back from.
 type mergedRootWaitsLive struct {
-	t       *testing.T
-	cfg     config.Config
-	rt      *fake.Runtime
-	built   *built
-	d       *daemon
-	js      jetstream.JetStream
-	board   *mergedRootWaitsDispatch
-	notices *noticeListener
-	st      *store.Store
-	records record.Store
-	project string
+	liveProof
+	rt    *fake.Runtime
+	built *built
 	// parent is the tree's root, the issue that is accepted and whose merge waits; child is the
 	// one issue beneath it.
 	parent, child string
@@ -128,9 +98,9 @@ type mergedRootWaitsLive struct {
 // waiting root's branch, which must leave the merge the root waits on, and last the child's merge,
 // which closes the root on that merge.
 func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
-	natsURL := os.Getenv(mergedRootWaitsNATSURL)
+	natsURL := os.Getenv(liveNATSURLEnv)
 	if natsURL == "" {
-		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; scripts/e2e/merged-root-waits.sh starts a nats-server and sets it", mergedRootWaitsNATSURL)
+		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; scripts/e2e/merged-root-waits.sh starts a nats-server and sets it", liveNATSURLEnv)
 	}
 	r := newMergedRootWaitsLive(t, natsURL)
 	r.step("step1-the-acceptance-waits-for-the-child", r.acceptanceRefused)
@@ -147,21 +117,8 @@ func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
 // child beneath it implementing on an open pull request of its own.
 func newMergedRootWaitsLive(t *testing.T, natsURL string) *mergedRootWaitsLive {
 	t.Helper()
-	cfg := workflowConfig(t, natsURL)
-	board := newMergedRootWaitsDispatch(t, cfg.Project)
-	dispatchServer := httptest.NewServer(board)
-	t.Cleanup(dispatchServer.Close)
-	cfg.DispatchURL = dispatchServer.URL
-	notices := newNoticeListener()
-	envoyServer := httptest.NewServer(notices)
-	t.Cleanup(envoyServer.Close)
-	cfg.EnvoyURL = envoyServer.URL
-
-	project, err := claim.ProjectToken(cfg.Project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	architect, err := claim.NewToken(project, cfg.Project+"-1", claim.RoleArchitect)
+	proof := newLiveProof(t, natsURL, workflowConfig(t, natsURL))
+	architect, err := claim.NewToken(proof.project, proof.cfg.Project+"-1", claim.RoleArchitect)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,32 +127,14 @@ func newMergedRootWaitsLive(t *testing.T, natsURL string) *mergedRootWaitsLive {
 		t.Fatal(err)
 	}
 	r := &mergedRootWaitsLive{
-		t: t, cfg: cfg, rt: fake.NewRuntime(), built: &built{}, board: board, notices: notices,
-		records: record.NewStore(), project: project, parent: cfg.Project + "-1", child: cfg.Project + "-2",
+		liveProof: proof, rt: fake.NewRuntime(), built: &built{},
+		parent: proof.cfg.Project + "-1", child: proof.cfg.Project + "-2",
 		parentPR: int(number) + 1, childPR: int(number) + 2, openedPR: int(number) + 3,
 		github: mergedRootWaitsGitHub(t), architectTopic: notify.RoleTopicPrefix + string(architect), seq: 1,
-	}
-	r.js = mergedRootWaitsStream(t, natsURL)
-	ctx := context.Background()
-	if r.st, err = store.Open(ctx, cfg.PostgresDSN); err != nil {
-		t.Fatalf("open the store: %v", err)
-	}
-	t.Cleanup(r.st.Close)
-	if _, err := r.st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate the store: %v", err)
 	}
 	r.seedTree()
 	r.boot()
 	return r
-}
-
-// mergedRootWaitsStream is a JetStream client of the script's nats-server with the stream the
-// daemon's intake consumes, which boot refuses to run without.
-func mergedRootWaitsStream(t *testing.T, natsURL string) jetstream.JetStream {
-	t.Helper()
-	js := workflowJetStream(t, natsURL)
-	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
-	return js
 }
 
 // mergedRootWaitsGitHub is GitHub as this proof's daemon reads it: every repository of the
@@ -234,7 +173,7 @@ func (r *mergedRootWaitsLive) seedTree() {
 	r.board.show(r.child, "in_progress")
 	r.write("the tree", func(tx pgx.Tx) error {
 		if err := r.records.PutIssue(ctx, tx, record.Issue{
-			Key: r.parent, Repo: mergedRootWaitsRepo, DefaultBranch: "main", GitHubRepo: mergedRootWaitsRepo, Tree: r.parent, Project: r.cfg.Project,
+			Key: r.parent, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: r.parent, Project: r.cfg.Project,
 			Title: "the tree's root", Phase: phase.Accepting, Generation: 1, Status: "needs_review", DispatchStatus: "needs_review", Rank: "U",
 			LastDispatchSeq: r.seq, HandedOver: true,
 		}); err != nil {
@@ -242,7 +181,7 @@ func (r *mergedRootWaitsLive) seedTree() {
 		}
 		parent := r.parent
 		if err := r.records.PutIssue(ctx, tx, record.Issue{
-			Key: r.child, Repo: mergedRootWaitsRepo, DefaultBranch: "main", GitHubRepo: mergedRootWaitsRepo, Tree: r.parent, Project: r.cfg.Project,
+			Key: r.child, Repo: liveRepo, DefaultBranch: "main", GitHubRepo: liveRepo, Tree: r.parent, Project: r.cfg.Project,
 			Title: "the child beneath it", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", DispatchStatus: "in_progress",
 			Rank: "V", LastDispatchSeq: r.seq,
 		}); err != nil {
@@ -252,8 +191,8 @@ func (r *mergedRootWaitsLive) seedTree() {
 			return err
 		}
 		for _, pr := range []record.PullRequest{
-			{State: record.PullRequestOpen, Issue: r.parent, Repo: mergedRootWaitsRepo, Number: r.parentPR, Branch: "legion/" + r.parent, HeadSHA: "head-parent", Failing: []string{}},
-			{State: record.PullRequestOpen, Issue: r.child, Repo: mergedRootWaitsRepo, Number: r.childPR, Branch: "legion/" + r.child, HeadSHA: "head-child", Failing: []string{}},
+			{State: record.PullRequestOpen, Issue: r.parent, Repo: liveRepo, Number: r.parentPR, Branch: "legion/" + r.parent, HeadSHA: "head-parent", Failing: []string{}},
+			{State: record.PullRequestOpen, Issue: r.child, Repo: liveRepo, Number: r.childPR, Branch: "legion/" + r.child, HeadSHA: "head-child", Failing: []string{}},
 		} {
 			if err := r.records.PutPullRequest(ctx, tx, pr); err != nil {
 				return err
@@ -294,22 +233,6 @@ func (r *mergedRootWaitsLive) boot() {
 	o.workflowTokens = &workflowTokenRecorder{}
 	o.githubAPI = r.github
 	r.d = startDaemonWithin(r.t, r.cfg, o, r.log(), 60*time.Second)
-}
-
-// log is where the booted daemon writes its own log: the file mergedRootWaitsLog names, appended
-// to across the restart, and nowhere when it names none.
-func (r *mergedRootWaitsLive) log() *slog.Logger {
-	r.t.Helper()
-	path := os.Getenv(mergedRootWaitsLog)
-	if path == "" {
-		return quietLogger()
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		r.t.Fatalf("open the daemon's log %s: %v", path, err)
-	}
-	r.t.Cleanup(func() { file.Close() })
-	return slog.New(slog.NewTextHandler(file, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // restart stops the daemon and boots another one on the same store, as an operator's `legion
@@ -415,21 +338,6 @@ func (c *mergedRootWaitsClaimant) grant() string {
 	return granted.GrantID
 }
 
-// step runs one of the proof's steps between its `== name` and `ok name (<s>s)` lines, as the
-// repository's live proofs print them.
-func (r *mergedRootWaitsLive) step(name string, body func()) {
-	r.t.Helper()
-	started := time.Now()
-	fmt.Printf("== %s\n", name)
-	body()
-	fmt.Printf("ok %s (%ds)\n", name, int(time.Since(started).Seconds()))
-}
-
-// note prints what a step drove or read, under its heading.
-func (r *mergedRootWaitsLive) note(format string, args ...any) {
-	fmt.Printf("   "+format+"\n", args...)
-}
-
 // write runs body in one transaction against the daemon's own database, failing the test with
 // what it was seeding on an error.
 func (r *mergedRootWaitsLive) write(what string, body func(tx pgx.Tx) error) {
@@ -458,16 +366,6 @@ func (r *mergedRootWaitsLive) seedIssue(what, key string, change func(issue *rec
 	r.note("seeded: %s", what)
 }
 
-// issue is key as GET /legion/v1/state shows it now.
-func (r *mergedRootWaitsLive) issue(key string) api.Issue {
-	r.t.Helper()
-	issue, ok := r.d.state().Issues[key]
-	if !ok {
-		r.t.Fatalf("the state records no issue %s", key)
-	}
-	return issue
-}
-
 // waitFor polls the state until want is true of key, failing with what it last saw.
 func (r *mergedRootWaitsLive) waitFor(what, key string, want func(api.Issue) bool) api.Issue {
 	r.t.Helper()
@@ -477,38 +375,6 @@ func (r *mergedRootWaitsLive) waitFor(what, key string, want func(api.Issue) boo
 		return want(last)
 	})
 	return last
-}
-
-// waitNotices polls until the parent's architect has been published count pr-merged notices, and
-// returns them.
-func (r *mergedRootWaitsLive) waitNotices(what string, count int) []listenerPublish {
-	r.t.Helper()
-	var got []listenerPublish
-	testwait.Eventually(r.t, what, func() bool {
-		got = r.noticesOfKind("pr-merged")
-		return len(got) == count
-	})
-	return got
-}
-
-// noticesOfKind is every notice of kind the daemon has published to the parent's architect topic.
-func (r *mergedRootWaitsLive) noticesOfKind(kind string) []listenerPublish {
-	r.t.Helper()
-	var got []listenerPublish
-	for _, published := range r.notices.acceptedOn(r.architectTopic) {
-		var payload struct {
-			Kind   string `json:"kind"`
-			Reason string `json:"reason"`
-		}
-		if err := json.Unmarshal([]byte(published.Payload), &payload); err != nil {
-			r.t.Fatalf("decode the notice payload %q: %v", published.Payload, err)
-		}
-		if payload.Kind == kind {
-			published.Payload = payload.Reason
-			got = append(got, published)
-		}
-	}
-	return got
 }
 
 // Step 1. The architect accepts the root while the child is still in the workflow: the daemon
@@ -572,7 +438,7 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 
 	r.publishMerge(r.parent, r.parentPR, mergedRootWaitsParentMerge)
 	r.note("drove the root's merge: a notifications.github.%s.pr.%d envelope, merged at %s",
-		strings.ReplaceAll(mergedRootWaitsRepo, "/", "."), r.parentPR, mergedRootWaitsParentMerge)
+		r.subjectRepo(), r.parentPR, mergedRootWaitsParentMerge)
 	got := r.waitFor("the merge recorded on the root's pull request", r.parent, func(got api.Issue) bool {
 		return got.PullRequest != nil && got.PullRequest.State == string(record.PullRequestMerged)
 	})
@@ -600,7 +466,7 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 		}
 	}
 	r.note("read back: the Dispatch stand-in took no status write and no message for %s", r.parent)
-	told := r.waitNotices("the architect told once that the close waits", 1)
+	told := r.waitNoticesOn("the architect told once that the close waits", r.architectTopic, "pr-merged", 1)
 	if !strings.Contains(told[0].Payload, r.child) || !strings.Contains(told[0].Payload, fmt.Sprint(r.parentPR)) {
 		t.Fatalf("the pr-merged notice reads %q, want it naming pull request #%d and %s", told[0].Payload, r.parentPR, r.child)
 	}
@@ -674,17 +540,10 @@ func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
 	t := r.t
 	eventID := r.publishOpened(r.parent, r.openedPR)
 	r.note("drove a pull request opened from %s's branch: a notifications.github.%s.pr.%d envelope, action opened, head_ref legion/%s",
-		r.parent, strings.ReplaceAll(mergedRootWaitsRepo, "/", "."), r.openedPR, r.parent)
-	testwait.Eventually(t, "the daemon's record that it took the opened", func() bool {
-		var taken bool
-		if err := r.st.Pool().QueryRow(context.Background(),
-			"select exists(select 1 from processed_events where source = 'github' and event_id = $1)", eventID).Scan(&taken); err != nil {
-			t.Fatalf("read the processed event %s: %v", eventID, err)
-		}
-		return taken
-	})
+		r.parent, r.subjectRepo(), r.openedPR, r.parent)
+	r.waitProcessed("the opened", eventID)
 	r.note("read back: the daemon took the event — its processed_events row for github %s", eventID)
-	deadline := time.Now().Add(mergedRootWaitsSettle)
+	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
 		got := r.issue(r.parent)
 		if got.Phase != phase.AwaitingMerge || got.PullRequest == nil ||
@@ -696,7 +555,7 @@ func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
 	}
 	got := r.issue(r.parent)
 	r.note("read back over %s: %s is in %s on pull request #%d, pullRequest.state %s — not #%d",
-		mergedRootWaitsSettle, r.parent, got.Phase, got.PullRequest.Number, got.PullRequest.State, r.openedPR)
+		liveSettle, r.parent, got.Phase, got.PullRequest.Number, got.PullRequest.State, r.openedPR)
 }
 
 // Step 5. The daemon is restarted at the waiting root's state. The boot's sweep of merged pull
@@ -704,26 +563,26 @@ func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
 // nobody: a restart must not repeat the architect's notice, and a root can wait across many boots.
 func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 	t := r.t
-	before := len(r.waitNotices("the one notice of the wait", 1))
+	before := len(r.waitNoticesOn("the one notice of the wait", r.architectTopic, "pr-merged", 1))
 	r.restart()
 	// The boot's work is under way: this boot relaunched the claim the fixture left unfinished,
 	// which its reconciliation does. The window below then watches the wait, and step 4 reads the
 	// notice count once more at the end of the run, past every retry a slow boot fact can take.
 	r.awaitLaunch(r.token(r.child, claim.RoleImplementer))
 	r.note("drove a restart of the daemon at the waiting root's state; boot %d, its reconciliation run", r.d.state().Daemon.Boots)
-	deadline := time.Now().Add(mergedRootWaitsSettle)
+	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
 		if got := r.issue(r.parent); got.Phase != phase.AwaitingMerge || got.PullRequest.State != string(record.PullRequestMerged) {
 			t.Fatalf("after the restart %s is in %s on a %s pull request, want it still awaiting its merge", r.parent, got.Phase, got.PullRequest.State)
 		}
-		if told := r.noticesOfKind("pr-merged"); len(told) != before {
+		if told := r.noticesOn(r.architectTopic, "pr-merged"); len(told) != before {
 			t.Fatalf("the boot told the architect %d pr-merged notices, want the %d the wait began with", len(told), before)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	got := r.issue(r.parent)
 	r.note("read back over %s: %s is in %s, pullRequest.state %s, and the architect's pr-merged notices are still %d",
-		mergedRootWaitsSettle, r.parent, got.Phase, got.PullRequest.State, before)
+		liveSettle, r.parent, got.Phase, got.PullRequest.State, before)
 }
 
 // Step 4. The child's own pull request merges, which closes it and takes the last open member out
@@ -738,7 +597,7 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	suspendsBefore := len(r.rt.CallsOf("Suspend"))
 	r.publishMerge(r.child, r.childPR, mergedRootWaitsChildMerge)
 	r.note("drove the child's merge: a notifications.github.%s.pr.%d envelope, merged at %s",
-		strings.ReplaceAll(mergedRootWaitsRepo, "/", "."), r.childPR, mergedRootWaitsChildMerge)
+		r.subjectRepo(), r.childPR, mergedRootWaitsChildMerge)
 
 	child := r.waitFor("the child closed", r.child, func(got api.Issue) bool { return got.Phase == phase.Done })
 	r.note("read back: %s is in %s, status %s", r.child, child.Phase, child.Status)
@@ -762,7 +621,7 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 		t.Fatalf("the close suspended %d claims, want the tree's", len(suspends)-suspendsBefore)
 	}
 	r.note("read back: the fake runtime was asked to suspend %d of the tree's processes", len(suspends)-suspendsBefore)
-	if told := r.noticesOfKind("pr-merged"); len(told) != 1 {
+	if told := r.noticesOn(r.architectTopic, "pr-merged"); len(told) != 1 {
 		t.Fatalf("the architect was told %d pr-merged notices over the whole run, want the one the wait began with", len(told))
 	}
 	r.note("read back: one pr-merged notice over the whole run")
@@ -776,16 +635,16 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 func (r *mergedRootWaitsLive) publishMerge(issue string, number int, mergeSHA string) {
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
-		"action": "closed", "kind": "pr", "repo": mergedRootWaitsRepo, "number": fmt.Sprint(number),
+		"action": "closed", "kind": "pr", "repo": liveRepo, "number": fmt.Sprint(number),
 		"merged": "true", "merge_commit_sha": mergeSHA, "head_sha": "head-" + fmt.Sprint(number),
 		"base_ref": "main", "head_ref": "legion/" + issue, "title": "the merge the proof drives",
-		"url":        "https://github.com/" + mergedRootWaitsRepo + "/pull/" + fmt.Sprint(number),
+		"url":        "https://github.com/" + liveRepo + "/pull/" + fmt.Sprint(number),
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		r.t.Fatalf("encode the merge payload: %v", err)
 	}
-	subject := "notifications.github." + strings.ReplaceAll(mergedRootWaitsRepo, "/", ".") + ".pr." + fmt.Sprint(number)
+	subject := "notifications.github." + r.subjectRepo() + ".pr." + fmt.Sprint(number)
 	r.publish(subject, "github", fmt.Sprintf("pr-%d-merged", number), string(payload))
 }
 
@@ -795,16 +654,16 @@ func (r *mergedRootWaitsLive) publishMerge(issue string, number int, mergeSHA st
 func (r *mergedRootWaitsLive) publishOpened(issue string, number int) string {
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
-		"action": "opened", "kind": "pr", "repo": mergedRootWaitsRepo, "number": fmt.Sprint(number),
+		"action": "opened", "kind": "pr", "repo": liveRepo, "number": fmt.Sprint(number),
 		"head_sha": "head-" + fmt.Sprint(number), "base_ref": "main", "head_ref": "legion/" + issue,
 		"title":      "a pull request opened from the waiting root's branch",
-		"url":        "https://github.com/" + mergedRootWaitsRepo + "/pull/" + fmt.Sprint(number),
+		"url":        "https://github.com/" + liveRepo + "/pull/" + fmt.Sprint(number),
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		r.t.Fatalf("encode the opened payload: %v", err)
 	}
-	subject := "notifications.github." + strings.ReplaceAll(mergedRootWaitsRepo, "/", ".") + ".pr." + fmt.Sprint(number)
+	subject := "notifications.github." + r.subjectRepo() + ".pr." + fmt.Sprint(number)
 	return r.publish(subject, "github", fmt.Sprintf("pr-%d-opened", number), string(payload))
 }
 
@@ -824,160 +683,11 @@ func (r *mergedRootWaitsLive) publishChildPark(status string) {
 		"created_at": time.Now().UTC().Format(time.RFC3339Nano),
 		"payload": map[string]any{
 			"key": key, "status": status, "title": "the child beneath it", "parent": parent, "rank": "V",
-			"labels": []string{}, "last_seq": r.seq, "project": r.cfg.Project, "resolved_repo": mergedRootWaitsRepo,
+			"labels": []string{}, "last_seq": r.seq, "project": r.cfg.Project, "resolved_repo": liveRepo,
 		},
 	})
 	if err != nil {
 		r.t.Fatalf("encode the Dispatch event: %v", err)
 	}
 	r.publish("notifications.dispatch.issue."+key+"."+"issue.updated", "dispatch", fmt.Sprintf("%s-%s-%d", key, status, r.seq), string(payload))
-}
-
-// publish puts one Envoy envelope on the stream the daemon consumes, and returns its event id. The
-// event id carries the run's own project, since a processed event is deduplicated by its id across
-// the shared database, and this proof's runs share one.
-func (r *mergedRootWaitsLive) publish(subject, source, eventID, payload string) string {
-	r.t.Helper()
-	eventID = r.cfg.Project + "-" + eventID
-	envelope, err := json.Marshal(map[string]any{
-		"event_id": eventID, "source": source, "source_event_id": eventID, "topic": subject, "dedupe_key": eventID,
-		"issued_at": time.Now().UnixMilli(), "payload_summary": subject, "payload": payload, "trace_id": eventID,
-	})
-	if err != nil {
-		r.t.Fatalf("encode the %s envelope: %v", subject, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := r.js.Publish(ctx, subject, envelope); err != nil {
-		r.t.Fatalf("publish %s: %v", subject, err)
-	}
-	return eventID
-}
-
-// mergedRootWaitsDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an
-// empty issue list — grown into the board the daemon writes to: it holds each issue's status, as
-// Dispatch's own board does, answers the issue read the outbox makes before a status write, and
-// records every status and message the daemon posted, so a step can read back what the daemon
-// told Dispatch and tell a write that never came from one it cannot see. Anything else is a call
-// this proof does not expect, and fails the test as workflowConfig's stand-in does.
-type mergedRootWaitsDispatch struct {
-	t       *testing.T
-	project string
-	mu      sync.Mutex
-	// status is each issue's status as this board holds it, the daemon's writes applied.
-	status map[string]string
-	posted []mergedRootWaitsWrite
-}
-
-// mergedRootWaitsWrite is one write the daemon made to Dispatch: a status it set on an issue, or
-// a message it posted on one.
-type mergedRootWaitsWrite struct {
-	Issue  string
-	Status string
-	Body   string
-}
-
-func newMergedRootWaitsDispatch(t *testing.T, project string) *mergedRootWaitsDispatch {
-	return &mergedRootWaitsDispatch{t: t, project: project, status: map[string]string{}}
-}
-
-// show puts key on the board at status, as the seeded tree stands on Dispatch before the daemon
-// writes anything.
-func (b *mergedRootWaitsDispatch) show(key, status string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.status[key] = status
-}
-
-func (b *mergedRootWaitsDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if servedMapping(b.t, w, req, b.project) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	path := req.URL.Path
-	key := issueOfDispatchPath(path)
-	switch {
-	case req.Method == http.MethodGet && path == "/api/v1/issues":
-		_, _ = io.WriteString(w, `[]`)
-	case req.Method == http.MethodGet && path == "/healthz":
-		_, _ = io.WriteString(w, `{"status":"ok","commit":null}`)
-	case req.Method == http.MethodGet && strings.HasSuffix(path, "/events"):
-		// The outbox reads an issue's events to see whether its message is already posted; this
-		// board keeps none, so every message the daemon decides to post is posted.
-		_, _ = io.WriteString(w, `[]`)
-	case req.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/issues/") && key != "":
-		b.showIssue(key, w)
-	case req.Method == http.MethodPost && strings.HasSuffix(path, "/messages"):
-		b.record(mergedRootWaitsWrite{Issue: key, Body: b.decode(req, w)}, w)
-	case req.Method == http.MethodPatch && strings.HasPrefix(path, "/api/v1/issues/"):
-		write := mergedRootWaitsWrite{Issue: key, Status: b.decode(req, w)}
-		b.show(key, write.Status)
-		b.record(write, w)
-	default:
-		b.t.Errorf("Dispatch request = %s %s", req.Method, path)
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	}
-}
-
-// showIssue answers the issue read the outbox makes before a status write: the board's own status
-// for it, with the Legion label the tree runs under.
-func (b *mergedRootWaitsDispatch) showIssue(key string, w http.ResponseWriter) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"key": key, "project": b.project, "title": key, "status": b.status[key], "rank": "U",
-		"labels": []string{"legion"}, "last_seq": 1, "resolved_repo": mergedRootWaitsRepo,
-	}); err != nil {
-		b.t.Errorf("write the Dispatch issue %s: %v", key, err)
-	}
-}
-
-// decode is the write's status or body, whichever the daemon sent.
-func (b *mergedRootWaitsDispatch) decode(req *http.Request, w http.ResponseWriter) string {
-	var write struct {
-		Status string `json:"status"`
-		Body   string `json:"body"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&write); err != nil {
-		b.t.Errorf("decode the Dispatch write to %s: %v", req.URL.Path, err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return ""
-	}
-	if write.Status != "" {
-		return write.Status
-	}
-	return write.Body
-}
-
-func (b *mergedRootWaitsDispatch) record(write mergedRootWaitsWrite, w http.ResponseWriter) {
-	b.mu.Lock()
-	b.posted = append(b.posted, write)
-	b.mu.Unlock()
-	_, _ = io.WriteString(w, `{}`)
-}
-
-// writes is every status the daemon has set and every message it has posted, oldest first.
-func (b *mergedRootWaitsDispatch) writes() []mergedRootWaitsWrite {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]mergedRootWaitsWrite(nil), b.posted...)
-}
-
-// wrote says whether the daemon set issue to status.
-func (b *mergedRootWaitsDispatch) wrote(issue, status string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, write := range b.posted {
-		if write.Issue == issue && write.Status == status {
-			return true
-		}
-	}
-	return false
-}
-
-// issueOfDispatchPath is the issue key in /api/v1/issues/<key>[/...].
-func issueOfDispatchPath(path string) string {
-	rest := strings.TrimPrefix(path, "/api/v1/issues/")
-	key, _, _ := strings.Cut(rest, "/")
-	return key
 }

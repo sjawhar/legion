@@ -1921,7 +1921,8 @@ names the PostgreSQL the daemon migrates and runs on; the script starts none, so
 devbox container and a pod's own embedded PostgreSQL all satisfy it. The broker is the run's own:
 the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with
 `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it
-(`-p -1`, read back from its log) and stopped on any exit.
+(`-p -1`, read back from its log) and stopped on any exit. The four checks below are
+[`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `no-required-checks.sh` makes too.
 
 | check | what it holds |
 | :--- | :--- |
@@ -1962,8 +1963,8 @@ package's fake runtime and brought to ready over the daemon's own worker stream 
 The records that put the tree at each step are seeded through the store, as every daemon test
 seeds its fixture, and each seed is printed as one. The configuration load, the store and its
 migrations, the HTTP API, the claim supervision, `openWorkflow`, the JetStream consumers and the
-outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fresh `/tmp`
-directory, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
+outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fresh directory under
+`TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
 which the driver writes through `LEGION_E2E_DAEMON_LOG`.
 
 ## no-required-checks.sh
@@ -1980,7 +1981,9 @@ the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the scri
 `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it
 (`-p -1`, read back from its log) and stopped on any exit. A run takes about seven minutes: the
 daemon reads what each base branch requires at boot and every two minutes after
-(`requiredChecksInterval`), and the proof waits for three of those reads.
+(`requiredChecksInterval`), and the proof waits for three of those reads. The four checks below
+are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` makes
+too.
 
 | check | what it holds |
 | :--- | :--- |
@@ -2017,15 +2020,16 @@ switch), and the `processed_events` rows of the push and the synchronize.
 What the proof stands in for lies outside the rule: the broker is a native `nats-server` rather
 than the testcontainers one the daemon's other NATS tests start, GitHub is a REST stand-in that
 also answers the repository a launch reads and a GraphQL root that knows no pull request, Dispatch
-is the board the `merged-root-waits.sh` driver keeps, Envoy's listener is the package's
-`noticeListener`, the two Apps' tokens are placeholders, and no agent runs: a send-back's
-implementer is launched by the package's fake runtime, which provisions its own workspace so the
-daemon clones nothing, and never registers. The records are seeded through the store, as every
-daemon test seeds its fixture, and each seed is printed as one. The configuration, the store and
-its migrations, the HTTP API, `openWorkflow` and its required-checks pass, the JetStream consumers
-and the outbox lanes are the real ones. `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh
-directory under `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the
-daemon's own, which the driver writes through `LEGION_E2E_DAEMON_LOG`.
+is the board both whole-daemon drivers share (`liveDispatch`, in
+`internal/daemon/live_proof_test.go`), Envoy's listener is the package's `noticeListener`, the two
+Apps' tokens are placeholders, and no agent runs: a send-back's implementer is launched by the
+package's fake runtime, which provisions its own workspace so the daemon clones nothing, and never
+registers. The records are seeded through the store, as every daemon test seeds its fixture, and
+each seed is printed as one. The configuration, the store and its migrations, the HTTP API,
+`openWorkflow` and its required-checks pass, the JetStream consumers and the outbox lanes are the
+real ones. `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and
+printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver
+writes through `LEGION_E2E_DAEMON_LOG`.
 
 ## lib/free-port.sh
 
@@ -2892,6 +2896,37 @@ trap. `LEGION_E2E_KIND` names the kind binary when it is not on `PATH`.
 | `kind_sandbox_load_image IMAGE` | pulls `IMAGE`, which must be named by digest, into the node's containerd, so a pod's start never waits on a registry |
 | `kind_sandbox_internal_kubeconfig FILE` | writes the kubeconfig a container on the kind network reads, whose server is the node's address on that network |
 | `kind_sandbox_teardown STATUS EVIDENCE` | when `STATUS` is not 0, writes the cluster's pods, the `legion` namespace's Sandboxes, volume claims, events and container logs to `EVIDENCE/cluster-at-failure.txt`; then deletes the cluster. It does nothing before `kind_sandbox_create` named a cluster, or once the cluster is gone |
+
+## lib/live-daemon-proof.sh
+
+The run a whole-daemon live proof makes around its driver. `merged-root-waits.sh` and
+`no-required-checks.sh` differ only in what their driver proves, so each sets its own values and
+makes this run.
+
+```sh
+. "$root/scripts/e2e/lib/live-daemon-proof.sh"     # sourced, never run
+live_daemon_proof LABEL SLUG TEST EVIDENCE         # the script's last command
+```
+
+The caller sets `set -euo pipefail` and `root`, the checkout. `live_daemon_proof` starts the
+transcript ([`lib/transcript.sh`](#libtranscriptsh)) in the evidence directory, then runs the four
+checks each script's section lists — `prerequisites`, `broker`, `driver` and `proof` — each
+printing `== <check>`, what it observed and `ok <check> (<s>s)`, and the first that fails
+`FAIL <check>: <why>`. On any exit it stops the `nats-server`, removes the work directory and
+prints `LABEL e2e: PASS in <n>s (evidence: <dir>)`, or
+`LABEL e2e: FAIL at <check> after <n>s (evidence: <dir>)` on stderr.
+
+| argument | is |
+| :--- | :--- |
+| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks` |
+| `SLUG` | the name of the run's own files under `TMPDIR` (or `/tmp` when it is unset): the work directory `legion-e2e-SLUG.<pid>.*`, which holds the broker's store and the driver binary `SLUG.test`, and the evidence directory `legion-e2e-SLUG-evidence.*` when `EVIDENCE` is empty |
+| `TEST` | the one test the driver runs (`-test.run '^TEST$'`); `proof` fails unless the driver reports `--- PASS: TEST`, so a driver that skipped, or a pattern that matched nothing, is no pass |
+| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
+
+The two drivers share their Go harness the same way: `internal/daemon/live_proof_test.go`
+(`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`),
+the stream the daemon's intake consumes, the Dispatch board stand-in (`liveDispatch`), the store,
+and the envelope, notice and `processed_events` reads and writes a step makes.
 
 ## lib/secret-leaks.ts
 
