@@ -2,165 +2,185 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-179",
-  "completed": "2026-10-25T19:58:00Z",
+  "completed": "2026-10-26T07:28:09Z",
   "plan": "dispatch://INFRA-179/artifact/plan-md",
+  "specVersion": 23,
+  "branchHeadPlannedFrom": "e3fe50ff65e8",
+  "architectDecisions": [
+    {
+      "decision": "The budget charges structs (option 2), as a plan departure; the spec does not change.",
+      "source": "Envoy message 6efccd271528e3c6c9690491db6a1a1a from the INFRA-179 architect, 2026-10-26T07:02:03Z",
+      "detail": "Charge each integrated struct at the measured per-struct price plus a split margin, in a part a rendering count does not clear; apply the decode-cap refusal (4413) on the room's integrated struct total; add acceptance (a) gcflood client refused with RSS bounded, (b) frames past the decode cap refused 4413 with the stored document still decoding, (c) over-charge guard on A3's rooms, (d) keystroke benchmark within the tenth."
+    },
+    {
+      "decision": "Two standing instructions for the implementer (dispatch://INFRA/artifact/goals-md).",
+      "source": "Envoy message cbc32ff746a78e60796a420fa26b8c4d from the INFRA-179 architect, 2026-10-26T07:10:14Z",
+      "detail": "A defect found in code this change touches or depends on is fixed in this pull request, not filed. Merge main into legion/INFRA-179 only to resolve a conflict GitHub reports, or when the only red check is a failure main has since fixed."
+    }
+  ],
+  "remainingWork": [
+    "Task 1: route BenchmarkKeystrokeBesideReads's keystrokes through weighPeerUpdate at head; gate every row's p50 within +10% of base (GOMAXPROCS=1, -benchtime 1x -count 6, benchstat); a row over stops the work and goes to the architect.",
+    "Task 2: an allocation-free V1 update walker (internal/dispatch/docs/update_walk.go) ported from ygo's pendingScanner and decodeItem; refuses what ygo's decoder refuses plus ContentDoc and roots other than fragmentName and marksMapName; differential, set-relation and fuzz tests.",
+    "Task 3: the hook walks every update; a walk refusal returns an error without apply (SyncStatus(0), nothing integrated); the struct-total 4413; deletes under pressure up to a reserve; applies over 64 KiB under a measured pod-wide semaphore; stale comments in peer_update.go rewritten.",
+    "Task 4: the room's struct total: exact walk of the encoded state at load and at each count, plus hook additions (structs, two splits each, two per delete range), stale after server writes, confirmed and cached before a 4413.",
+    "Task 5: R5 asks whether the document the write leaves decodes: clock sum plus parked terms plus the write's bound, else copy plus write plus walk in the measurer's turn; refuseUndecodable gains the parked terms; A6 tests at the cap including a parked shape.",
+    "Task 6: budget: permanent structure part at measured prices; uncounted added content at the densest price replacing charge.took(len(observer payload)); early count past a threshold; admission waits for its sweep before refusing; server-opened rooms over budget evicted once unused; pressure delete reserve; committed heap tests for every price and the semaphore's transient.",
+    "Task 7: repeat the floor measurement on the heaviest browser-grown state; 64 MiB is the come-back line.",
+    "Task 8: real-process proofs: A1 added cases (a)-(d), A3 first drive with no refusal while a gone room is charged and whole-state handoffs in the burst, the over-charge guard, the second drive reworked to the spec's words, the A4 server-opened-room case, the before picture on the merge base.",
+    "Task 9: delete the dead pmdoc element-gate test and fix its citation; update cmd/dispatch/README.md, cmd/dispatch/AGENTS.md, packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md and packages/envoy/CHANGELOG.md.",
+    "Task 10: A2 at base and head with the stated reds; open the pull request with Dispatch: INFRA-179; production check after the deploy with the deployment's command."
+  ],
   "requiredSkills": {
     "implement": [
-      "legion-worker: the implementer's own part of it — the pull request body and what counts as a proof (references/pr-body.md), review threads (references/review-threads.md), and conflicts and rewrites (references/conflicts-and-rewrites.md); this change touches the editor, so its proof is a browser run on a production-like surface, not a unit test",
-      "ce-simplify-code: the simplify pass over the new hook, budget and editor code before the phase completes, since this change adds a second byte budget and a second close-code path beside existing ones and must reuse their shape rather than start a third convention",
-      "dispatch-first and dispatch: every write to Dispatch this phase makes (a finding outside the issue is an ask, never a new issue)"
+      "legion-worker: the implementer's part, with references/pr-body.md (body, proofs, simplify pass), references/review-threads.md and references/conflicts-and-rewrites.md (a forward merge is likely once the pull request opens, since main moved on the same files); the editor is touched, so A2's proof is a Chromium run, not a unit test",
+      "ce-simplify-code: the simplify pass over the walker, the hook and the budget's new parts, which add a third charge part and a second decode-free path beside existing ones and must reuse their shape",
+      "dispatch-first and dispatch: every write to Dispatch this phase makes; a finding outside the issue is an ask, never a new issue"
     ],
     "test": [
-      "legion-worker: references/pr-body.md defines what the tester drives (the application on a production-like surface, trying to break it) and what it may not re-run (lint, types and the unit suites are CI's work), which matters here because most of this change's evidence is a real-process Go drive and a real browser run",
+      "legion-worker: references/pr-body.md defines what the tester drives (the real Dispatch process over real websockets, the Chromium e2e, a hostile non-editor client) and what it may not re-run (lint, types, unit suites are CI's work)",
       "dispatch-first and dispatch: for any ask the tester opens about something outside this issue"
     ],
     "review": [
-      "legion-worker: references/merge-gate.md for the review round's order (read the code commit's checks on GitHub, push the handoff, review the head that push made, then complete) and references/review-threads.md for answering and resolving threads one by one",
+      "legion-worker: references/merge-gate.md for the review round's order and references/review-threads.md for answering and resolving threads one by one; the reviewer reads plan.md's ten departures beside spec v23",
       "dispatch-first and dispatch: for any ask the reviewer opens"
     ]
   },
   "gapAnalysis": {
     "findings": [
       {
-        "finding": "F1. The budget's refusal cannot reach a browser. The spec refuses the next browser before its socket is upgraded with a reason that names the bound, but a browser's WebSocket interface exposes neither the status nor the body of a refused handshake, so A2's third case (the person is shown that reason and tries again) is unprovable as written. websocket.go:172-174 already records the rule, which is why the schema refusal completes the upgrade only to close it.",
-        "answer": "The plan refuses by completing the upgrade and closing with a new transient close code, 4503 / DOC_BUSY, as refuseOutsideSchema does with 4409 (plan T7, T4). No room is created and no document is loaded, which is the memory property the spec's wording protects. Recorded as spec departure 1; A4's wording changes from 'before its socket is upgraded' to 'before any room is created'."
+        "finding": "P1. Content outside the rendering (margin map entries, other named roots, Any/JSON values, binary, subdocuments, parked content) grows heap with its content, which a per-struct price and update bytes cleared by the next count do not price.",
+        "answer": "Task 2 refuses subdocuments and roots other than the fragment and the margin map (after confirming the editor writes no other); task 6 charges unrendered content its encoded bytes at a measured heap-per-byte for its kind in the part only retirement clears, pinned by committed heap tests. Departures 4 and 5."
       },
       {
-        "finding": "F2. 'What it inserts' is undefined for a resync, and read literally A1's whole-state case contradicts A1's refusal case: a browser handing over a whole at-bound document would be refused and closed. The same ambiguity decides the editor's half — deleting the saved row does not remove the refused text from the browser's in-memory document, so the next sync resends it and earns the same refusal.",
-        "answer": "The plan states the measure as what the update adds beyond the room's own state, taken against the room's state vector (crdt.DiffUpdateV1, crdt/merge.go:289, already used at fold.go:160; or crdt.ContentIDsFromUpdateV1), and states that the editor drops the refused edit by deleting that frame's saved row and rebuilding the document from a fresh server read through ProofDocument's existing admit() path before reconnecting (plan T2, T5). Recorded as spec departure 2."
+        "finding": "P2. A frame that fails to decode partway still integrates its earlier structs, and today's hook answers a decode error by calling apply(), bypassing the 8 KiB and creep rules.",
+        "answer": "Task 3: a walk refusal returns an error without calling apply, so ygo answers SyncStatus(0) and integrates nothing; task 2's set-relation test (every update ygo applies cleanly is walked; every update walked applies) and fuzz seed with a valid GC run ending in a bad tag; A1 case (c)."
       },
       {
-        "finding": "F3. The element gate rests on a density claim the code contradicts: the spec opens the element half at 65,536 bytes of rendering 'since a rendering makes at most one element per byte', while pmdoc/elements.go:16-27 records up to 1,421 elements a kibibyte (about 1.4 a byte) and nodeGuard's comment allows about twice the weight. A browser could reach the element bound at roughly 46 KiB with nothing measuring it.",
-        "answer": "The gate opens at MaxDocumentElements / 4, 16 KiB of rendering, and a Go test measures the densest shapes the repository knows (cmd/dispatch/memory_shapes_test.go plus empty list items) and fails if any exceeds four elements a byte (plan T2). A1's element case is driven by the densest shape rather than by headings. Recorded as spec departures 3 and 8."
+        "finding": "P3. The planned struct total misses server writes, skips before parked items, parked delete ranges and the per-client delete-range cap; an undercount never triggers the confirmation; the delete-only question.",
+        "answer": "Task 4: the exact count walks the encoded state, which includes parked structs and parked delete ranges, at load and at each count; server writes mark the total stale and a stale total near the cap is confirmed before the hook admits; the walker enforces the per-client delete-range cap; deletes count two structs a range and the 4413 applies to them (departure 6); A1 case (b) has a GC shape and a delete-range shape."
       },
       {
-        "finding": "F4. 'An API write needs no room' is true of the fork only: the publish half of an API write opens a room through srv.Apply (livewrite.go:303, coldFork's comment at :343-352), so a budget enforced inside Apply would refuse the write A4 requires to succeed.",
-        "answer": "The plan enforces the budget only at socket admission, never inside srv.Apply, and names the API write's publish beside the mark sweep and settlement's repair in the exemption list (plan T7). Recorded as spec departure 5."
+        "finding": "P4. The clock-sum filter is unsound once anything is parked, in refuseUndecodable, pastDecodeCap and the planned filter.",
+        "answer": "Task 5 adds twice the parked items and the parked delete ranges from doc.PendingStats() to every free filter, including refuseUndecodable in applyLive (a defect in code this change touches, fixed here); A6 gains a case at the cap made of parked items."
       },
       {
-        "finding": "F5. Charging a room by its stored markdown size misses what the room actually holds: thirty-two suggestions of 900 KB leave the markdown as it was and took one cold websocket load to 296 MiB (cmd/dispatch/memory_test.go:651-657). The budget would be met while the pod died.",
-        "answer": "The admission reservation still comes from the stored size, but the room's charge, which replaces it when the room loads, is computed from what the room actually decoded, with a test pinning that ratio the way read_cache_weight_test.go:23 pins the read cache's (plan T7). Recorded as spec departure 4."
+        "finding": "P5. BenchmarkKeystrokeBesideReads never calls weighPeerUpdate, so the gate cannot see the walk; the last measured build has one row at +10.89%; per-row or geomean is unstated.",
+        "answer": "Task 1 routes the benchmark's keystrokes through weighPeerUpdate at head (base has no hook, the spec's 'without'), gates every row's p50 at +10%, names the command, and puts it first; the earlier files in /legion/scratch are history and are measured again. Departure 10."
       },
       {
-        "finding": "F6. A room already admitted and still in use can grow from the median document (5 KiB) to the bound (1 MiB) with no lever: the budget acts at admission and by closing unused rooms, and unusedLocked requires no connected browser (roomstate.go:192-196). The only remaining backstop is maxLiveRooms = 1,000. A3's second drive has no pass condition if its browsers stay connected.",
-        "answer": "The architect answered that the gap belongs in this issue, and version 17 of the spec carries the lever: while the budget is over and nothing can be closed, the update hook takes a third state in every room and refuses, with the transient close 4503 and DOC_BUSY, an update that would grow a document, while one that shrinks it or leaves it as it is still applies. Nobody's room is taken from them and nobody loses text, since a transient refusal leaves the edit in the browser. For that state to end the charge must be able to fall, so each measurement the observer publishes replaces the charge rather than adding to it. The plan carries both (T2's third state, T7's re-based charge and its full-or-not signal), and A3's second drive now keeps its browsers connected so the growth case is real."
+        "finding": "P6. Rendered structs would be charged twice; delete ranges permanent; charge.took is fed the observer's payload with the whole delete set; acceptance (c) is not decidable as worded.",
+        "answer": "Task 6 replaces charge.took(len(observer payload)) with the walk's added content bytes; the structure part is accepted as an over-charge, bounded by the over-charge guard TestTheRoomBudgetDoesNotOverchargeTypingAndPasting with concrete numbers (39 rooms of 1 MiB prose, 2,000 one-character updates and ten 4 KiB pastes each, first refusal within one room of the arithmetic including the structure part); the exact struct count re-bases the total only, never the heap charge."
       },
       {
-        "finding": "F7. A1's benchmark clause is not machine-checkable: no go test -bench invocation exists anywhere in the repository, 'without the hook' would need a toggle the design does not provide, 'half a processor' is unnamed, and a median over three runs is read by a person.",
-        "answer": "The plan names the command: BenchmarkKeystrokeBesideReads at GOMAXPROCS=1, -benchtime 1x -count 6, run at the base build and at head and compared with benchstat on the p50-ms metric the benchmark already reports, the base build being the 'without' (plan T3). It is also scheduled first, before the dashboard and contracts work, because the spec makes a regression beyond a tenth send the design back. Recorded as spec departure 7."
+        "finding": "P7. onLoadDocument receives a document, not bytes, so 'walk the load bytes' has no source.",
+        "answer": "Task 4 walks EncodeStateAsUpdate once at load in keepReplica's path, beside the load's whole render, and again with each measurer count."
       },
       {
-        "finding": "F8. A3's before picture is a by-hand run of a test that does not exist on main, and the drive's own process would hold fifty client documents of its own.",
-        "answer": "The plan names the procedure: a scratch clone of the base commit on the issue's disk (git clone of /legion/repos/github.com/sjawhar/legion, not a second jj workspace), the new drive carried onto it, run once, quoted; and it requires the drive to encode one client update once and reuse its bytes across sockets (plan T0, T10). Recorded as spec departure 7."
+        "finding": "P8. The confirmation encodes the whole state on the read loop and could repeat on every keystroke near the cap.",
+        "answer": "Task 4 caches the confirmation per room until another 1/64 of the cap is added, and its cost at 1 MiB is measured and quoted beside the keystroke gate."
       },
       {
-        "finding": "F9. The spec places the budget's eviction (evictRoom, which flushes to Postgres before closing) on the socket admission goroutine, the path whose load already has a documented wedge against a writer holding a pooled connection (websocket.go:399-404). The reservation's lifecycle is also unstated on the early-return paths.",
-        "answer": "The plan runs the sweep on a goroutine of its own, as failRoomLocked already does (service.go:1965-1993); the admission that finds the budget full refuses at once and the sweep frees the bytes for the next attempt. The reservation is taken before anything loads the document and released on every return path of ServeHTTP with a deferred release, including the out-of-schema branch (plan T7)."
+        "finding": "P9. A semaphore on large applies is not in the spec and blocks the read loop; frame buffering stays per frame.",
+        "answer": "Recorded as departure 8; task 6 measures the worst transient by a committed test and task 3 sizes the slots from it; a waiter has no timeout; typing never reaches it; A3's burst sends whole-state handoffs so the drive measures the storm."
       },
       {
-        "finding": "F10. R5 cannot reuse refuseUndecodable as it stands: that function judges a post-write fork, and unmarkExpired mutates the live document inside one Yjs transaction, which cannot be rolled back, so a check part-way through would leave a half-unmarked document rather than the document as it was.",
-        "answer": "Each of the three writes asks the cheap question before it writes anything — the live document's state vector already sums past maxUpdateItems (persistence.go:851), the same sum refuseUndecodable makes first — and then withholds (settlement) or leaves the document alone and logs once (the mark sweep, the block-id backfill). A6 proves a document at the cap is left alone (plan T9). Recorded as spec departure 6."
+        "finding": "P10. The admission's wait deadline against the 2 s settle delay; refusal() needs the wait; wanted is reset while others wait.",
+        "answer": "Task 6: the deadline exceeds the settle delay plus the eviction flush, bounded by the request context; refusal() waits too; wanted is kept for every waiting admission; task 8's first drive adds a browser leaving just before the next admission."
       },
       {
-        "finding": "F11. The ygo pin bump falsifies ten citations that quote the fork by its own file and line numbers, which a tag that adds a file moves.",
-        "answer": "T1 carries one task to re-read and update every one of them: docs/service.go:565-566, docs/tree.go:282 and :303, docs/websocket.go:347-348, :379-380, :414, docs/rebuild_test.go:28, pmdoc/linear_test.go:252, packages/envoy/AGENTS.md:529 and :605, packages/envoy/CHANGELOG.md:1363-1364, plus the fork comment at go.mod:129-141 gaining reearth/ygo#304."
+        "finding": "P11. 'An API write needs no room' is false; 'closed as soon as the write lands' has two readings; other server openers exist.",
+        "answer": "Departure 3: read as 'while the budget is over its limit, once the room is unused'; the mark is set at load for any room loaded without a socket reservation over the limit, which covers every Server.Apply opener; eviction waits for unusedLocked, so settlement finishes first; A4's added case reads roomLive after settlement."
       },
       {
-        "finding": "F12. The browser tests have no way to reach the budget: e2e/run-server.sh unsets every DISPATCH_* variable, and filling a real 2 GiB budget from Playwright would need about eight one-megabyte documents open in real tabs under workers: 1.",
-        "answer": "The plan adds a test hook, POST /api/v1/artifacts/_test/room-budget, mounted like _test/outside-schema (routes_table.go:189-191) under DISPATCH_TEST_HOOKS=1, rather than a new operator setting, so the browser row shrinks the budget instead of filling it (plan T6)."
+        "finding": "P12. The second A3 drive is paced to the counter, hiding the 15 s lag in which heap can outgrow the charge.",
+        "answer": "Task 8's reworked drive grows as fast as the client can; task 6 charges uncounted added content at the densest price and counts a room early past a threshold. Departure 9."
       },
       {
-        "finding": "F13. What the memory harness's own servers do about the new Go memory limit is unstated; every existing memory test asserts fixed thresholds of 256 MiB and 512 MiB above idle and would suddenly run under whatever limit the runner's control group exposes.",
-        "answer": "The harness pins AUTOMEMLIMIT=off for every server it starts except the two rows that assert a limit: A5's real-process row (AUTOMEMLIMIT=off, the boot line says no limit) and A3's drive (GOMEMLIMIT set to 3.6 GiB). The settings guard itself is unaffected, since it scans only this repository's own source (plan T8)."
+        "finding": "P13. Spec sentences the struct charge makes untrue: a room's charge bounded by the document bound, a charge that can fall, deletes always apply, and a 4413 on a small document.",
+        "answer": "Departures 4, 6 and 7 state each with the replacement; a document at the cap is trimmed by a rebuild; the 4413 keeps its code and sentence (plan.md, 'Decisions this plan takes')."
       },
       {
-        "finding": "F14. Documents the change makes untrue beyond the five the spec lists: the /ws/doc/{room} row in cmd/dispatch/AGENTS.md:494, the editor's close-code paragraph in packages/dispatch/AGENTS.md:636-656 (which says the sixth refusal asks for a reload), the replica figures in packages/envoy/AGENTS.md:552-558 ('with nothing bounding how many rooms hold one'), and the library-owned variable list in settings.go:11-21.",
-        "answer": "T11 names each of them, with the five the spec already lists, as part of the change."
+        "finding": "P14. The walker can desynchronise on wireJSON's JSON-or-Any rule; ygo's pendingScanner is the model.",
+        "answer": "Task 2 names pendingScanner (crdt/pending_budget.go:239) and decodeItem (crdt/update.go:794) as the reference, and seeds the fuzz target with 116-127-byte JSON strings, nested Any and ContentDoc."
       },
       {
-        "finding": "F15. Three acceptance phrases have no decidable reading: 'the stored document is unchanged' has no stated read point, 'no more than 64 KiB past the bound plus the single update that crossed it' leaves the second quantity unbounded, and 'within one room of the budget's own arithmetic' is a hand-check.",
-        "answer": "T10 requires each drive to state its arithmetic and compute it from the same constants the server uses, to read the stored document through the harness's waitForSettled, and to bound the crossing update by the size the drive itself sends rather than by MaxMessageBytes."
+        "finding": "P15. Prices from a scratch program, the before picture's commit and source, proofs taken before a forward merge, and A2 reds that are not evidence.",
+        "answer": "Task 6 commits heap tests with tolerances; task 8 names the merge base in /legion/scratch/base fetched from GitHub; the standing instructions re-run every proof at a merged head; task 10 states which A2 case must fail at base and why, and that the read-only case passes at both."
       },
       {
-        "finding": "F16. Several of the spec's own line citations have drifted (refuseOutsideSchema is at websocket.go:176-196, not :224-236; the bare 503 is at :220-223; loadTree is called at :232; the replica type begins at tree.go:301).",
-        "answer": "The plan quotes the verified citations throughout rather than inheriting the drifted ones; it does not edit the spec, which is the architect's to change."
+        "finding": "P16. Main changed the files holding unusedLocked, evictRoom and the unload wiring, and sami.3 changes CloseRoom.",
+        "answer": "The standing instructions re-check the budget's lifecycle after any merge with TestEveryRoomStateHolderKeepsADetachedState, the room_release_test map list and the CloseRoom unload dependency; sami.3 is not taken unless main takes it."
       },
       {
-        "finding": "F17. dispatch-production-check.sh does not exist in this repository, and this pod cannot run a cluster workload (create services answers no).",
-        "answer": "The script lives in the deployment repository, not this one; the planner confirmed it by fetching repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main, which reads the running build's commit from /healthz. plan.md names the exact command the implementer runs after the deploy. The Postgres and browser prerequisites this pod lacks are answered by T0's userspace Postgres recipe, proven by hand on 2026-10-25 (PostgreSQL 16.15 with vector 0.8.7), and by bunx playwright install chromium, which the planner ran here."
+        "finding": "P17. With v23 dropping the v17 margin charge, a server-written margin is uncharged.",
+        "answer": "plan.md states it: the spec says margin records are heap the measurement does not weigh, and server writes bound the margin at 1 MiB (maxMarginBytes); a browser-written margin is charged through task 6's content factors."
       }
     ]
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 2
+    "rounds": 1
   },
   "specDepartures": [
     {
-      "spec": "Once the measurement is at or over either half, the hook decodes that one update and admits it only when what it inserts is under 8 KiB.",
-      "plan": "What it inserts is measured as what the update adds beyond the room's own state, taken against the room's state vector (crdt.DiffUpdateV1 or crdt.ContentIDsFromUpdateV1); and the editor drops a refused edit by deleting that frame's saved row and rebuilding its document from a fresh server read before reconnecting.",
-      "evidence": "A browser's first message hands over the document's whole live state; measured literally it is the whole document, so every editor of an at-bound document would be closed, which A1 forbids in the same breath ('a browser handing over the whole live state ... is not closed'). On the client, pending-sync.ts:337-340 only keeps or clears saved rows and never touches the in-memory document, so without the rebuild the refused text is resent on the next sync and earns the same refusal, the loop A2 forbids.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A1's refusal cases are measured against net-new content, so the whole-state case and the refusal case no longer collide.",
-          "A2's first case gains the editor's rebuild from the server's state as part of what 'the refused edit is gone' means."
-        ]
-      }
+      "spec": "Once the measurement is at or over the bound, the hook ... admits it only when what it inserts is under 8 KiB.",
+      "plan": "What it inserts is measured as clocks beyond the room's state vector, and the editor drops a refused edit by deleting its saved row and rebuilding from a fresh server read.",
+      "evidence": "A browser's first message is the whole live state; measured literally every editor of a large document would be closed, which A1 forbids ('a browser opening a document at the bound is not closed before it edits').",
+      "outcome": {"kind": "unchanged"}
     },
     {
-      "spec": "A room is weighed at both copies from the moment it is admitted, its stored markdown size times that constant.",
-      "plan": "The admission reservation comes from the stored size, but the charge that replaces it when the room loads is computed from what the room actually decoded, with a test pinning that ratio against real heap.",
-      "evidence": "cmd/dispatch/memory_test.go:651-657 and growth.go:14-18: thirty-two suggestions of 900 KB, which leave the markdown as it was, took one cold websocket load of their document to 296 MiB, and a margin may hold a further mebibyte no rendering carries. Charging markdown alone would leave the budget met while the pod died, which is what R3 exists to prevent.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A3 gains a case for a room whose document carries a full margin: it is charged, and the budget refuses before peak resident memory passes 4 GiB."
-        ]
-      }
+      "spec": "A browser's admission reserves from the stored version's bytes at the densest price this repository measures.",
+      "plan": "The admission counts the stored version once per version (cached, one count at a time) and uses the densest price only where goldmark cannot finish.",
+      "evidence": "1,048,576 x 1,058 x 2 = 2,218,786,816 bytes, more than the 2 GiB budget: no 1 MiB document could be admitted, so A3's 'around the fortieth room' could not hold (room_budget.go:247-253, 508-517).",
+      "outcome": {"kind": "unchanged"}
     },
     {
-      "spec": "The server's own work is never refused: an API write needs no room, since it falls back to a cold copy (forkLive to coldFork, livewrite.go:229-242).",
-      "plan": "The budget is enforced only at socket admission, never inside srv.Apply, and the exemption names the API write's publish beside the mark sweep and settlement's repair.",
-      "evidence": "coldFork's own comment at livewrite.go:343-352 says the room loads when the write is published, from the store; the publish's srv.Apply is at livewrite.go:303. Only the fork avoids a room, so a budget inside Apply would refuse the very write A4 requires to succeed.",
-      "outcome": {
-        "kind": "changed",
-        "scope": "The budget's enforcement point is the socket admission alone; no server write path is given a budget check to pass."
-      }
+      "spec": "An API write needs no room, since it falls back to a cold copy; the mark sweep and settlement's repair are admitted over the budget and their room is closed as soon as the write lands.",
+      "plan": "The publish of an API write does load a room; the budget is enforced at socket admission only; every room loaded without a socket reservation while the budget is over its limit is evicted once unused.",
+      "evidence": "livewrite.go:303 and :614-616 (the publish loads the room when none holds the document); the branch closes such rooms only by the sweep while short or by idle retirement (room_budget.go:84-90).",
+      "outcome": {"kind": "changed", "acceptance": ["A4 gains a case: with the budget full, an API write and the mark sweep on a document with no resident room succeed and leave no room once settlement ends."]}
     },
     {
-      "spec": "All three check the cap before they write and leave the document as it is when the write would fail, each in the way its caller can survive.",
-      "plan": "Each of the three asks against the live document before its transaction: the cheap clock sum first, and, when that trips, the authoritative encode-and-decode refuseUndecodable already makes, refusing only when that fails. The confirmation is paid at most once per room while its state lasts and re-asked when the sum has grown by another eighth of the cap. The confirmation runs through the service's one measurer (Service.measurer, docs/measure.go), which already serialises the element count so one whole-document copy is paid for the pod rather than one per room, and the copy it makes is transient and charged to no room's budget entry.",
-      "evidence": "refuseUndecodable (growth.go:337-351) judges a post-write fork; unmarkExpired (marks.go:836) mutates the live document inside one Yjs transaction, which cannot be rolled back. The clock sum alone is not the question: ygo's state vector is the last item's clock plus its content length (crdt/store.go:190-200) and ContentString.Len() is the UTF-16 length (crdt/content.go:109), so it counts characters; persistence.go:831-834 records the heaviest admitted document at about 131,000 items, an eighth of the cap. Measured 2026-10-25 against ygo v1.51.3-sami.2 with a throwaway program: a 256 KiB document after 1 MiB of typing and deleting sums to 1,310,720 clocks, past the 1,048,576 cap, and its whole state still decodes.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A6 proves that a document whose live state really cannot be decoded is left alone, and gains a case that a document which only looks past the cap by its clock sum is still written to."
-        ]
-      }
+      "spec": "A room is charged its latest measured document, both copies, plus the bytes of the updates taken since that measurement; a count that lands clears the update bytes it took in.",
+      "plan": "The budget also charges each new struct a browser adds at a measured price with a split margin, and unrendered content at measured factors, in a part only retirement clears; added content bytes are charged at the densest price until a count. The architect chose this (Envoy 6efccd27, 2026-10-26).",
+      "evidence": "gcflood (/legion/scratch/tmp/infra179/gcflood/main.go, sami.2): one 1,000,008-byte update of 500,000 GC structs keeps 64,645,200 bytes of heap with the rendering unchanged; the hook admits it on bytes under the bound and the next count clears its 1 MB charge.",
+      "outcome": {"kind": "changed", "summary": ["A room's charge is no longer bounded by the document bound, and its structure part falls only at retirement."], "acceptance": ["A1 gains a non-editor GC-struct flood refused with peak RSS under 4 GiB.", "A3 gains an over-charge guard: 39 rooms of 1 MiB prose typed and pasted are refused within one room of the arithmetic."]}
     },
     {
-      "spec": "The keystroke benchmark the repository already has is run with and without the hook, three runs of each at half a processor, and the medians are quoted on the pull request; and A3's before picture is the same drive against a build of main, run once by hand.",
-      "plan": "The benchmark is run at the base build and at head at GOMAXPROCS=1 with -benchtime 1x -count 6 and compared with benchstat on the p50-ms metric, the base build being the 'without'; a second benchmark measures the hook's own per-update cost, since the existing one does not reach it. The before picture is the new drive carried onto a scratch clone of the base commit on the issue's disk and run there once.",
-      "evidence": "No go test -bench invocation exists anywhere in the repository and no workflow runs a benchmark; a 'without the hook' toggle would be dead code the clean-cutover rule forbids. BenchmarkKeystrokeBesideReads (live_read_bench_test.go:117-200) drives live.Transact and replica.observe on a bare &Service{}, so it measures the observer's published measurement, not the OnPeerUpdate call.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A1's benchmark clause becomes a named command with a decidable output (benchstat, p50-ms, ten per cent), plus the hook's own benchmark quoted beside it.",
-          "A3's before picture names the base commit, the carried file and the command."
-        ]
-      }
+      "spec": "While the room's last measured size plus the update's bytes stay under the bound, the update is admitted on that comparison alone ... which turns away a single huge frame before anything decodes it.",
+      "plan": "Every update is walked without allocating per struct; malformed frames, subdocuments and roots other than the fragment and margin map are answered not-applied without apply.",
+      "evidence": "The branch decodes such a frame with ContentIDsFromUpdateV1 (an item per struct, up to 1,048,576, crdt/merge.go:24-46) and calls apply() on a decode error, which integrates the structs before the failure (crdt/update.go:50-56).",
+      "outcome": {"kind": "changed", "scope": "The hook refuses content no editor sends: malformed frames, subdocuments, unknown roots.", "acceptance": ["A1 gains cases (c) and (d): such frames are answered SyncStatus(0) and change nothing."]}
     },
     {
-      "spec": "A3: a second drive opens rooms on small documents, well inside the budget, and grows each one through its socket to the document bound: the budget follows them up, closing unused rooms and then refusing the next browser, before peak resident memory passes that same 4 GiB.",
-      "plan": "That drive keeps every browser connected while its rooms grow, so it closes no unused room and refuses no next browser. It proves that the charge follows the rooms up, that the hook's third state refuses the updates that would grow them while the ones that shrink them still apply, and that peak resident memory stays under 4 GiB.",
-      "evidence": "unusedLocked requires len(state.connected) == 0 (roomstate.go:190-197), so a drive that holds every socket open has no closable room, and a drive that opens no further document asks for no admission. Those two clauses are proven by A3's first drive, where rooms whose browsers have gone are closed before any refusal, and by A4, where the next browser's socket is closed with 4503. Holding the sockets open is what makes the growth case the third hook state exists for.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A3's second drive proves the growth case and peak resident memory; its 'closing unused rooms and then refusing the next browser' clauses move to A3's first drive and to A4."
-        ]
-      }
+      "spec": "The apply itself still refuses an update that does not decode or that overflows the room's parked-item queue.",
+      "plan": "The hook refuses with 4413 an update that would take the room's struct total past 1,048,576, deletes included; at the cap a document is trimmed by a rebuild.",
+      "evidence": "gcflood: a second frame of 600,000 GC structs left a whole state of 2,200,030 bytes that no longer decodes; ygo's cap bounds one update, not the document.",
+      "outcome": {"kind": "changed", "acceptance": ["A1 gains case (b): frames past the decode cap (GC and delete-range shapes) are refused 4413 and the stored document still loads.", "A1's 'one editing a document already over the bound can still shorten it' holds at the decode cap only for a delete that splits nothing."]}
+    },
+    {
+      "spec": "While the budget is over and nothing can be closed ... one that only deletes still applies.",
+      "plan": "Delete-only updates under pressure are admitted until the charges reach the budget plus a reserve (64 MiB unless measured otherwise), then refused 4503.",
+      "evidence": "Deleting the middle of an item splits it and adds structs, so unbounded deletes add heap with the budget full.",
+      "outcome": {"kind": "changed", "acceptance": ["A4's hundred shrinking updates must fit inside the reserve, which the drive asserts."]}
+    },
+    {
+      "spec": "Not in the spec.",
+      "plan": "An admitted update over 64 KiB applies under a pod-wide semaphore of a few slots sized from a measured transient.",
+      "evidence": "Every browser's first sync sends its whole state (up to 5,360,879 bytes measured), which ygo's apply decodes in full; in a reconnect storm those decodes stack with no bound.",
+      "outcome": {"kind": "changed", "scope": "Large applies take turns pod-wide; typing never waits."}
+    },
+    {
+      "spec": "A room is counted ... at most once in every few seconds ... A charge is therefore a few seconds old at worst.",
+      "plan": "At most once every 15 s, or at once when its uncounted part passes a threshold (16 MiB unless measured otherwise); uncounted additions are charged at the densest price.",
+      "evidence": "At 5 s one row of BenchmarkKeystrokeBesideReads reached +10.89% on p50 against the tenth (tree.go:416-434, /legion/scratch/bench-head3.txt).",
+      "outcome": {"kind": "changed", "summary": ["A charge can be up to 15 s old, but never more than the threshold of uncounted bytes."]}
+    },
+    {
+      "spec": "The keystroke benchmark ... is run with and without the hook on a document of 524 KiB, three runs of each at half a processor, and the medians are quoted.",
+      "plan": "BenchmarkKeystrokeBesideReads routes its keystrokes through weighPeerUpdate at head; base and head, six runs each at GOMAXPROCS=1, benchstat; every row's p50 within +10%.",
+      "evidence": "The existing benchmark drives live.Transact on a bare &Service{} and never calls the hook (live_read_bench_test.go:118); no benchmark result is recorded for the current head.",
+      "outcome": {"kind": "changed", "acceptance": ["A1's cost clause becomes a named command with a per-row p50 gate and the hook in the path."]}
     }
   ]
 }
