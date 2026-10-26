@@ -280,11 +280,12 @@ type server struct {
 	// http.Server.Shutdown finishes the requests in flight. A send bound to Deps.Lifetime instead
 	// was cut off by SIGTERM, which cancels that context before the HTTP drain even begins.
 	detached backgroundWork
-	// requestKeyLease and requestKeyRenewal replace a keyed request's lease (IdempotencyLease, a
-	// minute) and how often a running handler renews it (keyedLeaseRenewal); zero, which every
-	// server the deployment builds leaves them, keeps those. Only a test sets them, so a handler
-	// that outlives its lease is the test's choice rather than a minute of wall clock.
-	requestKeyLease, requestKeyRenewal time.Duration
+	// requestKeyLease, requestKeyRenewal and requestKeyRunLimit replace a keyed request's lease
+	// (IdempotencyLease, a minute), how often a running handler renews it (keyedLeaseRenewal) and
+	// how long a handler runs (keyedHandlerLimit); zero, which every server the deployment builds
+	// leaves them, keeps those. Only a test sets them, so a handler that outlives its lease or its
+	// limit is the test's choice rather than minutes of wall clock.
+	requestKeyLease, requestKeyRenewal, requestKeyRunLimit time.Duration
 	// slowWrites is the slow-write test hook's delay for each keyed method and path it was armed
 	// for (POST /api/v1/writes/_test/slow), by "METHOD path"; it holds nothing on a server without
 	// TestHooksEnabled, which mounts no hook.
@@ -456,6 +457,9 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		handler := route.Handler
 		if keyedMethod(route.Method) {
 			handler = s.keyedWrites(route.Method, route.Pattern, handler, replays[route.Method+" "+route.Pattern])
+		}
+		if route.Method+" "+route.Pattern == issueUploadRoute {
+			handler = s.refuseUploadToAClosedIssue(handler)
 		}
 		if route.Method != http.MethodGet {
 			handler = s.refuseChangedLogin(handler)

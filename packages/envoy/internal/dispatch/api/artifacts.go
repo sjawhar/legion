@@ -94,6 +94,34 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	s.uploadArtifactFor(w, r, artifactTarget{IssueKey: &issueKey})
 }
 
+// issueUploadRoute is the upload to an issue, which refuseUploadToAClosedIssue guards.
+const issueUploadRoute = http.MethodPost + " /api/v1/issues/{key}/artifacts"
+
+// refuseUploadToAClosedIssue answers an upload to an issue that is closed, or missing, with the
+// refusal its handler would make (requireOpenOwnerStatus) before anything reads the upload's body:
+// the keyed layer spools a keyed body whole before its handler runs (readKeyedBody), and the
+// multipart parser reads an unkeyed one whole before the handler reaches the issue, so an upload
+// to a closed issue would otherwise go up in full only to be refused. register mounts it ahead of
+// the keyed layer, so the refusal claims no key. The handler's locked check still decides an issue
+// that closes meanwhile; this one only spares the body. A caller that resolves to nobody is left
+// to the route's own 401.
+func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: the key layer and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		if err := s.refuseClosedOwnerBeforeResolving(r.Context(), issueOwner(r.PathValue("key"))); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		handler(w, r)
+	}
+}
+
 func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))

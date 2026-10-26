@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -303,4 +304,136 @@ func TestTheSlowWriteHookDelaysEveryKeyedRunOfItsPath(t *testing.T) {
 		map[string]any{"method": "POST", "path": path, "delay_ms": 10}, "alice"); response.Code != http.StatusNotFound {
 		t.Fatalf("the hook without DISPATCH_TEST_HOOKS: status=%d, want 404", response.Code)
 	}
+}
+
+// countingBody is a request body that counts what is read from it.
+type countingBody struct {
+	io.Reader
+	read atomic.Int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	b.read.Add(int64(n))
+	return n, err
+}
+
+// INFRA-258. A repeat of a keyed write whose first request still runs is answered 409
+// KEY_IN_FLIGHT before any of its body is read: the key is looked up by its login and key first,
+// so a slow upload's repeats - the page asks again about once a second - never send the file again
+// only to be told to wait.
+func TestAnInFlightRepeatIsAnsweredBeforeItsBodyIsRead(t *testing.T) {
+	const pattern = "/api/v1/issues/{key}/artifacts"
+	rig := newKeyedRigAt(t, pattern, answerRun)
+	body := `{"name":"big.bin","content":"` + strings.Repeat("a", 2<<20) + `"}`
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/issues/UP-1/artifacts", strings.NewReader(body))
+	first.Header.Set("Content-Type", "application/json")
+	first.SetPathValue("key", "UP-1")
+	holdRequestKey(t, rig.database, heldKey{login: "alice", key: "slow-upload", request: first, pattern: pattern})
+
+	sent := &countingBody{Reader: strings.NewReader(body)}
+	repeat := httptest.NewRequest(http.MethodPost, "/api/v1/issues/UP-1/artifacts", sent)
+	repeat.Header.Set("Content-Type", "application/json")
+	repeat.Header.Set("X-Dispatch-User", "alice")
+	repeat.Header.Set(contracts.IdempotencyKeyHeader, "slow-upload")
+	response := httptest.NewRecorder()
+	rig.handler.ServeHTTP(response, repeat)
+	if code, _ := refusalOf(t, response); response.Code != http.StatusConflict || code != contracts.IdempotencyKeyInFlight ||
+		response.Header().Get("Retry-After") != "1" || response.Header().Get(contracts.IdempotencyKeyHeader) != "slow-upload" {
+		t.Fatalf("a repeat while the first upload runs: status=%d headers=%v body=%s, want 409 %s naming its key",
+			response.Code, response.Header(), response.Body.String(), contracts.IdempotencyKeyInFlight)
+	}
+	if read := sent.read.Load(); read != 0 {
+		t.Fatalf("the repeat's body was read (%d bytes) before it was told the first still runs, want none read", read)
+	}
+	if runs := rig.runs.Load(); runs != 0 {
+		t.Fatalf("the handler ran %d times, want none", runs)
+	}
+}
+
+// A client that gives up while its key is being claimed leaves the claim to finish: the claim's
+// statements run on a context the client's cancellation does not reach, so a claim the database
+// made is never left in flight with no handler behind it, holding every repeat at KEY_IN_FLIGHT
+// for a lease. Here the claim waits behind another transaction's hold on the key, the client gives
+// up meanwhile, and once the hold goes the request is claimed, run once and answered under its key.
+func TestAKeyedClaimFinishesWhenItsClientGivesUpDuringIt(t *testing.T) {
+	rig := newKeyedRig(t, answerRun)
+	ctx := context.Background()
+	hold, err := rig.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hold.Rollback(ctx) })
+	if _, err := hold.Exec(ctx, `
+		insert into request_keys (login, idempotency_key, request_digest, method, path)
+		values ('alice', 'cut-claim', 'held', 'POST', '/test/a/writes')
+	`); err != nil {
+		t.Fatalf("hold the key: %v", err)
+	}
+	client, giveUp := context.WithCancel(ctx)
+	defer giveUp()
+	request := httptest.NewRequestWithContext(client, http.MethodPost, "/test/a/writes", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.Header.Set(contracts.IdempotencyKeyHeader, "cut-claim")
+	response := httptest.NewRecorder()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		rig.handler.ServeHTTP(response, request)
+	}()
+	waitForDatabaseLocks(t, hold, 1)
+	giveUp()
+	// Long enough for a claim bound to the client's context to be cancelled in the database.
+	time.Sleep(300 * time.Millisecond)
+	if err := hold.Rollback(ctx); err != nil {
+		t.Fatalf("release the hold: %v", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request never finished once the hold on its key was released")
+	}
+	if response.Code != http.StatusCreated || rig.runs.Load() != 1 {
+		t.Fatalf("a request whose client gave up mid-claim: status=%d body=%s, ran %d times; want it claimed, run once and answered",
+			response.Code, response.Body.String(), rig.runs.Load())
+	}
+	var status *int
+	if err := rig.database.Pool.QueryRow(ctx,
+		`select status from request_keys where login = 'alice' and idempotency_key = 'cut-claim'`).Scan(&status); err != nil {
+		t.Fatalf("read the key: %v", err)
+	}
+	if status == nil || *status != http.StatusCreated {
+		t.Fatalf("the key holds status %v, want the run's 201 kept for its repeats", status)
+	}
+}
+
+// A handler that runs on past its limit - its context ended and it did not stop - holds its key no
+// longer: the lease is renewed until the limit and no further, so once it lapses a repeat is
+// answered as one whose holder died, here taking over a key the run made nothing under, rather than
+// told KEY_IN_FLIGHT for as long as the handler ignores its context.
+func TestARunPastItsLimitStopsRenewingItsLease(t *testing.T) {
+	release, releaseOnce := heldUntilReleased(t)
+	running := make(chan struct{})
+	rig := newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
+		if run == 1 {
+			close(running)
+			<-release
+		}
+		answerRun(run, w, r)
+	})
+	rig.server.requestKeyLease, rig.server.requestKeyRenewal, rig.server.requestKeyRunLimit =
+		2*time.Second, 200*time.Millisecond, time.Second
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answered <- rig.send(t, "a", nil, "alice", "overrun") }()
+	<-running
+	// The limit, then a whole lease past the last renewal it allows.
+	time.Sleep(4 * time.Second)
+	takeover := rig.send(t, "a", nil, "alice", "overrun")
+	if takeover.Code != http.StatusCreated || replayed(takeover) || !strings.Contains(takeover.Body.String(), `"run":2`) {
+		t.Fatalf("a repeat a lease past the run's limit: status=%d body=%s, want the key taken over and run again",
+			takeover.Code, takeover.Body.String())
+	}
+	releaseOnce()
+	awaitResponse(t, answered)
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -550,5 +552,52 @@ func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 				t.Fatalf("invalid UUID %s: status=%d body=%s", route.name, response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+// INFRA-258 (ProofRun3 D3). An upload to a closed issue is refused 409 ISSUE_CLOSED before any of
+// its body is read, keyed or not: the keyed layer spools a body whole before its handler runs, and
+// the multipart parser reads one whole before the handler reaches its issue, so a closed issue's
+// 20 MB upload went up in full only to be refused. Nothing is stored and no key is claimed.
+func TestAnUploadToAClosedIssueIsRefusedBeforeItsBodyIsRead(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := createArtifactIssue(t, handler)
+	if closing := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key,
+		map[string]string{"status": "done"}, "alice"); closing.Code != http.StatusOK {
+		t.Fatalf("close the issue: status=%d body=%s", closing.Code, closing.Body.String())
+	}
+	artifacts := func() int {
+		var count int
+		if err := database.Pool.QueryRow(context.Background(),
+			`select count(*) from artifacts where issue_key = $1`, issue.Key).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	before := artifacts()
+	for name, key := range map[string]string{"an unkeyed upload": "", "a keyed upload": "closed-upload"} {
+		body, bodyType, err := apitest.MultipartUpload(map[string]string{"name": "big.bin"}, "big.bin",
+			"application/octet-stream", bytes.Repeat([]byte("a"), 4<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sent := &countingBody{Reader: body}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", sent)
+		request.Header.Set("Content-Type", bodyType)
+		request.Header.Set("X-Dispatch-User", "alice")
+		if key != "" {
+			request.Header.Set(contracts.IdempotencyKeyHeader, key)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if code, _ := refusalOf(t, response); response.Code != http.StatusConflict || code != "ISSUE_CLOSED" {
+			t.Errorf("%s to a closed issue: status=%d body=%s, want 409 ISSUE_CLOSED", name, response.Code, response.Body.String())
+		}
+		if read := sent.read.Load(); read != 0 {
+			t.Errorf("%s to a closed issue read %d bytes of its body before it was refused, want none", name, read)
+		}
+	}
+	if after, keys := artifacts(), countRequestKeys(t, database); after != before || keys != 0 {
+		t.Fatalf("the refused uploads left %d artifacts (was %d) and %d keys, want nothing written", after, before, keys)
 	}
 }
