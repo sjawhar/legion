@@ -16,6 +16,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more, every check of the run keeping its sessions in a scratch Postgres of the run's own (`session_store: postgres`; the daemon requires a store that keeps sessions in a database): the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; every container of its pod reserves its role's cpu and memory with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and `nproc` and `MemTotal` inside it are the summed reservation; a second role joins the root's issue pod; suspend, resume, a same-agent refusal of a session the table lacks, a pod killed in place, and a relaunch before registration each hold; a new tree's root and child spawned at once each provision an issue pod whose Sandbox owns no claim template and whose disk is that pod's own, neither able to read the other's workspace; a fresh runtime re-adopts every live pod, and the pod it killed meanwhile comes back with a disk of a new uid and an empty marker on it, the claim resuming from the table; the orphan sweep honours its grace and takes the swept issue's pod and that pod's disk; releasing one role leaves the issue's pod and disk, and the tree's cleanup takes both; a launch that replaces an issue pod another role still runs in names the replaced pod on its Sandbox, and the running role is observed displaced and resumes into the new pod; closing an issue deletes its Sandbox with the role Secrets and leaves no disk, and the resume after it brings Sandbox, pod and disk afresh with `LEGION_WORKSPACE_RECREATED=true`; and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config, reporting after its OK line the two deployment capabilities a tmux file alone leaves open (secrets, resource-limits), and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
+| `dispatch-session-settings.sh` | Dispatch's live view shows a real Oh My Pi session's current model and thinking level and switches them (INFRA-195), run in an issue pod: Oh My Pi in `--mode rpc` with this checkout's Envoy plugin, a real listener, `nats-server`, Postgres and Dispatch, and one held-open Chromium page. Each value the header shows matches the session's own RPC answers, its `/effort` output and its session file: before any turn; within 20 s of a change at the terminal, by a message or by a fallback; after a pick from either picker, including `auto` kept across a model pick, the level a model pick leaves (compared with a twin session), a pick during a turn, a refusal, and a pick to a stopped session that ends in the no-answer line and is refused `ACCEPT_STALE` once it resumes. A forged switch, an Envoy message and an agent's bearer change nothing. Another session, a resumed session and a new session each keep their own values. A session on the released pi-envoy shows the restart notice. A switch is stored under the person who sent it |
 | `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the implementer `memory_request: 8Gi` under `memory: 32Gi` is admitted, scheduled and recorded `Burstable` with exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable role and refuses a request past its limit or that is no quantity, naming the key |
@@ -1673,6 +1674,131 @@ Postgres and NATS containers; a run that finds another's leftovers refuses to st
 | `a-frame-forged-after-the-restart-naming-an-old-send-gets-a-card` | once the Send made while the session was down, which Dispatch recorded as failed, is more than a minute old, a frame forged with the listener token names it as a person's steer: it arrives as a card, with neither its stored nor its forged text a user message |
 | `a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card` | the listener drops the session's registration (`DELETE /v1/sessions/{id}`), so the person's Send to it fails with no frame sent, and within 45 s a bare bus client publishes a frame naming that failed attempt straight onto the session's agent subject: it arrives as a card, with neither text a user message |
 | `dispatch-records-only-the-turns-the-session-took` | Dispatch's thread read, which the Agents page reads, records the Send and the Aside accepted at attempt 1 and the carded Send at its retry, attempt 2, and never the BTW, the Send made while the session was down or the Send made while the listener listed no session |
+
+## dispatch-session-settings.sh
+
+INFRA-195's local-stack proof. Dispatch's live view shows a real Oh My Pi session's current model
+and thinking level and switches them from its header. The stack is real: Oh My Pi with this
+checkout's Envoy plugin, an Envoy listener, NATS, Postgres, Dispatch built from the checkout, and
+its page driven in Chromium. The rig never takes the page as its own oracle. Each value the header
+shows is compared with what the session reports without the page: RPC `get_state` (the model) and
+`get_available_models`, the `Thinking:` and `Available:` lines an `/effort` prompt prints (RPC
+`command_output`), the session file's `model_change`, `thinking_level_change`, card and user-message
+entries, and Dispatch's stored messages, read with the person's header.
+
+```bash
+LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' \
+  bash scripts/e2e/dispatch-session-settings.sh     # → "dispatch session settings e2e: PASS in <n>s", exit 0
+```
+
+The script does only the setup and the cleanup. The driver,
+[`lib/dispatch-session-settings.ts`](lib/dispatch-session-settings.ts), owns every Oh My Pi
+process and one held-open page, signed in as `alice`, and runs the checks in order, each its own
+function. The parts it drives are its siblings in `lib/`:
+[`session-settings-omp.ts`](lib/session-settings-omp.ts) (Oh My Pi in `--mode rpc`),
+[`session-settings-services.ts`](lib/session-settings-services.ts) (Dispatch, the listener and the
+bus), [`session-settings-browser.ts`](lib/session-settings-browser.ts) (the held-open page),
+[`session-settings-session-file.ts`](lib/session-settings-session-file.ts) (the session file's
+entries) and [`session-settings-common.ts`](lib/session-settings-common.ts) (the rig's setup, the
+transcript and the waits).
+
+It differs from [`dispatch-user-turns.sh`](#dispatch-user-turnssh) in these ways:
+
+- **It runs in an issue pod.** It needs no docker, tmux, mise or root. It uses `go`, `bun`, `jq`,
+  `curl`, `tar` and `python3`.
+- **Oh My Pi runs in `--mode rpc`, as a Legion pane runs it, not as the TUI in tmux.** The command
+  is `omp --extension <pi-envoy> --mode rpc`, with the plugin packed by
+  [`lib/pack-plugin.sh`](#libpack-pluginsh) and unpacked as the worker image unpacks
+  `/opt/legion/pi-envoy`. The driver reads and writes the RPC protocol on the process's stdin and
+  stdout. The profile is an isolated `PI_CODING_AGENT_DIR` under a `HOME` of the run's own. That
+  `HOME` links `.omp/natives` to the caller's cache, as [`lib/omp-home.sh`](#libomp-homesh) does.
+  The Oh My Pi is `LEGION_TEST_OMP`, not a mise tool spec.
+- **The model turns use the caller's own provider keys, not the Hawk gateway.** The script takes
+  `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` out of its environment before it starts anything, so
+  no build, install, service or log of the run inherits them, and gives them back to the driver
+  alone, which takes them off its own environment at once and passes them to each Oh My Pi it
+  starts and to no other process (Chromium included). It sets no key of its own, and prints only
+  each key's length. A key is needed only for a model of its provider.
+- **Postgres is a loopback server the caller names**, in `LEGION_TEST_PG_DSN`, as for
+  [`merged-root-waits.sh`](#merged-root-waitssh). The rig creates a database of its own in it and
+  drops it on any exit. In a pod, start one without root as
+  `docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md`
+  says.
+- **NATS is a pinned `nats-server`**: `LEGION_E2E_NATS_BIN`, or v2.10.22, which the rig installs
+  once with `go install`. In an issue pod it installs into `/legion/scratch/bin`, on the issue's
+  volume, and otherwise into the run's own directory. The server starts with JetStream on a port
+  the kernel picks, as `merged-root-waits.sh` starts it.
+- **No variable of the caller's shell named `DISPATCH_*`, `ENVOY_*`, `NATS_*`, `OMP*` or `PI_*`
+  reaches any process of the run.** A Legion pane's own Dispatch, Envoy and profile stay out of it.
+
+**The model list `picker-refusal` picks from is injected, not reported by the session.** The check makes the session
+refuse a model because it has no key for that model's provider. Under the run's keys, the session
+lists no such model, so its header cannot offer one. A bare NATS client publishes a `settings` frame
+on `agentstream.<session>.frames`. The frame's `seq` is above the session's own, and it lists the
+session's own models plus `google/gemini-2.5-flash`, a catalog model of a provider the run has no
+key for. The person picks that model. The refusal comes from the real session, and the page
+shows it. The check then reloads the page, so that the session's next replay puts its real frame
+back. Any process that can reach NATS can publish this frame. That is the frames subject's existing
+exposure, the one `dispatch-user-turns.sh`'s `a-forged-command-list-changes-nothing-on-the-page`
+drives.
+
+The default models are the cheapest reasoning models of each provider that the pinned host's
+`get_available_models` lists under a pod's keys: `anthropic/claude-haiku-5-5` and
+`openai/gpt-5-nano`. Their `/effort` lists differ, and the preflight refuses two models whose lists
+are the same. `anthropic/claude-haiku-5-5` offers `off, auto, low, medium, high, xhigh, max`, and
+`openai/gpt-5-nano` offers `off, auto, minimal, low, medium, high`. Before any check, the preflight
+runs a one-word prompt on each model, in a session with no plugin.
+
+The rig serves the checkout's built `packages/dispatch/web/dist` live. Do not run
+`bun run build:web` or `bun run e2e` in this checkout while a run is live, for the reason
+`dispatch-user-turns.sh` gives.
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `LEGION_TEST_PG_DSN` | required | a loopback PostgreSQL with pgvector; the run makes and drops its own database there |
+| `LEGION_E2E_NATS_BIN` | the pinned `nats-server` v2.10.22, installed as above | another `nats-server` |
+| `LEGION_TEST_OMP` | the `omp` on `PATH`, else the worker image's `/opt/omp/bin/omp` | the Oh My Pi to run. The rig refuses a host whose first replay has no `commands` frame, because that host cannot run typed input from Dispatch |
+| `SESSION_SETTINGS_MODELS` | `anthropic/claude-haiku-5-5 openai/gpt-5-nano` | two `provider/id` models the caller's keys serve. The first is the profile's default model (every `modelRoles` entry) and the fallback target. Two Anthropic models run every check but `fallback`: Oh My Pi skips a same-provider fallback candidate after a turn with another Anthropic model's signed thinking, and only retries (dispatch://INFRA-309) |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | required for a model of that provider | passed through to Oh My Pi only |
+| `SESSION_SETTINGS_CHROMIUM` | `/usr/bin/chromium` | the Chromium Playwright launches (`executablePath`); a pod has no Playwright browser of its own |
+| `SESSION_SETTINGS_EVIDENCE_DIR` | a fresh directory under `TMPDIR` | kept and printed: `transcript.log`; `checks/`, one screenshot per check; `logs/`, with the builds, the services, each Oh My Pi's stderr and RPC events (`omp-<label>.rpc.jsonl`), the Oh My Pi logs (`logs/omp/`) and the profile's `config.yml` and `models.yml`; and `sessions/`, each session file |
+
+The profile's `config.yml` sets `defaultThinkingLevel: low` and every `modelRoles` entry to the
+first model, so no side request (a title, a summary) goes to another model. It also sets
+`retry.fallbackChains` (the key the fork's `session/retry-fallback-chains.ts` reads) from
+`rig-broken/broken-model` to the first model. `models.yml` adds the provider `rig-broken`: a
+literal key and one model, `broken-model`, whose `baseUrl` is a loopback port that a `python3`
+process of the run binds and never listens on. Every connection to that port is refused.
+
+Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends
+the run non-zero and names itself. Check 2 of the plan is three checks here, so a passing run
+prints 20 `ok` lines. On any exit, the script stops what it started by the pid it started: the
+`nats-server`, the listener, Dispatch, the port holder and every Oh My Pi in `$work/omp.pids`.
+It stops an Oh My Pi only while that pid's command line still names the run's work directory. It
+also drops the database and removes the work directory.
+
+| check | what it holds |
+| :--- | :--- |
+| `header-before-any-turn` | before any prompt, the header shows `get_state`'s model and the level on `/effort`'s `Thinking:` line. The model picker offers exactly what `get_available_models` lists, and the thinking picker offers `/effort`'s `Available:` list, in its order. No turn has run in the session file or on the page |
+| `terminal-set-model` | RPC `set_model` to the second model, then back to the first. The same open page shows each within 20 s of the RPC answer, `get_state` agrees, and the session file gains no user message |
+| `terminal-set-thinking` | RPC `set_thinking_level medium`. The page shows it within 20 s, `/effort` reports it, and no user message is added |
+| `terminal-typed-effort` | an RPC `prompt` of `/effort high`, the host's own typed route. It prints `Thinking set to high.`, the page shows `high` within 20 s, and no user message is added |
+| `message-switch` | the composer sends `/model <second>` as a Send. The header shows it within 20 s, and the session replies `Model set to <second>.` |
+| `picker-model` | a pick of the first model. Dispatch stores `/model <first>` authored by `alice`, the thread shows it as hers, and the session's reply `Model set to <first>.` shows on the switch line and in the thread. `get_state` and the header agree, and the header shows the level `/effort` reports. A composer prompt then runs, and its turn's `model` is the first model in the session file and on the page's turn label |
+| `picker-auto-kept` | a pick of `auto`, then a pick of the second model. `/effort` still reports `auto`, and the header shows `auto` |
+| `picker-level-after-model` | a concrete level of the second model that the first model lacks (`minimal` by default), then a pick of the first model. The level the header shows, and the one `/effort` reports, equals what `/effort` reports in a twin session after a person's `/model <first>` Send. The twin is a second session of the same profile, brought to the same model and level through RPC |
+| `picker-effort` | a pick of a concrete level (`medium`). `/effort` reports it, and the header shows it |
+| `picker-during-turn` | while a prompt runs `sleep 45` in the bash tool, a pick of the second model. The session answers within 30 s, while `get_state` still says the turn is streaming. The run's request that was already running is on the first model, and each request started after the answer is on the second. The next composer prompt runs on the second model |
+| `picker-refusal` | the injected list described above, then a pick of `google/gemini-2.5-flash`. The switch line reads `The session answered: Failed to set model: No API key for google/gemini-2.5-flash`. `get_state`, `/effort` and the header are unchanged. A reload brings back the session's own list |
+| `forged-switch-changes-nothing` | two sends to the session. First, a frame forged with the listener token, in `dispatch-user-turns.sh`'s forged-frame shape: a person-shaped steer naming a message Dispatch never stored, with the body `/model <the other model>`. Second, an Envoy message `/effort <another level>` from a second client registered with the listener. The session file records the forged attempt as handled (`envoy-dispatch-handled-attempt`), and both arrive as cards. `get_state` and `/effort` are unchanged. The check prints the values before, the values after, and what each would read had a switch been applied, which is its negative control |
+| `agent-token-refused` | `POST /api/v1/agents/<id>/messages` with the body `/model <the other model>` and the session's Dispatch bearer gets 403 `HUMAN_ONLY`. Dispatch stores nothing new, and the session is unchanged |
+| `other-session-unchanged` | a second session of the same profile, started before every switch, still reports the model and level it started with (`get_state`, `/effort`) |
+| `no-answer` | the session's Oh My Pi gets `SIGSTOP`, and then a model is picked. Dispatch's send does not fail: its attempt stays `pending` or `sent`. After 30 s the switch line reads the no-answer text, the header keeps the values it had, and the pickers come back. The process gets `SIGCONT` 65 s after the message was stored, so the late frame arrives as a card and a handled attempt. The session's log records Dispatch's refusal (`attempt 1 was requested more than a minute ago`). The same accept, asked again with the session's bearer, answers 409 `ACCEPT_STALE`. `get_state` is unchanged, and Dispatch records no acceptance |
+| `resume-keeps-switch` | one page, held open from before the first relaunch to the last step, and three steps. **The switch stays (A2):** the process ends and is started again with `--resume <session file>`, which opens the same session; `get_state` and `/effort` show the model and level picked last. **Numbering:** once the resumed process has registered, a bare NATS client subscribes to `agentstream.<session>.control` and waits up to 30 s for the first control message the relay sends there (its `watch`, about every 10 s while a page is open), then 1 s more; RPC `set_thinking_level` to another level then shows on the held page within 20 s with no reload, and the level set back shows too. **Arming:** the process ends again and is started with `--resume <session file> --model <the other model>`; `get_state` shows that model, and with no RPC change and no reload the held page shows it within 20 s of the registration. The screenshot is the held page then. RPC `set_model` (and `set_thinking_level`, when the level moved) puts the session back on the model and level picked last, and the reloaded header shows them. A held-page step that times out reloads the page, to tell a report the page missed from one never made, and fails naming its step |
+| `new-session-defaults` | a new session of the same profile reports the profile's default model and `low`, through RPC and on its own live view |
+| `fallback` | a pick of `rig-broken/broken-model`, then a composer prompt. That request fails, and the session file gains a `model_change` with role `fallback` to the first model. The header shows the first model within 20 s of that entry, with no further user message. The check prints how each request of the run ended, including the retry on the fallback model |
+| `older-plugin-notice` | a session on `@sjawhar/pi-envoy` 10.24.0, a release before the settings frame (pinned in the script, since the newest release reports its settings once this one ships), installed with `bun add` into the run's directory, runs one prompt. Its live view shows that turn's model, no picker, and the restart notice |
+| `attribution` | `bob` sends a switch with `X-Dispatch-User: bob`, the header's own body (`/model <id>` as a steer). Dispatch stores it as `bob`'s, the session answers it, and `alice`'s held-open page shows `bob` beside it in the thread |
 
 ## verifiers-staging-token.sh
 
