@@ -88,14 +88,15 @@ func (e *apiError) Permanent() bool {
 	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
 }
 
-// unreachableError is a broker call that never reached the broker: its host does not resolve, or
-// nothing answered at the address. It is not a refusal - the broker said nothing - and it reads as
-// what it is, naming the address tried and the variable the address came from, because a session
-// that inherited a stale AGENT_SECRETS_URL otherwise reads a bare DNS error as a broker that is
-// down and the stale value goes unnoticed.
+// unreachableError is a broker call that did not complete. Its host might not resolve, nothing
+// might answer at the address, or a peer might answer the connection but fail the exchange. It is
+// not a broker refusal - the broker sent no usable response - and it reads as what it is, naming
+// the address tried and the variable the address came from, because a session that inherited a
+// stale AGENT_SECRETS_URL otherwise reads a bare DNS error as a broker that is down and the stale
+// value goes unnoticed.
 type unreachableError struct {
-	// what classifies the failure: the host does not resolve, nothing answered, nothing answered
-	// in time, or it could not be reached at all.
+	// what classifies the failure: a failed name resolution, nothing answered, nothing answered in
+	// time, or a peer answered but the exchange failed.
 	what string
 	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried.
 	base, method, url string
@@ -109,9 +110,10 @@ func (e *unreachableError) Error() string {
 
 func (e *unreachableError) Unwrap() error { return e.cause }
 
-// unreachable classifies a failure of the HTTP call itself, which the broker never answered.
-// A host that does not resolve and a refused connection are told apart because they need
-// different fixes: a stale or mistyped AGENT_SECRETS_URL, and a broker that is not listening.
+// unreachable classifies a failed HTTP exchange. A name resolver that timed out or returned an
+// error is still name resolution, before the generic net.Error timeout branch; and a peer that
+// did answer the connection but failed HTTP or TLS has a different recovery from a broker whose
+// address nothing listened on.
 func unreachable(base, method, callURL string, err error) error {
 	cause := err
 	var wrapped *url.Error
@@ -124,12 +126,14 @@ func unreachable(base, method, callURL string, err error) error {
 	switch {
 	case errors.As(err, &dns) && dns.IsNotFound:
 		return &unreachableError{"the broker's host " + host + " does not resolve", base, method, callURL, cause}
+	case errors.As(err, &dns):
+		return &unreachableError{"the broker's host " + host + " name resolution failed", base, method, callURL, cause}
 	case errors.Is(err, syscall.ECONNREFUSED):
 		return &unreachableError{"nothing answered at " + host + ": the connection was refused", base, method, callURL, cause}
 	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
 		return &unreachableError{"the broker at " + host + " did not answer in time", base, method, callURL, cause}
 	default:
-		return &unreachableError{"the broker at " + host + " could not be reached", base, method, callURL, cause}
+		return &unreachableError{"the broker at " + host + " answered but the exchange failed", base, method, callURL, cause}
 	}
 }
 

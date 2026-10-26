@@ -2280,9 +2280,10 @@ body verbatim as before, and makes no settings call. The other secrets CLI a box
 `secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is
 archived): it reads its agent tier from local sops files and its human tier through the local
 secretsd daemon, which asks for a YubiKey touch, and it never reads this broker. One key name can
-hold different values in the two stores, which is why each CLI names the store it answered from.
-Its `secret` forms are how a person manages the agent secrets themselves, in the
-broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
+hold different values in the two stores. `agent-secrets` names its store in output and every
+refusal; `secrets` names none today. `agent-secrets secret` forms are how a person manages the
+agent secrets themselves, in the broker's own store (AWS Secrets Manager or GCP Secret Manager)
+under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — made in Dispatch reaches the broker's approval routes

@@ -11,8 +11,8 @@ is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` reposito
 reads its agent tier from local sops files and its human tier through the local secretsd daemon,
 which asks for a YubiKey touch, and it never reads the agent-secrets broker. `agent-secrets` reads
 that broker, which is backed by a cloud Secret Manager. One key name can therefore hold different
-values in the two stores, so each CLI names the store it answered from, in its output and in every
-refusal. This page is about `secrets`.
+values in the two stores. `agent-secrets` names its store in output and every refusal; `secrets`
+names none today. This page is about `secrets`.
 
 ## Current decision for the LEGION deployment
 

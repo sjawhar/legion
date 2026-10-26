@@ -11,15 +11,18 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
@@ -252,8 +255,10 @@ func TestABrokerThatCannotBeReachedSaysSo(t *testing.T) {
 	}
 }
 
-// TestEveryUnreachableFailureIsClassified pins the four classes unreachable tells apart, from the
-// errors a transport gives, since only two of them can be produced from a test's own address.
+// TestEveryUnreachableFailureIsClassified keeps a failed name lookup distinct from a broker that
+// timed out, and both distinct from a peer that answered the connection but failed the exchange.
+// An agent fixing a stale AGENT_SECRETS_URL needs to know which it is; saying an address resolves
+// after DNS itself timed out or returned SERVFAIL sends that agent to the wrong layer.
 func TestEveryUnreachableFailureIsClassified(t *testing.T) {
 	const base = "https://secrets.internal.example"
 	for _, row := range []struct {
@@ -262,9 +267,11 @@ func TestEveryUnreachableFailureIsClassified(t *testing.T) {
 		want string
 	}{
 		{"no such host", &net.DNSError{Err: "no such host", Name: "secrets.internal.example", IsNotFound: true}, "does not resolve"},
+		{"DNS timeout", &net.DNSError{Err: "i/o timeout", Name: "secrets.internal.example", IsTimeout: true}, "name resolution failed"},
+		{"DNS server failure", &net.DNSError{Err: "server misbehaving", Name: "secrets.internal.example", IsTemporary: true}, "name resolution failed"},
 		{"refused", syscall.ECONNREFUSED, "the connection was refused"},
 		{"timed out", context.DeadlineExceeded, "did not answer in time"},
-		{"anything else", errors.New("tls: handshake failure"), "could not be reached"},
+		{"an answered exchange failed", io.EOF, "answered but the exchange failed"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			err := unreachable(base, http.MethodGet, base+"/v1/enrollments/self", &url.Error{Op: "Get", URL: base, Err: row.err})
@@ -275,6 +282,48 @@ func TestEveryUnreachableFailureIsClassified(t *testing.T) {
 			for _, want := range []string{row.want, "secrets.internal.example", brokerURLVar, "/v1/enrollments/self"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("message %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestAHelperFailureNamesTheHelperNotTheBroker: requesting a secret first asks the local helper
+// to sign, so an unavailable helper or a helper's own refusal must name its socket. A broker was
+// never asked, and adding its source trailer lies about the request path.
+func TestAHelperFailureNamesTheHelperNotTheBroker(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	socket, _ := fakeHelper(t, helper.Response{
+		Code:  helper.CodeNotASession,
+		Error: "this process is not a registered session",
+	})
+	for _, row := range []struct {
+		name, socket, want string
+	}{
+		{"helper refusal", socket, "refused: NOT_A_SESSION: this process is not a registered session"},
+		{"dead helper", filepath.Join(t.TempDir(), "missing.sock"), "did not answer"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			_, stderr, exit := runAgentSecrets(
+				t,
+				binary,
+				"https://broker.invalid",
+				t.TempDir(),
+				[]string{"AGENT_SECRETS_HELPER_SOCK=" + row.socket},
+				"request",
+				"DEMO_API_KEY",
+			)
+			if exit == 0 {
+				t.Fatal("request succeeded with no helper")
+			}
+			for _, want := range []string{row.socket, row.want} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr = %q; want it to name %q", stderr, want)
+				}
+			}
+			for _, notWant := range []string{"asked the broker", brokerURLVar} {
+				if strings.Contains(stderr, notWant) {
+					t.Fatalf("stderr = %q; the helper failure must not name %q", stderr, notWant)
 				}
 			}
 		})

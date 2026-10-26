@@ -21,12 +21,13 @@
   releases a grant's values as names and values alone, and a session holds no sign-in of its own
   to the store to read one with (`agent-secrets secret show`, which reads the store directly
   under the person's own sign-in, lists each version as before).
-- A broker call that never reached a broker says so, rather than leaving a bare transport error to
-  read as a broker that is down: it names which of the four it met (the host does not resolve, the
-  connection was refused, nothing answered in time, it could not be reached), the method and URL it
-  tried, and that `AGENT_SECRETS_URL` named that address, so a session that inherited a stale
-  address reads a stale address. Such a message carries no `asked the broker …` trailer: the broker
-  refused nothing.
+- A broker call that did not complete says what failed, rather than leaving a bare transport error
+  to read as a broker refusal: the host does not resolve, name resolution failed, the connection
+  was refused, nothing answered in time, or a peer answered but the HTTP/TLS exchange failed. It
+  names the method and URL it tried, and that `AGENT_SECRETS_URL` named that address, so a session
+  that inherited a stale address reads a stale address. Such a message carries no `asked the
+  broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
+  that socket instead, since no broker was asked.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

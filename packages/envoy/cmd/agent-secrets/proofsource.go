@@ -70,8 +70,7 @@ type helperSigner struct {
 }
 
 // errNoCredential is what a machine session gets from a helper that holds no launcher credential
-// (NO_CREDENTIAL): never logged in, or its login lapsed or was refused, until the operator logs the
-// machine in again, the helper enrolls no one, so the session has no broker identity. identity prints it, and
+// (NO_CREDENTIAL): never logged in, or its login lapsed or was refused, until the operator logs the machine in, the helper enrolls no one, so the session has no broker identity. identity prints it, and
 // reportError prints it the same way for every command that meets it.
 var errNoCredential = errors.New("this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets machine login)")
 
@@ -83,13 +82,38 @@ func helperRefusal(resp helper.Response) error {
 	return fmt.Errorf("%s: %s", resp.Code, resp.Error)
 }
 
+// helperError is the local helper's own refusal or a socket that did not answer. It names the
+// helper socket because no broker has been asked yet: adding a broker source trailer would report
+// a request path the client did not take.
+type helperError struct {
+	socket  string
+	err     error
+	refused bool
+}
+
+func (e *helperError) Error() string {
+	if e.refused {
+		return fmt.Sprintf("agent-secrets-helper at %s refused: %v", e.socket, e.err)
+	}
+	return fmt.Sprintf("agent-secrets-helper at %s did not answer: %v", e.socket, e.err)
+}
+
+func (e *helperError) Unwrap() error { return e.err }
+
+func helperFailure(socket string, err error, refused bool) error {
+	if errors.Is(err, errNoCredential) {
+		return err
+	}
+	return &helperError{socket: socket, err: err, refused: refused}
+}
+
 func (h *helperSigner) Sign(method, url string) (string, error) {
 	resp, err := helper.Call(h.sock, helper.Request{Op: "sign", Method: method, URL: url}, 5*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("agent-secrets-helper at %s: %w", h.sock, err)
+		return "", helperFailure(h.sock, err, false)
 	}
 	if !resp.OK {
-		return "", helperRefusal(resp)
+		return "", helperFailure(h.sock, helperRefusal(resp), true)
 	}
 	return resp.Proof, nil
 }
@@ -100,10 +124,10 @@ func (h *helperSigner) Sign(method, url string) (string, error) {
 func (h *helperSigner) SignRequestObject(audience string, names []string, reason string, lifetimeSeconds *int) (string, error) {
 	resp, err := helper.Call(h.sock, helper.Request{Op: "sign-request", Secrets: names, Reason: reason, LifetimeSeconds: lifetimeSeconds}, 5*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("agent-secrets-helper at %s: %w", h.sock, err)
+		return "", helperFailure(h.sock, err, false)
 	}
 	if !resp.OK {
-		return "", helperRefusal(resp)
+		return "", helperFailure(h.sock, helperRefusal(resp), true)
 	}
 	return resp.RequestObject, nil
 }

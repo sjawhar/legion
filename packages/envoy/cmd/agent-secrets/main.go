@@ -362,13 +362,19 @@ func refuse(stderr io.Writer, prefix string, src source, err error) {
 // A call that never reached the broker says so itself - which address it tried, that
 // AGENT_SECRETS_URL named it, and whether the host does not resolve or nothing answered - and
 // takes no source trailer: the broker refused nothing, so a trailer saying it was asked would
-// read as an answer it gave, and the store behind it could not be read either.
+// read as an answer it gave, and the store behind it could not be read either. Likewise, a local
+// helper failure names its socket: no broker request could begin without its signature.
 func refusalText(src source, err error) string {
 	var unreached *unreachableError
-	if errors.As(err, &unreached) {
+	var helperFailure *helperError
+	switch {
+	case errors.As(err, &unreached):
 		return unreached.Error()
+	case errors.As(err, &helperFailure):
+		return helperFailure.Error()
+	default:
+		return err.Error() + src.asked()
 	}
-	return err.Error() + src.asked()
 }
 
 // splitArgs partitions args into recognized "--flag"/"--flag value" tokens (as declared by

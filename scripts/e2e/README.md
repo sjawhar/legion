@@ -177,8 +177,8 @@ The `secrets` CLI named here and below is secretsd, shipped from `sjawhar/forwar
 human tier through the local secretsd daemon, which asks for a YubiKey touch, and it never reads
 the agent-secrets broker. `agent-secrets` is the other CLI, which reads that broker, backed by a
 cloud Secret Manager. One key name can hold different values in the two stores - the App keys
-these runs use are the `secrets` store's - so each CLI names the store it answered from, in its
-output and in every refusal.
+these runs use are the `secrets` store's. `agent-secrets` names its store in output and every
+refusal; `secrets` names none today.
 
 CI runs the unit and integration tests, not this script; what only this
 run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
