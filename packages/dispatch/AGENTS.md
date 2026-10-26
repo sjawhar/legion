@@ -1092,8 +1092,9 @@ naming the variable and the value). Every port set by hand plus that flag runs a
 a person started and left listening; pair it with that harness's own `DATABASE_URL`, since
 `e2e/seed.ts` truncates the database the server holds. `CI` takes no part in that decision. A
 deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose file, which derives the target's
-`ENVOY_URL` from that same value; the README's acceptance recipe wires the pair. Even a listing
-run (`--list`) goes through `e2e/run.ts`, since the config refuses without the ports.
+`ENVOY_URL` from that same value; the README's acceptance recipe wires the pair. A listing
+(`--list`, with no `--ui`) is the one exception: it starts no server and runs no spec, so the
+config lets it evaluate with no ports and no harness.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
 starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port
@@ -1162,7 +1163,7 @@ its title can resize an ask card and make Firefox or WebKit anchor the margin's 
 
 The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` and the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
-No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
+No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, `e2e/offline-edits.e2e.ts`, and

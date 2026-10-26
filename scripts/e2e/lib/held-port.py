@@ -75,8 +75,14 @@ def receive(path):
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as keeper:
             keeper.connect(path)
-            # Close-on-exec from the moment it arrives, so no copy but descriptor 3 reaches CMD.
-            _, fds, flags, _ = socket.recv_fds(keeper, 1, 1, socket.MSG_CMSG_CLOEXEC)
+            # Close-on-exec from the moment it arrives where the platform can (Linux's
+            # MSG_CMSG_CLOEXEC; darwin has none, so the descriptor is made so right after), so no
+            # copy but descriptor 3 reaches CMD.
+            cloexec = getattr(socket, "MSG_CMSG_CLOEXEC", 0)
+            _, fds, flags, _ = socket.recv_fds(keeper, 1, 1, cloexec)
+            if not cloexec:
+                for fd in fds:
+                    os.set_inheritable(fd, False)
     except OSError as error:
         raise Refusal(f"receive the held socket from the keeper at {path}: {error}") from error
     if len(fds) != 1 or flags & socket.MSG_CTRUNC:
@@ -91,7 +97,9 @@ def receive(path):
     if (
         held.family not in (socket.AF_INET, socket.AF_INET6)
         or held.type != socket.SOCK_STREAM
-        or held.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1
+        # Linux answers 1 for a listening socket and darwin the option's own bit, so any non-zero
+        # answer is listening, as listenfd reads it.
+        or held.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) == 0
     ):
         held.close()
         raise Refusal(f"the keeper at {path} sent a socket that is not a listening TCP socket")

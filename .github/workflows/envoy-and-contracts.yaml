@@ -23,6 +23,9 @@ on:
       # prepack test packs through pack-plugin.sh, pi-legion's skills guard sweeps the root guides
       # and docs below, and every Bun job installs Bun through setup-bun from .bun-version.
       - "scripts/e2e/lib/pack-plugin.sh"
+      # The dispatch job's e2e/run-server.sh serves the browser tests' server on the socket this
+      # holds.
+      - "scripts/e2e/lib/held-port.py"
       - "AGENTS.md"
       - "README.md"
       - "docs/kubernetes.md"
@@ -76,6 +79,7 @@ on:
       - "packages/pi-shared/**"
       - "scripts/pi-plugin-prepack.sh"
       - "scripts/e2e/lib/pack-plugin.sh"
+      - "scripts/e2e/lib/held-port.py"
       - "AGENTS.md"
       - "README.md"
       - "docs/kubernetes.md"
@@ -386,10 +390,13 @@ jobs:
               # job's S3 step reads.
               - 'packages/envoy/internal/bus/**'
               - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/internal/githubappjwt/**'
+              - 'packages/envoy/internal/id/**'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/**'
               - 'packages/envoy/internal/pglisten/**'
               - 'packages/envoy/internal/routing/**'
+              - 'packages/envoy/listenfd/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
               # dev-postgres.test.sh (envoy-go) reads too.
