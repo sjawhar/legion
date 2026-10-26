@@ -2,38 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-26T03:44:57Z",
-  "round": "generation 3, the tester's fail at 52dd9f17: two red tests (f45801ddc27c, b5ab689632f3), both made to pass unmodified",
+  "completed": "2026-10-26T05:20:00Z",
+  "round": "generation 3, review 5647344074 at 93a30a85 (seven items and thread PRRT_kwDORFy7ds6wHB8w); no merge of main (PR MERGEABLE)",
   "proof": [
     {
-      "criterion": "Bus connected but silent: a send to a cached target, a topic publish and a role lookup each answer 503 with Retry-After: 1 and the busUnansweredPrefix body inside the 3.5 s budget (tester failures 1 and 2)",
-      "surface": "the real envoy-listener binary built at this head, connected to a real NATS (internal/testnats/cmd/natsd) through a TCP relay that is then frozen (connection open, nothing forwarded); throwaway rig under $TMPDIR, driven with curl",
-      "command": "bash smoke.sh listener-new: POST /v1/interests/subscribe registers ses_live; send ses_live from ses_no_interest (bus up); freeze the relay; POST /v1/messages/send {target_session: ses_live, source_session: ses_no_interest}; POST /v1/messages/publish {topic: notifications.github.smoke.topic, source_session: ses_no_interest}; GET /v1/roles/stall-role",
-      "observed": "bus up: send 200 in 0.007 s; frozen send: 503 in 3.503203 s {\"error\":\"envoy: the message bus did not answer: context deadline exceeded\"}, Retry-After: 1; frozen publish: 503 in 3.502440 s, same body, Retry-After: 1; frozen lookup: 503 in 3.502570 s {\"error\":\"envoy: the message bus did not answer: read role stall-role's claim: context deadline exceeded\"}, Retry-After: 1",
-      "headSha": "ef828fd61a5418a0c447b5a8a1ac966046663824",
-      "negativeControl": "The same rig with the listener built from the previous head 278ff802: frozen send and frozen publish got no answer, 'curl: (52) Empty reply from server' at 10.002 s and 10.004 s; frozen lookup 500 in 3.503 s with no Retry-After"
+      "criterion": "Item 3: a malformed role-claim record is answered on both role routes as 500 with no Retry-After and no bus-unavailable prefix, and the publish records it as role_claim_unreadable, not bus_unavailable",
+      "surface": "the real envoy-listener binary built at this head against a real NATS (internal/testnats/cmd/natsd); the raw claim {\"holder_session_id\":\"\"} written into envoy_roles with a throwaway nats.go client; driven with curl",
+      "command": "bash smoke.sh listener-new: putter envoy_roles broken-role '{\"holder_session_id\":\"\"}'; GET /v1/roles/broken-role; POST /v1/messages/publish {topic: notifications.role.broken-role}",
+      "observed": "lookup: 500 in 0.0029 s {\"error\":\"envoy: the claim record of role broken-role is unreadable: malformed role claim: it names no holder\"}, no Retry-After; publish: 500 in 0.0034 s, same body, no Retry-After; listener.log WARN listener publish {outcome: role_claim_unreadable, status: 500, topic: notifications.role.broken-role}",
+      "headSha": "dfe43f43f471a98e93d1888da21e8c36beb48d34",
+      "negativeControl": "The same rig with the listener built from the previous head 57d8d3bb: lookup and publish both 503 {\"error\":\"envoy: the message bus did not answer: role claim has no holder\"} with Retry-After: 1, and the publish recorded outcome bus_unavailable"
     },
     {
-      "criterion": "The tester's red tests pass unmodified, and the rest of the listener suite stays green",
-      "surface": "go test of ./cmd/listener against the in-process NATS test server and the listener's real HTTP handlers",
-      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip '^(TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills)$' -timeout 20m",
-      "observed": "ok 270.366s, no --- FAIL; --- PASS TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering (the_claim_read 4.07 s, the_conditional_release 4.07 s), TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget (send 3.56 s, publish 3.56 s), TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget, TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim, and the new TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket; send_route_acceptance_test.go has no diff from the tester's commit and publish_refusal_answers_test.go differs only in hunks at 177 and 264 (TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget), before the red test at 292. Also: internal/integration ok 97.540s; bash scripts/e2e-local.sh exit 0, both PASS lines, bus-down send 503 in 3.504636 s, client EnvoyApiError 503; go build ./..., go vet, gofmt and check-private-names.sh clean",
-      "headSha": "ef828fd61a5418a0c447b5a8a1ac966046663824",
-      "negativeControl": "At the tester's head 52dd9f17 the two red tests fail: 'lookup whose role store did not answer: status 500' and 'the send answered after 10.001217784s … want inside 4s' (tester's handoff, reproduced by the real-binary control above)"
+      "criterion": "Item 1 keeps the frozen-bus answers: with the bound moved into store.Registry, a send to a cached target from a sender with no interest record, a topic publish and a role lookup each answer 503 with Retry-After: 1 inside the 3.5 s budget",
+      "surface": "the same real binary, connected through a TCP relay that is then frozen (connection open, nothing forwarded)",
+      "command": "bash smoke.sh listener-new (after the malformed-claim step): subscribe ses_live; send from ses_no_interest (bus up); freeze the relay; send, publish notifications.github.smoke.topic, GET /v1/roles/stall-role",
+      "observed": "bus up send 200 in 0.0058 s; frozen send 503 in 3.502876 s, frozen publish 503 in 3.502962 s, both {\"error\":\"envoy: the message bus did not answer: context deadline exceeded\"}; frozen lookup 503 in 3.503104 s {\"error\":\"envoy: the message bus did not answer: read role stall-role's claim: context deadline exceeded\"}; each Retry-After: 1",
+      "headSha": "dfe43f43f471a98e93d1888da21e8c36beb48d34",
+      "negativeControl": "The identical send answered 200 before the freeze; the listener from 278ff802, before any bound on the sender read, gave the same frozen send and publish no answer at 10 s (the previous round's control, same rig)"
+    },
+    {
+      "criterion": "Every item pinned and the suites green: the tester's two red tests pass unmodified; the new malformed-claim tests fail before the fix; the bus, store, integration and listener suites and e2e-local pass",
+      "surface": "go test against the in-process NATS test server; scripts/e2e-local.sh against the real binary and a real NATS",
+      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -skip '^(TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills)$'; go test ./internal/bus (after the publishConfirmed change); go test ./internal/store ./internal/integration; bash scripts/e2e-local.sh",
+      "observed": "cmd/listener ok 264.171s, 0 '--- FAIL', --- PASS for TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering, TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget, TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError, TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError, TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget (publish only now), TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt; internal/bus ok 217.323s; internal/store ok 18.617s (incl. TestReadsWhoseContextHasEndedAnswerOnlyFromTheCache, TestRoleClaimReadsAnUndecodableRecordAsErrMalformedRoleClaim); internal/integration ok 98.925s; e2e-local exit 0, both PASS, bus-down send 503 in 3.502923 s, client EnvoyApiError 503, three WARN bus_unavailable records; go build ./..., go vet ./..., gofmt, check-private-names.sh clean",
+      "headSha": "dfe43f43f471a98e93d1888da21e8c36beb48d34",
+      "negativeControl": "go test -overlay with both ErrMalformedRoleClaim branches cut from api.go: TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError fails 'status 503, body {\"error\":\"envoy: the message bus did not answer: malformed role claim: it names no holder\"}; want 500' (and the publish test likewise); with publishConfirmed's ctx read removed, TestAPublishCancelledAsTheReconnectCompletesSendsNothing fails with the message received"
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/api.go — roleGetHandler answers a read that did not answer through writeBusUnavailable; senderStamp takes the route's ctx and bounds its interest read-through at senderStampReadTimeout (1 s) through withinContext",
-    "packages/envoy/cmd/listener/role_holder.go — liveSessionEntry comment",
-    "packages/envoy/cmd/listener/api_test.go — TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim's lookup now expects 503; new TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket",
-    "packages/envoy/cmd/listener/publish_refusal_answers_test.go — the lookup/* subtests of TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget expect 503",
-    "packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, packages/envoy/CHANGELOG.md"
+    "packages/envoy/internal/bus/confirm.go, nats.go and tests — publishConfirmed takes ctx; publishCoreTo's two reads and most of its comment removed",
+    "packages/envoy/internal/store/kv.go — Get, RoleClaim, ReleaseExpiredRoleClaim take ctx; bounded at the store (bucket read only; cache hit stays in the caller's goroutine); ErrMalformedRoleClaim",
+    "packages/envoy/cmd/listener/role_holder.go — withinContext deleted; writeRoleClaimUnreadable",
+    "packages/envoy/cmd/listener/api.go, request_record.go — both role routes answer ErrMalformedRoleClaim 500; outcome role_claim_unreadable",
+    "packages/envoy/cmd/listener/main.go — one deliveryConfig again; listenerDeliveryHandlerConfigs and its test deleted",
+    "packages/envoy/cmd/listener/unplaceable_delivery.go, delivery.go — unplaceableAgentDelivery finalizes both arms, no bool",
+    "packages/envoy/cmd/listener/role_claim_unreadable_test.go (new), publish_refusal_answers_test.go (lookup subtests removed from the implementer's test; comment fixed), callers' ctx updates in tests and internal/integration",
+    "packages/envoy/AGENTS.md, docs/architecture.md, CHANGELOG.md; docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md; docs/solutions/best-practices/an-instrument-…-INFRA-141.md"
   ],
   "trickyParts": [
-    "senderStamp only enriches the envelope's sender, so a read that does not answer within 1 s stamps the session id and the session-cache title and lets the publish meet the silent bus itself; on a healthy bus the read-through still bridges the interest cache's refill (pinned by the new sender-stamp test)."
+    "senderStamp still creates one context.WithTimeout per send/publish with a source_session (its 1 s cap); the goroutine, channel and error string are gone from the cache-hit path. Removing the timer would need a second read API.",
+    "Of the two duplicate lookup tests, the tester's (TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering) is kept unmodified and the implementer's lookup/* subtests were removed, so the lookup's lower time bound is no longer asserted; its upper bound and answer are."
   ],
   "deviations": [
-    "Every read-did-not-answer failure on GET /v1/roles/<role> is now the bus-unavailable 503, not only the role store's claim read: the holder session read and the conditional release answer the same way, as on the publish route; a refused key keeps writeNATSError's 413/400 through writeBusUnavailable."
+    "ReleaseExpiredRoleClaim now prefixes every failure with 'release role <r>'s expired claim held by <s>: ' (wording only; errors.Is unchanged)."
   ],
   "openQuestions": []
 }
