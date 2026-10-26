@@ -1223,3 +1223,30 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 		t.Fatalf("%q reads back with the first item holding %q", markdown, first.Children[0].Children[0].Text)
 	}
 }
+
+// An image whose title holds a line feed, in a list item or a block quote, is stored today with
+// the line feed as it is (the next line is the paragraph's lazy continuation), and reads back as
+// held, so no write after INFRA-190 changes those bytes (R3): the title's line feed stays raw
+// wherever the block holds it, not only in a top-level paragraph.
+func TestRenderKeepsAStoredImageTitlesLineFeedInAListItemOrBlockQuote(t *testing.T) {
+	for _, markdown := range []string{
+		"- ![x](i.png \"a\nb\")\n",
+		"1. ![x](i.png \"a\nb\")\n",
+		"> ![x](i.png \"a\nb\")\n",
+		"- > ![x](i.png \"a\nb\")\n",
+	} {
+		doc, err := ParseForWrite(markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", markdown, err)
+			continue
+		}
+		got, err := Render(doc)
+		if err != nil {
+			t.Errorf("Render(ParseForWrite(%q)) = %v", markdown, err)
+			continue
+		}
+		if got != markdown {
+			t.Errorf("Render(ParseForWrite(%q)) = %q, want the stored bytes kept", markdown, got)
+		}
+	}
+}
