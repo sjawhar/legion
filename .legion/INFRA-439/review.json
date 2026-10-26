@@ -2,61 +2,56 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T17:57:40Z",
-  "round": 3,
-  "reviewedHead": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
-  "decision": "changes_requested",
+  "completed": "2026-10-26T21:38:41Z",
+  "round": 4,
+  "reviewedHead": "2f95f13f3965f11b0ac5e0ae0630dcfa4d9a2057",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
+  "important": 0,
+  "minor": 5,
   "verifiedFixed": [
-    "Round 2 finding 1 as stated: a BTW's event id is recorded (recordDeliveredFor, bound to the transcript session, so it holds during shutdown) before the side turn and before any reply; a same-mode Retry still runs (tester round 8 r14 B1/B2, round 10 B5/B6k).",
-    "Round 2 finding 2 as stated: readArrivals stamps a frame when the subscription yields it, not when deliver starts (tester round 8 r15 C1, live).",
-    "Round 2 finding 3: mergeForUpsert and removeInterestTopics drop private-stream topics from stored rows; every production writer goes through one of them; the census rollout line now says what happens (cleaned at the next registration, Match reads the stale row until then).",
-    "Round 2 finding 4: UnwrittenFrames.sendCard settles, waits or releases its claim, awaitTurn settles without an identity; no caller in envoy.ts repeats the protocol.",
-    "Round 2 minors: no CoversAnotherAgentSubject reference; reachesPrivateStreamSubject mirrors the Go rule; the withdrawn-text-turn comment and test follow production order; go.work.sum equals main's.",
-    "Trust-model sentence present in the census and docs/site dispatch/envoy.md; no per-session secret."
+    "Round 3 finding 1: UnwrittenFrames.sendCard hands an inert card only to a settled host (hostSettled: idle, no pending message, not shutting down, same session) and handBackWithdrawn hands a held one at the first settled heartbeat; every inert path (replayed BTW, failure notice naming a BTW, hand-back) goes through it; smoke leg 7 on omp 18.12.2 (tester round 11/12) shows nothing queued during the turn and one inert card after idle with no turn run.",
+    "Round 3 finding 2: readArrivals yields every frame it read before a clean end or an error and returns the source when the caller stops; delivery-arrivals.test.ts drives nats.js's own QueuedIteratorImpl.",
+    "Round 3 minors: trust sentence names the API credential and ended sessions; pump comment says a BTW's outcome is Dispatch's record; the cursorStarts window is documented (stated, not closed: accepted, a margin trades it for duplicate notices after every reconnect).",
+    "smoke-replay.sh remote mode: replay_read reads its cursor from $1 and both callers match; tester round 12 SMOKE REPLAY PASS in remote and local mode at 2f95f13f."
   ],
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/pi-envoy/extensions/envoy.ts",
-      "description": "An 'inert' card (steer, triggerTurn false, 1048-1050) handed while a turn streams goes into omp's steering queue, and omp runs another model turn on a steering message at the stop boundary; triggerTurn is ignored while streaming. Deep-review drove it on real omp 18.12.2 with claude-haiku-4-5: the model answered the replayed BTW ('17 x 23 = 391') in the main transcript. The tester's legs ran on an idle host (B5, B6k) or interrupted before the stop boundary (B7). So a replayed BTW, or a failure notice naming one, still starts a turn when it arrives mid-turn. Hold an inert card until the host is idle with no pending messages (the heartbeat's isIdle/hasPendingMessages gate) and hand it then; correct unwritten-frames.ts 6-11, pi-envoy AGENTS.md, the CHANGELOG and the PR body."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy-client/src/delivery.ts",
-      "description": "readArrivals checks `stopped` (200-201) before shifting `arrived`, so frames already read from a subscription that then ends cleanly (unsubscribe, channel close, connection close) while an earlier delivery is slow are dropped. nats.js QueuedIteratorImpl yields the batch it took before it honours done; code-quality proved it on nats 2.29.3's own iterator (raw [1,2,3], through readArrivals [1]). Role-held topics and anything replay does not cover are lost silently. Yield what was read before ending; the test's hand-made fake pins the wrong model, so drive it with nats.js's iterator."
-    },
-    {
       "severity": "minor",
       "file": "docs/site/src/content/docs/dispatch/envoy.md",
-      "description": "The trust sentence (178-181) says 'a live session's id'; replayHandler never checks liveness, so any session id whose inbox the stream still holds, an ended session's included, is readable, and 'reach the listener' means holding its API credential, or loopback when /v1 is open. Same in the census rollout line."
+      "description": "The trust sentence names loopback as the only open-/v1 caller; ENVOY_ALLOWED_HOSTS names are served too, and the GCP hub serves its tailnet name with no bearer, so any tailnet peer reaching port 9020 can replay any session's inbox (already able to read live traffic via the hub's no-auth NATS user). Wording: Fast-follow; stated under Not proven / risk."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-envoy/extensions/envoy.ts",
-      "description": "The pump comment (1536-1537) says the next sweep shows a failed frame or deliver reported it; a BTW is recorded before its side turn, so when both its reply POSTs fail no sweep shows it and no notice comes. Dispatch records the attempt unanswered and a Retry runs, so that is not a defect; correct the comment."
+      "file": "packages/pi-envoy/src/unwritten-frames.ts",
+      "description": "handBackWithdrawn takes `settled` as a parameter while sendCard reads host.settled(); production passes the same function, so no behaviour differs, but the two can drift. Fast-follow."
     },
     {
       "severity": "minor",
       "file": "packages/envoy-client/src/replay.ts",
-      "description": "Hypothesis (not driven): cursorStarts is stamped when the answer arrives, after the listener read its watermark, so a frame stored before the watermark but delivered on the NATS socket after the HTTP answer is stamped after the cursor start and is only logged if it fails. A short grace margin on the start biases it to a notice."
+      "description": "ReplayDeliveryOutcome's `queued` text does not name the keyless held inert card (claim released, re-shown each sweep until the host settles). Fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/AGENTS.md",
+      "description": "The stream_recreated / retention_gap notice card is handed directly as a steer with triggerTurn false, so a streaming turn runs one more model turn for it; AGENTS.md says it starts no turn. Not this round's code; no person's instruction in it. Wording: Fast-follow; stated under Not proven / risk."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/scripts/smoke-replay.sh",
+      "description": "Leg 7 proves the mid-turn hold only in local mode (remote mode has no evidence the sweep ran during the turn); the entry-matching jq predicate has four copies. Fast-follow; stated under Not proven / risk."
     }
   ],
-  "notRequired": [
-    "Code-quality: filter private topics where rows enter the registry (applyWatched/Get) instead of at the writers; the census describes the current window honestly.",
-    "Code-quality: one recordDelivered(sessionID, frame) instead of two methods; that a card omp writes during shutdown is then unrecorded and shown again after a resume is a duplicate, not a loss, and rests on an unverified omp behaviour; listed under Not proven / risk.",
-    "Deep-review hardening: decide a failure notice's inertness from its envelope rather than the 1,000-entry btwEvents set; Claude Code re-logs a passed-over BTW while a hole holds its cursor."
-  ],
   "ci": {
-    "codeHead": "cdc5696f34f2d1808cbe31aca29f80a13e8dddf2",
+    "codeHead": "2f95f13f3965f11b0ac5e0ae0630dcfa4d9a2057",
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "observed": "lint in progress, typecheck and test queued, pr-title queued when read (runs 40366118143, 40367470435); compare cdc5696f...9d617a58 changes only .legion/. A request for changes does not wait on CI."
+    "observed": "lint success, typecheck success, test success, pr-title success at 2f95f13f (read 21:37Z); newest pull_request run head is 2f95f13f; compare 2f95f13f...335ddbef changes only .legion/ (2 files)."
   },
+  "threads": "All 19 threads answered by me and resolved; the five round-3 threads (PRRT_kwDORFy7ds6wY0Nj, Nr, Nz, N8, OF) accepted in this round.",
   "thermonuclear": {
-    "head": "9d617a583cd3124b85c34056f8959ff0b8358628",
-    "deepReview": "CHANGES: inert card mid-stream starts a turn (adopted, important, proven on real omp); cursor-start window (minor hypothesis); trust sentence (minor). Provider: anthropic/claude-opus-5-5, 83 turns, no other provider.",
-    "codeQuality": "CHANGES: readArrivals drop (adopted, important, proven); BTW reply failure dropped (judged not a defect, comment fix); two record APIs and registry layering (not required). Provider: anthropic/claude-opus-5-5, 46 turns, no other provider."
-  }
+    "head": "335ddbef91177b33967421c8804dd847639dd3fa",
+    "deepReview": "APPROVE, two minors (trust sentence callers, replay notice card claim). Provider: anthropic/claude-opus-5-5, 73 turns, no other provider.",
+    "codeQuality": "CHANGES on structure only: settled read two ways, queued contract text, optional host probes, smoke leg 7 remote proof and jq duplication; none changes behaviour on supported omp, batched into Fast-follow and Not proven / risk. Provider: anthropic/claude-opus-5-5, 24 turns, no other provider."
+  },
+  "fastFollow": "handBackWithdrawn reads host.settled(); queued outcome text names the keyless held card; trust sentence names ENVOY_ALLOWED_HOSTS and the GCP hub's tailnet name; pi-envoy AGENTS.md on the replay notice card; smoke-replay.sh jq predicate once and leg 7 local-only statement."
 }
