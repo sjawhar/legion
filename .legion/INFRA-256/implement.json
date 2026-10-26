@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-256",
-  "completed": "2026-10-26T21:20:00Z",
+  "completed": "2026-10-26T23:05:00Z",
   "generation": 4,
   "proof": [
     {
@@ -60,6 +60,14 @@
       "observed": "237 passed, 0 failed; the comment and review-comment cases print the new hint (delete each comment and review comment or edit the review, then re-run the newest failed run of each check that reported it, lint and pr-title per red event, never an older run)",
       "headSha": "13bd6a70498903ef7f142e9255d69f72904e16a3",
       "negativeControl": "A clean comment set prints no hint (the 'a clean set of comments...passes' case exits 0 with no hint lines)"
+    },
+    {
+      "criterion": "Tester round 2 failure 1: the checks pill ignores checks of events GitHub does not evaluate for a pull request",
+      "surface": "Dispatch's own browser suite (packages/dispatch/e2e, Playwright chromium and iphone) against the real Dispatch server and web build with the e2e fake GitHub; plus the rule on real sjawhar/legion heads",
+      "command": "bun run e2e e2e/github-checks.e2e.ts (harness $TMPDIR/infra-256/harness/e2e.sh); bun test web/src/features/issue",
+      "observed": "6 passed (all three cases, the tester's red case included); unit suite 134 pass, 0 fail with the tester's red row. Real heads, pill vs GitHub rollup: #2234 44eab33b success/SUCCESS, #2059 488032a8 success/SUCCESS, #2250 672e3e1a failure/FAILURE, #2255 88e0dffe success/SUCCESS",
+      "headSha": "e918e18311172723c25e3b20e6455a453df03ac7",
+      "negativeControl": "GitHubLink.tsx as of 2df03e03 with the same suite: 2 failed, 4 passed; the tester's case 'the checks pill ignores checks of events GitHub does not evaluate for a pull request' got checks: failure, expected checks: success"
     }
   ],
   "filesChanged": [
@@ -89,11 +97,12 @@
   "deviations": [
     "The architect's first concurrency addition asked for group pr-title-${{ github.event.pull_request.number }}; the head uses pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }} for the per-event check listing above (reported to the architect with evidence, and now plan amendment 2 in the generation 4 plan handoff 23e66cc4). At most one running and one pending run per event, so at most four per pull request.",
     "ce-simplify-code applied one change: as_event became as_review_event (no argument).",
-    "Scope added in round 2 at the architect's direction: the Dispatch checks pill and the GitHub proxy's fourth read (actions/runs for one head_sha). packages/envoy/CHANGELOG.md's historical entry naming the proxy's three paths is left as release history."
+    "Scope added in round 2 at the architect's direction: the Dispatch checks pill and the GitHub proxy's fourth read (actions/runs for one head_sha). packages/envoy/CHANGELOG.md's historical entry naming the proxy's three paths is left as release history.",
+    "Round 3 forward-merged main (a real conflict, GitHub DIRTY); fingerprint 67fde3bb… → 2efb8792… changed, by the resolved fake-github.ts comment lines; recorded in a PR comment."
   ],
   "openQuestions": [
     "Production check for the pill: run the dispatch-production-check.sh command from the deployment instructions with --page set to an issue page; it adds no new /api route (the proxy path is under the existing /api/github/rest/)."
   ],
-  "round": 2,
-  "roundSummary": "Review round 1 (review 5658487797) and the architect's scope addition (dispatch://INFRA-49/ask/404474ab-ce40-4508-a692-e090ed18220e, fix in place): 4dffee8f9cdc rewrites the re-run hint in check-pr-text.sh and AGENTS.md:148; 13bd6a70498903ef7f142e9255d69f72904e16a3 makes Dispatch's checks pill judge the newest run per check name, workflow and event, with the GitHub proxy forwarding one commit's actions/runs. The PR body Outcome line is rewritten as the reviewer asked. The workflow (9bb73cab) is unchanged; its proof entries below stand."
+  "round": 3,
+  "roundSummary": "Answers the tester's round 2 failures (test.json at 2df03e03): e918e183 drops a workflow run's check whose event GitHub does not evaluate for a pull request (the tester's red tests cdf24efc and 5a0a94c2 pass unmodified); e877dbf9 forward-merges main@origin 5c4548f0, resolving the conflict in packages/dispatch/e2e/fake-github.ts, so the head is no longer DIRTY and GitHub runs its pull_request CI (runs 40405244351 Tests, 40405244233 PR Title, queued at writing). The earlier heads had no run because the PR conflicted; the round 2 code pushes (4dffee8f, 13bd6a70) carried no skip-checks trailer, only the handoff push did."
 }
