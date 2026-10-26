@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-256",
+  "completed": "2026-10-26T20:24:00Z",
+  "generation": 4,
+  "round": 1,
+  "reviewedCodeHead": "9bb73cab40630765aeb55fccef6f1cd7cb34acf8",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 0,
+  "ci": "Required set on main (ruleset): lint, typecheck, test, pr-title; no branch protection. Newest pull_request run head 9bb73cab; its check-runs lint 121643970855, typecheck 121643970597, test 121643970999, pr-title 121643970964 and 121735063112 all completed success. Compare 9bb73cab...e4337c23: status ahead, 3 files, handoffsOnly true.",
+  "acceptanceChecks": "Greps A and B from plan.md print nothing; actionlint v1.7.7 on pr-title.yaml exit 0; header items (a)-(e) present; GitHub's troubleshooting-required-status-checks doc lists push, pull_request, pull_request_review, pull_request_target, deployment, deployment_status as the only events whose checks count, which confirms header item (c). check-private-names.test.sh 237 passed (thermonuclear pair's run).",
+  "thermonuclear": "Both run once at 9bb73cab. Deep review: no correctness or security finding in the workflow or the script; Minor findings on the new re-run hint, on the PR body's Outcome wording, and on Dispatch's GitHub-link checks pill. Code quality: Important finding on the re-run hint; four cleanup Minors.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-pr-text.sh",
+      "description": "Lines 145-147, the new recovery hint, also printed by the required lint job and by pull_request-event runs. (1) 'Editing a review starts a new run by itself' is true only for the pull_request_review pr-title. When lint or the pull_request pr-title flagged the review (any push after it), an edit leaves those checks red with nothing re-running them. (2) 'the failed run' does not say which run. A re-run replays the frozen title and body of its payload (docs/solutions/legion/the-private-names-check-reads-each-events-frozen-body-...-LEGION-781.md). So a re-run of an older failed run gets the highest check-run id and can turn pr-title green over a newer run that failed on the body. Fix: one instruction for every kind: re-run the newest failed run of each check that reported it on the current head (lint, and pr-title once per event); never an older run."
+    },
+    {
+      "severity": "important",
+      "file": "AGENTS.md",
+      "description": "Line 148 adds 'then re-run the failed run', which has the same gap. The edit must match the corrected hint. Also, the PR body's Outcome line says 'at most two PR Title runs per event' and 'never leaves a cancelled pr-title on the head'. Each trigger still starts a run (tester's #2261 has three runs for one event), and superseded cancelled check runs stay on the commit. The true claims are 'at most one running and one pending per event at a time' and 'the pr-title that stands for each event is never a cancelled run'."
+    }
+  ],
+  "fastFollow": "Wording only: the trigger list is restated in five places (check-pr-text.sh, check-private-names.sh, pr-and-main.yaml, AGENTS.md, pr-title.yaml); pr-title.yaml says 'loses nothing' twice, and its concurrency comment carries a checkout remark.",
+  "outsideFindings": "Dispatch's GitHub-link checks pill (packages/dispatch/web/src/features/issue/GitHubLink.tsx:58-63) shows failure for any cancelled check run on the head, not only the run that stands. This existed before this PR, and the pill is display only. This PR's review-run cancellation makes the pill red more often. It goes to the controller's report issue as a dispatch ask."
+}
