@@ -2,30 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-26T04:11:00Z",
-  "decision": "approved",
+  "completed": "2026-10-26T04:44:00Z",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "kind": "fingerprint-confirmation",
+  "kind": "new round (round 14): fingerprint changed",
   "lastReview": {
-    "id": 5645277340,
+    "id": 5647297954,
     "state": "APPROVED",
-    "commitId": "06f26ab1eb6a2aacd43042eaad87cd6da09610ba"
+    "commitId": "3b90e2498e8e07686c9c3a480f7af80233896950"
   },
   "fingerprint": {
-    "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, after jj git fetch",
-    "atLastReview": "06f26ab1eb6a2aacd43042eaad87cd6da09610ba fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9",
-    "atNewHead": "befa6151099c176b808db8fbfdde2bc24ccca033 fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9",
-    "result": "unchanged"
+    "atLastReview": "3b90e2498e8e fc66319c54fa9634463392d22e921ddb1f0cfa4b0c5a5afb3a3057670ac3c0c9",
+    "atMerge": "8867bd5d67a1 c907e753d2df31e6b4cbe3c7f90effc7741ecc1466d3d9a434d791e7716d66c4",
+    "atHead": "b0e681fdf296 62c5fa089d137f97881aef34abc891defae1a28421ecafb84cbd5896c45abb56",
+    "restricted": "excluding the three skill files and their claude-envoy copies as well: 032f4c81... at 3b90e249 and 8867bd5d, so outside those paths the merge changed nothing; at b0e681fd it differs by the new skills-guard test alone"
+  },
+  "thermonuclear": {
+    "deepReview": "APPROVE at b0e681fd: acceptance.md child-closed bullet true of workflow/linger.go:30-33 and check.go:60-117, 205-302, 374-403; no stale statement from #2197; skills-guard test 12 pass; claude-envoy check-dist in sync",
+    "codeQuality": "CHANGES: (1) acceptance.md duplicates merge-gate.md's look lifecycle (taken as fast-follow), (2) merge-gate.md:282-284 false at this head (taken), (3) worker SKILL.md step-1 tail wording (not a defect)"
   },
   "ci": {
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "requiredSource": "rulesets of main; branch protection lists none",
-    "codeHead": "0c7467a987478e91383b4f692202a435e93be5bd",
-    "checks": "lint success 03:35:25Z, pr-title success 03:35:54Z, typecheck success 03:36:26Z, test success 03:49:23Z (check-runs of the code head, read 04:10Z); Tests run 40264431582 and Worker Image run 40264431578 completed success",
-    "compare": "0c7467a98747...befa6151099c: ahead, 2 files, all under .legion/"
+    "ciHead": "752a8e4edf9e (code of 4bee7ec164de; compare to b0e681fd lists only .legion/)",
+    "state": "queued at 04:43Z; a request for changes does not wait on it"
   },
-  "e2eLines": "E2E (implementer) and E2E (tester) both present; the tester's round 14 is a rebase re-check b247931acbca -> 0c7467a98747, fingerprint unchanged",
-  "keyFindings": []
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "skills/legion-worker/references/merge-gate.md:282-284 (and packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md:282-284)",
+      "description": "Says `pass` or `fail` closes the check and, 'for a child, the issue's Sandbox and volume are released'. This PR made closeCheck enqueue IssueSuspend for every issue not back in the workflow, root or child, lingering or not (packages/daemon/internal/workflow/check.go:275-302; main's version gated it with Release: !IsTreeRoot && !root.Lingers()). At this head a root's Sandbox also goes with its pod and disk, so the sentence is false about the mechanism this PR changed."
+    }
+  ]
 }
