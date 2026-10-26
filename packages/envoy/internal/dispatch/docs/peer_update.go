@@ -62,16 +62,23 @@ import (
 // inserts or deletes (structTotal).
 //
 // The hook has a third state, which is the room budget's rather than the document's: while the
-// open rooms are past their budget and nothing can be closed (roomBudget.full), only an update
-// that inserts nothing is admitted, in every room, and anything else is refused with the transient
-// DocumentBusyCloseCode (refusedUnderPressure). Bytes cannot be that test. The hook does not count
-// elements, and the elements are what the heap follows (bytesOfHeapAnElement): a mebibyte of
-// markdown can make 786,432 of them (pmdoc/elements.go:16-29), so an update can leave a document
-// as long as it was, or shorter, and still multiply what its room holds. What an update inserts is
-// what can add an element, so an update that inserts nothing is the one update that cannot grow the
-// rendering. That refusal is not the document's own bound and is not folded into it: 4413 is
+// open rooms are past their budget and nothing can be closed (roomBudget.full), an update that
+// inserts anything is refused in every room with the transient DocumentBusyCloseCode, and one that
+// only deletes is admitted while the budget's charges stay within the pressure reserve past its
+// limit (pressureReserveBytes), and refused the same way past it (refusedUnderPressure). Bytes
+// cannot be that test. The hook does not count elements, and the elements are what the heap
+// follows (bytesOfHeapAnElement): a mebibyte of markdown can make 786,432 of them
+// (pmdoc/elements.go:16-29), so an update can leave a document as long as it was, or shorter, and
+// still multiply what its room holds. What an update inserts is what can add an element, so an
+// update that inserts nothing is the one update that cannot grow the rendering; but a delete that
+// cuts the middle of an item splits it, which adds structs, so even deletes are bounded, by the
+// reserve. That refusal is not the document's own bound and is not folded into it: 4413 is
 // permanent and the editor drops the refused edit, where 4503 is transient and the editor keeps
 // it, to send once the pressure passes.
+//
+// The hook charges the room budget from the same walk (peerWeighing.structureHeap): each update it
+// admits adds to its room's structure part what the rendering's count cannot see, which no count
+// clears (roomCharge).
 
 // maxPeerInsertAtTheBound is the most new content one update may carry into a document already at
 // or over the bound: enough for the editor's own derived writes - heading ids, list labels, anchor
@@ -132,9 +139,20 @@ const maxMessageBytes = 24 << 20
 // refused with DocumentBusyCloseCode when it inserts anything (refusedUnderPressure), whatever it
 // leaves the document's bytes at, since an insert of fewer bytes than it deletes can still add
 // elements. An update does not say what it deletes without the document to measure it against, so
-// an edit that replaces text with less of it is refused too, as the creep cap refuses it. The
+// an edit that replaces text with less of it is refused too, as the creep cap refuses it. One that
+// only deletes is admitted while what it adds to the charges keeps them within the budget's limit
+// and the pressure reserve beyond it (pressureReserveBytes), and refused the same way past it. The
 // signal is one atomic load, so the peer's read loop takes neither the budget's lock nor a room's
-// state lock for it.
+// state lock for it while the budget is not full.
+//
+// An update it admits is charged to its room's structure part (roomCharge.grew,
+// peerWeighing.structureHeap) once its apply returns, failed or not: an apply that fails can have
+// integrated structs before it failed (crdt/update.go:50-56). One admitted under pressure is
+// charged before its apply, in the same look at the budget as the reserve's check. A delete range
+// the room is known to hold deleted already is charged nothing (deletedRuns), so a browser's
+// whole-state handoff is not charged the room's whole delete set. The content it adds that a
+// rendering can show is charged by the room's update observer, from the transaction the apply
+// commits (contentAdded), not here.
 //
 // Every update's apply is weighed too, by what the walk estimates ygo's apply of it allocates into
 // this room (peerWeighing.applyHeap), which is proportional to the values and structs it carries
@@ -153,11 +171,13 @@ const maxMessageBytes = 24 << 20
 // is returned as it is, so ygo answers that browser SyncStatus(0) and leaves it connected, exactly
 // as a room without this hook does.
 func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
-	weighed := peerWeighing{held: info.Doc.StateVector()}
-	if _, err := walkUpdate(info.Update, fromPeer, &weighed); err != nil {
+	replica := s.liveReplica(info.Doc)
+	charge := replica.roomCharge()
+	weighed := peerWeighing{held: info.Doc.StateVector(), known: charge.deletes()}
+	tally, err := walkUpdate(info.Update, fromPeer, &weighed)
+	if err != nil {
 		return err
 	}
-	replica := s.liveReplica(info.Doc)
 	var bytes int64
 	measured := false
 	var structs *structTotal
@@ -189,19 +209,28 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	if !structs.reserve(info.Doc, added) {
 		return documentTooLarge()
 	}
-	if s.budget.full.Load() && s.refusedUnderPressure(&weighed) {
-		structs.unreserve(added)
-		return &websocket.PeerClose{
-			Code:   contracts.DocumentBusyCloseCode,
-			Reason: contracts.DocumentBusyCloseReason,
+	charged := false
+	if s.budget.full.Load() {
+		if s.refusedUnderPressure(&weighed, charge) {
+			structs.unreserve(added)
+			return &websocket.PeerClose{
+				Code:   contracts.DocumentBusyCloseCode,
+				Reason: contracts.DocumentBusyCloseReason,
+			}
 		}
+		charged = true
 	}
-	err := structs.applying(info.Origin, apply)
+	err = structs.applying(info.Origin, apply)
 	// Moved to what the hook admitted only after the apply returns, so a recount that read the
 	// total's admissions before its encode cannot miss what this apply integrated
-	// (structTotal.recount). An apply that failed is moved all the same: it can have integrated
-	// structs before it failed.
+	// (structTotal.recount). An apply that failed is moved all the same, and charged all the
+	// same: it can have integrated structs before it failed. Its delete ranges are listed as the
+	// room's, so a later update carrying them again is charged nothing for them (deletedRuns).
 	structs.landed(added)
+	if !charged {
+		charge.grew(weighed.structureHeap())
+	}
+	charge.deletes().record(info.Update, tally.deletesAt, weighed.born)
 	return err
 }
 
@@ -215,10 +244,17 @@ func documentTooLarge() *websocket.PeerClose {
 }
 
 // refusedUnderPressure is whether the room budget's pressure, while the budget is full and nothing
-// can be closed (roomBudget.full), refuses weighed, an update the document's own bounds admit: one
-// that carries anything the room does not already hold. One that only deletes is admitted.
-func (s *Service) refusedUnderPressure(weighed *peerWeighing) bool {
-	return weighed.inserted > 0
+// can be closed (roomBudget.full), refuses weighed, an update the document's own bounds admit:
+// one that carries anything the room does not already hold, and one that only deletes once its
+// structure would take the charges and reservations past the limit and pressureReserveBytes
+// beyond it. A delete it admits is charged to charge, the room's, in the same look at the budget
+// (roomBudget.growWithin), so the hook does not charge it again after its apply.
+func (s *Service) refusedUnderPressure(weighed *peerWeighing, charge *roomCharge) bool {
+	if weighed.inserted > 0 {
+		return true
+	}
+	structure := weighed.structureHeap()
+	return structure > 0 && !s.budget.growWithin(charge, structure, pressureReserveBytes)
 }
 
 // liveReplica is the replica of the room holding live (keepReplica), or nil for a document no
@@ -249,12 +285,21 @@ type peerWeighing struct {
 	// first sync and which measured literally would be the whole document.
 	inserted int64
 	// structs is the structs reaching past the room's state, each of which integration adds to the
-	// room's store; deletes is the update's delete ranges.
-	structs, deletes uint64
+	// room's store; deletes is the update's delete ranges, and newDeletes those of them the room
+	// is not known to hold deleted already (known, deletedRuns), which alone can split an item
+	// for good. known is nil for a room no load charged, and every range is new to it.
+	structs, deletes, newDeletes uint64
+	known                        *deletedRuns
 	// decoded is every walked struct's share of the apply's estimate, since ygo's apply decodes
 	// each before it asks whether the room holds it; integrated is the share of the structs past
 	// the room's state alone, which only they cost (structApplyHeap).
 	decoded, integrated uint64
+	// content is the heap one copy of the room keeps for the content of the structs past its
+	// state that no rendering prices (unrenderedContentHeap).
+	content uint64
+	// born is whether any struct past the room's state integrates deleted (bornDeleted), whose
+	// clocks the room's delete set holds from then on (deletedRuns.record).
+	born bool
 }
 
 func (w *peerWeighing) walkedStruct(walked updateStruct) {
@@ -273,9 +318,16 @@ func (w *peerWeighing) walkedStruct(walked updateStruct) {
 	w.inserted += int64(end - max(walked.clock, known))
 	w.structs++
 	w.integrated += cost.integrate
+	w.content += unrenderedContentHeap(walked)
+	w.born = w.born || bornDeleted(walked)
 }
 
-func (w *peerWeighing) walkedDelete(_, _, _ uint64) { w.deletes++ }
+func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
+	w.deletes++
+	if !w.known.covers(client, clock, length) {
+		w.newDeletes++
+	}
+}
 
 // splitsAStructCanCause is the most structs integrating one struct can add to a store beyond
 // itself, and the most applying one delete range can: each splits at most the item it starts in
@@ -289,6 +341,48 @@ const splitsAStructCanCause = 2
 // splits its integration can cause, and the splits each delete range can cause.
 func (w *peerWeighing) added() uint64 {
 	return w.structs*(1+splitsAStructCanCause) + w.deletes*splitsAStructCanCause
+}
+
+// structureHeap is what the walked update adds to its room that a count of the rendering cannot
+// see, at both copies (roomCopies), which the room budget charges to the room's structure part
+// (roomCharge): each new struct with the splits its integration can cause, and the splits of each
+// delete range the room is not known to hold deleted already (newDeletes), at bytesOfHeapAStruct,
+// and the content of its new structs that no rendering prices (content). A whole-state handoff of
+// a document the room already holds adds no struct and carries no delete range the room does not
+// hold, and is charged nothing. The struct total counts every delete range (added): it bounds what
+// a decode of the room's state reads, which every range of its delete set is part of.
+func (w *peerWeighing) structureHeap() int64 {
+	structs := w.structs*(1+splitsAStructCanCause) + w.newDeletes*splitsAStructCanCause
+	return int64((structs*bytesOfHeapAStruct + w.content) * roomCopies)
+}
+
+// unrenderedContentHeap is the heap one copy of a room keeps for walked's content that no count of
+// the rendering prices: a map key's bytes, as text, and the content itself at its kind's heap a
+// byte - text for a string, a binary or an XML type's name (bytesOfHeapAByteOfText), values for
+// Any, JSON, an embed or a format (bytesOfHeapAByteOfValues). The rendering prices what it shows:
+// a string, an embed, a format or an XML type directly under the fragment. Everything else is
+// charged here, whether or not it is shown, since the walk cannot tell for a struct whose parent
+// is an item or its neighbour's (parentItem, parentOfNeighbour) where it sits: text typed into a
+// paragraph, and a later entry for a margin key, both read that way. Charged as unshown, typing
+// costs its text's price a byte beside the per-struct price, a few bytes a keystroke, against
+// content in the margin that no count would ever see were it taken as shown. A deleted item's or
+// a GC run's content is a length, which no heap follows.
+func unrenderedContentHeap(walked updateStruct) uint64 {
+	heap := uint64(len(walked.key)) * bytesOfHeapAByteOfText
+	content := uint64(len(walked.content))
+	switch walked.kind {
+	case structString, structType, structEmbed, structFormat:
+		if walked.parent == parentFragment {
+			return heap
+		}
+	}
+	switch walked.kind {
+	case structString, structBinary, structType:
+		return heap + content*bytesOfHeapAByteOfText
+	case structAny, structJSON, structEmbed, structFormat:
+		return heap + content*bytesOfHeapAByteOfValues
+	}
+	return heap
 }
 
 // structTotalStaleMargin is how near the cap a stale struct total must be for the hook to confirm

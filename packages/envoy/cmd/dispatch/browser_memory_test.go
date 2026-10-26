@@ -37,9 +37,9 @@ const (
 	podGoMemoryLimit = 3_865_470_566
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
-	// roomBudgetBytes (room_budget.go:33), bytesOfHeapAnElement (:45), roomCopies (:180),
-	// maxPeerInsertAtTheBound (peer_update.go:80), maxPeerByteCreep (:85) and maxMessageBytes
-	// (:106). No drive takes a mirror on trust. The server names its budget and what each refused
+	// roomBudgetBytes (room_budget.go:36), bytesOfHeapAnElement (:48), roomCopies (:438),
+	// maxPeerInsertAtTheBound (peer_update.go:87), maxPeerByteCreep (:92) and maxMessageBytes
+	// (:113). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
 	// drives fail unless those are these numbers; the byte drive fails unless a run of small
 	// inserts is refused exactly once the room is the creep past the bound, a paste past the
@@ -52,7 +52,7 @@ const (
 	maxPeerByteCreepForTest        = 64 << 10
 	maxMessageBytesForTest         = 24 << 20
 
-	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:438), the
+	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:466), the
 	// least time between two counts of one room's elements, which is how stale a room's charge
 	// can be. The drives that grow rooms send a round of growth no more often than this and two
 	// seconds, so each round's counts have landed before the next is sent, as they would under a
@@ -62,7 +62,7 @@ const (
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:155-204): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:173-235): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
@@ -243,7 +243,7 @@ func TestABrowsersUpdateIsBoundedByTheDocumentBound(t *testing.T) {
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:180), so the refusals begin within one room of
+// (roomCopies, internal/dispatch/docs/room_budget.go:438), so the refusals begin within one room of
 // the budget divided by what one such room reserves - its stored version's elements at the price of
 // one, at both copies - computed here from the server's constants and held to the numbers the server
 // logs, both when the browsers come one after another and when fifty open at once.
@@ -657,9 +657,10 @@ func TestTheRoomBudgetFollowsRoomsThatGrowWhileTheirBrowsersStay(t *testing.T) {
 // limit, since a room is charged at both copies from its reservation on (roomCopies), so browsers
 // open documents of a mebibyte until the budget refuses one, which leaves less than one such room's
 // worth of it free and raises nothing; then small rooms opened first grow under their browsers, a
-// round of headings at a time, until the counts of their elements take the charges past the limit,
-// a sweep finds nothing to close, and the budget is full (roomBudget.full): the next round is
-// refused.
+// round of headings at a time, until what a round adds to its room's charge - the structure the
+// peer hook charges for its structs and the count of its elements (internal/dispatch/docs,
+// roomCharge) - takes the charges past the limit, a sweep finds nothing to close, and the budget is
+// full (roomBudget.full): the next round is refused.
 //
 // Each refusal is read twice: an update's from its close frame and from its document, through the
 // server's text and through the store, never holding it; a browser's from its close frame and from
@@ -1310,7 +1311,7 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
-// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:222-254).
+// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:499-536).
 var budgetRefusalLine = regexp.MustCompile(`the open documents fill their memory budget: (\d+) of (\d+) bytes are charged(?:, and this document needs (\d+))?`)
 
 // budgetRefusal is one refusal the server logged: what its rooms were charged, its budget, and
@@ -1352,7 +1353,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:700-728).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1201-1234).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after

@@ -150,7 +150,7 @@ func TestTheUpdateWalkNamesParentsAndContent(t *testing.T) {
 	want := []updateStruct{
 		// Seven UTF-16 code units over ten bytes: the emoji is two units and four bytes.
 		{client: 9, clock: 0, length: 7, kind: structString, parent: parentFragment, root: []byte(fragmentName), content: append([]byte{10}, "héllo🙂"...)},
-		{client: 9, clock: 7, length: 1, kind: structAny, parent: parentMargin, root: []byte(marksMapName), keyed: true, content: anyContent.Bytes()},
+		{client: 9, clock: 7, length: 1, kind: structAny, parent: parentMargin, root: []byte(marksMapName), keyed: true, key: append([]byte{3}, "c-1"...), content: anyContent.Bytes()},
 		{client: 9, clock: 8, length: 1, kind: structString, parent: parentOfNeighbour, content: []byte{1, 'x'}},
 		{client: 9, clock: 9, length: 2, kind: structString, parent: parentItem, content: []byte{2, 'i', 'n'}},
 		{client: 9, clock: 11, length: 3, kind: structGC},
@@ -161,7 +161,7 @@ func TestTheUpdateWalkNamesParentsAndContent(t *testing.T) {
 	for i, s := range walked.structs {
 		w := want[i]
 		if s.client != w.client || s.clock != w.clock || s.length != w.length || s.kind != w.kind || s.parent != w.parent ||
-			s.keyed != w.keyed || string(s.root) != string(w.root) || string(s.content) != string(w.content) {
+			s.keyed != w.keyed || string(s.key) != string(w.key) || string(s.root) != string(w.root) || string(s.content) != string(w.content) {
 			t.Errorf("struct %d: walked %+v, want %+v", i, s, w)
 		}
 	}

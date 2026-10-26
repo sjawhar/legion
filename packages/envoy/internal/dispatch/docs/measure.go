@@ -19,7 +19,9 @@ import (
 // about 89 ms of every keystroke that changed a 524 KiB rendering and raised the keystroke's p50 by
 // 29 to 36 per cent (BenchmarkKeystrokeBesideReads). The rendering's bytes are a len the observer
 // publishes itself (renderedReplica.publishSize), which is all the peer update hook weighs; only
-// the count comes here, and for a room at most once each roomCountInterval after its load's own.
+// the count comes here, and for a room at most once each roomCountInterval after its load's own,
+// unless the content its transactions added since its last count passes earlyCountCharge, which
+// typing never does, and which has its rendering counted at once (hurry).
 //
 // There is one for the whole service (Service.measurer), and it runs one count at a time: the
 // parse's own heap, up to about 130 MiB for a mebibyte of the heaviest shape (pmdoc/elements.go:31-37),
@@ -94,26 +96,40 @@ func (m *elementMeasurer) minInterval() time.Duration {
 }
 
 // enqueueAfter lists replica once wait has passed, the rest of the interval since its room's last
-// count, or at once when none is left. The timer holds the replica weakly, as the queue does, and
-// one that fires after the measurer stopped lists nothing.
-func (m *elementMeasurer) enqueueAfter(replica weak.Pointer[renderedReplica], wait time.Duration) {
+// count, or at once when none is left, and returns the timer it waits on, nil when it listed the
+// replica at once or the measurer has stopped. The timer holds the replica weakly, as the queue
+// does, and one that fires after the measurer stopped lists nothing.
+func (m *elementMeasurer) enqueueAfter(replica weak.Pointer[renderedReplica], wait time.Duration) *time.Timer {
 	if wait <= 0 {
 		m.enqueue(replica)
-		return
+		return nil
 	}
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	m.delayed++
 	m.mu.Unlock()
-	time.AfterFunc(wait, func() {
+	return time.AfterFunc(wait, func() {
 		m.mu.Lock()
 		m.delayed--
 		m.mu.Unlock()
 		m.enqueue(replica)
 	})
+}
+
+// hurry lists replica now, in place of delay, the timer enqueueAfter had it wait out the interval
+// on: its room's uncounted part has passed earlyCountCharge (renderedReplica.publishSize). A timer
+// that has already fired has listed it, and hurry lists nothing more.
+func (m *elementMeasurer) hurry(replica weak.Pointer[renderedReplica], delay *time.Timer) {
+	if !delay.Stop() {
+		return
+	}
+	m.mu.Lock()
+	m.delayed--
+	m.mu.Unlock()
+	m.enqueue(replica)
 }
 
 // enqueue lists replica as having a rendering to count, and starts the worker if none runs. The
@@ -163,13 +179,15 @@ func (m *elementMeasurer) next() (weak.Pointer[renderedReplica], bool) {
 }
 
 // count counts the rendering replica has waiting, stores the count where the room budget reads it,
-// and re-bases the room's charge on it. In the same turn it counts the room's struct total afresh
-// (structTotal.recountLive), an encode of the live document's state and a walk of it, which
-// re-bases the total the peer update hook refuses past the decode cap on and nothing else. A
-// replica already collected, or one whose waiting rendering a later publication withdrew (one the
-// room could not read), has nothing to count. The parse and the walk run in the measurer's turn.
+// and re-bases the room's counted and uncounted parts on it (storeCounted). In the same turn it
+// counts the room's struct total afresh (structTotal.recountLive), an encode of the live
+// document's state and a walk of it, which re-bases the total the peer update hook refuses past
+// the decode cap on and nothing else: neither it nor the element count touches the room's
+// structure part. A replica already collected, or one whose waiting rendering a later publication
+// withdrew (one the room could not read), has nothing to count. The parse and the walk run in the
+// measurer's turn.
 func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
-	markdown, publication, updates := takeUncounted(replica)
+	markdown, publication, content := takeUncounted(replica)
 	if markdown == nil {
 		return
 	}
@@ -185,7 +203,7 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	structs.recountLive()
 	m.turn.Unlock()
 	if held := replica.Value(); held != nil {
-		held.storeCounted(int64(len(*markdown)), elements, publication, updates)
+		held.storeCounted(int64(len(*markdown)), elements, publication, content)
 	}
 }
 
@@ -250,8 +268,8 @@ func (m *elementMeasurer) stop(ctx context.Context) {
 }
 
 // takeUncounted takes the rendering replica has waiting to be counted, with the publication that
-// made it and the update bytes its room had taken then, marks the replica as no longer queued, so
-// its next rendering queues it again, and starts the room's interval from this count. It holds the
+// made it and the content its room had added then, marks the replica as no longer queued, so its
+// next rendering queues it again, and starts the room's interval from this count. It holds the
 // replica only for that.
 func takeUncounted(replica weak.Pointer[renderedReplica]) (*string, uint64, int64) {
 	r := replica.Value()
@@ -263,25 +281,27 @@ func takeUncounted(replica weak.Pointer[renderedReplica]) (*string, uint64, int6
 	markdown := r.uncounted
 	r.uncounted = nil
 	r.queued = false
+	r.delay = nil
 	if markdown != nil {
 		r.countedAt = time.Now()
 	}
-	return markdown, r.uncountedAt, r.uncountedUpdates
+	return markdown, r.uncountedAt, r.uncountedContent
 }
 
 // storeCounted stores elements, the count of the bytes-long rendering the replica's publication-th
-// publication made when the room had taken updates bytes of updates, and re-bases the room's charge
-// on its price (copyHeap, roomCharge.measured), unless a later publication has already stored a
-// count of its own: the room's load, or a rendering the room could not read. Those are newer than
-// this count, and a count landing after them would put an older document's weight back on the
-// room. The update bytes it clears are those the room had taken when the counted rendering was
-// published, never the bytes taken since, which the rendering does not hold.
-func (r *renderedReplica) storeCounted(bytes, elements int64, publication uint64, updates int64) {
+// publication made when the room had added content bytes of content, and re-bases the room's
+// charge on its price (copyHeap, roomCharge.measured), unless a later publication has already
+// stored a count of its own: the room's load, or a rendering the room could not read. Those are
+// newer than this count, and a count landing after them would put an older document's weight back
+// on the room. The content it clears from the uncounted part is what the room had added when the
+// counted rendering was published, never what was added since, which the rendering does not hold;
+// the structure part it leaves as it is.
+func (r *renderedReplica) storeCounted(bytes, elements int64, publication uint64, content int64) {
 	r.sizeMu.Lock()
 	defer r.sizeMu.Unlock()
 	if publication > r.settled {
 		r.elements.Store(elements)
-		r.charge.measured(copyHeap(bytes, elements), updates)
+		r.charge.measured(copyHeap(bytes, elements), content)
 	}
 }
 

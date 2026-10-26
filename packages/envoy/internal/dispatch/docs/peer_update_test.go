@@ -1118,7 +1118,7 @@ func holdingClocks(t *testing.T, client, length uint64) func() *crdt.Doc {
 // applyAllocation is what ygo's apply of update into a document into makes allocates, the least of
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
-// observer, as every room does (ygo's own, and the room's, websocket.go:496), so the apply
+// observer, as every room does (ygo's own, and the room's, websocket.go:497), so the apply
 // encodes the update its transaction made for the observers (sjawhar/ygo v1.51.3-sami.2,
 // crdt/doc.go:463-465) as a room's does. Two collections before each run empty the pool ygo's
 // encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,

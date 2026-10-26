@@ -118,6 +118,34 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 			clock = end
 		}
 	}
+	tally.deletesAt = w.pos
+	w.deleteSet(&tally, visit)
+	if w.refusal == nil && source == fromPeer && w.pos != len(update) {
+		w.notFromEditor("bytes after the delete set")
+	}
+	if w.refusal != nil {
+		return tally, w.refusal
+	}
+	return tally, nil
+}
+
+// walkDeleteSet reads the delete set of update alone, from at, where a walk of the whole update
+// found it (updateTally.deletesAt), handing visit each range as walkUpdate does, and refuses what
+// that walk would. It is for a second look at the delete set of an update already walked, which
+// need not read its structs again.
+func walkDeleteSet(update []byte, at int, source updateSource, visit updateVisitor) error {
+	w := updateWalker{buf: update, pos: at, source: source}
+	var tally updateTally
+	w.deleteSet(&tally, visit)
+	if w.refusal != nil {
+		return w.refusal
+	}
+	return nil
+}
+
+// deleteSet reads a delete set from the walker's position, counting it into tally and handing
+// visit each range.
+func (w *updateWalker) deleteSet(tally *updateTally, visit updateVisitor) {
 	if w.refusal == nil {
 		tally.deleteClients = w.uint()
 	}
@@ -142,7 +170,7 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 			if w.refusal != nil {
 				break
 			}
-			if end := clock + length; source == fromPeer && (end < clock || end > maxEditorClock) {
+			if end := clock + length; w.source == fromPeer && (end < clock || end > maxEditorClock) {
 				w.notFromEditor("a deleted clock past what a JavaScript client can write")
 				break
 			}
@@ -152,13 +180,6 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 			}
 		}
 	}
-	if w.refusal == nil && source == fromPeer && w.pos != len(update) {
-		w.notFromEditor("bytes after the delete set")
-	}
-	if w.refusal != nil {
-		return tally, w.refusal
-	}
-	return tally, nil
 }
 
 // updateSource is who wrote the update a walk reads, which decides whether what the Proof editor
@@ -194,6 +215,9 @@ type updateTally struct {
 	// each client's ranges when it decodes them (crdt/update.go:1214-1216), so a decoded delete set
 	// can hold fewer.
 	deleteRanges uint64
+	// deletesAt is where in the update its delete set starts, for a second look at the delete set
+	// alone (walkDeleteSet).
+	deletesAt int
 }
 
 // updateStruct is one struct of an update as walkUpdate reads it. Its byte slices alias the
@@ -209,10 +233,11 @@ type updateStruct struct {
 	parent structParent
 	root   []byte
 	// keyed is whether the struct names a map key (parentSub): a map entry, or an attribute of an
-	// XML element. A later entry for the same key carries an origin instead and names neither its
-	// parent nor its key (Yjs typeMapSet; ygo's YMap.Set, crdt/ymap.go:220-225; crdt/update.go:
-	// 909-922), so it reads as unkeyed here.
+	// XML element, and key is that key as encoded, length prefix included. A later entry for the
+	// same key carries an origin instead and names neither its parent nor its key (Yjs typeMapSet;
+	// ygo's YMap.Set, crdt/ymap.go:220-225; crdt/update.go:909-922), so it reads as unkeyed here.
 	keyed bool
+	key   []byte
 	// content is the encoded content after the struct's header, length prefix included, which is
 	// what decodeContent reads: empty for a GC run or a skip, which carry only their length.
 	content []byte
@@ -350,7 +375,9 @@ func (w *updateWalker) walkStruct(walked *updateStruct) {
 			walked.parent = parentItem
 		}
 		if info&infoHasParentSub != 0 {
+			start := w.pos
 			w.str()
+			walked.key = w.buf[start:w.pos]
 			walked.keyed = true
 		}
 	}

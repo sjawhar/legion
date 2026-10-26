@@ -458,7 +458,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 }
 
 // The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
-// which Dispatch's rooms speak (internal/dispatch/docs/service.go:565), puts the room's name before
+// which Dispatch's rooms speak (internal/dispatch/docs/service.go:571), puts the room's name before
 // each (sjawhar/ygo v1.51.3-sami.2, provider/websocket/server.go:66-80).
 const (
 	frameSync       = 0

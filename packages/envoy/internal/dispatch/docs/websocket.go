@@ -488,9 +488,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	replica := s.keepReplica(doc, contentMarkdown)
 	// The room's charge in the room budget replaces the reservations of the sockets admitted to it
 	// (reserveRoom), which counted the stored version at both copies, with the count its load just
-	// made of the room's own document, at both copies too (roomCopies). From here every update the
-	// room takes is charged until a later count of its rendering re-bases the charge (roomCharge).
-	charge := s.chargeLoadedRoom(room, replica)
+	// made of the room's own document, at both copies too (roomCopies). From here the content every
+	// transaction adds is charged until a later count of its rendering re-bases it, and what the
+	// peer hook admits adds to the room's structure part (roomCharge).
+	charge := s.chargeLoadedRoom(room, doc, replica)
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -502,7 +503,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.finishSuppressedPersistence(published.slot, update)
 		}
 		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
-			charge.took(len(update))
+			// A repair is the server's own write, charged as every transaction is: by the content
+			// it adds, which the next count of a rendering holding it re-bases (contentAdded).
+			charge.adds(contentAdded(update))
 			s.recordSuppressedCommit(repair.slot, update)
 			// A repair's update is not classified or credited - its writer appends it in its own
 			// transaction - but it names this instance all the same: one that reaches the room's
@@ -518,9 +521,12 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		}
 		// Charged before the observer renders it, so the rendering it publishes holds this update
 		// and the count of that rendering re-bases the charge past it (renderedReplica.publishSize).
-		// The observer's first update copies the room into its replica, the room's second copy,
-		// which the charge has held since the room loaded (roomCopies).
-		charge.took(len(update))
+		// What is charged is the content the transaction added, whoever wrote it - a browser's
+		// update the peer hook admitted, or the server's own write - never the update's bytes,
+		// which carry the room's whole delete set on every transaction (contentAdded). The
+		// observer's first update copies the room into its replica, the room's second copy, which
+		// the charge has held since the room loaded (roomCopies).
+		charge.adds(contentAdded(update))
 		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
 			s.observeAskBlocksForUpdate(room, tree)
 		})
@@ -625,17 +631,25 @@ func (s *Service) removeConnection(room string, id uint64) {
 		return
 	}
 	delete(state.connected, id)
+	delete(state.departed, id)
 	s.unlockState(room, state)
 }
 
 // settleLastPeer runs the settlement a room's last browser leaving owes now rather than when its
 // timer fires. It takes over the timer's settleWG count, so Shutdown joins it as it would the
 // timer's settlement: Shutdown reports which documents settled, and stops ygo, only once it has
-// returned.
+// returned. First it marks every browser the room's state names as connected departed: ygo has
+// none left in the room, and their handlers forget them only once this returns (departed).
 func (s *Service) settleLastPeer(_ context.Context, room string) {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return
+	}
+	for id := range state.connected {
+		if state.departed == nil {
+			state.departed = make(map[uint64]struct{})
+		}
+		state.departed[id] = struct{}{}
 	}
 	if !s.takeSettleTimer(state.settle) {
 		s.unlockState(room, state)

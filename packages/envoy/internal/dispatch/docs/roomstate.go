@@ -28,6 +28,19 @@ import (
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
+	// departed is the browsers connected when ygo reported the room's last browser gone
+	// (settleLastPeer), each until its handler forgets it (removeConnection). ygo makes that report
+	// on the leaving browser's own socket (sjawhar/ygo v1.51.3-sami.2,
+	// provider/websocket/peer.go:619-625), before the handler that registered the browser returns
+	// and removes it from connected (ServeHTTP), and the settlement it owes runs there first, which
+	// takes seconds for a mebibyte; meanwhile connected still names browsers that have gone. The
+	// room budget's sweep counts a room whose connected browsers have all departed as one that will
+	// be closable (onlyDepartedLocked, sweepRooms), so an admission waits for it rather than being
+	// refused as though a browser held it. A browser authorized in the instant before the report
+	// and registered with ygo after it is counted departed too, so an admission can wait on its
+	// room until its deadline; the room is never closed for it, since connected still names it
+	// (unusedLocked).
+	departed map[uint64]struct{}
 	// inflight is F (pending_authors.go): each browser edit's credit from the moment the room's
 	// update observer records it (creditContentChange) until the edit's append lands, keyed by its
 	// creditSeq. creditSeq is atomic so forkLive, which every document write calls, reads it for
@@ -146,17 +159,25 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 }
 
 // unlockState unlocks state, room's, forgetting it first when it holds nothing
-// (releaseIfUnusedLocked). While the room budget is full, a state that holds nothing may be a room
-// the last sweep could not close, and that has just become closable, so it starts a sweep, which
-// closes the room and lowers the signal (sweepRooms); the sweep takes the state again itself, so
-// it starts once the lock is released.
+// (releaseIfUnusedLocked). A loaded room whose state holds nothing may be one the room budget is
+// waiting to close. While the budget is full, or an admission waits on it (roomBudget.waiters),
+// it may be a room the last sweep could not close that has just become closable, so it starts a
+// sweep, which closes the room and lowers the signal or admits the admission (sweepRooms,
+// roomBudget.kick). While any room is marked as opened over the budget, it may be that room, now
+// free of the work that opened it (closeIfOpenedOverBudget). Each takes the state again itself,
+// so it starts once the lock is released.
 func (s *Service) unlockState(room string, state *roomState) {
 	s.releaseIfUnusedLocked(room, state)
-	closable := s.budget.full.Load() && !state.released && s.unusedLocked(state)
+	watched := s.budget.full.Load() || s.budget.waiters.Load() > 0 || s.budget.marked.Load() > 0
+	closable := watched && !state.released && s.unusedLocked(state) && s.srv.GetDoc(room) != nil
 	state.mu.Unlock()
-	if closable {
-		s.budget.kick()
+	if !closable {
+		return
 	}
+	if s.budget.full.Load() || s.budget.waiters.Load() > 0 {
+		s.budget.kick(room)
+	}
+	s.closeIfOpenedOverBudget(room)
 }
 
 // releaseIfUnused forgets room's state when it holds nothing (releaseIfUnusedLocked).
@@ -206,6 +227,18 @@ func (s *Service) unusedLocked(state *roomState) bool {
 	return state.liveWriter == nil && state.settling == 0 && !s.isSettleTimerArmed(state.settle) &&
 		!state.unsettled && state.failed == nil && len(state.connected) == 0 &&
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
+}
+
+// onlyDepartedLocked is whether every browser state names as connected has departed (departed):
+// true with none connected, and true for a room whose last browser ygo has reported gone while
+// the handlers of its browsers have not yet returned to forget them. Its caller holds state.mu.
+func (state *roomState) onlyDepartedLocked() bool {
+	for id := range state.connected {
+		if _, gone := state.departed[id]; !gone {
+			return false
+		}
+	}
+	return true
 }
 
 // recordUpdateClass records what the room's update observer read off one update, for the

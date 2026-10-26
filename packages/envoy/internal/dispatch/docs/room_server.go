@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"context"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -9,7 +10,8 @@ import (
 
 // roomServer is the service's ygo server. Its CloseRoom shadows ygo's, so every close of a room
 // the service makes waits for each repair committing into the room (holdOpen) to hand its update
-// to the room's persistence, and holds off new repairs until the room is closed.
+// to the room's persistence, and holds off new repairs until the room is closed. Its Apply shadows
+// ygo's, so the room each Apply touched is looked at once the Apply has returned (applied).
 //
 // A settlement writes its repairs while it holds the document's advisory lock, and ygo hands a
 // commit's update to the room's persistence inside the commit. Were the room's persistence worker
@@ -29,6 +31,10 @@ type roomServer struct {
 	// gates holds a room's closeGate only while a close or a repair holds it or waits for it: the
 	// last of them to let go removes it (releaseGate), so no gate outlives the work on its room.
 	gates map[string]*closeGate
+	// applied is handed the room of each Apply once it has returned: the service's close of a room
+	// its own work opened over the room budget (Service.closeIfOpenedOverBudget). Nil looks at
+	// nothing.
+	applied func(room string)
 }
 
 // closeGate is a room's gate between the repairs committing into the room, which hold it shared,
@@ -52,6 +58,18 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	gate.Lock()
 	defer gate.Unlock()
 	return r.Server.CloseRoom(room, force)
+}
+
+// Apply runs fn in room through ygo's Apply, then hands room to applied: a room the Apply loaded
+// is published once the Apply's load has returned, and some openers - a snapshot read, a live
+// tree's read, a warm-up - hold nothing of the room's state while they use it, so the end of their
+// Apply is the moment their use of it ends.
+func (r *roomServer) Apply(ctx context.Context, room string, fn func(doc *crdt.Doc, transact func(func(*crdt.Transaction)))) error {
+	err := r.Server.Apply(ctx, room, fn)
+	if r.applied != nil {
+		r.applied(room)
+	}
+	return err
 }
 
 // holdOpen holds doc's room open while a repair commits into it, until release. It refuses,

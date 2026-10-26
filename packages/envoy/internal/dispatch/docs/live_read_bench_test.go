@@ -185,7 +185,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 				}
 				service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
 				replica := service.keepReplica(live, &rendering)
-				service.chargeLoadedRoom("bench", replica)
+				service.chargeLoadedRoom("bench", live, replica)
 				replica.observe("bench", live, nil)
 				for b.Loop() {
 					stop := make(chan struct{})

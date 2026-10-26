@@ -214,8 +214,13 @@ type Service struct {
 	// Its zero value is ready, and Shutdown stops it.
 	measurer elementMeasurer
 	// budget charges every open room the heap it holds and refuses a browser one more room past
-	// roomBudgetBytes (roomBudget). New readies it; Shutdown joins its sweeps (evictWG).
+	// roomBudgetBytes (roomBudget). New readies it; Shutdown joins its sweeps (evictWG) and the
+	// closes of the rooms it opened over the budget (closeIfOpenedOverBudget).
 	budget roomBudget
+	// admissionWait is the longest a browser's admission waits on the budget's sweeps before it is
+	// refused (reserveRoom): the settle delay and admissionFlushAllowance, which New sets. Zero in a
+	// service New did not build (a test's), whose admission is refused at once.
+	admissionWait time.Duration
 	// applyHeaps is the pod's bound on the estimated heap of browsers' applies, applyHeapBound of
 	// it, out of which an admitted update whose own share of its estimate passes
 	// unweighedApplyHeapBytes holds its estimate while it applies (weighPeerUpdate). Its zero value
@@ -558,6 +563,7 @@ func New(deps Deps) *Service {
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		reads:             newDocumentReads(documentReadBudget),
 		budget:            roomBudget{limit: roomBudgetBytes},
+		admissionWait:     settle + admissionFlushAllowance,
 	}
 	service.budget.sweep = service.sweepRooms
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
@@ -603,6 +609,9 @@ func New(deps Deps) *Service {
 	srv.MaxMessageBytes = maxMessageBytes
 
 	service.srv = newRoomServer(srv)
+	// A room the server's own work opened over the budget is closed once that work no longer holds
+	// it, the end of the Server.Apply that opened it among the moments it is looked at.
+	service.srv.applied = service.closeIfOpenedOverBudget
 	srv.Authorize = service.authorize
 	srv.OnTokenAuth = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
