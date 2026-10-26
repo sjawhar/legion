@@ -1043,3 +1043,65 @@ test("on a phone, the Conversation opens with its newest message in view whichev
     await alice.close();
   }
 });
+
+// INFRA-303's second path: a read that fails shows "Could not load the conversation." in the
+// list's place, and the first placement must not be spent on that text either. When a later
+// refetch brings the list - here the one TanStack Query makes when the page becomes visible
+// again, as when a reader comes back to the browser - without changing which conversation is
+// newest, nothing else would bring the reader to it.
+test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Landing after a failed read" });
+  await createAsk(issue.key, { question: "Which landing should the reader get?" }, session);
+  await createComment(issue.key, { body: "A root comment under the ask" });
+  for (let index = 0; index < 8; index += 1) {
+    await createMessage(issue.key, { body: `Older message ${index}` }, session);
+  }
+  // Newer than the ask and the comment, so the asks read failing and then answering cannot
+  // change which conversation is newest.
+  const newest = await createMessage(issue.key, { body: "The newest message lands here" }, session);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(iphone);
+    const asksRead = (url: URL) =>
+      url.pathname === `/api/v1/issues/${issue.key}/asks` && url.searchParams.get("thread") === "1";
+    let failing = true;
+    let failed = 0;
+    await page.route(asksRead, async (route) => {
+      if (!failing) {
+        await route.continue();
+        return;
+      }
+      failed += 1;
+      await route.fulfill({
+        body: JSON.stringify({ code: "SERVER_ERROR", error: "boom" }),
+        contentType: "application/json",
+        status: 500,
+      });
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    // Shown once the app's own retries of the asks read have failed too.
+    await expect(page.getByText("Could not load the conversation.")).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(failed, "the asks read and each of its retries failed").toBeGreaterThan(0);
+
+    failing = false;
+    const answered = page.waitForResponse(
+      (response) => asksRead(new URL(response.url())) && response.status() === 200
+    );
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await answered;
+    const newestCard = page.locator(
+      `ol[aria-label="Conversation turns"] [data-turn="message:${newest.id}"]`
+    );
+    await settle(newestCard, "after the refetch");
+    await expectNewestInView(page, newestCard, "after the refetch");
+  } finally {
+    await alice.close();
+  }
+});
