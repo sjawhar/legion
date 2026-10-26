@@ -30,6 +30,7 @@ import {
 import {
   type ActiveDispatchConfig,
   activeDispatchSettings,
+  dispatchSettings,
 } from "@legion/envoy-client/dispatch-config";
 import {
   dispatchFirstSkillFile,
@@ -45,7 +46,7 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
-import { askgateSetting } from "@legion/envoy-client/envoy-config";
+import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
@@ -122,7 +123,7 @@ import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
-import { registerAskGate, registerAskGateRefusal } from "./askgate/askgate";
+import { registerAskGate } from "./askgate/askgate";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -542,24 +543,29 @@ export default function envoyExtension(pi: PiApi): void {
   // interface's `claim` and `subscribe` refuse naming why (`requireInbound`).
   const inbound = envoy.enabled && !("off" in envoy.inbound);
   const startNotice = atStart.notice ?? "";
-  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts. The session's own
-  // envoy.json is its only switch: a checkout can change Dispatch startup settings, but cannot
-  // disable a gate that a later shell command can still reach with DISPATCH_URL. Its one
-  // `tool_call` handler registers with this factory's own handlers (after this entry's handler,
-  // below) and waits for the Oh My Pi modules the gate loads. A switch that cannot be read, and a
-  // gate that did not load, are said at every session start; a gate that did not load refuses each
-  // write it would review.
+  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts, in a session that
+  // has Dispatch: its own envoy.json and the variables over it name one. A session or pod with no
+  // Dispatch has no write to review, so the gate binds nothing there and says nothing. A
+  // checkout's file is left out of that test: it can turn off the Dispatch of its own checkout,
+  // but not the gate, which a later shell command can still pass with DISPATCH_URL. The session's
+  // own envoy.json is the gate's only switch. Its one `tool_call` handler registers with this
+  // factory's own handlers (after this entry's handler, below) and waits for the Oh My Pi modules
+  // the gate loads. A switch that cannot be read, and a gate that did not load, are said at every
+  // session start; a gate that did not load refuses each write it would review.
   const askgateNotices: string[] = [];
   let askgateLoad: Promise<void> = Promise.resolve();
-  let askgateOn = false;
-  if (CONFIG_FILE.path !== null) {
-    const setting = askgateSetting(CONFIG_FILE.path);
+  let askgateFile: string | null = null;
+  const configPath = CONFIG_FILE.path;
+  const ownDispatch = (file: string): boolean => {
+    const own = readEnvoyConfig(file, process.env, { cwd: process.cwd() });
+    return dispatchSettings(process.env, own.kind === "read" ? { ...own, checkout: null } : own)
+      .enabled;
+  };
+  if (configPath !== null && (atStart.dispatch.enabled || ownDispatch(configPath))) {
+    const setting = askgateSetting(configPath);
     if (setting.error !== null) askgateNotices.push(setting.error);
-    askgateOn = setting.enabled;
-  } else
-    askgateNotices.push(
-      "AskGate refuses each Dispatch write it would review: this session's envoy.json location could not be worked out, so its switch cannot be read."
-    );
+    if (setting.enabled) askgateFile = configPath;
+  }
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
@@ -3052,12 +3058,10 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // AskGate's `tool_call` handler, registered now, in the factory, so it is there for the first
-  // call; it waits for the modules the gate loads (`registerAskGate`). With no envoy.json location
-  // the switch cannot be read, so the gate's refusal binds in its place: a session AskGate cannot
-  // be turned off in is never a session it lets writes through unreviewed.
-  if (CONFIG_FILE.path === null) registerAskGateRefusal(pi, new Error(CONFIG_FILE.error));
-  else if (askgateOn) {
-    const configFile = CONFIG_FILE.path;
+  // call; it waits for the modules the gate loads (`registerAskGate`). Only a session with
+  // Dispatch and the switch on has one (`askgateFile`, above).
+  if (askgateFile !== null) {
+    const configFile = askgateFile;
     // What the gate logs at bind is also a notice at session start: the one it logs there says
     // the review deadline is under 30 s, which at the host's default handler limit is every
     // profile that sets nothing, and a review that times out lets the write post.

@@ -3629,15 +3629,11 @@ describe("envoy OMP extension", () => {
         expect(process.env.ENVOY_CONFIG_FILE).toBe(file);
         expect(fixture.tools).toEqual([]);
         expect(fixture.commands.map((command) => command.name)).not.toContain("whoami");
-        // The profile's file is missing, so it does not turn AskGate off and the gate registers:
-        // its switch is the session's own file alone. Only in this workspace, which has none of Oh
-        // My Pi's own modules, does that load fail and say so.
-        expect(notifications).toHaveLength(2);
-        expect(notifications[0]).toBe(
-          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`
-        );
-        expect(notifications[1]).toContain("AskGate did not load");
-        expect(notifications[1]).toContain(`set askgate.enabled to false in ${file}`);
+        // The profile's file is missing, so Dispatch is off and AskGate does not bind or say
+        // anything: the start notice is the one line.
+        expect(notifications).toEqual([
+          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`,
+        ]);
         expect(existsSync(marker)).toBe(false);
         // A Legion claim reaches the listener through the one accessor, which refuses it.
         await expect(
@@ -3776,7 +3772,7 @@ describe("envoy OMP extension", () => {
       );
     });
 
-    test("envoy.json: a relative XDG_CONFIG_HOME still loads the plugin, with both sections off and the refusal said once", async () => {
+    test("envoy.json: a relative XDG_CONFIG_HOME still loads the plugin, with both sections off and said once", async () => {
       delete process.env.ENVOY_CONFIG_FILE;
       process.env.XDG_CONFIG_HOME = "relative/config";
       const { default: envoyExtension } = await import("./envoy.ts?envoy-json-relative-xdg");
@@ -3791,9 +3787,9 @@ describe("envoy OMP extension", () => {
       // What needs no configuration still registers.
       expect(fixture.handlers.has("resources_discover")).toBe(true);
       expect(fixture.renderers.has("envoy-message")).toBe(true);
+      // Dispatch is off, so AskGate does not bind and says nothing.
       expect(notifications).toEqual([
         "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
-        "envoy: AskGate refuses each Dispatch write it would review: this session's envoy.json location could not be worked out, so its switch cannot be read.",
       ]);
       expect(natsState.connectedNames).toEqual([]);
     });
@@ -3942,6 +3938,8 @@ console.log(JSON.stringify(args));
       expect(notifications[0]).toContain("the review deadline is 25000 ms");
       expect(notifications[0]).toContain("extensionHandlers.toolCallTimeoutMs");
     }, 30_000);
+    // A checkout's file can turn the session's Dispatch off in that checkout, but not the gate: the
+    // gate binds where the session's own envoy.json and variables name a Dispatch.
     test("astra 6: a checkout dispatch disable does not suppress the session's AskGate", async () => {
       const checkout = mkdtempSync(join(tmpdir(), "askgate-checkout-"));
       const originalCwd = process.cwd();
@@ -3951,7 +3949,10 @@ console.log(JSON.stringify(args));
           join(checkout, ".envoy", "envoy.json"),
           JSON.stringify({ dispatch: { enabled: false } })
         );
-        writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+        writeFileSync(
+          process.env.ENVOY_CONFIG_FILE ?? "",
+          `${JSON.stringify({ dispatch: { serverUrl: "http://dispatch.test", token: "dispatch-token" } })}\n`
+        );
         process.chdir(checkout);
         standInHost();
         const { default: envoyExtension } = await import("./envoy.ts?askgate-checkout-disable");
@@ -3960,8 +3961,6 @@ console.log(JSON.stringify(args));
         const notifications: string[] = [];
         const context = gateContext(notifications);
         await fixture.handlers.get("session_start")?.({}, context);
-        process.env.DISPATCH_URL = "http://dispatch.test";
-        process.env.DISPATCH_TOKEN = "dispatch-token";
         standInDispatch();
 
         const result = (await fixture.handlers.get("tool_call")?.(
@@ -4001,6 +4000,38 @@ console.log(JSON.stringify(args));
       expect(result).toBeUndefined();
       expect(completions).toEqual([]);
       expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toEqual([]);
+    });
+
+    // The second final review of #2159: the gate bound wherever its switch was on, so a session or
+    // pod with no Dispatch got its refusals too. It binds only where Dispatch is on.
+    test("with Dispatch off and the switch on, the gate does not bind: no handler acts, nothing is refused or recorded", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      delete process.env.DISPATCH_URL;
+      delete process.env.DISPATCH_TOKEN;
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-no-dispatch");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      for (const command of [ASK, 'echo "$a $b"']) {
+        const result = await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: `call-${command}`, input: { command } },
+          context
+        );
+        expect(result).toBeUndefined();
+      }
+      const device = await fixture.handlers.get("tool_call")?.(
+        { toolName: "dispatch_ask", toolCallId: "call-device", input: { issue: "DSP-1" } },
+        context
+      );
+      expect(device).toBeUndefined();
+      expect(completions).toEqual([]);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toEqual([]);
+      expect(notifications.filter((notice) => notice.includes("AskGate"))).toEqual([]);
     });
 
     test("a switch that does not parse leaves the gate on and is said at session start", async () => {
@@ -4072,9 +4103,10 @@ console.log(JSON.stringify(args));
       }
     });
 
-    test("a session whose envoy.json location cannot be worked out refuses each write the gate would review", async () => {
-      // With no file, the switch cannot be read either way, and only `askgate.enabled: false`
-      // turns AskGate off (outside review, finding 4: the gate bound nothing and the write sent).
+    test("a session whose envoy.json location cannot be worked out has no Dispatch, so the gate does not bind", async () => {
+      // With no file the session's Dispatch is off, and the `dispatch` command its shell runs
+      // works the file out by the same rule and is off too: there is no write for the gate to
+      // review, and a refusal would break only calls that hold none.
       delete process.env.ENVOY_CONFIG_FILE;
       process.env.XDG_CONFIG_HOME = "relative/config";
       process.env.DISPATCH_URL = "http://dispatch.test";
@@ -4090,26 +4122,14 @@ console.log(JSON.stringify(args));
 
       expect(notifications).toEqual([
         "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
-        "envoy: AskGate refuses each Dispatch write it would review: this session's envoy.json location could not be worked out, so its switch cannot be read.",
       ]);
-      const refused = (await fixture.handlers.get("tool_call")?.(
+      const result = await fixture.handlers.get("tool_call")?.(
         { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
         context
-      )) as { block?: boolean; reason?: string } | undefined;
-      expect(refused?.block).toBe(true);
-      expect(refused?.reason).toContain("envoy.json location could not be worked out");
-      const other = await fixture.handlers.get("tool_call")?.(
-        { toolName: "bash", toolCallId: "call-ls", input: { command: "ls -la" } },
-        context
       );
-      expect(other).toBeUndefined();
+      expect(result).toBeUndefined();
       expect(completions).toEqual([]);
-      expect(fixture.entries).toMatchObject([
-        {
-          customType: "advisor-gate",
-          data: { tool: "dispatch_ask", outcome: "load-failed", decision: "revise" },
-        },
-      ]);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toEqual([]);
     });
   });
 

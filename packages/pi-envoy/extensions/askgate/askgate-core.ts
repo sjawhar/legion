@@ -2459,23 +2459,19 @@ function renderUnreadable(
 
 /**
  * The gate of a session where AskGate did not load: a host module that did not import, an
- * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, a handler ceiling too short for a verdict,
- * or no envoy.json location at all (`configFile` null), which is where the switch lives.
- * Only `askgate.enabled: false` turns AskGate off, so neither is an off switch: each call of
+ * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a
+ * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each call of
  * the main agent the gate would review (`scopedCommand`, `unreadableDispatchWrite`, `scopedDevice`,
  * an upload counted as the gate counts it) is refused in both modes, naming the error and the
  * switch, and recorded as `load-failed`. Every other call runs.
  */
 export function loadFailureGate(
   error: unknown,
-  deps: Pick<Deps, "env"> & { configFile: string | null },
+  deps: Pick<Deps, "env"> & { configFile: string },
   pi: Pick<Pi, "appendEntry">
 ): (event: ToolCallEvent, ctx: GateCtx) => ToolCallResult {
   const message = messageOf(error);
-  const reason =
-    deps.configFile === null
-      ? `AskGate did not send this call: it reviews each Dispatch write before it posts, and this session's envoy.json location could not be worked out (${message}), so AskGate cannot read its switch. Give the session a location — an absolute XDG_CONFIG_HOME, ENVOY_CONFIG_FILE or PI_CODING_AGENT_DIR — then send the call again.`
-      : `AskGate did not send this call: it reviews each Dispatch write before it posts, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
+  const reason = `AskGate did not send this call: it reviews each Dispatch write before it posts, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
   const envMode = parseMode(deps.env.OMP_ASKGATE);
   return (event, ctx) => {
     if (ctx.agent.kind !== "main") return undefined;
