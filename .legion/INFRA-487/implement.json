@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-487",
+  "completed": "2026-10-26T19:30:42Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2269",
+  "proof": [
+    {
+      "criterion": "After a broker outage longer than a pod's lease, a Legion pod fetches a secret again within one renewal interval of the broker serving again, with no relaunch and no person acting",
+      "surface": "the real broker binary run twice on one real Postgres 16.4 database, the real agent-secrets binary (keygen, renew --pod-token-file, NAME -- cmd) as the worker shim runs it, a test-owned TCP forwarder holding one address across the restart; lease 45 s, sweep 1 s, drain 0",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54487/postgres?sslmode=disable go test -count=1 -v -run TestABrokerOutageLongerThanALease ./cmd/broker",
+      "observed": "survivor held 39.947s at the stop; second broker listened 58.088s after the first exited; survivor's first CLI fetch served 78ms after listening; its renewer (never exited) renewed to 44.924s past now 5.968s after listening; broker logged 'INFO broker: gave back the time no broker was serving ... gap=58.307957s ... enrollments=2'; --- PASS (83.84s); 0 '--- SKIP'",
+      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
+      "negativeControl": "the same outage_test.go in a git-archive export of eee16056's packages/envoy, GOWORK=off: --- FAIL (77.75s) at step (1), 'agent-secrets: proof invalid: not live (PROOF_INVALID)', 0 skips"
+    },
+    {
+      "criterion": "An enrollment that was really ended stays ended: revoked, lapsed while a broker served, or renewed with another pod's or service account's token",
+      "surface": "the same real-binary run after the restart",
+      "command": "the same command, steps (3) and (4)",
+      "observed": "revoked pod (launcher DELETE) and lapsed pod (ended by the first broker's sweeper) each refused fetch 401 PROOF_INVALID 'not live' and renew 401 ENROLLMENT_NOT_LIVE; the mismatch pod's renewal with a token naming another pod UID and with another service account each refused 403 POD_IDENTITY_MISMATCH, its lease_expires_at unchanged",
+      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
+      "negativeControl": "renewing the survivor with its own pod token after the restart succeeds (step 2), so the refusals are identity- and state-specific, not a broker that refuses everything"
+    },
+    {
+      "criterion": "The guard holds for a database outage while the broker process keeps running, and under concurrent beats",
+      "surface": "in-process broker services on real Postgres",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v ./internal/broker/enroll ./internal/broker/api ./internal/broker/requests ./internal/broker/config",
+      "observed": "all ok (383 PASS, 0 SKIP at e53dda04; enroll and config re-run ok with 0 SKIP at 8f8b7ddb); TestAPodWhoseLeaseRanOutWhileNoBrokerServedRenewsAndReadsItsGrant: stale serving row, pod renews 200 and reads WORKER_TOKEN; TestTwoBeatsAtOnceGiveTheTimeBackOnce passes",
+      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
+      "negativeControl": "in the same api test, a pod whose lease ran out before the last beat is refused renew 401 ENROLLMENT_NOT_LIVE; TestBeforeAnyBeatALapsedLeaseIsLapsed shows the guard off with no threshold recorded"
+    },
+    {
+      "criterion": "The daemon logs in again within about 10 s of the broker answering",
+      "surface": "the daemon's broker client against an httptest broker that hijacks and closes login connections, then answers",
+      "command": "cd packages/daemon && go test -count=5 -v -run TestTokenLoginRetries ./internal/agentsecrets",
+      "observed": "TestTokenLoginRetriesQuicklyWhileTheBrokerDoesNotAnswer and TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses PASS 5/5 (and 3/3 after the simplify pass)",
+      "headSha": "8f8b7ddbaa50eab4ab2901cf3f6c35386b71636f",
+      "negativeControl": "a broker answering 401 keeps the long schedule: the second login arrives no earlier than the long wait (TestTokenLoginRetriesSlowlyWhenTheBrokerRefuses)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql (new: broker_serving row, enrollment_lease_live)",
+    "packages/envoy/internal/broker/enroll/enroll.go (predicate at recoverConflict, EndLapsed, Renew, liveCredentials, Lookup; EndLapsed doc)",
+    "packages/envoy/internal/broker/requests/machine_read.go, machine_state.go (predicate at :50, :614, :924, :937), sweeper.go (comment)",
+    "packages/envoy/internal/broker/enroll/serving.go (new: ServingClock), serving_test.go (new)",
+    "packages/envoy/cmd/broker/main.go (clock on serving), outage_test.go (new acceptance test)",
+    "packages/envoy/internal/broker/config/config.go (NotServingSweeps, lease/sweep refusal, field comments), config_test.go",
+    "packages/envoy/internal/broker/api/renew_liveness_test.go",
+    "packages/daemon/internal/agentsecrets/client.go, client_test.go (short retry when the broker gives no HTTP answer)",
+    "packages/daemon/internal/shim/agentsecrets.go (comment)",
+    "docs: broker concepts, revoke-a-session, run-an-agent-in-a-container, troubleshooting, operate; legion troubleshooting; docs/kubernetes.md; packages/envoy/AGENTS.md; packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "The guard is a SQL function evaluated in the same statement as every lease read, so a request stalled on Postgres past the threshold answers as it would once the time was given back; only the beat locks broker_serving, so there is no lock cycle.",
+    "The beat reads clock_timestamp() only after taking the row lock, so a second concurrent beat sees the gap the first closed (time given back once).",
+    "outage_test.go uses only symbols present on eee16056 so it proves the failure there; it stops the broker between two survivor renewals so the given-back lease is distinguishable from a real renewal."
+  ],
+  "deviations": [
+    "Simplify pass changed ServingClock to hold Enrollments *Service instead of Store and Lease, and added config.NotServingSweeps; the plan named the fields Store/Interval/NotServingAfter/Lease.",
+    "Local runs skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken by name (the pod's Postgres trusts every password); internal/broker/helper and cmd/agent-secrets fail locally on SO_PEERPIDFD and terminal job control under gVisor, identically on eee16056, and are untouched; CI runs them."
+  ],
+  "openQuestions": []
+}
