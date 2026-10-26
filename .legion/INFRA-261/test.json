@@ -2,62 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-261",
-  "completed": "2026-10-26T10:14:00Z",
-  "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
+  "round": 2,
+  "completed": "2026-10-26T14:13:00Z",
+  "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command and drove the same surfaces independently at b6d4733: `bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra261-test/rig-head` exited 0 with reread, interrupt(stop), interrupt(restart) and refuse PASS, and the raw session polls show the old set held (old 1:3000) through the read while the union grew to 9000 rows, then exactly 6000. `bun run e2e -- agent-list-refilling --project chromium` passed 4/4 at head, and the same spec on the 81a3b5ef base export failed 4/4 (no refilling notice in mention suggestions). Independent probes with my own drivers, outside refillrig's judge, are in proof."
+    "how": "I re-ran its command at 57e48f1: `bash packages/envoy/scripts/e2e-refill.sh --scenario all --out $TMPDIR/infra261-test/r2/rig` exited 0. reread, interrupt(stop), interrupt(restart), recreate-live (both shapes: the probe found the recreate at +1.083 s, its read ran from +5.096 s to +5.138 s, before the tick at +26.946 s) and refuse all PASS, with 0 panic lines in every listener log. `bun run e2e -- agent-list-refilling claim-refilling --project chromium` passed 6/6. My round-1 red test TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck is unmodified and passes with -count=3."
   },
   "failures": [
     {
-      "criterion": "Architect's ruling under the 'fix it here' rule (2026-10-26 10:07Z, envoy dcd100dd283040ed542b02e9a13c49b7). Once the session or interest bucket's stream is recreated, the copy stops reporting Following before it applies any record of the new stream, and the listener starts the full re-read without waiting for the self-health tick. From then on the normal rules hold: the copy keeps its records and serves them within the stale bound, and the re-read sweeps only once it completes. The adv-expiry scenarios (recreate 28 s before a tick, with the old stream shorter and longer than the new one) become a regression scenario in the rig (packages/envoy/scripts/e2e-refill.sh) that fails on b6d4733. Design is the implementer's choice: the JetStream stream deleted/created advisories, or treating an entry from a stream other than w.stream (or the ordered consumer's reset) as the end of following. A missed advisory must still be caught by the existing Check.",
-      "evidence": "At b6d4733, between a bucket recreate and the next self-health Check (up to 30 s), the old ordered consumer re-attaches to the new stream at the old stream's last sequence + 1. Following() stays true, the epoch does not move, and the new bucket's records in the skipped range never arrive. Real listener: $TMPDIR/infra261-test/adv-expiry-head shows GET /v1/sessions without 40 of the bucket's 2000 records from T-19.8 s until the tick's re-read completed at T+8 s. adv-expiry2-head (old stream longer) shows nothing of the new bucket before the tick. adv-expiry-base shows main 748e8d95 behaves the same before the tick. Red test, commit 2fa7c3d6081c: packages/envoy/internal/kvwatch/recreated_under_watch_test.go TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck. `cd packages/envoy && go test ./internal/kvwatch/ -run TestABucketRecreatedUnderALiveWatcherIsReadWholeWithoutCheck -count=1 -v` fails at head. old_stream_shorter: '20s after the recreate: ghost kept true, 3 of 40 new records missing, Following true, Epoch 0 (37 new records applied)' and '37 records of the new bucket were applied while the copy still reported Following (first \"fresh-03\")'. old_stream_longer: '40 of 40 new records missing, Following true, Epoch 0 (0 new records applied)'. Apart from this, the spec's acceptance holds at b6d4733 (proof below)."
+      "criterion": "Architect's ruling under the 'fix it here' rule (2026-10-26 13:54Z, envoy bacc93d9ac734fa44f1f32d36b043e7c): no way of ending a kvwatch subscription can panic the listener. The paths include a connection close or drain, nats.go's own unsubscribe, and End at shutdown, not only the watcher replacement round 2 deferred. The architect gave the implementer the design: kvwatch watches through the nats.go jetstream package's KV watcher, which has no init timer, with its own idle timer for the timed-out-scan re-read; writes stay on the legacy API.",
+      "evidence": "nats.go v1.50.0 kv.go:1138-1170: the legacy watcher's init timer callback sends on errCh under w.mu. pDone closes errCh under the same mutex and only Stops the timer, which does not wait for a callback already running. The message handler holds w.mu while it blocks on the full 256-entry updates channel, so a callback that fires then and loses the mutex to pDone sends on a closed channel. Red test, commit b8fcdb264eee: packages/envoy/internal/kvwatch/subscription_end_test.go TestASubscriptionEndingMidScanNeverPanics. It holds the cache's first record, closes the watcher's connection, and releases the record at moments swept across a 20 ms JetStream wait. `cd packages/envoy && go test ./internal/kvwatch/ -run TestASubscriptionEndingMidScanNeverPanics -count=1` crashed the test binary in 7 of 7 runs at 57e48f1, in 0.8-3.2 s: 'panic: send on closed channel ... github.com/nats-io/nats.go.(*kvs).WatchFiltered.func2() .../nats.go@v1.50.0/kv.go:1151, created by time.goFunc'."
     }
   ],
   "failed": 1,
   "proof": [
     {
-      "criterion": "Acceptance 1: a re-read keeps every record of the copy and every delivered record until it completes, then the new read's records; registrations and deregistrations during the read survive the sweep",
-      "surface": "real listener binary + natsd (file store), mutated through the listener's own API (POST /v1/interests/subscribe, DELETE /v1/sessions/{id}) while the session bucket is re-read; judged by my own curl + jq polls, not by refillrig",
-      "command": "BIN=$TMPDIR/infra261-test/rig-head/bin OUT=... bash $TMPDIR/infra261-test/adv-mutate.sh and adv-mutate-par.sh (6000 sessions, the bucket recreated with keep=3000,new=3000 and 100000 delete markers)",
-      "observed": "A poll inside the read answered 200 with 9000 rows (old 3000, keep 3000, new 3000). A subscribe of ses_adv_mid_0 and a DELETE of ses_refill_keep_0 both finished 126 ms before the read completed. After the sweep, and 35 s later, the list was exactly 6000 rows (old 0, keep 2988, new 3000, mid 12): every session registered during the read was present, and every deregistered one was absent. A run with 200 parallel subscribe+delete pairs ended at keep 2800, new 3000, mid 200, with 0 missing and 0 resurrected.",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "The same probe on a listener built from main's fork point 748e8d952a76 answered 200s of 284, 857, 1556, 2737 and 3816 rows during the read: live sessions missing."
+      "criterion": "Round-1 failure (bucket recreated under a live watcher): following stops before any record of the new stream is applied, and the new bucket is read whole without the tick",
+      "surface": "real listener + natsd, the bucket recreated 12 s after a self-health tick (the next tick 16 s later), polled by my own curl + jq loop: $TMPDIR/infra261-test/r2-live.sh",
+      "command": "MODE=shorter|longer|interests|double|empty BIN=$TMPDIR/infra261-test/r2/rig/bin OUT=... bash $TMPDIR/infra261-test/r2-live.sh",
+      "observed": "shorter and longer old stream: 'bucket was recreated under its watcher' at +1 s and the read completed at +1 s. Polls went straight from the old copy [2000 rows, keep 1500, old 500] to exactly the new bucket [2000, keep 1500 v2, new 500, old 0], with no partial answer. interests: the interest copy was re-read at +1 s, and the session rows' role holder moved from 2 to 1 (old_0's role gone). double (recreated twice, 1.77 s apart): one detection at +1.8 s onto the second incarnation, and the list was the final bucket from +1.95 s. 0 panic lines in every log.",
+      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
+      "negativeControl": "On b6d4733 (round 1, $TMPDIR/infra261-test/adv-expiry-head and adv-expiry2-head) the same recreate was found only at the tick, and the list was missing 40 of 2000 records for 28 s. The kvwatch red test failed there and passes here."
     },
     {
-      "criterion": "Acceptance 1, last clause: a session whose old record expires during the read, and whose heartbeat renewed it in the new bucket, is never left out",
-      "surface": "real listener + natsd. S was registered through the listener 298 s before the re-read (its record expires at T+2 s). Its renewal was written into the recreated bucket after 100000 markers. NATS was SIGSTOPped for 7 s at the read's start, so the expiry falls inside the read.",
-      "command": "BIN=$TMPDIR/infra261-test/rig-head/bin OUT=$TMPDIR/infra261-test/adv-expiry2-head bash $TMPDIR/infra261-test/adv-expiry-v2.sh",
-      "observed": "Every poll from T-21 s to T+7.3 s listed S with its old title 'refill hb 0 v1', across its T+2 s expiry, while the read was stalled. The read then delivered 201, 693 and 1296 rows, each with S, and completed at T+9.1 s with 2001 entries, S as 'refill hb 0 v2'.",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "The 748e8d95 build in the same timeline answered 19 polls of 200 [] (S absent) from T+0.4 s, then partial lists without S, until its read completed at T+9.2 s."
+      "criterion": "Acceptance 3 and 4 still hold at the round-2 head: past the bound every client says refilling, never an absence; no gauge sample; whole after recovery",
+      "surface": "real natsd + listener + real Go Dispatch server built from 57e48f1 + claude-envoy MCP server over stdio",
+      "command": "BIN=$TMPDIR/infra261-test/r2/rig/bin OUT=$TMPDIR/infra261-test/r2/outage bash $TMPDIR/infra261-test/outage.sh",
+      "observed": "First 503 at +121 s after NATS stopped. /v1/sessions and /v1/interests/ answered 503 Retry-After: 5 code refilling, with no envoy_active_* sample. /api/v1/agents answered 503 ENVOY_REFILLING, Retry-After: 5. Issue and list showed route_status unknown, reason refilling. ?route_status=no_holder answered 503 ENVOY_REFILLING. envoy_sessions returned error 'envoy: the agent list is refilling; try again in a moment'. 2 s after NATS returned: 50 rows, gauges 50, route live, reason null, envoy_sessions listed the sessions.",
+      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
+      "negativeControl": "The 748e8d95 listener ($TMPDIR/infra261-test/outage-base, round 1) answered 200 with its frozen 50 rows and gauges 50 past the bound."
     },
     {
-      "criterion": "Acceptance 3 and 4: past the bound every client says refilling, never a partial list or an absence; route status unknown with reason; envoy_active_sessions has no sample and equals the list otherwise",
-      "surface": "real natsd + listener + the real Go Dispatch server (built from head, on its own Postgres) + claude-envoy's MCP server over stdio, 50 seeded sessions, one holding role tester-role, and a Dispatch issue routed to role:tester-role",
-      "command": "BIN=$TMPDIR/infra261-test/rig-head/bin OUT=$TMPDIR/infra261-test/outage-head bash $TMPDIR/infra261-test/outage.sh (NATS stopped for 150 s, then restarted)",
-      "observed": "Before: /v1/sessions 200 with 50 rows, gauges 50/50, /api/v1/agents 200 with 50 rows, issue route_status live with holder ses_refill_live_0, envoy_sessions listed 50. NATS down: every poll answered 200 until the first 503 at +121 s. Then /v1/sessions and /v1/interests/ answered 503 Retry-After: 5 {\"code\":\"refilling\"}, and /metrics had no envoy_active_* sample. /api/v1/agents answered 503 Retry-After: 5 ENVOY_REFILLING. The issue and the issue list showed route_status unknown, reason refilling. ?route_status=no_holder answered 503 ENVOY_REFILLING. envoy_sessions failed with JSON-RPC -32603 'envoy: the agent list is refilling; try again in a moment'. NATS back: everything was whole within 1 s (50 rows, gauges 50, route live, reason null). Before the first read, with no NATS, both lists answered the refilling 503 with an empty gauge, and per-session reads answered 'service starting'.",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "The same run with LISTENER=748e8d95 build (outage-base) gave no 503 within 150 s. Past the bound it answered 200 with 50 rows, gauges 50, route live, and envoy_sessions returned the frozen list."
-    },
-    {
-      "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence; a lapsed-claim judgement waits for a current list",
-      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium) on my own Postgres 16",
-      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling --project chromium; bun run e2e -- claim-refilling --project chromium (new spec, commit fbcf40659f72)",
-      "observed": "agent-list-refilling: 4 passed at head. claim-refilling: 2 passed at head. While refilling, the claim chip's title ends 'Couldn't check whether that session is still running: The agent list is refilling. Try again in a moment.' and never says 'no longer running'. The Unclaimed filter keeps the live holder's issue out and shows 'Couldn't check which claims have lapsed, so every claim counts as held: The agent list is refilling...'. A complete list without the holder lapses the claim in both places.",
-      "headSha": "b6d4733ae0e7d759ad63b9df257911a2f96fd016",
-      "negativeControl": "agent-list-refilling on the 81a3b5ef base export: 4 failed. claim-refilling against a mutant of head whose claimHasLapsed ignores `current`: test 1 failed with the chip title 'That session is no longer running, so anyone may claim it.' ClaimChip.tsx was restored afterwards. On the base export it failed at the header's missing refilling notice."
-    }
-  ],
-  "testGaps": [
-    {
-      "gap": "No test covered the claim chip or the Unclaimed filter while the agent list refills (ClaimChip.test.tsx and issue-filters.test.ts gained only fixture lines). A regression that judges a claim lapsed from a refilling list would tell a person 'anyone may claim it' and list a live holder's issue as unclaimed. No unit test or browser test would catch that.",
-      "pinnedBy": "packages/dispatch/e2e/claim-refilling.e2e.ts (commit fbcf40659f72): green at head, red against the mutant above."
+      "criterion": "Acceptance 3: every Dispatch view shows refilling, never an agent's absence; a lapsed claim waits for a current list",
+      "surface": "Dispatch browser suite (real Go Dispatch server, fake listener, Chromium)",
+      "command": "cd packages/dispatch && bun run e2e -- agent-list-refilling claim-refilling --project chromium",
+      "observed": "6 passed at 57e48f1",
+      "headSha": "57e48f1b0ec338d80905ac66eb281e73330305f2",
+      "negativeControl": "Round 1: agent-list-refilling failed 4/4 on the 81a3b5ef base export, and claim-refilling failed against a claimHasLapsed mutant that ignores `current`."
     }
   ],
   "observations": [
-    "A subscribe through the listener during a 100000-marker re-read waited about 1 s on head and on the 748e8d95 build alike: not a regression.",
-    "Dispatch's subscribers routes answer 403 HUMAN_ONLY to an agent token, so their refilling answer was proven through the browser suite (signed in as a human), not with curl."
+    "Spec-conforming, so not recorded as a failure, but now visible within 2 s instead of at the tick: a recreated bucket is listed as it stands once its read completes. MODE=empty (recreated empty, filled 20 s later) answered 200 [] from +1.8 s to +20.5 s. MODE=double completed a read of 646 records mid-fill, and the rest arrived by the watch. Acceptance 1 makes the new read's records the list, and main and b6d4733 did the same at the tick, so in production after a bucket deletion the lists show only sessions that have heartbeated into the new bucket (up to the 90 s heartbeat interval).",
+    "The rig now holds the listener (SIGSTOP) while it fills a recreated bucket in reread, because the probe would otherwise read the bucket mid-fill. That is consistent with the observation above.",
+    "Implementer's own known limit, not exercised: a gate STREAM.INFO failing with an error other than stream-not-found applies the record with Following unchanged."
   ],
-  "ci": "At b6d4733: Tests 40294334916 success, Docs 40294335047 success, Worker Image 40294334914 success, PR Title 40296400635 success; Legion Envoy and Contracts 40294335001 queued (cited as queued, not waited for)."
+  "ci": "At 57e48f1: Tests 40332075546, Legion Envoy and Contracts 40332075911, Docs 40332075597, Worker Image 40332109954, PR Title 40334143208 all queued (cited as queued, not waited for)."
 }
