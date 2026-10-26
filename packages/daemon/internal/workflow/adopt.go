@@ -49,7 +49,7 @@ func (e *Engine) AdoptionRefusal(ctx context.Context, tx pgx.Tx, issue record.Is
 // run handed over to it (handed_over_roots). The members of a root that never ran cannot have
 // started a phase either: a phase needs its gate, the gate needs the root's architect, and the
 // architect needs a slot, whose promotion opens the lifecycle. A root that ran is never adopted
-// (AdoptionRefusal) nor held under another tree (RecordedAncestor).
+// (AdoptionRefusal) nor held under another tree (Ancestry).
 func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (string, error) {
 	project, err := claim.ProjectToken(issue.Project)
 	if err != nil {
@@ -75,29 +75,28 @@ func (e *Engine) RanAsRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (
 	return "", nil
 }
 
-// RecordedAncestor is the recorded ancestor issue's record takes when an observation's preparation
-// read ancestor, the nearest recorded root up its unrecorded parent's Dispatch chain
-// (record.Issue.RecordedAncestor): ancestor, or "" when issue ran as a tree of its own (RanAsRoot).
-// The waiting line holds a root under that recorded root's live tree until that tree's release
-// adopts it, and a release refuses a root that ran, so such a root keeps queueing as its own
-// instead: held, nothing would ever bring it in. Every write of an observation's recorded ancestor
-// to a record goes through this.
-func (e *Engine) RecordedAncestor(ctx context.Context, tx pgx.Tx, issue record.Issue, ancestor string) (string, error) {
-	if ancestor == "" {
-		return "", nil
+// Ancestry is the Dispatch chain issue's record takes when an observation's preparation read chain
+// (record.Issue.Ancestry): chain, or nil when issue ran as a tree of its own (RanAsRoot). The
+// waiting line holds a root while a live root is on its chain until that root's release adopts it,
+// and a release refuses a root that ran, so such a root keeps queueing as its own instead: held,
+// nothing would ever bring it in. Every write of an observation's chain to a record goes through
+// this.
+func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, chain []string) ([]string, error) {
+	if len(chain) == 0 {
+		return nil, nil
 	}
 	ran, err := e.RanAsRoot(ctx, tx, issue)
 	if err != nil || ran != "" {
-		return "", err
+		return nil, err
 	}
-	return ancestor, nil
+	return chain, nil
 }
 
 // Adopt moves issue, a recorded root AdoptionRefusal found adoptable into root's live tree, into
 // that tree with every record of its own tree, its parent recorded as parent; each member keeps
 // its own. Each record takes its next generation, the fence every row of the old tree already
 // checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold,
-// pending READY or recorded ancestor (record.Issue.RecordedAncestor: a member waits in no line), no
+// pending READY or Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
 // hand-over fence and its generation's facts cleared. A todo record enters the tree's run
 // admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning;
 // any other status keeps it as a parked child at done, which a todo runs again (ReenterChild).
@@ -129,7 +128,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 			continue
 		}
 		member.Tree, member.Project, member.Generation, member.Phase = root.Tree, root.Project, next, phase.Done
-		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.RecordedAncestor = nil, nil, nil, ""
+		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.Ancestry = nil, nil, nil, nil
 		if err := e.store.PutIssue(ctx, tx, member); err != nil {
 			return err
 		}

@@ -35,28 +35,22 @@ func OutOfWorkflow(status string) bool {
 // root without the label waits for nothing; a child's tree holds its place, so a child needs none.
 // A root that never ran, whose recorded parent is a live tree's member, is adopted into that tree
 // before admission reads the line (admit's adoptQueuedRoots), so it is not read as waiting there.
-// A root whose parent is not recorded, whose nearest recorded root up its Dispatch chain is in
-// another live tree (RecordedAncestor, whose current tree is read here, so a hold follows that
-// root's adoption into a tree), waits for nothing either: it is that tree's unreleased work, which
-// its architect's release, or its parent's, brings into the tree. A tree is live here as
-// everywhere (LiveRoots), so a held root's tree is live too; once the tree it is held under lingers
-// or leaves the workflow, or a person moves an ancestor out from under it, the root waits as its
-// own again.
+// A root under a parent unrecorded or recorded as a root, whose Dispatch chain (Ancestry) holds
+// any live root but its own key, waits for nothing either: it is that tree's unreleased work, which
+// its architect's release, or its parent's, brings into the tree, exactly as release_children's
+// own walk of the chain reaches it. A recorded root on the chain that is not live is passed over.
+// A tree is live here as everywhere (LiveRoots), so a held root's tree is live too; once no live
+// root is left on its chain (each lingers or leaves the workflow, or a person moves an ancestor
+// out from under it), the root waits as its own again.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	waiting := line(issues, slots)
-	if slices.ContainsFunc(waiting, func(issue Issue) bool { return issue.RecordedAncestor != "" }) {
+	if slices.ContainsFunc(waiting, func(issue Issue) bool { return len(issue.Ancestry) != 0 }) {
 		live := liveRoots(issues, slots, waiting)
-		trees := make(map[string]string, len(issues))
-		for _, issue := range issues {
-			trees[issue.Key] = issue.Tree
-		}
 		waiting = slices.DeleteFunc(waiting, func(issue Issue) bool {
-			tree, ok := trees[issue.RecordedAncestor]
-			if !ok || issue.RecordedAncestor == issue.Key {
-				return false
-			}
-			_, under := live[tree]
-			return under && tree != issue.Key
+			return slices.ContainsFunc(issue.Ancestry, func(key string) bool {
+				_, under := live[key]
+				return under && key != issue.Key
+			})
 		})
 	}
 	sort.Slice(waiting, func(i, j int) bool { return RankLess(waiting[i], waiting[j]) })

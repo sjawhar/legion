@@ -201,7 +201,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	}
 
 	// An observation that records nothing still owes the line its release and promotion when its
-	// Reread moved a root's recorded ancestor: the root it frees has no event of its own.
+	// Reread moved a root's Dispatch chain: the root it frees has no event of its own.
 	var released []string
 	if records || reread {
 		if released, err = a.settle(ctx, tx); err != nil {
@@ -235,12 +235,12 @@ func (a *Admission) settle(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return released, nil
 }
 
-// applyReread writes each recorded ancestor the preparation of an unrecorded or re-parented
-// issue's event read again (intake.DispatchIssue.Reread) to its root's record while that record is
-// still a todo root, as the engine's RecordedAncestor takes it, and says whether any record changed.
-// The read was taken outside the fact lock, so a root adopted or moved on meanwhile is left as it
-// now stands.
-func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[string]string) (bool, error) {
+// applyReread writes each Dispatch chain the preparation of an unrecorded or re-parented issue's
+// event read again (intake.DispatchIssue.Reread) to its root's record while that record is still
+// a todo root, as the engine's Ancestry takes it, and says whether any record changed. The read
+// was taken outside the fact lock, so a root adopted or moved on meanwhile is left as it now
+// stands.
+func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[string][]string) (bool, error) {
 	changed := false
 	for _, key := range slices.Sorted(maps.Keys(reread)) {
 		stored, err := a.store.Issue(ctx, tx, key)
@@ -250,16 +250,16 @@ func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[strin
 		if stored == nil || stored.Status != "todo" || !claim.IsTreeRoot(stored.Key, stored.Tree) {
 			continue
 		}
-		ancestor, err := a.engine.RecordedAncestor(ctx, tx, *stored, reread[key])
+		ancestry, err := a.engine.Ancestry(ctx, tx, *stored, reread[key])
 		if err != nil {
 			return false, fmt.Errorf("read whether %s ran as a tree of its own: %w", key, err)
 		}
-		if stored.RecordedAncestor == ancestor {
+		if slices.Equal(stored.Ancestry, ancestry) {
 			continue
 		}
-		stored.RecordedAncestor = ancestor
+		stored.Ancestry = ancestry
 		if err := a.store.PutIssue(ctx, tx, *stored); err != nil {
-			return false, fmt.Errorf("record the recorded ancestor of %s: %w", key, err)
+			return false, fmt.Errorf("record the Dispatch chain of %s: %w", key, err)
 		}
 		changed = true
 	}
@@ -432,7 +432,7 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		DefaultBranch:   resolution.DefaultBranch,
 		GitHubRepo:      resolution.GitHubRepo,
 	}
-	if issue.RecordedAncestor, err = a.engine.RecordedAncestor(ctx, tx, issue, observation.RecordedAncestor); err != nil {
+	if issue.Ancestry, err = a.engine.Ancestry(ctx, tx, issue, observation.Ancestry); err != nil {
 		return fmt.Errorf("read whether %s ran as a tree of its own: %w", observation.Key, err)
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
@@ -520,7 +520,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	}
 	o := observed{
 		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-		Status: status, Shown: summary.Status, RecordedAncestor: summary.RecordedAncestor, HandedOver: handed, Seq: seq,
+		Status: status, Shown: summary.Status, Ancestry: summary.Ancestry, HandedOver: handed, Seq: seq,
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
 		return a.readmit(ctx, tx, *stored, o, false)
@@ -544,7 +544,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	handed := observation.HandedOver
 	o := observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
-		Status: observation.Status, Shown: observation.Status, RecordedAncestor: observation.RecordedAncestor, HandedOver: handed, Seq: observation.Seq,
+		Status: observation.Status, Shown: observation.Status, Ancestry: observation.Ancestry, HandedOver: handed, Seq: observation.Seq,
 	}
 	if observation.DaemonActor && observation.HandedOver && observation.Status == "todo" {
 		if handover, err := a.store.Handover(ctx, tx, stored.Key); err != nil || handover == nil {
@@ -601,7 +601,7 @@ func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.
 		a.log.Info("admission hand-over", "issue", fact.Issue, "tree", fact.Tree, "linger", fact.Generation, "via", "outbox")
 	})
 	return a.readmit(ctx, tx, *stored, observed{
-		Title: stored.Title, Parent: deref(stored.Parent), Rank: stored.Rank, RecordedAncestor: stored.RecordedAncestor, Seq: stored.LastDispatchSeq,
+		Title: stored.Title, Parent: deref(stored.Parent), Rank: stored.Rank, Ancestry: stored.Ancestry, Seq: stored.LastDispatchSeq,
 	}, startedRun(*stored))
 }
 
@@ -632,12 +632,13 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
 // the boot read: Shown is the status Dispatch showed, and Status the one the record takes, which is
 // Shown except from a boot listing no newer than the record, which keeps the record's own.
-// RecordedAncestor is the recorded ancestor its preparation read above an unrecorded parent, which a
-// record takes as the engine's RecordedAncestor says.
+// Ancestry is the Dispatch chain its preparation read, which a record takes as the engine's
+// Ancestry says.
 type observed struct {
-	Title, Parent, Rank, Status, Shown, RecordedAncestor string
-	HandedOver                                           bool
-	Seq                                                  int64
+	Title, Parent, Rank, Status, Shown string
+	Ancestry                           []string
+	HandedOver                         bool
+	Seq                                int64
 }
 
 // recordObservation is where admission writes a Dispatch observation to an issue record: a live
@@ -650,13 +651,13 @@ type observed struct {
 // here: the only path that does is adoption, which the same fact's promote runs next
 // (adoptQueuedRoots) for a todo root that never ran and whose new parent is in a live tree.
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
-	ancestor, err := a.engine.RecordedAncestor(ctx, tx, stored, o.RecordedAncestor)
+	ancestry, err := a.engine.Ancestry(ctx, tx, stored, o.Ancestry)
 	if err != nil {
 		return fmt.Errorf("read whether %s ran as a tree of its own: %w", stored.Key, err)
 	}
 	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
 		stored.HandedOver == o.HandedOver && sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq &&
-		stored.RecordedAncestor == ancestor {
+		slices.Equal(stored.Ancestry, ancestry) {
 		return nil
 	}
 	stored.Title = o.Title
@@ -666,7 +667,7 @@ func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored rec
 	stored.DispatchStatus = o.Shown
 	stored.HandedOver = o.HandedOver
 	stored.LastDispatchSeq = o.Seq
-	stored.RecordedAncestor = ancestor
+	stored.Ancestry = ancestry
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record observation of %s: %w", stored.Key, err)
 	}
@@ -690,7 +691,7 @@ func startedRun(issue record.Issue) bool {
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
-// for a slot, taking o's title, parent, rank, recorded ancestor (as the engine's RecordedAncestor
+// for a slot, taking o's title, parent, rank, Dispatch chain (as the engine's Ancestry
 // takes it; a carried orphan takes none) and sequence. A root starts a fresh generation: its facts
 // clear across its whole tree, as do those of an orphan readmitted without carry. An orphan
 // readmitted with carry (one that started a phase) is the same work moving from a finished root to
@@ -722,10 +723,10 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.HandedOver = true
 	stored.Parent = record.ParentOf(o.Parent)
 	// A carried orphan is recorded below as carrying a run handed over to it (handed_over_roots), so it
-	// ran as a tree of its own (workflow's RanAsRoot) and records no ancestor to be held under.
-	stored.RecordedAncestor = ""
+	// ran as a tree of its own (workflow's RanAsRoot) and records no chain to be held under.
+	stored.Ancestry = nil
 	if !orphan {
-		if stored.RecordedAncestor, err = a.engine.RecordedAncestor(ctx, tx, stored, o.RecordedAncestor); err != nil {
+		if stored.Ancestry, err = a.engine.Ancestry(ctx, tx, stored, o.Ancestry); err != nil {
 			return fmt.Errorf("read whether re-admitted %s ran as a tree of its own: %w", stored.Key, err)
 		}
 	}
@@ -1039,7 +1040,7 @@ func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
 		Key: observation.Key, Title: observation.Title, Status: observation.Status,
 		Parent: record.ParentOf(observation.Parent), Rank: observation.Rank,
 		HandedOver: observation.HandedOver, LastSeq: observation.Seq, ResolvedRepo: observation.ResolvedRepo,
-		RecordedAncestor: observation.RecordedAncestor,
+		Ancestry: observation.Ancestry,
 	}
 }
 

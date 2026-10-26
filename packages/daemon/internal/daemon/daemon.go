@@ -1509,7 +1509,7 @@ type source struct {
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
 // widening record.Store's fixed transaction interface; the workflow and the state route read the
-// store through it. Every read that starts from Issues or ParentedQueuedRoots is within this
+// store through it. Every read that starts from Issues or QueuedRootsUnder is within this
 // filtered set. Slots are not filtered here: a slot's index is unique across every project's
 // slots, so admission chooses the next one over all of them and counts only its own against its
 // cap (admit.ownSlots). The outbox's claim is scoped in its SQL instead, because the lease it
@@ -1536,8 +1536,8 @@ func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, 
 	return s.own(all), nil
 }
 
-func (s projectRecords) ParentedQueuedRoots(ctx context.Context, tx pgx.Tx) ([]record.Issue, error) {
-	all, err := s.Store.ParentedQueuedRoots(ctx, tx)
+func (s projectRecords) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]record.Issue, error) {
+	all, err := s.Store.QueuedRootsUnder(ctx, tx, key)
 	if err != nil {
 		return nil, err
 	}

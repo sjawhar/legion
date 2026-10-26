@@ -6,11 +6,12 @@
 // (admit's adoptQueuedRoots); an architect's release_children adopts it from the Dispatch chain it
 // reads, from todo, from backlog, and from the state INFRA-214 reached, before it answers
 // (api's adoptReleasedChildren); a todo root under an unreleased child of a live tree waits in no
-// line (record.Waiting's RecordedAncestor), a todo child of that root waits with it and moves with
-// it into the tree its release adopts it into, and the root queues as its own again once a person
-// moves an ancestor out of the tree, recorded or not (such an event reads every held root's chain
-// again); a root that ran as a tree of its own is never held, and keeps queueing as its own; and a
-// child recorded in another tree is refused by name.
+// line (record.Waiting reads its Ancestry, the Dispatch chain above it), a todo child of that root
+// waits with it and moves with it into the tree its release adopts it into, and the root queues as
+// its own again once a person moves an ancestor out of the tree, recorded or not (such an event
+// reads again the chain of every held root it is on); a root that ran as a tree of its own is
+// never held, and keeps queueing as its own; and a child recorded in another tree is refused by
+// name.
 // scripts/e2e/child-adoption.sh builds this driver with `-tags e2e` and owns the nats-server and
 // the PostgreSQL it runs against, through the run lib/live-daemon-proof.sh makes around every
 // whole-daemon live proof.
@@ -32,7 +33,7 @@
 // script starts and names in LEGION_E2E_NATS_URL. Dispatch is liveDispatch, the board the
 // package's whole-daemon live proofs share (live_proof_test.go): it holds each issue's status,
 // parent and labels as Dispatch's board does, answers the issue reads the release (its walk up the
-// parent chain) and the event preparation (its walk to the nearest recorded ancestor) make, 404s
+// parent chain) and the event preparation (its walk up the Dispatch chain to the top) make, 404s
 // an issue it does not hold, and records every status and message the daemon writes. Envoy's
 // listener is the package's noticeListener. GitHub is childAdoptionGitHub, which knows each
 // repository's default branch and takes each issue branch the workflow creates. No agent runs:
@@ -668,8 +669,8 @@ func (r *childAdoptionLive) releaseAdoptsInfra214State() {
 }
 
 // Step 5 (D2). P is a child of T on Dispatch alone, in backlog, never released and never recorded.
-// H, a labelled todo issue under P, is recorded as a root of its own, but waits in no line: its
-// nearest recorded ancestor's tree is live. X then leaves, freeing the cap's other slot, and H
+// H, a labelled todo issue under P, is recorded as a root of its own, but waits in no line: T, a
+// live root, is on its Dispatch chain. X then leaves, freeing the cap's other slot, and H
 // still takes no slot and no architect. T's architect releases H: it joins T and plans.
 func (r *childAdoptionLive) heldUnderAnUnreleasedChild() {
 	t := r.t
@@ -832,15 +833,15 @@ func (r *childAdoptionLive) heldRootQueuesOnceARecordedAncestorLeaves() {
 }
 
 // recordedAsHeld waits for the daemon's record of key and requires it a root of its own held under
-// T: its tree its own, its recorded ancestor T.
+// T: its tree its own, T on the Dispatch chain it records (Ancestry).
 func (r *childAdoptionLive) recordedAsHeld(key string) {
 	r.t.Helper()
 	testwait.Eventually(r.t, "the daemon's record of "+key, func() bool { return r.recorded(key) != nil })
 	recorded := r.recorded(key)
-	if recorded.Tree != key || recorded.RecordedAncestor != r.tree {
-		r.t.Fatalf("the daemon records %s in the tree of %s with recorded ancestor %q, want a root of its own held under %s", key, recorded.Tree, recorded.RecordedAncestor, r.tree)
+	if recorded.Tree != key || !slices.Contains(recorded.Ancestry, r.tree) {
+		r.t.Fatalf("the daemon records %s in the tree of %s with Dispatch chain %q, want a root of its own held under %s", key, recorded.Tree, recorded.Ancestry, r.tree)
 	}
-	r.note("read back: the daemon records %s as a root of its own, its recorded ancestor %s", key, recorded.RecordedAncestor)
+	r.note("read back: the daemon records %s as a root of its own, its Dispatch chain %v", key, recorded.Ancestry)
 }
 
 // heldWithASlotFree requires each of keys, over liveSettle, out of admission.waiting with
@@ -869,7 +870,7 @@ func (r *childAdoptionLive) heldWithASlotFree(keys ...string) {
 
 // takesTheFreeSlot requires key, within the bounded wait, to hold the free slot with its
 // architect's claim, the fake runtime asked to launch that architect, key in admission.active and
-// out of admission.waiting, and the daemon's record of it a root of its own, held under no tree.
+// out of admission.waiting, and the daemon's record of it a root of its own, T on no chain it records.
 func (r *childAdoptionLive) takesTheFreeSlot(key string) {
 	t := r.t
 	t.Helper()
@@ -884,10 +885,11 @@ func (r *childAdoptionLive) takesTheFreeSlot(key string) {
 	}
 	r.note("read back: %s holds admission slot %d with its architect's claim %s, the fake runtime was asked to launch %s, admission.active %v, admission.waiting %v",
 		key, got.Slot.Index, got.Architect.State, architect, state.Admission.Active, state.Admission.Waiting)
-	if recorded := r.recorded(key); recorded.Tree != key || recorded.RecordedAncestor != "" {
-		t.Fatalf("the daemon records %s in the tree of %s with recorded ancestor %q, want its own tree under none", key, recorded.Tree, recorded.RecordedAncestor)
+	recorded := r.recorded(key)
+	if recorded.Tree != key || slices.Contains(recorded.Ancestry, r.tree) {
+		t.Fatalf("the daemon records %s in the tree of %s with Dispatch chain %q, want its own tree with %s on no chain", key, recorded.Tree, recorded.Ancestry, r.tree)
 	}
-	r.note("read back: the daemon records %s in its own tree, with no recorded ancestor", key)
+	r.note("read back: the daemon records %s in its own tree, its Dispatch chain %v, which holds no %s", key, recorded.Ancestry, r.tree)
 }
 
 // frees moves key, the root which says a previous step slotted, to backlog under parent by

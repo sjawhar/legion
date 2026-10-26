@@ -1,0 +1,11 @@
+-- 0051_issue_ancestry.up.sql — the Dispatch chain a queued root waits under (INFRA-252).
+--
+-- A labelled todo issue under a Dispatch parent that is not recorded, or is recorded as a root of
+-- its own (a backlog child of a live tree its architect never released, or a root parked under
+-- one), is recorded as a root of its own. ancestry is the keys of its Dispatch parent chain, from
+-- its parent upward to the top, stopping only at a repeated key or back at the issue, read when its
+-- observation was prepared, or when an event of an issue on that chain (one the daemon does not
+-- record, or a recorded one a person moved) was; admission keeps such a root out of its waiting
+-- line while any live root is on that chain, exactly when release_children from that root would
+-- reach it. Empty for every other record, and for every existing row until its next observation.
+alter table issues add column ancestry text[] not null default '{}';

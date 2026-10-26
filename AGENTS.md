@@ -194,11 +194,12 @@ again. It waits for no slot, gets no architect, runs there as a `todo` child doe
 architect gets a `child-status` notice. `release_children` adopts such a child the same way before it
 answers `released`, and refuses one it cannot, writing nothing: `CHILD_NOT_ADOPTABLE` for a root
 that ran as a tree of its own or carries a handed-over run, `CHILD_IN_OTHER_TREE` for a child
-recorded in another tree. A labelled `todo` issue whose parent is not recorded but sits under a
-live tree (a child that tree's architect has not released) waits for no slot until that release,
-or its parent's, brings it into the tree, and a `todo` child of it waits with it and moves with it;
-it queues as a root of its own once that tree lingers or leaves the workflow, or once a person
-moves any ancestor, recorded or not, out from under that tree. A root that ran as a tree of its own
+recorded in another tree. A labelled `todo` issue whose parent is not recorded, or is recorded as a
+root of its own, and whose Dispatch chain reaches a live tree (a child that tree's architect has not
+released, or a root parked under it) waits for no slot until that release, or its parent's, brings
+it into the tree, and a `todo` child of it waits with it and moves with it; it queues as a root of
+its own once no live tree is left on its chain: each lingers or leaves the workflow, or a person
+moves an ancestor, recorded or not, out from under it. A root that ran as a tree of its own
 or carries a handed-over run is never held so: it keeps queueing as its own root.
 An issue is recorded on the repository Dispatch resolves for it (its own, else its nearest
 ancestor's, else the project's default) and keeps it: an issue whose repository

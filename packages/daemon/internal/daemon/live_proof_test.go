@@ -262,8 +262,8 @@ func (p *liveProof) waitArchitectNotices(key, kind string, count int) []listener
 // liveDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an empty issue
 // list — grown into the board the daemon reads and writes: it holds each issue's status, parent and
 // labels, as Dispatch's own board does, answers the issue reads the daemon makes (the outbox's
-// before a status write, a release's walk up an issue's parent chain, an event's walk to its
-// nearest recorded ancestor) and 404s an issue it does not hold, and records every status and
+// before a status write, a release's walk up an issue's parent chain, an event's walk up its
+// Dispatch chain to the top) and 404s an issue it does not hold, and records every status and
 // message the daemon posted, so a step can read back what the daemon told Dispatch and tell a
 // write that never came from one it cannot see. Anything else is a call a live proof does not
 // expect, and fails the test as workflowConfig's stand-in does.

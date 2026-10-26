@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -281,7 +282,7 @@ func TestAQueuedRootUnderAnUnreleasedChildOfALiveTreeTakesNoSlot(t *testing.T) {
 
 	// The preparation read the parent's chain from Dispatch: parent is not recorded, tree is.
 	apply(t, pool, admission, "queued", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
-		Title: child, Parent: parent, Rank: "B", HandedOver: handed, RecordedAncestor: tree}, admission.engine)
+		Title: child, Parent: parent, Rank: "B", HandedOver: handed, Ancestry: []string{parent, tree}}, admission.engine)
 	if got := issue(t, pool, child); got.Tree != child || got.Status != "todo" || got.Parent == nil || *got.Parent != parent {
 		t.Fatalf("%s = %#v, want it recorded todo as a root of its own under %s", child, got, parent)
 	}
@@ -310,27 +311,28 @@ func TestAQueuedRootUnderAnUnreleasedChildOfALiveTreeTakesNoSlot(t *testing.T) {
 	}
 }
 
-// A labelled todo issue held under a recorded ancestor that is itself a queued root stays held when
-// admission's sweep adopts that ancestor into the live tree its recorded parent runs in: the hold
-// reads the ancestor's tree when the line is read, not when the issue was recorded, so it follows
-// the ancestor into the tree and the issue takes no slot with one free. Once that tree lingers, the
-// issue waits as its own root again and takes the slot.
-func TestAHoldFollowsItsRecordedAncestorIntoTheTreeThatAdoptsIt(t *testing.T) {
+// A labelled todo issue whose Dispatch chain runs through a queued root to a live tree stays held
+// when admission's sweep adopts that queued root into the live tree its recorded parent runs in:
+// the live tree's root is on the issue's chain, so the issue takes no slot with one free. Once that
+// tree lingers, no live root is left on the chain, and the issue waits as its own root again and
+// takes the slot.
+func TestAHoldStandsWhileAQueuedRootOnItsChainIsAdoptedIntoTheLiveTree(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	const tree, ancestor, parent, child = "LEGION-168", "LEGION-170", "LEGION-169", "LEGION-214"
 	seedOpenTree(t, pool, tree)
 	putIssue(t, pool, queuedRoot(ancestor, tree, "C", 1))
 
-	// The preparation read the parent's chain from Dispatch: parent is not recorded, and the nearest
-	// recorded ancestor is the queued root, a tree of its own when it was read.
+	// The preparation read the parent's chain from Dispatch: parent is not recorded, then the queued
+	// root, a tree of its own when it was read, then the live tree.
+	chain := []string{parent, ancestor, tree}
 	apply(t, pool, admission, "queued", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
-		Title: child, Parent: parent, Rank: "B", HandedOver: handed, RecordedAncestor: ancestor}, admission.engine)
+		Title: child, Parent: parent, Rank: "B", HandedOver: handed, Ancestry: chain}, admission.engine)
 	if got := issue(t, pool, ancestor); got.Tree != tree {
 		t.Fatalf("%s = %#v, want it adopted into the tree of %s", ancestor, got, tree)
 	}
-	if got := issue(t, pool, child); got.Tree != child || got.Status != "todo" || got.RecordedAncestor != ancestor {
-		t.Fatalf("%s = %#v, want it recorded todo as a root of its own under %s", child, got, ancestor)
+	if got := issue(t, pool, child); got.Tree != child || got.Status != "todo" || !slices.Equal(got.Ancestry, chain) {
+		t.Fatalf("%s = %#v, want it recorded todo as a root of its own under %v", child, got, chain)
 	}
 	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
 	assertWaiting(t, pool, nil)
@@ -353,6 +355,42 @@ func TestAHoldFollowsItsRecordedAncestorIntoTheTreeThatAdoptsIt(t *testing.T) {
 	}
 }
 
+// A labelled todo issue whose Dispatch chain reaches a live tree past a recorded root parked out of
+// the workflow (INFRA-214's state: a once-queued root a person moved under the live tree and did
+// not release) is held under the live tree, whose release would reach it, not passed by the parked
+// root, which is not live: it takes no slot and no architect with one free. Once the live tree
+// lingers, no live root is left on its chain, and it waits as its own root and takes the slot.
+func TestARootHeldPastAParkedRootOnItsChainQueuesOnceTheTreeLingers(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const tree, parked, parent, child = "LEGION-168", "LEGION-180", "LEGION-169", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+	recorded := queuedRoot(parked, tree, "C", 1)
+	recorded.Status, recorded.DispatchStatus, recorded.Phase, recorded.HandedOver = "backlog", "backlog", phase.Done, false
+	putIssue(t, pool, recorded)
+
+	// The preparation read the parent's chain from Dispatch: parent is not recorded, then the parked
+	// root, then the live tree.
+	apply(t, pool, admission, "queued", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
+		Title: child, Parent: parent, Rank: "B", HandedOver: handed, Ancestry: []string{parent, parked, tree}}, admission.engine)
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	assertWaiting(t, pool, nil)
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+	if starts := architectStarts(t, pool, child); starts != 0 {
+		t.Fatalf("%s has %d architect starts queued, want none while %s runs above %s", child, starts, tree, parked)
+	}
+
+	apply(t, pool, admission, "tree-done", intake.DispatchIssue{Key: tree, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "done",
+		Title: tree, Rank: "A", HandedOver: handed}, admission.engine)
+	if got := issue(t, pool, tree); !got.Lingers() {
+		t.Fatalf("%s = %#v, want it lingering after its close", tree, got)
+	}
+	if got := issue(t, pool, child); got.Tree != child || got.Status != "in_progress" {
+		t.Fatalf("%s = %#v, want it promoted as its own root once %s lingers", child, got, tree)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
+}
+
 // A labelled todo child of a root held under a running tree's unreleased child is recorded in the
 // held root's tree, as any todo child of a waiting root is: it waits with the held root and takes no
 // slot and no architect, even with a slot free. When the running tree's architect releases the held
@@ -365,7 +403,7 @@ func TestAChildOfAHeldRootWaitsWithIt(t *testing.T) {
 
 	// The preparation read the held root's chain from Dispatch: parent is not recorded, tree is.
 	apply(t, pool, admission, "held", intake.DispatchIssue{Key: held, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
-		Title: held, Parent: parent, Rank: "B", HandedOver: handed, RecordedAncestor: tree}, admission.engine)
+		Title: held, Parent: parent, Rank: "B", HandedOver: handed, Ancestry: []string{parent, tree}}, admission.engine)
 	apply(t, pool, admission, "child", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo",
 		Title: child, Parent: held, Rank: "A", HandedOver: handed}, admission.engine)
 	if got := issue(t, pool, child); got.Tree != held || got.Status != "todo" || got.Phase != phase.Admitted {
@@ -430,10 +468,10 @@ func TestARootThatRanKeepsQueueingUnderAnUnreleasedChild(t *testing.T) {
 
 			// The preparation read the root's chain from Dispatch: parent is not recorded, tree is.
 			apply(t, pool, admission, "reparented", intake.DispatchIssue{Key: root, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo",
-				Title: root, Parent: parent, Rank: "B", HandedOver: handed, RecordedAncestor: tree}, admission.engine)
+				Title: root, Parent: parent, Rank: "B", HandedOver: handed, Ancestry: []string{parent, tree}}, admission.engine)
 			got := issue(t, pool, root)
-			if got.Tree != root || got.Generation != seeded.Generation || got.Status != "in_progress" || got.RecordedAncestor != "" {
-				t.Fatalf("%s = %#v, want it promoted as its own root at generation %d with no recorded ancestor", root, got, seeded.Generation)
+			if got.Tree != root || got.Generation != seeded.Generation || got.Status != "in_progress" || len(got.Ancestry) != 0 {
+				t.Fatalf("%s = %#v, want it promoted as its own root at generation %d with no Dispatch chain", root, got, seeded.Generation)
 			}
 			if got.Parent == nil || *got.Parent != parent {
 				t.Fatalf("%s = %#v, want its parent recorded as %s", root, got, parent)

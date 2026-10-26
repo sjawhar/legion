@@ -81,10 +81,10 @@ type IssueSummary struct {
 	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to: its own, else its
 	// nearest ancestor's, else its project's default; empty when it resolves to none.
 	ResolvedRepo string
-	// RecordedAncestor is the daemon's, never Dispatch's: the key of the nearest ancestor on an
-	// unrecorded parent's chain that the daemon records as a tree's root, read when the boot listing
-	// is prepared (intake's DispatchIssue.RecordedAncestor); empty for any other issue.
-	RecordedAncestor string `json:"-"`
+	// Ancestry is the daemon's, never Dispatch's: the keys of a labelled todo issue's Dispatch
+	// parent chain, read when the boot listing is prepared (intake's DispatchIssue.Ancestry); empty
+	// for any other issue.
+	Ancestry []string `json:"-"`
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at

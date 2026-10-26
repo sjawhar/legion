@@ -85,17 +85,17 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
-	// RecordedAncestor is the key of the nearest ancestor on a root's unrecorded parent's Dispatch
-	// chain that the daemon records as a tree's root, read through every other ancestor, recorded
-	// or not, as the newest Dispatch observation applied to the record was prepared with (intake's
-	// DispatchIssue.RecordedAncestor), or as the preparation of an event of an unrecorded issue or
-	// of a re-parented recorded one read it again (intake's DispatchIssue.Reread): a labelled todo
-	// issue under a child of a live tree that tree's architect has not released. Such a root waits
-	// for no slot while that root's current tree is live (Waiting), so a hold follows the root's
-	// adoption into another tree. Empty for every other record, for a root that ran as a tree of its
+	// Ancestry is the keys of a root's Dispatch parent chain, from its parent upward to the top,
+	// stopping only at a repeated key or back at the root, as the newest Dispatch observation
+	// applied to the record was prepared with (intake's DispatchIssue.Ancestry), or as the
+	// preparation of an event of an issue on that chain read it again (intake's
+	// DispatchIssue.Reread): kept for a labelled todo root under a parent unrecorded or recorded as
+	// a root, such as a child of a live tree that tree's architect has not released. Such a root
+	// waits for no slot while any live root is on its chain (Waiting), exactly while that root's
+	// release would reach it. Empty for every other record, for a root that ran as a tree of its
 	// own (workflow's RanAsRoot), which no release adopts, and cleared when adoption takes the
 	// record into a tree.
-	RecordedAncestor string
+	Ancestry []string
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -470,10 +470,10 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
-	// ParentedQueuedRoots is every labelled todo root whose recorded Dispatch parent no record
-	// names, by key: the roots the waiting line may hold under an ancestor's tree (Waiting), whose
-	// recorded ancestor an event of an issue that may be that ancestor reads again.
-	ParentedQueuedRoots(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
+	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
+	// event of key reads again.
+	QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error)
 	// PutIssue writes issue, refusing one without its repository, default branch or GitHub's
 	// spelling of the repository, one whose GitHub spelling names another repository, and one that
 	// would give a recorded issue another of any of them.

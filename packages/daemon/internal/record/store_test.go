@@ -188,44 +188,52 @@ func TestPutIssueRefusesAMissingOrChangedRepository(t *testing.T) {
 	})
 }
 
-// ParentedQueuedRoots lists, by key, exactly the labelled todo roots whose recorded parent no record
-// names: not a root under a recorded parent, an unlabelled one, one in another status, a child in
-// a tree, nor a root with no parent.
-func TestParentedQueuedRootsListsTheLabelledTodoRootsUnderUnrecordedParents(t *testing.T) {
+// QueuedRootsUnder lists, by key, exactly the labelled todo roots whose Ancestry holds the key,
+// whatever their parent: not a root whose chain holds another key, an unlabelled one, one in
+// another status, nor a child in a tree. A root's Ancestry reads back as it was written.
+func TestQueuedRootsUnderListsTheLabelledTodoRootsWhoseChainHoldsTheKey(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
-	issue := func(key, tree, status, parent string, handed bool) Issue {
+	issue := func(key, tree, status string, handed bool, ancestry ...string) Issue {
 		issue := issueFixture(key)
-		issue.Tree, issue.Status, issue.Parent, issue.HandedOver, issue.ReadyPendingVersion = tree, status, ParentOf(parent), handed, nil
+		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPendingVersion, issue.Ancestry = tree, status, handed, nil, ancestry
+		if len(ancestry) != 0 {
+			issue.Parent = ParentOf(ancestry[0])
+		}
 		return issue
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		for _, recorded := range []Issue{
-			issue("LEGION-300", "LEGION-300", "in_progress", "", true),
-			issue("LEGION-302", "LEGION-302", "todo", "LEGION-401", true),
-			issue("LEGION-301", "LEGION-301", "todo", "LEGION-400", true),
-			issue("LEGION-303", "LEGION-303", "todo", "LEGION-300", true),
-			issue("LEGION-304", "LEGION-304", "todo", "LEGION-402", false),
-			issue("LEGION-305", "LEGION-305", "backlog", "LEGION-403", true),
-			issue("LEGION-306", "LEGION-300", "todo", "LEGION-404", true),
-			issue("LEGION-307", "LEGION-307", "todo", "", true),
+			issue("LEGION-300", "LEGION-300", "in_progress", true),
+			issue("LEGION-302", "LEGION-302", "todo", true, "LEGION-401", "LEGION-400", "LEGION-300"),
+			issue("LEGION-301", "LEGION-301", "todo", true, "LEGION-400", "LEGION-300"),
+			issue("LEGION-303", "LEGION-303", "todo", true, "LEGION-300"),
+			issue("LEGION-304", "LEGION-304", "todo", false, "LEGION-400"),
+			issue("LEGION-305", "LEGION-305", "backlog", true, "LEGION-400"),
+			issue("LEGION-306", "LEGION-300", "todo", true, "LEGION-400"),
+			issue("LEGION-307", "LEGION-307", "todo", true),
 		} {
 			must(t, records.PutIssue(ctx, tx, recorded))
 		}
 	})
 	inTx(t, st, func(tx pgx.Tx) {
-		roots, err := records.ParentedQueuedRoots(ctx, tx)
+		roots, err := records.QueuedRootsUnder(ctx, tx, "LEGION-400")
 		must(t, err)
 		var keys []string
 		for _, root := range roots {
 			keys = append(keys, root.Key)
 		}
 		if !reflect.DeepEqual(keys, []string{"LEGION-301", "LEGION-302"}) {
-			t.Fatalf("ParentedQueuedRoots = %v, want LEGION-301 and LEGION-302", keys)
+			t.Fatalf("QueuedRootsUnder(LEGION-400) = %v, want LEGION-301 and LEGION-302", keys)
 		}
-		if *roots[0].Parent != "LEGION-400" || roots[0].Status != "todo" {
-			t.Fatalf("ParentedQueuedRoots[0] = %#v, want the whole record of LEGION-301", roots[0])
+		if !reflect.DeepEqual(roots[1].Ancestry, []string{"LEGION-401", "LEGION-400", "LEGION-300"}) || roots[1].Status != "todo" {
+			t.Fatalf("QueuedRootsUnder(LEGION-400)[1] = %#v, want the whole record of LEGION-302", roots[1])
+		}
+		none, err := records.Issue(ctx, tx, "LEGION-307")
+		must(t, err)
+		if none.Ancestry != nil {
+			t.Fatalf("LEGION-307 reads back with Ancestry %#v, want nil as written", none.Ancestry)
 		}
 	})
 }
@@ -1654,7 +1662,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo", "recorded_ancestor"},
+		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo", "ancestry"},
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},

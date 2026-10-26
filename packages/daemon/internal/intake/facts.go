@@ -50,22 +50,20 @@ type DispatchIssue struct {
 	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
 	// never records an issue from a fact still missing it.
 	ResolvedRepoMissing bool
-	// RecordedAncestor is the key of the nearest ancestor on the issue's Dispatch parent chain that
-	// the workflow records as a tree's root, read through every other ancestor, recorded or not,
-	// when the issue's parent is not recorded (a backlog child of a live tree, never released): the
-	// chain release_children's own walk reads. It is read from Dispatch when the fact is prepared,
-	// outside the fact lock; empty when the issue has no parent, its parent is recorded, the chain
-	// ends, repeats a key or comes back to the issue first with no root recorded, or the fact is no
-	// labelled todo of an unrecorded issue or a recorded root. Admission records it, and keeps such a
-	// root out of its waiting line while that root's current tree is live (record.Waiting).
-	RecordedAncestor string
-	// Reread is the RecordedAncestor read again, when an event of an issue the workflow does not
-	// record, or of a recorded issue whose Dispatch parent differs from its record's, is prepared,
-	// of every other labelled todo root whose recorded Dispatch parent is not recorded, keyed by that
-	// root, for each one the read changes ("" for none now): such an issue may be the very ancestor
-	// a person moved, and the root under it has no event of its own. Nil when none changes.
-	// Admission writes each before anything else it applies; the workflow reads none of it.
-	Reread map[string]string
+	// Ancestry is the keys of the issue's Dispatch parent chain, from its parent upward to the top,
+	// stopping only at a repeated key or back at the issue: the chain release_children's own walk
+	// reads. It is read from Dispatch when the fact is prepared, outside the fact lock, for a
+	// labelled todo of an unrecorded issue or a recorded root under a parent, recorded or not;
+	// empty for any other fact. Admission records it, and keeps such a root out of its waiting line
+	// while any live root is on it (record.Waiting).
+	Ancestry []string
+	// Reread is the Ancestry read again, when an event of an issue the workflow does not record, or
+	// a fresh event of a recorded issue whose Dispatch parent differs from its record's, is
+	// prepared, of every labelled todo root whose recorded Ancestry holds the issue's key, keyed by
+	// that root, for each one the read changes (nil for none now): a person may have moved that
+	// very issue, and the root under it has no event of its own. Nil when none changes. Admission
+	// writes each before anything else it applies; the workflow reads none of it.
+	Reread map[string][]string
 	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
 	// fact was prepared (ObservedIssue), not from one event, so no actor is known to have written
 	// its state. It reaches only an issue still unrecorded when it applies: ApplyFact, under the fact
@@ -99,7 +97,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, RecordedAncestor: issue.RecordedAncestor}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Ancestry: issue.Ancestry}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -776,7 +774,7 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 // settleObserved is the fact ApplyFact applies in fact's place, under the fact lock, and whether it
 // applies one: an Observed issue fact's view, as a plain observation, while the workflow records no
 // issue of its key, and once one is recorded the event it was prepared in place of (Delivered),
-// carrying the view's RecordedAncestor and Reread, which the preparation read for the view alone,
+// carrying the view's Ancestry and Reread, which the preparation read for the view alone,
 // or nothing when it was prepared in place of none. Every other fact applies as it is, so no
 // handler sees Observed or Delivered.
 func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, error) {
@@ -796,7 +794,7 @@ func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, erro
 		return nil, false, nil
 	default:
 		delivered := *issue.Delivered
-		delivered.RecordedAncestor, delivered.Reread = issue.RecordedAncestor, issue.Reread
+		delivered.Ancestry, delivered.Reread = issue.Ancestry, issue.Reread
 		return delivered, true, nil
 	}
 }

@@ -39,7 +39,9 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, recorded_ancestor`
+// issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
+// it was written.
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, nullif(ancestry, '{}')`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -60,20 +62,19 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 	return issues, nil
 }
 
-func (s *Postgres) ParentedQueuedRoots(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
-	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues root
-		where root.status = 'todo' and root.handed_over and root.key = root.tree and root.parent is not null
-			and not exists (select 1 from issues recorded where recorded.key = root.parent)
-		order by root.key`)
+func (s *Postgres) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error) {
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues
+		where status = 'todo' and handed_over and key = tree and $1 = any(ancestry)
+		order by key`, key)
 	if err != nil {
-		return nil, fmt.Errorf("list the queued roots under unrecorded parents: %w", err)
+		return nil, fmt.Errorf("list the queued roots whose chain holds %s: %w", key, err)
 	}
 	return issues, nil
 }
 
-// queryIssues is every issue record query selects, in its order.
-func queryIssues(ctx context.Context, tx pgx.Tx, query string) ([]Issue, error) {
-	rows, err := tx.Query(ctx, query)
+// queryIssues is every issue record query selects with args, in its order.
+func queryIssues(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]Issue, error) {
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -109,18 +110,18 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	}
 	// The update's condition keeps a recorded issue on the repository, default branch and GitHub
 	// spelling it was recorded with: a write naming others changes no row, and is refused below.
-	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo, recorded_ancestor)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19, $20)
+	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo, ancestry)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19, coalesce($20::text[], '{}'))
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, linger_until = excluded.linger_until,
 		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
 		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status,
-		recorded_ancestor = excluded.recorded_ancestor
+		ancestry = excluded.ancestry
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
 		issue.Rank, issue.HandedOver, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
-		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, issue.RecordedAncestor,
+		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, issue.Ancestry,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -238,7 +239,7 @@ func scanIssue(row scanner) (*Issue, error) {
 	var holdReason string
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.HandedOver, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
-		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &issue.RecordedAncestor); err != nil {
+		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &issue.Ancestry); err != nil {
 		return nil, err
 	}
 	if generation < 0 {
